@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.1.1...v0.1.2) (2026-06-21)
+
+
+### Fixed
+
+* **doctor:** locate costs/telemetry/bridge files vendor-aware ([#6](https://github.com/Opus-Aether-AI/legion-core/issues/6)) ([a3af601](https://github.com/Opus-Aether-AI/legion-core/commit/a3af601beabdee01b21b3b4e1d66c96c272070b9))
+
 ## [0.1.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.1.0...v0.1.1) (2026-06-21)
 
 

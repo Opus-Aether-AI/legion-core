@@ -183,7 +183,7 @@ jobs:
                 fail=1
               }
             fi
-          done < <(find . -path './tests' -prune -o -name SKILL.md -print)
+          done < <(find . \( -path './tests' -o -path './.legion' -o -path './node_modules' \) -prune -o -name SKILL.md -print)
           exit $fail
 
   validate-hooks-and-scripts:

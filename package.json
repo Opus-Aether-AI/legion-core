@@ -1,0 +1,64 @@
+{
+  "name": "@opus-aether-ai/legion-core",
+  "version": "0.1.2",
+  "description": "Legion engine — model-agnostic delegation, observability, orchestration, and cross-harness setup for AI coding agents. Consumed by legion-code and other agents.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Opus-Aether-AI/legion-core.git"
+  },
+  "homepage": "https://github.com/Opus-Aether-AI/legion-core#readme",
+  "bugs": {
+    "url": "https://github.com/Opus-Aether-AI/legion-core/issues"
+  },
+  "author": "Opus-Aether-AI",
+  "bin": {
+    "legion-activity": "legion-observability/bin/legion-activity",
+    "legion-catalog": "legion-observability/bin/legion-catalog",
+    "legion-console": "legion-observability/bin/legion-console",
+    "legion-console-index": "legion-observability/bin/legion-console-index",
+    "legion-context-tune": "legion-observability/bin/legion-context-tune",
+    "legion-doctor": "legion-observability/bin/legion-doctor",
+    "legion-eval": "legion-observability/bin/legion-eval",
+    "legion-heal": "legion-observability/bin/legion-heal",
+    "legion-otel-export": "legion-observability/bin/legion-otel-export",
+    "legion-report": "legion-observability/bin/legion-report",
+    "legion-self-learn": "legion-observability/bin/legion-self-learn",
+    "legion-share": "legion-observability/bin/legion-share",
+    "legion-trace": "legion-observability/bin/legion-trace",
+    "legion-fanout": "legion-orchestrate/bin/legion-fanout",
+    "legion-claude": "legion-router/bin/legion-claude",
+    "legion-control": "legion-router/bin/legion-control",
+    "legion-cursor": "legion-router/bin/legion-cursor",
+    "legion-delegate": "legion-router/bin/legion-delegate",
+    "legion-optimize": "legion-router/bin/legion-optimize",
+    "legion-route": "legion-router/bin/legion-route",
+    "legion-router": "legion-router/bin/legion-router",
+    "legion-codex-setup": "legion-setup/bin/legion-codex-setup",
+    "legion-cursor-setup": "legion-setup/bin/legion-cursor-setup",
+    "legion-setup": "legion-setup/bin/legion-setup"
+  },
+  "files": [
+    "legion-router/",
+    "legion-observability/",
+    "legion-orchestrate/",
+    "legion-setup/",
+    "legion-codex-mode/",
+    "scripts/",
+    ".claude-plugin/",
+    "identity/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "!**/__pycache__/**",
+    "!**/*.pyc"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  }
+}

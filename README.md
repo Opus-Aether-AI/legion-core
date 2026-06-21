@@ -31,6 +31,30 @@ legion-core is meant to be the foundation under a domain agent (e.g. a trading a
 
 See [`docs/building-an-agent.md`](docs/building-an-agent.md) for the full recipe and [`docs/self-learning.md`](docs/self-learning.md) for the learn/heal loop.
 
+## Install as a package
+
+legion-core is also published as a private npm package on **GitHub Packages**, so a
+downstream agent can pin a versioned copy of the engine (bins + scripts + plugins)
+instead of cloning. This is additive — the marketplace / source-clone paths still work.
+
+```bash
+# 1. Point the scope at GitHub Packages + add a read:packages token.
+#    In your project .npmrc (commit the registry line; keep the token out of git):
+@opus-aether-ai:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}   # token with read:packages
+
+# 2. Install it.
+npm install @opus-aether-ai/legion-core            # or: bun add / pnpm add
+
+# 3. The engine CLIs are now on your project's bin path.
+npx legion-doctor --help
+npx legion-delegate run --archetype fix-bug --task "…" --repo .
+```
+
+Publishing is automated: the [`publish-package`](.github/workflows/publish-package.yml)
+workflow runs on each GitHub Release (and on demand) and uses the built-in
+`GITHUB_TOKEN`. The package version tracks the release version via release-please.
+
 ## Configuration
 
 Copy [`.env.example`](.env.example) → `.env`. Runtime prerequisites: `gh` + `jq` + `git`; `codex` and `cursor-agent` CLIs (authenticated) for those executors; `ANTHROPIC_API_KEY` for Claude routing.

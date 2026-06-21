@@ -1,29 +1,9 @@
-# Entity-level trigger scorecard for Legion's self-learning loop.
+# Entity-level trigger scorecard for legion-core's self-learning loop.
 #
-# Plugin routing catches marketplace-level drift. This dataset checks the lower
-# surfaces Legion can now learn about directly: slash commands, sub-agents, and
-# cross-harness skills.
+# Calibrated to the legion-core entity surface — the 5 legion-* skills. legion-core
+# ships no slash commands or sub-agents of its own (domain agents add those), so
+# every case here is a skill. Extend with command/agent cases when you build on top.
 cases:
-  - prompt: "Run the /feature lane for a product slice with acceptance criteria, rollout notes, validation, PR, and review remediation"
-    expect_type: command
-    expect: feature
-    why: feature lane language should attach to the slash command, not only opus-commands
-
-  - prompt: "Perform a high-rigor multi-pass review gate over the PR and rank findings by severity"
-    expect_type: command
-    expect: review-gate
-    why: review gate vocabulary should identify the review-gate command
-
-  - prompt: "Fork this private repo for open sourcing, strip secrets, credentials, and internal references"
-    expect_type: agent
-    expect: opensource-forker
-    why: fork/sanitize/open-source packaging pipeline starts with the forker agent
-
-  - prompt: "Use the monorepo-engineer subagent for Turborepo workspace graph, package filters, turbo.json, and cross-package refactors"
-    expect_type: agent
-    expect: monorepo-engineer
-    why: Turborepo workspace graph work belongs to the monorepo engineer agent
-
   - prompt: "Use the Codex primary routing brain to decide when to call Claude from a Codex CLI session"
     expect_type: skill
     expect: legion-codex-mode
@@ -33,3 +13,18 @@ cases:
     expect_type: skill
     expect: legion-observability
     why: observability telemetry and self-learning hints belong to the observability skill
+
+  - prompt: "Delegate a scoped task to GPT-5 or Cursor in an isolated worktree and return a verified diff"
+    expect_type: skill
+    expect: legion-router
+    why: scoped model delegation with a verified diff is the router
+
+  - prompt: "Orchestrate the whole goal across models: fan out implementation, cross-verify, then synthesize"
+    expect_type: skill
+    expect: legion-orchestrate
+    why: whole-goal fan-out + cross-verify + synthesize is the orchestrator
+
+  - prompt: "Install and update the marketplace and wire the Codex and Cursor bridges"
+    expect_type: skill
+    expect: legion-setup
+    why: install/update + cross-harness bridges is the setup skill

@@ -1,24 +1,13 @@
 # legion-eval dataset — does each plugin trigger for the prompts it should?
 #
-# Each case: a realistic user prompt + the plugin we EXPECT Claude to route it to
-# (via SKILL.md description matching). Scored by the lexical proxy in
-# legion-eval.py — a signal, not the model. "collision" cases are deliberately
-# included to keep the known near-tie clusters (e.g. the 4-way Playwright group)
-# visible and tracked over time.
+# Calibrated to the legion-core skill surface (the 5 legion-* plugins). A domain
+# agent that builds on legion-core should extend this with cases for its own
+# plugins. Scored by the lexical proxy in legion-eval.py — a signal, not the model.
 #
 #   expect      — plugin that should win
 #   expect_not  — (optional) plugin that must NOT win (anti-trigger)
 #   why         — note for humans
 cases:
-  # ── clear wins (distinctive vocabulary) ──────────────────────────────
-  - prompt: "Edit a page in our Fumadocs MDX docs site and update meta.json navigation"
-    expect: fumadocs-authoring
-    why: fumadocs + mdx + meta.json are unique to the docs plugin
-
-  - prompt: "Analyze the turborepo workspace dependency graph and recommend turbo filters"
-    expect: opus-monorepo
-    why: turborepo/workspace/filters are monorepo-specific
-
   - prompt: "Delegate this scoped task to gpt-5.4 via codex and bring back a metered diff"
     expect: legion-router
     why: delegate + codex + metered diff is the router's core
@@ -27,45 +16,24 @@ cases:
     expect: legion-observability
     why: executor cost/latency dashboard + spans is observability
 
+  - prompt: "Run the daily self-learning loop, mine span outcomes, and auto-heal doctor findings into PRs"
+    expect: legion-observability
+    why: self-learning + heal + doctor live in observability
+
   - prompt: "Decompose this and fan out the coding across models in parallel, then cross-model verify"
     expect: legion-orchestrate
     why: decompose/fan-out/parallel/cross-model verify is the orchestrator loop
 
-  - prompt: "Disciplined loop to reproduce, minimise, instrument and fix a hard performance regression"
-    expect: diagnose
-    why: reproduce/minimise/regression is the diagnose vocabulary
-
-  - prompt: "Build this feature with a red-green-refactor test-driven development loop"
-    expect: tdd
-    why: red-green-refactor/test-driven is unique to tdd
-
-  - prompt: "Snapshot live AWS state and open a terraform PR to repair the drift"
-    expect: awspex
-    why: aws snapshot + terraform + drift repair is awspex
-
   - prompt: "Install and update the legion marketplace and refresh the cross-harness skills"
     expect: legion-setup
-    why: install/update legion marketplace is the setup skill
+    why: install/update marketplace + cross-harness is the setup skill
 
-  - prompt: "Run the overnight runner in tmux with worktrees and create draft PRs for each task"
-    expect: opus-agent-infra
-    why: overnight runner + tmux + worktrees + draft PRs is agent-infra
-
-  # ── known COLLISION cluster: Playwright (4-way) — tracked, not gated ──
-  - prompt: "Set up Playwright visual regression with screenshot baselines and test isolation"
-    expect: browser-patterns
-    why: visual regression + screenshot baselines lean browser-patterns
-
-  - prompt: "Test my local web app with Playwright, capture browser screenshots and view browser logs"
-    expect: webapp-testing
-    why: local web app + capture screenshots + view logs lean webapp-testing
-
-  - prompt: "Automate browser interactions and work with my Playwright test files"
-    expect: playwright-cli
-    why: bare 'automate browser + playwright tests' overlaps all four — the canonical collision
+  - prompt: "Codex-primary routing brain: decide when to call Claude from a Codex CLI session"
+    expect: legion-codex-mode
+    why: Codex-primary routing brain is the legion-codex-mode skill
 
   # ── anti-trigger (must NOT mis-route) ────────────────────────────────
-  - prompt: "Edit the MDX documentation page and fix the frontmatter"
-    expect: fumadocs-authoring
+  - prompt: "Show me the telemetry dashboard of cost and latency per model"
+    expect: legion-observability
     expect_not: legion-router
-    why: a docs edit must not trigger the model-delegation router
+    why: a reporting/telemetry ask must not trigger the delegation router

@@ -16,6 +16,8 @@
 #   cleanup [--run RUN_ID | --all] [--repo DIR]
 #
 # Safety: default sandbox is workspace-write for `run`, read-only for `review`.
+#   docker/podman/vercel are optional Sandcastle-backed OS/VM sandboxes, used
+#   only when explicitly requested.
 #   danger-full-access is hard-blocked unless LEGION_ALLOW_DANGER=1.
 #   Task text is scanned for injection/dangerous patterns before any write run
 #   (override with LEGION_ALLOW_UNSAFE=1).
@@ -79,6 +81,34 @@ run_codex() {
   set -e
 }
 
+is_sandcastle_sandbox() {
+  case "$1" in docker|podman|vercel) return 0 ;; *) return 1 ;; esac
+}
+
+# Run Sandcastle for one model into $art files; sets the caller's $rc (dynamic scope).
+# Sandcastle writes the diff directly to $art/diff.patch; the rest of the
+# delegate flow consumes that same artifact path.
+run_sandcastle() {
+  local node_bin sandcastle_script
+  node_bin="$(command -v node 2>/dev/null || true)"
+  [[ -n "$node_bin" ]] || {
+    printf 'legion-delegate: node is required for --sandbox %s. Run: npm i -D @ai-hero/sandcastle\n' "$sandbox" >&2
+    rc=127
+    return 0
+  }
+  sandcastle_script="$_self_dir/sandcastle-run.mjs"
+  : > "$art/stream.jsonl"
+  set +e
+  jq -cn \
+    --arg task "$task" --arg model "$1" --arg sandbox "$sandbox" \
+    --arg cwd "$wt" --arg base "$base" --arg branch "$branch" --arg diff "$art/diff.patch" --arg effort "$effort" \
+    '{task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
+      effort:(if $effort=="" then null else $effort end)}' \
+    | "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
+  rc=${PIPESTATUS[1]}
+  set -e
+}
+
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
 _run_id() { printf '%s-%s' "$(date -u +%Y%m%d-%H%M%S)" "${RANDOM}${RANDOM}"; }
@@ -87,12 +117,12 @@ _run_id() { printf '%s-%s' "$(date -u +%Y%m%d-%H%M%S)" "${RANDOM}${RANDOM}"; }
 validate_sandbox() {
   local s="$1"
   case "$s" in
-    read-only|workspace-write) return 0 ;;
+    read-only|workspace-write|docker|podman|vercel) return 0 ;;
     danger-full-access)
       [[ "${LEGION_ALLOW_DANGER:-0}" == "1" ]] || \
         die "sandbox=danger-full-access is hard-blocked. Set LEGION_ALLOW_DANGER=1 to override (NOT recommended)."
       return 0 ;;
-    *) die "invalid --sandbox '$s' (read-only|workspace-write|danger-full-access)" ;;
+    *) die "invalid --sandbox '$s' (read-only|workspace-write|docker|podman|vercel|danger-full-access)" ;;
   esac
 }
 
@@ -294,8 +324,13 @@ cmd_run() {
     case ",$tried," in *",$attempt,"*) continue ;; esac    # dedup
     tried="${tried:+$tried,}$attempt"
     used_model="$attempt"
-    note "→ codex exec -m $attempt -s $sandbox${effort:+ (effort=$effort)}"
-    run_codex "$attempt"
+    if is_sandcastle_sandbox "$sandbox"; then
+      note "→ sandcastle run -m $attempt --sandbox $sandbox${effort:+ (effort=$effort)}"
+      run_sandcastle "$attempt"
+    else
+      note "→ codex exec -m $attempt -s $sandbox${effort:+ (effort=$effort)}"
+      run_codex "$attempt"
+    fi
     [[ "$rc" -eq 0 ]] && break
     if is_quota_error "$art/codex.err"; then
       note "⚠ $attempt hit quota/rate-limit — trying next fallback model"
@@ -315,8 +350,12 @@ cmd_run() {
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
 
   local diff_rc=0
-  git -C "$wt" add -A 2>/dev/null || diff_rc=1
-  git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  if ! is_sandcastle_sandbox "$sandbox"; then
+    git -C "$wt" add -A 2>/dev/null || diff_rc=1
+    git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  else
+    [[ -f "$art/diff.patch" ]] || : > "$art/diff.patch"
+  fi
 
   local total_tokens status="ok"
   total_tokens="$(jq -r '((.input_tokens//0)+(.output_tokens//0)+(.reasoning_output_tokens//0)) | floor' <<<"$usage" 2>/dev/null || echo 0)"
@@ -586,7 +625,7 @@ main() {
     -h|--help|help|"") cat >&2 <<'EOF'
 legion-delegate — delegate a scoped task to an external model agent (Codex / GPT-5.x)
 
-  run      [--archetype A | --model M] [--sandbox read-only|workspace-write]
+  run      [--archetype A | --model M] [--sandbox read-only|workspace-write|docker|podman|vercel]
            [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
            [--base REF] [--budget-tokens N] [--apply] [--keep]
   review   [--archetype A | --model M] --base BRANCH [--repo DIR] [--reasoning-effort E]

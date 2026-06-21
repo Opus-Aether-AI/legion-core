@@ -57,6 +57,9 @@
     "darwin",
     "linux"
   ],
+  "optionalDependencies": {
+    "@ai-hero/sandcastle": "latest"
+  },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",
     "access": "restricted"

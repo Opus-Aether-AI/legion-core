@@ -398,12 +398,12 @@ EOF
     if grep -F "plugin install plugin-with-skill@" "$MOCK_CALL_LOG"; then false; fi
 }
 
-@test "profile 'minimal' attempts to install opus-core + opus-codebase-memory" {
+@test "profile 'minimal' attempts to install legion-router + legion-observability" {
     # These won't exist in our fixture; the mock claude still records the call
     run bash "$INSTALL_SH" minimal --no-cron
     [ "$status" -eq 0 ]
-    assert_mock_called claude "plugin install opus-core@legion"
-    assert_mock_called claude "plugin install opus-codebase-memory@legion"
+    assert_mock_called claude "plugin install legion-router@legion"
+    assert_mock_called claude "plugin install legion-observability@legion"
 }
 
 # ── Idempotent install — already-installed branch ───────────────────

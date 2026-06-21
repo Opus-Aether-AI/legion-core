@@ -100,16 +100,17 @@ make_patch() {
   local patch; patch="$(make_patch "$REPO_DIR")"
   printf '{"title":"Fix bug","body":"Please patch it"}\n' > "$MOCK_GH_ISSUE_JSON"
   printf 'implemented summary\n' > "$TEST_TMPDIR/last-message.txt"
-  printf '{"status":"ok","diff_path":"%s","last_message_path":"%s"}\n' "$patch" "$TEST_TMPDIR/last-message.txt" > "$MOCK_DELEGATE_RESULT"
+  printf '{"status":"ok","run_id":"r123","diff_path":"%s","last_message_path":"%s"}\n' "$patch" "$TEST_TMPDIR/last-message.txt" > "$MOCK_DELEGATE_RESULT"
 
   run bash -c "cd '$REPO_DIR' && env LEGION_DELEGATE_BIN=legion-delegate bash '$INTAKE' implement --issue 9 --repo acme/widgets"
 
   [ "$status" -eq 0 ]
-  assert_mock_called gh "pr create --repo acme/widgets --base main --head agent/issue-9 --title Fix bug"
+  # Branch is suffixed with the delegate run id so reruns don't collide.
+  assert_mock_called gh "pr create --repo acme/widgets --base main --head agent/issue-9-r123 --title Fix bug"
   assert_mock_called legion-delegate "--sandbox workspace-write --model gpt-5.4"
-  [ "$(git -C "$REPO_DIR" branch --show-current)" = "agent/issue-9" ]
+  [ "$(git -C "$REPO_DIR" branch --show-current)" = "agent/issue-9-r123" ]
   [ "$(git -C "$REPO_DIR" show HEAD:demo.txt)" = "new" ]
-  git -C "$REPO_DIR" ls-remote --exit-code --heads origin agent/issue-9 >/dev/null
+  git -C "$REPO_DIR" ls-remote --exit-code --heads origin agent/issue-9-r123 >/dev/null
   [ ! -f "$MOCK_GH_COMMENTS" ]
 }
 

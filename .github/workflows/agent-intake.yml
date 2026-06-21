@@ -26,11 +26,12 @@ jobs:
   intake:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Secrets are scoped to the specific steps that need them (NOT job-level), so
+    # checkout / setup / codex-install never see them. The agent itself runs with
+    # secrets scrubbed from its env inside legion-intake.sh — the issue body is
+    # untrusted, so a prompt injection must not be able to read a token.
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CODEX_HOME: ${{ runner.temp }}/codex-home
-      CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       # Maintainer setup:
       # 1. Create labels `agent:explore` and `agent:implement`.
@@ -39,6 +40,10 @@ jobs:
       # 3. If neither secret exists we comment on the issue and exit 0 by design.
       - name: Guard intake auth
         id: auth
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           if [[ -n "${CODEX_AUTH:-}" || -n "${OPENAI_API_KEY:-}" ]]; then
@@ -66,6 +71,9 @@ jobs:
 
       - if: steps.auth.outputs.configured == 'true'
         name: Configure Codex auth
+        env:
+          CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           mkdir -p "$CODEX_HOME"
@@ -78,6 +86,10 @@ jobs:
 
       - if: steps.auth.outputs.configured == 'true'
         name: Run intake lane
+        # Only GH_TOKEN (for posting/PR) — codex reads auth from $CODEX_HOME/auth.json.
+        # legion-intake.sh scrubs GH_TOKEN from the agent subprocess.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           bash legion-router/scripts/legion-intake.sh "${{ inputs.mode }}" \

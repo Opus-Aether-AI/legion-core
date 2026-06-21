@@ -75,10 +75,18 @@ model="${model:-gpt-5.4}"
 task="$prompt"
 tag="🤖 legion-intake $mode"
 
+# The agent is prompted with USER-CONTROLLED issue text, so a prompt injection
+# could try to read tokens from the environment and echo them into its output
+# (which we post back to the issue/PR). Run the delegated agent with the GitHub +
+# provider secrets SCRUBBED from its environment — the workflow writes codex auth
+# to ~/.codex/auth.json, so codex still authenticates without these env vars,
+# while `gh` posting below keeps GH_TOKEN in this parent shell.
+agent() { env -u GH_TOKEN -u GITHUB_TOKEN -u CODEX_AUTH -u OPENAI_API_KEY "$DELEGATE" "$@"; }
+
 if [[ "$mode" == "explore" ]]; then
   task="$task"$'\n\n'"Return: a short assessment — root cause if visible, the files involved, and whether this is safe to auto-implement (yes/no) with one-line reasoning."
   set +e
-  result="$("$DELEGATE" run --sandbox read-only --model "$model" --task "$task" --repo "$PWD")"
+  result="$(agent run --sandbox read-only --model "$model" --task "$task" --repo "$PWD")"
   rc=$?
   set -e
   summary="$(last_message "$result")"
@@ -88,7 +96,7 @@ if [[ "$mode" == "explore" ]]; then
 fi
 
 set +e
-result="$("$DELEGATE" run --sandbox workspace-write --model "$model" --task "$task" --repo "$PWD")"
+result="$(agent run --sandbox workspace-write --model "$model" --task "$task" --repo "$PWD")"
 rc=$?
 set -e
 status="$(jq -r '.status // "failed"' <<<"$result" 2>/dev/null || echo failed)"
@@ -101,7 +109,11 @@ if [[ "$rc" -ne 0 || "$status" != "ok" || -z "$diff" || ! -s "$diff" ]]; then
   exit 0
 fi
 
-branch="agent/issue-$issue"
+# Unique per run: a fixed agent/issue-N branch would diverge from its remote on a
+# rerun and the push would be rejected (non-fast-forward). Suffix with the
+# delegate run id (unique + traceable) so each run opens a fresh branch/PR.
+run_id="$(jq -r '.run_id // empty' <<<"$result" 2>/dev/null || true)"
+branch="agent/issue-$issue${run_id:+-$run_id}"
 base="$(base_branch "$PWD")"
 git checkout -B "$branch" >/dev/null 2>&1
 git apply --check "$diff" || die "delegate diff does not apply cleanly"

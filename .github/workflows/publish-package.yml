@@ -1,0 +1,54 @@
+name: publish-package
+
+# Publishes @opus-aether-ai/legion-core to GitHub Packages (npm registry, private
+# by repo visibility) on each published Release, and on demand via the Actions UI.
+#
+# This is an ADDITIVE distribution channel: legion-core is still consumable as a
+# Claude Code marketplace (`claude plugin marketplace add Opus-Aether-AI/legion-core`)
+# and via a source clone. The npm package lets moneyball / other agents pull a
+# versioned copy of the engine (bins + scripts + plugins) with `npm install`.
+#
+# Auth: the built-in GITHUB_TOKEN has `packages: write` for a package linked to
+# this repo, so no extra secret is needed to publish.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://npm.pkg.github.com
+          scope: "@opus-aether-ai"
+
+      - name: Version is in sync with the marketplace
+        run: |
+          set -e
+          pkg="$(jq -r '.version' package.json)"
+          mkt="$(jq -r '.version' .claude-plugin/marketplace.json)"
+          if [ "$pkg" != "$mkt" ]; then
+            echo "::error::package.json ($pkg) != marketplace.json ($mkt) — release-please keeps these in lockstep; do not edit by hand"
+            exit 1
+          fi
+          echo "version $pkg in sync"
+
+      - name: Publish to GitHub Packages
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

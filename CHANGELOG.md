@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.1.3...v0.2.0) (2026-06-21)
+
+
+### Added
+
+* **package:** publish legion-core to GitHub Packages (npm, private) ([#11](https://github.com/Opus-Aether-AI/legion-core/issues/11)) ([c9b4581](https://github.com/Opus-Aether-AI/legion-core/commit/c9b4581e7ce430422ea96d281e8be6c598b3272c))
+
 ## [0.1.3](https://github.com/Opus-Aether-AI/legion-core/compare/v0.1.2...v0.1.3) (2026-06-21)
 
 

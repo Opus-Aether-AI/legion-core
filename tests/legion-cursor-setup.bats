@@ -22,19 +22,25 @@ setup() {
   export PATH="$ROOT/legion-router/bin:$BATS_TEST_DIRNAME/mocks/bin:$PATH"
 }
 
-@test "cursor setup: all wires MCPs + Cursor agents + skill runner; verify confirms" {
-  skip "asserts company MCP plugins (context7/playwright/codebase-memory); legion-core ships none — covered by consumers that add MCP plugins"
-  run "$SETUP_SH" all
-  [ "$status" -eq 0 ]
+# legion-core ships no MCP plugins itself, so the bridge is exercised against a
+# fixture marketplace that declares one (the same shape a consumer adds).
+_mkt_with_mcp() {  # $1 = marketplace dir
+  mkdir -p "$1/dummy-mcp/.claude-plugin"
+  printf '%s\n' '{"name":"dummy-mcp","version":"0.0.0","description":"d","mcpServers":{"dummy":{"command":"echo","args":["hi"]}}}' \
+    > "$1/dummy-mcp/.claude-plugin/plugin.json"
+}
 
-  jq -e '.mcpServers.context7 and .mcpServers.playwright and .mcpServers["codebase-memory"]' "$CURSOR_MCP_CONFIG"
-  [ -f "$CURSOR_AGENTS/legion-cmd-feature.md" ]
-  [ -f "$CURSOR_AGENTS/legion-agent-monorepo-engineer.md" ]
-  [ -f "$CURSOR_AGENTS/legion-skill-runner.md" ]
-  grep -q "$AGENTS_HOME/skills" "$CURSOR_AGENTS/legion-skill-runner.md"
+@test "cursor setup: mcp wires a marketplace MCP server into Cursor; verify confirms it" {
+  local mkt="$BATS_TEST_TMPDIR/mkt"; _mkt_with_mcp "$mkt"
 
-  run "$SETUP_SH" verify
+  LEGION_MARKETPLACE_ROOT="$mkt" run "$SETUP_SH" mcp
   [ "$status" -eq 0 ]
+  jq -e '.mcpServers.dummy.command == "echo"' "$CURSOR_MCP_CONFIG"
+
+  # verify's MCP check confirms it (other readiness checks may be unmet in CI,
+  # so assert on the MCP line rather than the overall exit code).
+  LEGION_MARKETPLACE_ROOT="$mkt" run "$SETUP_SH" verify
+  [[ "$output" == *"ok MCP dummy registered"* ]]
 }
 
 @test "cursor setup: mcp merge is idempotent and preserves user servers" {
@@ -49,16 +55,16 @@ setup() {
   jq -e '.mcpServers["user-server"].command == "echo"' "$CURSOR_MCP_CONFIG"
 }
 
-@test "cursor setup: verify detects drifted Legion MCP specs" {
-  skip "asserts company MCP plugins (context7/playwright); legion-core ships none — covered by consumers that add MCP plugins"
+@test "cursor setup: verify detects a drifted Legion MCP spec" {
+  local mkt="$BATS_TEST_TMPDIR/mkt"; _mkt_with_mcp "$mkt"
+  # Register a STALE version of the spec, so verify must report drift.
   mkdir -p "$(dirname "$CURSOR_MCP_CONFIG")"
-  printf '%s\n' '{"mcpServers":{"context7":{"command":"/stale/context7","args":[]}}}' > "$CURSOR_MCP_CONFIG"
-  "$SETUP_SH" agents >/dev/null
+  printf '%s\n' '{"mcpServers":{"dummy":{"command":"/stale/dummy","args":[]}}}' > "$CURSOR_MCP_CONFIG"
 
-  run "$SETUP_SH" verify
+  LEGION_MARKETPLACE_ROOT="$mkt" run "$SETUP_SH" verify
 
   [ "$status" -ne 0 ]
-  echo "$output" | grep -q 'context7 registered but drifted'
+  echo "$output" | grep -q 'MCP dummy registered but drifted'
 }
 
 @test "cursor setup: verify requires Legion-generated agents, not any user agent" {

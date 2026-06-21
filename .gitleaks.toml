@@ -1,20 +1,22 @@
 # gitleaks config for Legion. Extends the bundled default ruleset and adds an
 # allowlist for paths that legitimately contain secret-shaped strings but no
-# real secrets: test fixtures, CLI mocks, example env files, and the cost table.
+# real secrets: test fixtures, CLI mocks, and example env files.
 title = "Legion gitleaks config"
 
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Fixtures, mocks, examples, and the cost table are not real secrets"
+description = "Fixtures, mocks, and examples are not real secrets"
 paths = [
   '''tests/.*''',
   '''.*\.example$''',
   '''.*/fixtures/.*''',
   '''.*/mocks/.*''',
-  '''legion-router/config/costs\.json''',
 ]
+# Note: costs.json is a price table (numbers only) and is intentionally NOT
+# allowlisted — scanning it keeps the blind spot from widening if a key-shaped
+# value is ever pasted there.
 # Placeholder/example token shapes used in docs + SKILL.md examples.
 regexes = [
   '''(?i)(your[-_]?(api[-_]?)?key|example|placeholder|dummy|xxx+|sk-ant-xxx)''',

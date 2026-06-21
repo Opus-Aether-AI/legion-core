@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/your-org/legion-core/legion-observability/schema/legion.handoff.v1.schema.json",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/legion-observability/schema/legion.handoff.v1.schema.json",
   "title": "legion.handoff.v1",
   "description": "One Legion context-handoff telemetry record. Appended as JSONL and consumed by the self-tuning context-handoff controller to learn a pre-cliff handoff threshold per model/context-class/runner-type bucket.",
   "type": "object",

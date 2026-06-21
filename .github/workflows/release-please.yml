@@ -4,6 +4,14 @@ name: release-please
 # Merging it bumps `.claude-plugin/marketplace.json` ($.version), updates
 # CHANGELOG.md, tags, and creates a GitHub Release. No npm publish — git tags +
 # GitHub Releases only.
+#
+# IMPORTANT: a PR opened with the default GITHUB_TOKEN does NOT trigger other
+# workflows (GitHub loop-prevention), so the Release PR would never run the
+# required validate-* / legion-doctor checks and couldn't satisfy branch
+# protection without a manual re-trigger. Provision a repo secret
+# RELEASE_PLEASE_TOKEN (fine-grained PAT or GitHub App token, contents:write +
+# pull-requests:write) so Release PRs trigger CI. Falls back to github.token
+# (current behaviour — manual re-trigger needed) when the secret is absent.
 
 on:
   push:
@@ -25,5 +33,8 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
+          # See header note: a provisioned PAT/App token makes Release PRs trigger
+          # required CI; falls back to the default token when unset.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

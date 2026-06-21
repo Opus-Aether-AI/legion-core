@@ -386,3 +386,20 @@ make_test_repo() {
     [ "$status" -eq 2 ]
     [[ "$output" == *"legion-delegate"* ]]
 }
+
+# ── service-management portability preflight (M4) ────────────────────
+@test "router: service commands refuse on non-macOS, pointing to dev/systemd" {
+    local fakebin="$TEST_TMPDIR/fakebin"; mkdir -p "$fakebin"
+    printf '#!/usr/bin/env bash\necho Linux\n' > "$fakebin/uname"
+    chmod +x "$fakebin/uname"
+    local router="$REPO_ROOT/legion-router/scripts/router.sh"
+
+    PATH="$fakebin:$PATH" run bash "$router" install
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"macOS-only"* ]]
+    [[ "$output" == *"legion-router dev"* ]]
+
+    PATH="$fakebin:$PATH" run bash "$router" status
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"macOS-only"* ]]
+}

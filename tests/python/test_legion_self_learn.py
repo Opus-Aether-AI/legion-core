@@ -13,6 +13,20 @@ self_learn = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(self_learn)
 
 
+def test_default_repo_honors_legion_root_override(tmp_path, monkeypatch):
+    # Location-agnostic: an explicit LEGION_ROOT wins over the script's layout.
+    monkeypatch.setenv("LEGION_ROOT", str(tmp_path))
+    assert self_learn.default_repo() == os.path.abspath(str(tmp_path))
+
+
+def test_default_repo_falls_back_to_git_toplevel(monkeypatch):
+    # With no override, the default resolves to the repo's git toplevel (where
+    # the script lives), not a cwd-relative guess.
+    monkeypatch.delenv("LEGION_ROOT", raising=False)
+    repo_root = os.path.abspath(os.path.join(HERE, "..", ".."))
+    assert self_learn.default_repo() == repo_root
+
+
 def _catalog(tmp_path):
     command_path = tmp_path / "opus-commands" / "commands" / "feature.md"
     skill_path = tmp_path / "opus-commands" / "SKILL.md"

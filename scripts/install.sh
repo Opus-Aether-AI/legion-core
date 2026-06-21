@@ -8,9 +8,8 @@
 #
 # Usage (after cloning the repo, since it's private):
 #   bash scripts/install.sh all       # everything (default) — Claude + Codex + cron
-#   bash scripts/install.sh opus      # only Opus-original plugins
-#   bash scripts/install.sh vendored  # only vendored third-party
 #   bash scripts/install.sh minimal   # legion-router + legion-observability only
+#   bash scripts/install.sh <plugin>  # a single named plugin
 #   bash scripts/install.sh --list    # show available plugins, don't install
 #   bash scripts/install.sh PLUGIN    # install one named plugin
 #
@@ -125,14 +124,6 @@ fetch_plugins() {
 
 list_all() {
     fetch_plugins | jq -r '.plugins[].name'
-}
-
-list_opus() {
-    fetch_plugins | jq -r '.plugins[] | select(.source | type == "string" and (startswith("./vendored/") | not)) | .name'
-}
-
-list_vendored() {
-    fetch_plugins | jq -r '.plugins[] | select(.source | type == "string" and startswith("./vendored/")) | .name'
 }
 
 # ── Install single Claude plugin ─────────────────────────────────────
@@ -570,13 +561,9 @@ setup_cron() {
 print_list() {
     add_marketplace >/dev/null 2>&1 || true
     bold ""
-    bold "Opus-original plugins (source: ./<dir>)"
+    bold "Legion engine plugins"
     echo ""
-    fetch_plugins | jq -r '.plugins[] | select(.source | type == "string" and (startswith("./vendored/") | not)) | "  \(.name)  —  \(.description | .[0:80])\(if (.description | length) > 80 then "…" else "" end)"'
-    echo ""
-    bold "Vendored plugins (auto-synced from upstream)"
-    echo ""
-    fetch_plugins | jq -r '.plugins[] | select(.source | type == "string" and startswith("./vendored/")) | "  \(.name)  —  \(.source)"'
+    fetch_plugins | jq -r '.plugins[] | "  \(.name)  —  \(.description | .[0:80])\(if (.description | length) > 80 then "…" else "" end)"'
     echo ""
 }
 
@@ -607,24 +594,6 @@ case "$MODE" in
     all)
         add_marketplace
         PLUGINS=(); while IFS= read -r line; do PLUGINS+=("$line"); done < <(list_all)
-        setup_cross_harness
-        setup_codex_skills
-        setup_cursor_native
-        install_many "${PLUGINS[@]}"
-        setup_cron
-        ;;
-    opus)
-        add_marketplace
-        PLUGINS=(); while IFS= read -r line; do PLUGINS+=("$line"); done < <(list_opus)
-        setup_cross_harness
-        setup_codex_skills
-        setup_cursor_native
-        install_many "${PLUGINS[@]}"
-        setup_cron
-        ;;
-    vendored)
-        add_marketplace
-        PLUGINS=(); while IFS= read -r line; do PLUGINS+=("$line"); done < <(list_vendored)
         setup_cross_harness
         setup_codex_skills
         setup_cursor_native

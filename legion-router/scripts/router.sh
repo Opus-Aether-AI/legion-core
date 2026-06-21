@@ -9,6 +9,10 @@ set -euo pipefail
 #   legion-router uninstall   # remove plist + stop
 #   legion-router start|stop|restart|status|logs|errors
 #   legion-router dev         # run in foreground (debug)
+#
+# Service management (install/uninstall/start/stop/restart/status) uses launchd
+# + the macOS Keychain and is macOS-only. On Linux use `legion-router dev` (or
+# wrap scripts/router.ts in a systemd unit); `logs`/`errors`/`dev` are portable.
 
 PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT_PATH="$PLUGIN_DIR/scripts/router.ts"
@@ -27,6 +31,20 @@ red()    { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green()  { printf '\033[0;32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
 dim()    { printf '\033[0;90m%s\033[0m\n' "$*"; }
+
+# Service management goes through launchd + the macOS Keychain, so install/start/
+# stop/restart/status are macOS-only. `dev` (foreground bun) and `logs`/`errors`
+# (tail) are portable and the documented Linux path. Fail fast with a clear
+# pointer instead of dying mid-script on `launchctl: command not found`.
+require_macos() {  # $1 = subcommand, for the message
+  if [[ "$(uname -s)" != "Darwin" ]] || ! command -v launchctl >/dev/null 2>&1 \
+       || ! command -v security >/dev/null 2>&1; then
+    red "legion-router $1 manages a launchd service and is macOS-only."
+    yellow "On Linux, run the router in the foreground:  legion-router dev"
+    yellow "or wrap scripts/router.ts in a systemd unit / your process supervisor."
+    exit 1
+  fi
+}
 
 check_installed() {
   [[ -f "$PLIST_PATH" ]] || { red "Not installed. Run: legion-router install"; exit 1; }
@@ -161,6 +179,10 @@ cmd_status() {
 cmd_logs()   { [[ -f "$LOG_FILE" ]] && tail -f "$LOG_FILE" || yellow "No log yet: $LOG_FILE"; }
 cmd_errors() { [[ -f "$ERR_FILE" ]] && tail -f "$ERR_FILE" || yellow "No error log yet: $ERR_FILE"; }
 cmd_dev()    { echo "Running in foreground (Ctrl+C to stop)..."; exec "$BUN_PATH" run "$SCRIPT_PATH"; }
+
+# Service-management commands need launchd + Keychain → macOS-only. dev/logs/
+# errors are portable. Gate the launchd-bound ones up front (see require_macos).
+case "${1:-}" in install|uninstall|start|stop|restart|status) require_macos "$1" ;; esac
 
 case "${1:-}" in
   install)   cmd_install "$@" ;;

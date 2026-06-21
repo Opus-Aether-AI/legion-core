@@ -1,0 +1,38 @@
+name: agent-intake-trigger
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to process.
+        required: true
+        type: number
+      mode:
+        description: Which lane to run.
+        required: true
+        type: choice
+        options:
+          - explore
+          - implement
+
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  route:
+    # Label mapping:
+    # - `agent:explore`   -> read-only assessment comment on the issue
+    # - `agent:implement` -> workspace-write patch, pushed branch, PR for review
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'agent:explore' ||
+      github.event.label.name == 'agent:implement'
+    uses: ./.github/workflows/agent-intake.yml
+    with:
+      issue_number: ${{ github.event_name == 'workflow_dispatch' && inputs.issue_number || github.event.issue.number }}
+      mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.label.name == 'agent:implement' && 'implement' || 'explore') }}
+    secrets: inherit

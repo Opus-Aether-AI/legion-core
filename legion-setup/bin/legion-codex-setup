@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Resolve through any symlink chain (the ~/.agents/bin farm symlinks here), then
+# exec the real script. Bash does not deref $0 for symlinks, so walk BASH_SOURCE.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+root="$(cd -P "$(dirname "$src")/.." >/dev/null 2>&1 && pwd)"
+exec "$root/scripts/legion-codex-setup.sh" "$@"

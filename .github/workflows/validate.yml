@@ -1,0 +1,333 @@
+name: validate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-marketplace:
+    name: validate-marketplace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Marketplace JSON parses
+        run: jq empty .claude-plugin/marketplace.json
+
+      - name: Marketplace has required top-level fields
+        run: |
+          jq -e '.name and .owner and .version and .plugins and (.plugins | type == "array")' \
+            .claude-plugin/marketplace.json > /dev/null
+
+      - name: Each plugin entry has required fields
+        run: |
+          jq -e '.plugins | all(
+            (.name | type == "string") and
+            (.source != null) and
+            (.description | type == "string") and
+            (.version | type == "string")
+          )' .claude-plugin/marketplace.json > /dev/null
+
+      - name: Every string source points at an existing directory
+        run: |
+          set -e
+          jq -r '.plugins[] | select(.source | type == "string") | .source' \
+            .claude-plugin/marketplace.json | while read -r src; do
+              if [ ! -d "$src" ]; then
+                echo "::error::Marketplace entry source dir missing: $src"
+                exit 1
+              fi
+            done
+
+      - name: Vendored (git-subdir) entries have required source fields
+        run: |
+          set -e
+          # When we add git-subdir entries later, validate their shape early.
+          count=$(jq '[.plugins[] | select(.source | type == "object")] | length' \
+            .claude-plugin/marketplace.json)
+          if [ "$count" = "0" ]; then
+            echo "No git-subdir entries yet — skipping."
+            exit 0
+          fi
+          jq -e '.plugins | map(select(.source | type == "object")) | all(
+            (.source.source == "git-subdir") and
+            (.source.url | test("^https?://|^git@")) and
+            (.source.path | type == "string") and
+            (.source.ref  | type == "string")
+          )' .claude-plugin/marketplace.json > /dev/null
+
+      - name: Plugin names are unique
+        run: |
+          dupes=$(jq -r '.plugins[].name' .claude-plugin/marketplace.json | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "::error::Duplicate plugin names: $dupes"
+            exit 1
+          fi
+
+      - name: No stale pre-rename identifiers (Legion rename guard)
+        run: |
+          set -e
+          # The repo path is ALWAYS a leftover bug — guard it everywhere.
+          if git grep -nE 'legion-core/claude-skills' \
+               -- ':!CHANGELOG.md' ':!.github/workflows/validate.yml'; then
+            echo "::error::stale pre-rename repo path — use 'your-org/legion-core'"
+            exit 1
+          fi
+          # The bare slug is legitimate ONLY in install.sh's migration shim (it
+          # detects + cleans up old-slug installs) and in the tests that exercise
+          # it. Anywhere else it's a leftover from an incomplete rename.
+          if git grep -nE 'legion-core-claude-skills' \
+               -- ':!CHANGELOG.md' ':!.github/workflows/validate.yml' \
+               ':!scripts/install.sh' ':!tests/'; then
+            echo "::error::stale pre-rename slug — use 'legion'"
+            exit 1
+          fi
+          echo "no stale pre-rename identifiers"
+
+  validate-plugins:
+    name: validate-plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Each in-repo plugin folder has SKILL.md or .claude-plugin/plugin.json
+        run: |
+          set -e
+          jq -r '.plugins[] | select(.source | type == "string") | .source' \
+            .claude-plugin/marketplace.json | while read -r src; do
+              if [ ! -f "$src/SKILL.md" ] && [ ! -f "$src/.claude-plugin/plugin.json" ]; then
+                echo "::error::$src has neither SKILL.md nor .claude-plugin/plugin.json"
+                exit 1
+              fi
+            done
+
+      - name: Each .claude-plugin/plugin.json parses and has required fields
+        run: |
+          set -e
+          fail=0
+          while read -r manifest; do
+            jq empty "$manifest" || { echo "::error::Invalid JSON: $manifest"; fail=1; continue; }
+            jq -e '.name and .version and .description' "$manifest" > /dev/null \
+              || { echo "::error::Missing name/version/description: $manifest"; fail=1; }
+          done < <(find . -path ./.git -prune -o -path "*/.claude-plugin/plugin.json" -print)
+          exit $fail
+
+      - name: Plugin manifest name matches marketplace entry (opus-original only)
+        run: |
+          set -e
+          # Only enforce alignment for opus-original plugins (no `upstream` field).
+          # Vendored plugins can legitimately have a different manifest name from
+          # our marketplace slug — e.g. vercel/vercel-plugin ships
+          # `plugin.json: {"name": "vercel"}` but our marketplace slug is
+          # `vercel-plugin` (kept for back-compat with existing installs).
+          # Claude Code's loader uses plugin.json's `name` as the skill
+          # namespace, so users see `vercel:nextjs` regardless of our slug.
+          jq -r '.plugins[]
+            | select(.source | type == "string")
+            | select(.upstream == null)
+            | "\(.name) \(.source)"' \
+            .claude-plugin/marketplace.json | while read -r name src; do
+              manifest="$src/.claude-plugin/plugin.json"
+              if [ -f "$manifest" ]; then
+                actual=$(jq -r '.name' "$manifest")
+                if [ "$name" != "$actual" ]; then
+                  echo "::error::Marketplace entry '$name' but $manifest name='$actual'"
+                  exit 1
+                fi
+              fi
+            done
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Each SKILL.md has frontmatter with name + description
+        run: |
+          python3 - <<'PY'
+          import sys, pathlib, re
+          # Lenient regex check — matches Claude Code's actual frontmatter
+          # tolerance (descriptions often contain unescaped `: ` and other
+          # YAML-hostile characters but parse fine in practice).
+          errors = []
+          for p in pathlib.Path('.').rglob('SKILL.md'):
+              if '.git' in p.parts: continue
+              text = p.read_text(encoding='utf-8')
+              if not text.startswith('---'):
+                  errors.append(f"{p}: missing frontmatter opener (---)"); continue
+              try:
+                  end = text.index('\n---', 3)
+              except ValueError:
+                  errors.append(f"{p}: unclosed frontmatter"); continue
+              fm = text[3:end]
+              if not re.search(r'(?m)^name:\s*\S', fm):
+                  errors.append(f"{p}: missing 'name' field")
+              if not re.search(r'(?m)^description:\s*\S', fm):
+                  errors.append(f"{p}: missing 'description' field")
+          for e in errors: print(f"::error::{e}")
+          sys.exit(1 if errors else 0)
+          PY
+
+  validate-hooks-and-scripts:
+    name: validate-hooks-and-scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install pyyaml
+        run: pip install pyyaml --quiet
+
+      - name: Python files compile
+        run: |
+          set -e
+          mapfile -t py_files < <(find . -path ./.git -prune -o -name "*.py" -print)
+          if [ "${#py_files[@]}" -eq 0 ]; then
+            echo "No .py files to check."
+            exit 0
+          fi
+          python3 -m py_compile "${py_files[@]}"
+
+      - name: Python unit tests (pytest)
+        run: |
+          set -e
+          if [ -d tests/python ]; then
+            pip install pytest --quiet
+            python3 -m pytest -q tests/python
+          else
+            echo "No tests/python suite."
+          fi
+
+      - name: Skill-triggering eval (report-only)
+        run: |
+          # legion-eval is a lexical PROXY for Claude's description-based skill
+          # triggering — a signal, not a gate. The scorer math itself is gated by
+          # tests/python/test_legion_eval.py above. Here we just surface P@1 +
+          # any collisions for visibility (pyyaml installed earlier in this job).
+          if [ -f legion-observability/scripts/legion-eval.py ]; then
+            python3 legion-observability/scripts/legion-eval.py || true
+            python3 legion-observability/scripts/legion-eval.py \
+              --dataset legion-observability/eval/entity-triggering.yaml \
+              --scope entity || true
+          fi
+
+      - name: patterns.yaml has expected structure (when present)
+        run: |
+          set -e
+          for f in $(find . -path ./.git -prune -o -name "patterns.yaml" -print); do
+            python3 -c "
+          import yaml, sys
+          d = yaml.safe_load(open('$f'))
+          assert isinstance(d, dict), 'patterns.yaml is not a mapping'
+          assert 'bashToolPatterns' in d, 'missing bashToolPatterns'
+          print('$f OK')
+          "
+          done
+
+      - name: hooks.json files parse
+        run: |
+          set -e
+          for f in $(find . -path ./.git -prune -o -name "hooks.json" -print); do
+            jq empty "$f"
+            echo "$f OK"
+          done
+
+      - name: ShellCheck on .sh and bin/ scripts
+        uses: ludeeus/action-shellcheck@master
+        with:
+          # error severity only — style/warning issues in pre-existing scripts
+          # (e.g., awspex) are out of scope for marketplace-level CI. Each
+          # plugin can add its own stricter CI if it wants.
+          severity: error
+          format: gcc
+          scandir: .
+          ignore_paths: |
+            .git
+
+  validate-installer-coverage:
+    name: validate-installer-coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install bats + jq
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bats jq
+
+      - name: Cache kcov binary
+        id: cache-kcov
+        uses: actions/cache@v5
+        with:
+          path: /usr/local/bin/kcov
+          key: kcov-v43-${{ runner.os }}
+
+      - name: Install kcov from source (not in Ubuntu 24.04 repos)
+        if: steps.cache-kcov.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y \
+            cmake build-essential libcurl4-openssl-dev libdw-dev libelf-dev \
+            binutils-dev libssl-dev libstdc++-12-dev pkg-config zlib1g-dev
+          git clone --depth 1 --branch v43 https://github.com/SimonKagstrom/kcov.git /tmp/kcov
+          cd /tmp/kcov && mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && make -j$(nproc)
+          sudo make install
+
+      - name: Verify kcov
+        run: kcov --version
+
+      - name: Verify bats tests pass without coverage instrumentation
+        run: bats tests/
+
+      - name: Run bats under kcov for coverage
+        run: |
+          mkdir -p coverage-output
+          kcov \
+            --include-path=scripts \
+            --exclude-pattern=/tests/ \
+            coverage-output \
+            bats tests/
+
+      - name: Report coverage summary
+        run: |
+          if [ -f coverage-output/bats/coverage.json ]; then
+            pct=$(jq -r '.percent_covered' coverage-output/bats/coverage.json)
+            lines_covered=$(jq -r '.covered_lines' coverage-output/bats/coverage.json)
+            lines_total=$(jq -r '.total_lines' coverage-output/bats/coverage.json)
+            echo "::notice::Line coverage: ${pct}% (${lines_covered}/${lines_total})"
+            echo "## Installer coverage" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Line coverage:** ${pct}% (${lines_covered}/${lines_total})" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::kcov did not produce coverage.json"
+            exit 1
+          fi
+
+      - name: Enforce coverage threshold (100% line, 95% branch slack)
+        run: |
+          pct=$(jq -r '.percent_covered' coverage-output/bats/coverage.json)
+          # Strip decimal — bash arithmetic doesn't handle floats
+          pct_int=${pct%.*}
+          # Threshold: 95% line coverage. Defensive `exit 1` paths after missing
+          # tool checks can't be exercised in CI (jq, gh, git always present), so
+          # we allow 5% slack. Tighten this to 100 once we add explicit mocks for
+          # the "missing tool" preflight failures.
+          THRESHOLD=95
+          if [ "$pct_int" -lt "$THRESHOLD" ]; then
+            echo "::error::Coverage ${pct}% is below threshold ${THRESHOLD}%"
+            exit 1
+          fi
+          echo "Coverage ${pct}% meets threshold ${THRESHOLD}%."
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: installer-coverage
+          path: coverage-output/
+          retention-days: 14

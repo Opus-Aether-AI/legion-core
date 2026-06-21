@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Mock `codex` CLI for BATS — deterministic, offline, no ChatGPT auth needed.
+#
+# Behaviour controls (env):
+#   MOCK_CALL_LOG   append "codex <args>" for assertions
+#   MOCK_CODEX_FAIL =1 -> emit a thread.started then exit 3 (failure path)
+#
+# Emits the codex-cli 0.139.x --json event shape. For `exec` with a writable
+# sandbox it creates a real file change in the -C worktree so `git diff` is
+# non-empty. For `exec review` it returns a schema-valid verdict message.
+
+set -euo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'codex %s\n' "$*" >> "$MOCK_CALL_LOG"
+
+args=("$@")
+cd_dir="."; out_file=""; sandbox="read-only"; model="mock"; review=0; resume=0
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  case "${args[$i]}" in
+    review)                     review=1 ;;
+    resume)                     resume=1 ;;
+    -C|--cd)                    i=$((i+1)); cd_dir="${args[$i]:-.}" ;;
+    -o|--output-last-message)   i=$((i+1)); out_file="${args[$i]:-}" ;;
+    -s|--sandbox)               i=$((i+1)); sandbox="${args[$i]:-read-only}" ;;
+    -m|--model)                 i=$((i+1)); model="${args[$i]:-mock}" ;;
+  esac
+  i=$((i+1))
+done
+
+if [[ "${MOCK_CODEX_FAIL:-}" == "1" ]]; then
+  printf '%s\n' '{"type":"thread.started","thread_id":"mock-fail"}'
+  printf 'mock codex forced failure\n' >&2
+  exit 3
+fi
+
+# Simulate a quota/rate-limit failure for a specific model (to exercise the fallback chain).
+if [[ -n "${MOCK_CODEX_QUOTA_FAIL:-}" && "$model" == "${MOCK_CODEX_QUOTA_FAIL}" ]]; then
+  printf '%s\n' '{"type":"thread.started","thread_id":"mock-quota"}'
+  printf 'Error: 429 rate limit exceeded — quota\n' >&2
+  exit 1
+fi
+
+thread_id="mock-thread-0001"
+printf '%s\n' '{"type":"thread.started","thread_id":"'"$thread_id"'"}'
+printf '%s\n' '{"type":"turn.started"}'
+
+if [[ $review -eq 1 ]]; then
+  msg='{"verdict":"approve","summary":"mock review","findings":[]}'
+  printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"verdict\":\"approve\",\"summary\":\"mock review\",\"findings\":[]}"}}'
+else
+  msg="Mock codex ($model) completed the task."
+  # resume passes no -s (sandbox default read-only) but still edits the worktree.
+  if [[ "$sandbox" == "workspace-write" || "$sandbox" == "danger-full-access" || $resume -eq 1 ]]; then
+    printf 'mock-codex-change by %s\n' "$model" >> "$cd_dir/MOCK_CODEX_CHANGE.txt" 2>/dev/null || true
+  fi
+  printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"'"$msg"'"}}'
+fi
+
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":10}}'
+[[ -n "$out_file" ]] && printf '%s\n' "$msg" > "$out_file"
+exit 0

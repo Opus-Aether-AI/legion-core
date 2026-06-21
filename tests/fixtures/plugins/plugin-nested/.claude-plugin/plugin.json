@@ -1,0 +1,5 @@
+{
+  "name": "nested",
+  "version": "0.1.0",
+  "description": "Test plugin with nested skills/<name>/SKILL.md layout"
+}

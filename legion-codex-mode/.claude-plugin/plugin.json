@@ -1,0 +1,20 @@
+{
+  "name": "legion-codex-mode",
+  "description": "The Codex-CLI-primary routing brain for Legion: you are GPT-5.5 doing most of the work, and this skill tells you WHEN to hand a task up to Claude via `legion-claude` (deep architecture, polished/complex frontend with the impeccable skill, final cross-model review, tie-breaks, or when you're stuck) versus doing it inline — with automatic GPT-5.5 fallback if the Claude limit is hit. The mirror image of legion-router (the Claude-primary brain). Also maps what runs natively on Codex (MCPs, mirrored skills, bridged commands/agents) so you don't reach for Claude needlessly.",
+  "version": "0.1.0",
+  "author": {
+    "name": "legion-core"
+  },
+  "homepage": "https://github.com/your-org/legion-core/tree/main/legion-codex-mode",
+  "license": "UNLICENSED",
+  "keywords": [
+    "codex",
+    "gpt-5.5",
+    "multi-model",
+    "delegation",
+    "legion-claude",
+    "routing",
+    "reverse-delegate",
+    "legion"
+  ]
+}

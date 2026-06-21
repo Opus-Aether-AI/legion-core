@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/your-org/legion-core/legion-observability/schema/legion.handoff.v1.schema.json",
+  "title": "legion.handoff.v1",
+  "description": "One Legion context-handoff telemetry record. Appended as JSONL and consumed by the self-tuning context-handoff controller to learn a pre-cliff handoff threshold per model/context-class/runner-type bucket.",
+  "type": "object",
+  "required": [
+    "schema",
+    "ts",
+    "run_id",
+    "context_class",
+    "model",
+    "fill_pct"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "legion.handoff.v1"
+    },
+    "ts": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "context_class": {
+      "type": "string",
+      "enum": ["main", "delegated", "overnight"]
+    },
+    "model": {
+      "type": "string"
+    },
+    "runner_type": {
+      "type": "string",
+      "description": "Runner discriminator; defaults to 'default' when omitted."
+    },
+    "fill_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "window_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "raw": {
+      "type": "object",
+      "required": ["input", "cache_read", "cache_create", "output"],
+      "additionalProperties": true,
+      "properties": {
+        "input": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_read": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_create": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "trigger_kind": {
+      "type": "string",
+      "enum": ["policy", "natural", "emergency"]
+    },
+    "triggered_by_policy": {
+      "type": "boolean"
+    },
+    "distance_to_T": {
+      "type": "number"
+    },
+    "handoff_completed": {
+      "type": "boolean"
+    },
+    "native_compaction_seen": {
+      "type": "boolean"
+    },
+    "degradation_seen": {
+      "type": "boolean"
+    },
+    "tool_failure_context_related": {
+      "type": "boolean"
+    },
+    "logical_boundary": {
+      "type": "boolean"
+    },
+    "operator_abort": {
+      "type": "boolean"
+    },
+    "continuity_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "resume_success": {
+      "type": "boolean"
+    },
+    "T": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "floor": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "ceiling": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "effective_ceiling": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "policy_version": {
+      "type": ["integer", "string"]
+    },
+    "state_version": {
+      "type": ["integer", "string"]
+    }
+  }
+}

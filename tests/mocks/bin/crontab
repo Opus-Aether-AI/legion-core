@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Mock for `crontab` — reads/writes $FAKE_CRONTAB_FILE instead of system cron.
+
+echo "crontab $*" >> "$MOCK_CALL_LOG"
+
+# `crontab -r` → remove the current crontab entirely
+if [ "$1" = "-r" ]; then
+    rm -f "$FAKE_CRONTAB_FILE"
+    exit 0
+fi
+
+# `crontab -l` → print current fake crontab
+if [ "$1" = "-l" ]; then
+    if [ -f "$FAKE_CRONTAB_FILE" ]; then
+        cat "$FAKE_CRONTAB_FILE"
+        exit 0
+    else
+        # Real crontab returns 1 when no crontab exists
+        echo "no crontab for $USER" >&2
+        exit 1
+    fi
+fi
+
+# `crontab -` → read stdin and write to fake file
+if [ "$1" = "-" ]; then
+    cat > "$FAKE_CRONTAB_FILE"
+    exit 0
+fi
+
+# `crontab <file>` → install from a file
+if [ -f "$1" ]; then
+    cp "$1" "$FAKE_CRONTAB_FILE"
+    exit 0
+fi
+
+exit 0

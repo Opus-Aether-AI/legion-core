@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Mock for `gh` CLI. Records calls; supports the subset install.sh uses.
+
+echo "gh $*" >> "$MOCK_CALL_LOG"
+
+# `gh auth status` → success (we're "authenticated" in tests)
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+    echo "Logged in to github.com as test-user"
+    exit 0
+fi
+
+# `gh api repos/.../contents/.claude-plugin/marketplace.json?ref=main --jq '.content' | base64 -d`
+# Return the marketplace.json content base64-encoded. Read from $MOCK_GH_FIXTURE
+# if set (test can point this at a fixture file independently of the source
+# clone — important for tests that delete the clone).
+if [ "$1" = "api" ]; then
+    if [[ "$*" == *"marketplace.json"* ]]; then
+        if [ -n "${MOCK_GH_FIXTURE:-}" ] && [ -f "$MOCK_GH_FIXTURE" ]; then
+            cat "$MOCK_GH_FIXTURE" | base64
+            exit 0
+        fi
+        if [ -f "$SOURCE_CLONE/.claude-plugin/marketplace.json" ]; then
+            cat "$SOURCE_CLONE/.claude-plugin/marketplace.json" | base64
+            exit 0
+        fi
+    fi
+    exit 0
+fi
+
+# `gh repo clone <repo> <dest>` → copy from $MOCK_GH_CLONE_SOURCE if set, else create empty
+if [ "$1" = "repo" ] && [ "$2" = "clone" ]; then
+    dest="$4"
+    if [ -n "${MOCK_GH_CLONE_SOURCE:-}" ] && [ -d "$MOCK_GH_CLONE_SOURCE" ]; then
+        mkdir -p "$(dirname "$dest")"
+        cp -R "$MOCK_GH_CLONE_SOURCE" "$dest"
+    else
+        mkdir -p "$dest/.git"
+    fi
+    exit 0
+fi
+
+exit 0

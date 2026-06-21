@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Mock Cursor Agent CLI. Supports `agent -p --output-format json [--force] TASK`.
+
+set -euo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'agent %s\n' "$*" >> "$MOCK_CALL_LOG"
+
+force=0
+model="cursor-auto"
+mode=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force) force=1; shift ;;
+    --trust) shift ;;
+    --mode) mode="$2"; shift 2 ;;
+    --model) model="$2"; shift 2 ;;
+    -p|--print|--output-format|json|text|stream-json) shift ;;
+    *) task="$1"; shift ;;
+  esac
+done
+
+if [[ "${MOCK_CURSOR_FAIL:-0}" == "1" ]]; then
+  printf 'mock cursor forced failure\n' >&2
+  exit 4
+fi
+
+if [[ "$force" -eq 1 || "${MOCK_CURSOR_WRITE_IN_PLAN:-0}" == "1" ]]; then
+  printf 'mock-cursor-change by %s\n' "$model" >> MOCK_CURSOR_CHANGE.txt
+fi
+
+printf '{"result":"CURSOR_OK_OUTPUT","model":"%s","total_cost_usd":0.03,"usage":{"input_tokens":500,"output_tokens":25}}\n' "$model"

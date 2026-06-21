@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "legion.review-verdict.v1",
+  "description": "Structured verdict for a cross-model code review (codex exec review --output-schema). Lets Opus reconcile a GPT review against its own programmatically.",
+  "type": "object",
+  "required": ["verdict", "summary", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "verdict": { "type": "string", "enum": ["approve", "request_changes", "comment"] },
+    "summary": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "title"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+          "title": { "type": "string" },
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "detail": { "type": "string" }
+        }
+      }
+    }
+  }
+}

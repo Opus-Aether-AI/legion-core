@@ -1,0 +1,32 @@
+{
+  "name": "legion",
+  "owner": { "name": "legion-core" },
+  "version": "0.0.0-test",
+  "metadata": {
+    "description": "Test fixture marketplace — 3 plugins covering the 3 layout shapes",
+    "repository": "https://example.com/test"
+  },
+  "plugins": [
+    {
+      "name": "plugin-with-skill",
+      "source": "./plugin-with-skill",
+      "description": "Plugin with a top-level SKILL.md.",
+      "version": "0.1.0",
+      "category": "test"
+    },
+    {
+      "name": "plugin-nested",
+      "source": "./plugin-nested",
+      "description": "Plugin with nested skills/<name>/SKILL.md layout (vercel-plugin shape).",
+      "version": "0.1.0",
+      "category": "test"
+    },
+    {
+      "name": "plugin-claude-only",
+      "source": "./plugin-claude-only",
+      "description": "Plugin with hooks only — Claude-Code-only, no cross-harness skill content.",
+      "version": "0.1.0",
+      "category": "test"
+    }
+  ]
+}

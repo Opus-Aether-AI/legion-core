@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/your-org/legion-core/legion-observability/schema/legion.span.v1.schema.json",
+  "title": "legion.span.v1",
+  "description": "One unit of metered work by any Legion executor (claude/opus/sonnet/haiku, gpt-5.x via codex, Cursor Agent, minimax). Appended as JSONL to $LEGION_TELEMETRY_DIR/<date>.jsonl by legion-delegate, the runners, and legion-telemetry. Consumed by legion-aggregate / legion-report / legion-otel-export / legion-self-learn.",
+  "type": "object",
+  "required": ["schema", "ts", "run_id", "executor", "model", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "legion.span.v1" },
+    "ts": { "type": "string", "description": "ISO-8601 UTC timestamp" },
+    "run_id": { "type": "string" },
+    "trace_id": { "type": ["string", "null"], "description": "groups spans of one multi-agent run; defaults to run_id" },
+    "parent_id": { "type": ["string", "null"] },
+    "executor": { "type": "string", "description": "codex | codex-review | claude | anthropic | minimax | ..." },
+    "model": { "type": "string" },
+    "task": { "type": "string" },
+    "status": { "type": "string", "enum": ["ok", "failed", "error", "over_budget", "blocked"] },
+    "target_type": { "type": ["string", "null"], "description": "Optional catalog entity type for self-learning attribution, e.g. plugin, skill, command, agent, hook, mcp." },
+    "target_name": { "type": ["string", "null"], "description": "Optional catalog entity name for self-learning attribution." },
+    "duration_ms": { "type": "number", "minimum": 0 },
+    "cost_usd": { "type": "number", "minimum": 0 },
+    "tokens": { "type": "object" },
+    "artifacts": { "type": "object" }
+  }
+}

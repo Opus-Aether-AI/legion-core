@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-label="Legion — we are many; we move as one">
+  <defs>
+    <radialGradient id="bbg" cx="22%" cy="46%" r="95%"><stop offset="0%" stop-color="#100C18"/><stop offset="100%" stop-color="#050409"/></radialGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#14131C"/><stop offset="100%" stop-color="#0B0A11"/></linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#474350"/><stop offset="100%" stop-color="#1A1922"/></linearGradient>
+    <linearGradient id="visor" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#100F16"/><stop offset="100%" stop-color="#06060C"/></linearGradient>
+    <radialGradient id="eye" cx="50%" cy="42%" r="62%"><stop offset="0%" stop-color="#FFF1CE"/><stop offset="55%" stop-color="#F6BB4E"/><stop offset="100%" stop-color="#D08A2C"/></radialGradient>
+    <radialGradient id="eyehalo" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#F6BB4E" stop-opacity="0.55"/><stop offset="100%" stop-color="#F6BB4E" stop-opacity="0"/></radialGradient>
+    <radialGradient id="presence" cx="50%" cy="46%" r="55%"><stop offset="0%" stop-color="#7E6CFF" stop-opacity="0.20"/><stop offset="100%" stop-color="#7E6CFF" stop-opacity="0"/></radialGradient>
+    <g id="bot">
+      <rect width="256" height="256" rx="58" fill="url(#tile)"/>
+      <circle cx="128" cy="134" r="96" fill="url(#presence)"/>
+      <line x1="128" y1="50" x2="128" y2="34" stroke="#6A6478" stroke-width="5" stroke-linecap="round"/><circle cx="128" cy="29" r="6" fill="url(#eye)"/>
+      <rect x="40" y="122" width="12" height="36" rx="6" fill="url(#body)"/><rect x="204" y="122" width="12" height="36" rx="6" fill="url(#body)"/>
+      <rect x="50" y="56" width="156" height="150" rx="54" fill="url(#body)"/><rect x="50" y="56" width="156" height="150" rx="54" fill="none" stroke="#000" stroke-opacity="0.4" stroke-width="1.5"/>
+      <path d="M76 86 Q128 65 180 86" fill="none" stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="9" stroke-linecap="round"/>
+      <rect x="72" y="106" width="112" height="54" rx="27" fill="url(#visor)"/><rect x="72" y="106" width="112" height="54" rx="27" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="1.4"/>
+      <path d="M86 118 Q128 110 170 118" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="106" cy="133" r="17" fill="url(#eyehalo)"/><circle cx="150" cy="133" r="17" fill="url(#eyehalo)"/>
+      <circle cx="106" cy="133" r="9" fill="url(#eye)"/><circle cx="150" cy="133" r="9" fill="url(#eye)"/>
+      <circle cx="103" cy="130" r="2.6" fill="#FFFBF0"/><circle cx="147" cy="130" r="2.6" fill="#FFFBF0"/>
+    </g>
+  </defs>
+  <rect width="1200" height="340" rx="28" fill="url(#bbg)"/>
+  <use href="#bot" transform="translate(46,42) scale(0.96)"/>
+  <g font-family="'Helvetica Neue', Arial, sans-serif">
+    <text x="372" y="176" font-size="116" font-weight="800" letter-spacing="14" fill="#F0E8D6">LEGION</text>
+    <text x="376" y="222" font-size="29" font-weight="500" letter-spacing="6" fill="#B9A6F0">we are many; we move as one</text>
+    <text x="377" y="261" font-size="20" letter-spacing="1.5" fill="#7C7690">humans and models, marshalled by one will</text>
+  </g>
+</svg>

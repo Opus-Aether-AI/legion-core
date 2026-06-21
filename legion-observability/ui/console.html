@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Legion Console</title>
+<style>
+  :root{
+    --bg:#0a0c0f; --panel:#12161b; --panel2:#171c23; --line:#222a33; --line2:#2c3540;
+    --txt:#e8eef5; --dim:#8a96a4; --faint:#5a6675; --accent:#5b8cff;
+    --run:#3fb950; --queued:#58a6ff; --wait:#d29922; --done:#6e7681; --fail:#f85149; --orphan:#db61a2;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--txt);font:13.5px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
+  /* ── top bar ── */
+  header{display:flex;align-items:center;gap:22px;padding:11px 22px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#12161b,#0e1217);position:sticky;top:0;z-index:10}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:650;letter-spacing:.2px;font-size:15px}
+  .brand .hex{color:var(--accent);font-size:17px}
+  .stats{display:flex;gap:20px;flex-wrap:wrap;font-family:var(--mono);font-size:12.5px;color:var(--dim)}
+  .stats .s b{color:var(--txt);font-weight:600} .stats .s i{font-style:normal;color:var(--faint)}
+  .stats .cost b{color:var(--run)}
+  .pulse{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--faint);font-size:12px;font-family:var(--mono)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--done)}
+  .dot.live{background:var(--run);box-shadow:0 0 0 0 rgba(63,185,80,.5);animation:pp 1.8s infinite}
+  @keyframes pp{70%{box-shadow:0 0 0 6px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
+  /* ── layout ── */
+  main{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:18px;padding:18px 22px;max-width:1500px;margin:0 auto}
+  h2{font-size:10.5px;text-transform:uppercase;letter-spacing:1px;color:var(--faint);margin:0;font-weight:600}
+  .sectionhead{display:flex;align-items:center;gap:14px;margin:0 0 11px}
+  .filters{display:flex;align-items:center;gap:8px;margin-left:auto}
+  .tog{font:600 11px/1 var(--mono);color:var(--dim);background:var(--panel);border:1px solid var(--line);
+    border-radius:20px;padding:5px 11px;cursor:pointer;letter-spacing:.3px}
+  .tog:hover{border-color:var(--line2);color:var(--txt)}
+  .tog.on{background:rgba(91,140,255,.14);border-color:var(--accent);color:var(--accent)}
+  .fcount{font:11px var(--mono);color:var(--faint)}
+  /* ── sessions (replaces cards) ── */
+  .session{border:1px solid var(--line);border-radius:11px;background:var(--panel);margin-bottom:11px;overflow:hidden}
+  .shead{display:flex;align-items:center;gap:12px;padding:11px 14px;cursor:pointer;user-select:none}
+  .shead:hover{background:var(--panel2)}
+  .chev{color:var(--faint);font-size:11px;width:10px;transition:transform .15s} .session.open .chev{transform:rotate(90deg)}
+  .sid{font-family:var(--mono);font-weight:600;font-size:13px}
+  .smeta{display:flex;gap:14px;margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--dim)}
+  .smeta b{color:var(--txt)} .smeta .c{color:var(--run)}
+  .stools{color:var(--faint);font-size:11.5px;font-family:var(--mono);max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .agents{border-top:1px solid var(--line);display:none} .session.open .agents{display:block}
+  /* ── agent rows (not cards) ── */
+  .agent{display:grid;grid-template-columns:14px 110px 1fr auto;gap:12px;align-items:center;
+    padding:9px 14px 9px 30px;border-top:1px solid var(--line2);font-size:12.5px}
+  .agent:first-child{border-top:none}
+  .agent:hover{background:var(--panel2)}
+  .sled{width:8px;height:8px;border-radius:50%;background:var(--done)}
+  .sled.running{background:var(--run);box-shadow:0 0 0 0 rgba(63,185,80,.5);animation:pp 1.8s infinite}
+  .sled.queued{background:var(--queued)} .sled.awaiting_human{background:var(--wait)}
+  .sled.failed{background:var(--fail)} .sled.orphaned{background:var(--orphan)}
+  .amodel{font-family:var(--mono);font-weight:600}
+  .amodel .st{display:block;font-size:10.5px;font-weight:400;color:var(--faint);text-transform:uppercase;letter-spacing:.5px}
+  .aact{color:var(--dim);font-family:var(--mono);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .aact .tool{color:var(--accent);opacity:.85}
+  .aright{display:flex;align-items:center;gap:13px;font-family:var(--mono);font-size:12px;color:var(--dim);justify-self:end}
+  .aright .cost{color:var(--run)} .aright .el{color:var(--faint)} .diffmark{color:var(--wait)}
+  .steer{font:600 10px/1 var(--mono);color:var(--dim);background:transparent;border:1px solid var(--line2);border-radius:6px;padding:3px 7px;cursor:pointer;letter-spacing:.3px}
+  .steer:hover{border-color:var(--accent);color:var(--accent)}
+  .steer.kill:hover{border-color:var(--fail);color:var(--fail)}
+  /* ── right rail ── */
+  aside .box{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:14px;margin-bottom:14px}
+  .row{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:12.5px;padding:3px 0;color:var(--dim)}
+  .row b{color:var(--txt)} .row .sub{opacity:.5;margin-left:6px}
+  .bar{height:5px;border-radius:3px;background:var(--panel2);overflow:hidden;display:flex;margin-top:9px}
+  .bar i{display:block;height:100%}
+  .empty{color:var(--faint);font-family:var(--mono);padding:46px;text-align:center;border:1px dashed var(--line);border-radius:11px}
+  .note{color:var(--faint);font-size:11px;font-family:var(--mono);margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="hex">⬡</span> Legion <span style="color:var(--faint);font-weight:400">Console</span></div>
+  <div class="stats" id="stats"></div>
+  <div class="pulse"><span class="dot" id="dot"></span><span id="conn">connecting…</span></div>
+</header>
+<main>
+  <section>
+    <div class="sectionhead">
+      <h2>Sessions</h2>
+      <div class="filters">
+        <button class="tog" id="f-nonzero" onclick="toggleFilter('nonzero')">hide $0</button>
+        <button class="tog" id="f-active" onclick="toggleFilter('active')">active only</button>
+        <span class="fcount" id="fcount"></span>
+      </div>
+    </div>
+    <div id="sessions"><div class="empty">loading…</div></div>
+  </section>
+  <aside>
+    <div class="box"><h2>Cost by model</h2><div id="bymodel"></div></div>
+    <div class="box"><h2>Status</h2><div id="bystatus"></div></div>
+    <div class="box"><h2>Top tools</h2><div id="toptools"></div></div>
+    <div class="box"><h2>Inventory</h2><div id="inventory"><div class="row"><span>loading…</span></div></div></div>
+  </aside>
+</main>
+<script>
+const SC={running:'#3fb950',queued:'#58a6ff',awaiting_human:'#d29922',failed:'#f85149',orphaned:'#db61a2',done:'#6e7681',applied:'#6e7681',unknown:'#5a6675'};
+const $=id=>document.getElementById(id);
+const money=n=>'$'+(Number(n)||0).toFixed(4);
+const dur=s=>{s=Math.max(0,Math.round(Number(s)||0));if(!s)return'—';const m=Math.floor(s/60);return m?`${m}m${String(s%60).padStart(2,'0')}s`:`${s}s`};
+const esc=t=>String(t==null?'':t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const short=(t,n)=>{t=String(t||'');return t.length>n?t.slice(0,n-1)+'…':t};
+
+let LIVE={}, ACT={}, openSet=JSON.parse(localStorage.getItem('legion.open')||'{}');
+let FILT=JSON.parse(localStorage.getItem('legion.filters')||'{"nonzero":false,"active":false}');
+const ACTIVE_ST={running:1,queued:1,awaiting_human:1};
+function keepRun(r){
+  if(FILT.nonzero && !(Number(r.cost_usd)>0)) return false;
+  if(FILT.active && !ACTIVE_ST[statusOf(r)]) return false;
+  return true;
+}
+function toggleFilter(k){FILT[k]=!FILT[k];localStorage.setItem('legion.filters',JSON.stringify(FILT));render();}
+
+function mergeRuns(){
+  // join live status (snapshot) with cost+activity (activity) by run_id
+  const byId={};
+  (ACT.runs||[]).forEach(r=>byId[r.run_id]={...r});
+  (LIVE.runs||[]).forEach(r=>{byId[r.run_id]={...(byId[r.run_id]||{}),...r,status:r.status};});
+  return byId;
+}
+function statusOf(r){ return r.status || ({running:'running',queued:'queued',ok:'done',failed:'failed',error:'failed',over_budget:'awaiting_human'}[r.phase]) || 'done'; }
+
+function render(){
+  const byId=mergeRuns();
+  const sessions=(ACT.sessions||[]).slice();
+  const agg=LIVE.aggregates||{}, tot=ACT.totals||{};
+  const running=Object.values(byId).filter(r=>statusOf(r)==='running').length;
+  const queued=Object.values(byId).filter(r=>statusOf(r)==='queued').length;
+  $('stats').innerHTML=
+    `<span class="s">sessions <b>${sessions.length}</b></span>`+
+    `<span class="s">agents <b>${Object.keys(byId).length}</b></span>`+
+    `<span class="s">running <b style="color:var(--run)">${running}</b></span>`+
+    `<span class="s">queued <b style="color:var(--queued)">${queued}</b></span>`+
+    `<span class="s cost">spend <b>${money(tot.cost_usd)}</b></span>`;
+
+  // reflect filter toggles
+  $('f-nonzero').className='tog'+(FILT.nonzero?' on':'');
+  $('f-active').className='tog'+(FILT.active?' on':'');
+
+  const host=$('sessions');
+  let shownAgents=0, hiddenAgents=0;
+  const cards=sessions.map(s=>{
+    const id=s.session, open=openSet[id];
+    const all=(s.runs||[]).map(rid=>byId[rid]).filter(Boolean);
+    const rows=all.filter(keepRun).sort((a,b)=>(Number(b.cost_usd)||0)-(Number(a.cost_usd)||0));
+    if(!rows.length) {hiddenAgents+=all.length; return '';}   // hide sessions emptied by the filter
+    shownAgents+=rows.length; hiddenAgents+=all.length-rows.length;
+    const stoolStr=(s.tools||[]).slice(0,4).map(t=>`${t.name}·${t.count}`).join('  ')||'—';
+    const agentsHtml=rows.map(r=>{
+      const st=statusOf(r), a=r.activity||{};
+      const tools=(a.tools||[]).slice(0,3).map(t=>`<span class="tool">${esc(t.name)}</span>·${t.count}`).join('  ');
+      return `<div class="agent">
+        <span class="sled ${st}" title="${st}"></span>
+        <span class="amodel">${esc(r.model||'?')}<span class="st">${esc(r.archetype||st)}</span></span>
+        <span class="aact">${a.summary?esc(a.summary)+'  —  ':''}${tools||'<span style="color:var(--faint)">no recorded activity</span>'}</span>
+        <span class="aright">
+          ${st==='running'?`<button class="steer kill" title="authorize kill (audited; you run the returned cmd)" onclick="steer(event,'run.kill','${esc(r.run_id)}')">⏻ kill</button>`:''}
+          ${st!=='running'&&st!=='queued'?`<button class="steer" title="authorize cleanup" onclick="steer(event,'run.cleanup','${esc(r.run_id)}')">cleanup</button>`:''}
+          ${r.diff_exists?'<span class="diffmark" title="diff awaiting apply">◆ diff</span>':''}
+          <span class="el">${dur(r.elapsed_s)}</span>
+          <span class="cost">${money(r.cost_usd)}</span>
+        </span></div>`;}).join('')||'<div class="agent"><span></span><span class="aact" style="grid-column:2/5">no agents</span></div>';
+    const statuses=Object.entries(s.statuses||{}).map(([k,v])=>`${k}:${v}`).join(' ');
+    return `<div class="session${open?' open':''}" data-id="${esc(id)}">
+      <div class="shead" onclick="toggle('${esc(id)}')">
+        <span class="chev">▶</span>
+        <span class="sid">${esc(short(id,30))}</span>
+        <span class="stools" title="${esc(statuses)}">${esc(stoolStr)}</span>
+        <span class="smeta">
+          <span><b>${s.run_count||rows.length}</b> agents</span>
+          <span><b>${(s.worktrees||[]).length}</b> wt</span>
+          <span class="c">${money(s.cost_usd)}</span>
+        </span>
+      </div>
+      <div class="agents">${agentsHtml}</div>
+    </div>`;}).join('');
+
+  host.innerHTML = cards.trim()
+    ? cards
+    : `<div class="empty">${sessions.length?'all '+hiddenAgents+' agents hidden by filters':'no sessions yet — run a delegation or fan-out'}</div>`;
+  $('fcount').textContent = (FILT.nonzero||FILT.active)
+    ? `${shownAgents} shown · ${hiddenAgents} hidden` : '';
+
+  // rail
+  const bm=(LIVE.aggregates||{}).by_model||{};
+  $('bymodel').innerHTML=Object.keys(bm).length?Object.entries(bm).map(([m,v])=>{
+    const cost=(v&&v.cost_usd!=null)?v.cost_usd:0,n=(v&&v.runs!=null)?v.runs:v;
+    return `<div class="row"><span>${esc(m)}<span class="sub">×${n}</span></span><b>${money(cost)}</b></div>`;}).join(''):'<div class="row"><span>—</span></div>';
+  const bs={}; Object.values(byId).forEach(r=>{const s=statusOf(r);bs[s]=(bs[s]||0)+1;});
+  const tt=Object.values(bs).reduce((x,y)=>x+y,0)||1;
+  $('bystatus').innerHTML=Object.entries(bs).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
+    `<div class="row"><span style="color:${SC[k]||'#8a96a4'}">${esc(k)}</span><b>${v}</b></div>`).join('')+
+    `<div class="bar">${Object.entries(bs).map(([k,v])=>`<i style="width:${v/tt*100}%;background:${SC[k]||'#6e7681'}"></i>`).join('')}</div>`;
+  const ttools=(tot.tools)||{};
+  $('toptools').innerHTML=Object.keys(ttools).length?Object.entries(ttools).slice(0,6).map(([n,c])=>
+    `<div class="row"><span>${esc(n)}</span><b>${c}</b></div>`).join(''):'<div class="row"><span>—</span></div>';
+}
+function toggle(id){openSet[id]=!openSet[id];localStorage.setItem('legion.open',JSON.stringify(openSet));render();}
+// Steer: the daemon AUTHORIZES + AUDITS and returns the action — it never executes.
+function steer(ev,verb,rid){
+  ev.stopPropagation();
+  const tok = verb==='run.kill' ? `kill ${rid}` : `cleanup ${rid}`;
+  if(!confirm(`Authorize ${verb} for\n${rid}?\n\nThis records an AUDITED authorization — it does NOT execute. You run the returned command.`)) return;
+  fetch('/console/control',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({verb,run_id:rid,confirm:tok})})
+   .then(r=>r.json()).then(res=>{
+     if(res.ok && res.authorized){
+       const cmd=(res.exec_argv||['kill','-'+String(res.signal||'SIGTERM').replace('SIG',''),'-'+res.pgid]).join(' ');
+       alert(`✓ ${verb} AUTHORIZED + audited.\n\nRun this to execute:\n  ${cmd}`);
+     } else { alert(`✗ ${verb} ${res.reason||'rejected'}${res.detail?'\n'+res.detail:''}`); }
+   }).catch(e=>alert('control plane error: '+e));
+}
+
+function renderInventory(c){
+  const t=c.by_type||{},ins=c.installed||{},order=['plugin','skill','agent','command','hook','mcp'];
+  $('inventory').innerHTML=order.filter(k=>t[k]!=null).map(k=>
+    `<div class="row"><span>${k}s</span><b>${t[k]}</b>${ins[k]!=null?`<span class="sub">${ins[k]} inst</span>`:''}</div>`).join('')||'<div class="row"><span>—</span></div>';
+}
+function pullActivity(){fetch('/console/activity').then(r=>r.json()).then(d=>{ACT=d;render();}).catch(()=>{});}
+function connect(){
+  const es=new EventSource('/console/events');
+  es.onopen=()=>{$('conn').textContent='live';$('dot').className='dot live';};
+  es.onmessage=e=>{try{LIVE=JSON.parse(e.data);render();}catch(_){}};
+  es.onerror=()=>{$('conn').textContent='reconnecting…';$('dot').className='dot';};
+}
+fetch('/console/catalog').then(r=>r.json()).then(renderInventory).catch(()=>{});
+pullActivity(); setInterval(pullActivity, 8000);   // cost/tools change slowly
+connect();                                          // status streams live
+</script>
+</body>
+</html>

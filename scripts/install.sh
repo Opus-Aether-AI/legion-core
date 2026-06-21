@@ -41,7 +41,6 @@ AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="$AGENTS_HOME/sources/legion"
 SKILLS_DIR="$AGENTS_HOME/skills"
 LEGION_BIN_DIR="$AGENTS_HOME/bin"        # managed symlink farm for plugin CLIs (on PATH)
-OLD_SLUG="legion-core-claude-skills"     # pre-rename identity (for the migration shim)
 
 # ── Colors ───────────────────────────────────────────────────────────
 red()    { printf '\033[0;31m%s\033[0m\n' "$*"; }
@@ -392,47 +391,6 @@ setup_bin_path() {
     return 0
 }
 
-# ── Migration shim: clean up a pre-rename (legion-core-claude-skills) install ─
-#
-# Idempotent + no-op on fresh/already-legion machines. Runs once at full-install
-# time so a team member's cutover is a single paste: detect old-slug source
-# clone / cron entry / Claude marketplace and remove them (the new legion ones
-# are re-created by the normal flow right after). Skill/bin symlinks are keyed by
-# command name, so the normal setup_* repoints them at the legion clone.
-migrate_old_slug() {
-    local did=0
-
-    local old_clone="$AGENTS_HOME/sources/$OLD_SLUG"
-    if [ -d "$old_clone" ]; then
-        yellow "  ⨯ removing pre-rename source clone: $old_clone"
-        rm -rf "$old_clone"; did=1
-    fi
-
-    if crontab -l 2>/dev/null | grep -qF "$OLD_SLUG"; then
-        local kept
-        kept="$(crontab -l 2>/dev/null | grep -vF "$OLD_SLUG" || true)"
-        if [ -n "$kept" ]; then
-            printf '%s\n' "$kept" | crontab -
-        else
-            crontab -r 2>/dev/null || true
-        fi
-        yellow "  ⨯ stripped pre-rename cron entry"; did=1
-    fi
-
-    if [ "$DO_CLAUDE" = "1" ] && command -v claude >/dev/null 2>&1 \
-       && claude plugin marketplace list 2>/dev/null | grep -q "$OLD_SLUG"; then
-        yellow "  ⨯ removing pre-rename marketplace '$OLD_SLUG' (re-added as legion below)"
-        claude plugin marketplace remove "$OLD_SLUG" >/dev/null 2>&1 || true
-        did=1
-    fi
-
-    if [ "$did" = "1" ]; then
-        bold ""
-        green "  ✔ migrated pre-rename install ($OLD_SLUG) → legion"
-    fi
-    return 0
-}
-
 # ── Codex skills mirror: symlink into ~/.codex/skills/<name> ────────
 #
 # Codex CLI 0.133 discovers skills from $CODEX_HOME/skills/ (= ~/.codex/skills/
@@ -644,7 +602,6 @@ case "$MODE" in
 esac
 
 preflight
-migrate_old_slug
 
 case "$MODE" in
     all)

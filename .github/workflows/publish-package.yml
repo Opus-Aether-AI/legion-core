@@ -1,19 +1,22 @@
 name: publish-package
 
-# Publishes @opus-aether-ai/legion-core to GitHub Packages (npm registry, private
-# by repo visibility) on each published Release, and on demand via the Actions UI.
+# Manual escape hatch to (re)publish @opus-aether-ai/legion-core to GitHub
+# Packages from whatever is currently on the default branch — for a first
+# publish, a recovery, or a re-push.
+#
+# The NORMAL path is automatic: release-please.yml publishes inline when it cuts
+# a release (gated on `release_created`). This workflow is dispatch-only because a
+# `release: published` event raised by release-please's GITHUB_TOKEN does NOT
+# trigger workflows, so a `release:` trigger here would never fire anyway.
 #
 # This is an ADDITIVE distribution channel: legion-core is still consumable as a
 # Claude Code marketplace (`claude plugin marketplace add Opus-Aether-AI/legion-core`)
-# and via a source clone. The npm package lets moneyball / other agents pull a
-# versioned copy of the engine (bins + scripts + plugins) with `npm install`.
+# and via a source clone.
 #
 # Auth: the built-in GITHUB_TOKEN has `packages: write` for a package linked to
 # this repo, so no extra secret is needed to publish.
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:

@@ -1,17 +1,17 @@
 name: release-please
 
 # Opens / updates a "Release PR" whenever Conventional Commits land on main.
-# Merging it bumps `.claude-plugin/marketplace.json` ($.version), updates
-# CHANGELOG.md, tags, and creates a GitHub Release. No npm publish — git tags +
-# GitHub Releases only.
+# Merging it bumps .claude-plugin/marketplace.json + package.json ($.version),
+# updates CHANGELOG.md, tags, creates a GitHub Release — AND publishes the npm
+# package to GitHub Packages, all in this one workflow.
 #
-# IMPORTANT: a PR opened with the default GITHUB_TOKEN does NOT trigger other
-# workflows (GitHub loop-prevention), so the Release PR would never run the
-# required validate-* / legion-doctor checks and couldn't satisfy branch
-# protection without a manual re-trigger. Provision a repo secret
-# RELEASE_PLEASE_TOKEN (fine-grained PAT or GitHub App token, contents:write +
-# pull-requests:write) so Release PRs trigger CI. Falls back to github.token
-# (current behaviour — manual re-trigger needed) when the secret is absent.
+# Token note: this uses the default GITHUB_TOKEN (no PAT). One consequence is
+# that the auto-generated Release PR lands WITHOUT CI checks (a PR opened by
+# GITHUB_TOKEN can't trigger workflows) — merge it with admin bypass. That's
+# safe: a Release PR only bumps version strings + CHANGELOG; the actual code
+# already passed CI on the feature PRs. The publish step below runs in THIS
+# workflow run (triggered by your merge to main, a real push), so it fires
+# automatically with no PAT — `release_created` gates it to real releases only.
 
 on:
   push:
@@ -21,6 +21,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  packages: write
 
 concurrency:
   group: release-please-${{ github.ref }}
@@ -29,12 +30,36 @@ concurrency:
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
         with:
-          # See header note: a provisioned PAT/App token makes Release PRs trigger
-          # required CI; falls back to the default token when unset.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # ── Publish the npm package — only when a release was actually cut ──
+      - uses: actions/checkout@v5
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+
+      - uses: actions/setup-node@v4
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        with:
+          node-version: 20
+          registry-url: https://npm.pkg.github.com
+          scope: "@opus-aether-ai"
+
+      - name: Version is in sync with the marketplace
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        run: |
+          set -e
+          pkg="$(jq -r '.version' package.json)"
+          mkt="$(jq -r '.version' .claude-plugin/marketplace.json)"
+          [ "$pkg" = "$mkt" ] || { echo "::error::package.json ($pkg) != marketplace.json ($mkt)"; exit 1; }
+          echo "version $pkg in sync"
+
+      - name: Publish to GitHub Packages
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

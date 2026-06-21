@@ -1,5 +1,7 @@
 ---
 name: legion-orchestrate
+kind: procedure
+# disable-model-invocation intentionally false: cross-harness orchestrator entrypoint
 description: Use to deliver a multi-step coding goal with Legion's dynamic MULTI-MODEL orchestration — decompose the goal, fan out implementation slices to GPT-5.4 in PARALLEL, cross-model verify with GPT-5.5, synthesize, and gate. The multi-model version of ultracode/Workflow orchestration. Triggers on "orchestrate with legion", "fan out", "ultracode", "build this with legion", parallel multi-model delivery, or any sizeable feature/refactor you want delivered with codex doing the bulk.
 ---
 

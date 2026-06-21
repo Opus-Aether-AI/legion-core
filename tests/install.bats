@@ -320,8 +320,15 @@ SH
 
 # ── Cron ─────────────────────────────────────────────────────────────
 
-@test "default install adds a daily refresh cron entry tagged with our marker" {
+@test "default install does not add cron and prints the opt-in hint" {
     run bash "$INSTALL_SH" all --no-claude
+    [ "$status" -eq 0 ]
+    [ ! -f "$FAKE_CRONTAB_FILE" ]
+    [[ "$output" == *"Re-run with --cron or LEGION_INSTALL_CRON=1"* ]]
+}
+
+@test "--cron adds a daily refresh cron entry tagged with our marker" {
+    run bash "$INSTALL_SH" all --no-claude --cron
     [ "$status" -eq 0 ]
     [ -f "$FAKE_CRONTAB_FILE" ]
     grep -q "# legion-core-refresh" "$FAKE_CRONTAB_FILE"
@@ -335,7 +342,7 @@ SH
 }
 
 @test "--cron-hour=N uses N as the hour" {
-    run bash "$INSTALL_SH" all --no-claude --cron-hour=3
+    run bash "$INSTALL_SH" all --no-claude --cron --cron-hour=3
     [ "$status" -eq 0 ]
     grep -q "0 3 \* \* \*" "$FAKE_CRONTAB_FILE"
     if grep -q "0 9 \* \* \*" "$FAKE_CRONTAB_FILE"; then false; fi
@@ -344,7 +351,7 @@ SH
 @test "cron entry preserves unrelated pre-existing crontab lines" {
     printf '%s\n' "# my other cron" "0 6 * * * /some/other/script" > "$FAKE_CRONTAB_FILE"
 
-    run bash "$INSTALL_SH" all --no-claude
+    run bash "$INSTALL_SH" all --no-claude --cron
     [ "$status" -eq 0 ]
     grep -q "my other cron" "$FAKE_CRONTAB_FILE"
     grep -q "/some/other/script" "$FAKE_CRONTAB_FILE"
@@ -352,8 +359,8 @@ SH
 }
 
 @test "re-running install replaces the cron entry, not duplicates it" {
-    bash "$INSTALL_SH" all --no-claude
-    bash "$INSTALL_SH" all --no-claude --cron-hour=4
+    bash "$INSTALL_SH" all --no-claude --cron
+    bash "$INSTALL_SH" all --no-claude --cron --cron-hour=4
 
     # Exactly one entry with our tag
     [ "$(grep -c "legion-core-refresh" "$FAKE_CRONTAB_FILE")" = "1" ]
@@ -545,7 +552,7 @@ EOF
         git fetch origin --quiet 2>/dev/null && \
         git reset --hard HEAD --quiet)
 
-    run bash "$INSTALL_SH" all --no-claude
+    run bash "$INSTALL_SH" all --no-claude --cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"not yet executable"* ]]
 }

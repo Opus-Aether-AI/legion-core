@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
 # install.sh — bootstrap the legion-core marketplace + cross-harness skills
 #
-# Adds the marketplace + installs plugins by profile, and (by default) also makes
+# Adds the marketplace + installs plugins by profile, and also makes
 # every skill available to Codex, Cursor, opencode, and any other harness that reads
 # ~/.agents/skills/ — via symlinks into a single source clone. A daily cron entry
-# keeps the clone fresh.
+# can be enabled to keep the clone fresh.
 #
 # Usage (after cloning the repo, since it's private):
-#   bash scripts/install.sh all       # everything (default) — Claude + Codex + cron
+#   bash scripts/install.sh all       # everything (default) — Claude + Codex
 #   bash scripts/install.sh minimal   # legion-router + legion-observability only
 #   bash scripts/install.sh <plugin>  # a single named plugin
 #   bash scripts/install.sh --list    # show available plugins, don't install
 #   bash scripts/install.sh PLUGIN    # install one named plugin
 #
-# Harness control (default: all enabled):
+# Harness control (default: all enabled except cron):
 #   --no-claude           Skip `claude plugin install` (Codex-only setup)
 #   --no-cross-harness    Skip ~/.agents/skills/ symlinks (Claude-only setup)
 #   --no-codex-skills     Skip ~/.codex/skills/<name> symlinks (Codex-skill mirror)
 #                         (alias: --no-codex-commands, kept for back-compat)
 #   --no-cursor           Skip Cursor MCP/subagent bridge setup
+#   --cron                Install daily refresh cron entry (default: off)
 #   --no-cron             Skip daily refresh cron entry
 #   --cron-hour=N         Hour of day for refresh cron (default: 9)
+#   LEGION_INSTALL_CRON=1 also enables cron
 #
 # Maintenance:
 #   bash scripts/install.sh --refresh-symlinks    # re-scan & sync ~/.agents/skills/ only
@@ -53,7 +55,8 @@ DO_CLAUDE=1
 DO_CROSS_HARNESS=1
 DO_CODEX_SKILLS=1
 DO_CURSOR=1
-DO_CRON=1
+DO_CRON=0
+[ "${LEGION_INSTALL_CRON:-0}" = "1" ] && DO_CRON=1
 CRON_HOUR=9
 MODE=""
 
@@ -64,6 +67,7 @@ for arg in "$@"; do
         --no-codex-skills)   DO_CODEX_SKILLS=0 ;;
         --no-codex-commands) DO_CODEX_SKILLS=0 ;;  # deprecated alias, kept for back-compat
         --no-cursor)         DO_CURSOR=0 ;;
+        --cron)              DO_CRON=1 ;;
         --no-cron)           DO_CRON=0 ;;
         --cron-hour=*)       CRON_HOUR="${arg#--cron-hour=}" ;;
         --refresh-symlinks)  MODE="refresh-symlinks" ;;
@@ -519,7 +523,10 @@ setup_cursor_native() {
 CRON_TAG="# legion-core-refresh"
 
 setup_cron() {
-    [ "$DO_CRON" = "1" ] || return 0
+    if [ "$DO_CRON" != "1" ]; then
+        dim "Cron not installed by default. Re-run with --cron or LEGION_INSTALL_CRON=1 to enable daily refresh."
+        return 0
+    fi
     [ "$DO_CROSS_HARNESS" = "1" ] || { dim "Cron refresh requires cross-harness setup — skipping."; return 0; }
 
     local refresh_script="$SOURCE_CLONE/scripts/refresh.sh"

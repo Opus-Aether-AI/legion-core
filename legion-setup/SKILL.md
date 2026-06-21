@@ -1,5 +1,7 @@
 ---
 name: legion-setup
+kind: procedure
+disable-model-invocation: true
 description: Install or update the Legion multi-model marketplace — one skill for both. Use when the user pastes the Legion GitHub repo link, says "install legion", "set up legion", "add legion", "update legion", "upgrade legion", "refresh legion", or wants Legion to work on/with Codex or Cursor. First run installs marketplace plugins, cross-harness skills, shared CLIs, daily refresh/self-learning, and the Codex/Cursor bridges. The `codex` and `cursor` subcommands wire marketplace MCPs, skills/agents, and delegation runners into those agents.
 ---
 

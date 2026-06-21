@@ -170,6 +170,22 @@ jobs:
           sys.exit(1 if errors else 0)
           PY
 
+      - name: First-party skills declare kind and procedure gating
+        run: |
+          set -e
+          fail=0
+          while read -r f; do
+            fm="$(awk 'BEGIN{n=0} /^---$/{n++; if(n==1) next; if(n==2) exit} n==1{print}' "$f")"
+            printf '%s\n' "$fm" | grep -q '^kind:[[:space:]]' || { echo "::error::$f missing kind"; fail=1; continue; }
+            if printf '%s\n' "$fm" | grep -q '^kind:[[:space:]]*procedure[[:space:]]*$'; then
+              printf '%s\n' "$fm" | grep -Eq '(^disable-model-invocation:[[:space:]]*true[[:space:]]*$|intentionally false)' || {
+                echo "::error::$f procedure skills must disable model invocation or document intentionally false"
+                fail=1
+              }
+            fi
+          done < <(find . -path './tests' -prune -o -name SKILL.md -print)
+          exit $fail
+
   validate-hooks-and-scripts:
     name: validate-hooks-and-scripts
     runs-on: ubuntu-latest

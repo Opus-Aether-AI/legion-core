@@ -1,5 +1,6 @@
 ---
 name: legion-codex-mode
+kind: ability
 description: The routing brain for a Codex-CLI-primary Legion session — you are GPT-5.5 doing most of the work, and this tells you WHEN to call Claude (via `legion-claude`) instead of doing it yourself, and how Legion's MCPs/skills/bridged-commands work on Codex. Use when running Legion under Codex CLI, when a task smells like deep architecture / polished frontend / final cross-model review, when you're stuck after a couple attempts, or when the user says "ask claude", "get claude to", "second opinion from claude", or "use legion on codex". The mirror image of legion-router (which is the Claude-primary brain).
 ---
 

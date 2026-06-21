@@ -1,5 +1,6 @@
 ---
 name: legion-router
+kind: ability
 description: Use when Opus should hand a scoped sub-task to an external model (Codex / GPT-5.5 / GPT-5.4 / Cursor Agent) instead of doing it itself — bulk mechanical edits, independent parallel code generation, cross-model review, Cursor second opinions, or tie-breaks. Drives `legion-delegate` for Codex and `legion-cursor` for Cursor Agent, both in isolated worktrees with metered telemetry. Triggers on "delegate to codex/gpt/cursor", "second opinion", "cross-model review", or cost-metered model routing. (For orchestrating a whole multi-step goal across models, use legion-orchestrate.)
 ---
 

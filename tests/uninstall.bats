@@ -7,7 +7,7 @@ setup() {
     setup_test_env
     make_source_clone marketplace-minimal.json
     # Establish the installed state we're uninstalling from
-    bash "$INSTALL_SH" all --no-claude
+    bash "$INSTALL_SH" all --no-claude --cron
 }
 
 @test "default uninstall removes ~/.agents/skills/ symlinks + cron, leaves source clone" {

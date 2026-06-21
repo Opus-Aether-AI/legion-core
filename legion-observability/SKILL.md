@@ -1,6 +1,7 @@
 ---
 name: legion-observability
-description: Use to see what Legion's multi-model runs actually did — per-executor cost (Claude vs GPT-5.x vs Cursor vs MiniMax), success rate, latency, and self-learning harness memory/proposals/experiments. Drives `legion-report` (cost/success/latency dashboard), `legion-trace` (emit/validate legion.span.v1 spans), `legion-otel-export` (OpenTelemetry trace tree), `legion-doctor` (CI-usable health check), and `legion-self-learn` (daily failure mining + command/agent/skill improvement memory/proposals with scorecard-gated source experiments). Triggers on "how much did that cost", "which model is winning", "is Legion set up right", telemetry/observability/tracing questions, self-learning, mistakes, bugs found by agents, or auditing delegation runs.
+kind: ability
+description: Use for "how much did that cost", "which model is winning", or "is legion set up right" — Legion telemetry, `legion.span.v1` traces, doctor, heal, and self-learn answers.
 ---
 
 # Legion Observability — see everything

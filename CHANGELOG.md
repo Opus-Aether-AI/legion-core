@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.2.0...v0.3.0) (2026-06-21)
+
+
+### Added
+
+* skill taxonomy + AGENTS/CONTEXT + opt-in cron (anti-bloat) ([#15](https://github.com/Opus-Aether-AI/legion-core/issues/15)) ([8144551](https://github.com/Opus-Aether-AI/legion-core/commit/8144551e4ca689633943ee6ef74ab13d2cdcf6b6))
+
 ## [0.2.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.1.3...v0.2.0) (2026-06-21)
 
 

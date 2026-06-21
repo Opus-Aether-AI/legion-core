@@ -61,18 +61,23 @@ def _here() -> str:
 
 
 def _find_marketplace_root(start: str) -> str:
+    # Return the OUTERMOST marketplace.json, not the first one going up. When
+    # legion-core is vendored (consumer/vendored/legion-core/...), the nearest
+    # match is legion-core's OWN marketplace.json; the consumer's sits at the
+    # repo root above it. Standalone legion-core has a single match (its root).
     current = os.path.abspath(start)
+    match = ""
     while current and current != os.path.dirname(current):
         candidate = os.path.join(current, ".claude-plugin", "marketplace.json")
         if os.path.exists(candidate):
-            return current
+            match = current
         current = os.path.dirname(current)
-    return ""
+    return match
 
 
 def default_repo() -> str:
     # Prefer an explicit marketplace root override, else walk up from the script
-    # to the nearest consumer marketplace, else fall back to the standalone core.
+    # to the outermost consumer marketplace, else fall back to the standalone core.
     env = (
         os.environ.get("MARKETPLACE_ROOT")
         or os.environ.get("LEGION_ROOT")

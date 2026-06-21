@@ -26,15 +26,24 @@ legion_resolve_marketplace_root() {
     return 0
   fi
 
+  # Walk to the OUTERMOST marketplace.json, not the first one found. When
+  # legion-core is vendored (consumer/vendored/legion-core/...), the nearest
+  # match going up is legion-core's OWN marketplace.json — but we want the
+  # consumer's, which sits at the repo root above it. The outermost match is the
+  # consumer. Standalone legion-core has a single match (its own root), so this
+  # stays correct there too. Use MARKETPLACE_ROOT to override for odd layouts.
+  local match=""
   while [[ -n "$current" ]]; do
-    if [[ -f "$current/.claude-plugin/marketplace.json" ]]; then
-      printf '%s\n' "$current"
-      return 0
-    fi
+    [[ -f "$current/.claude-plugin/marketplace.json" ]] && match="$current"
     parent="$(dirname "$current")"
     [[ "$parent" == "$current" ]] && break
     current="$parent"
   done
+
+  if [[ -n "$match" ]]; then
+    _legion_abs_dir_or_raw "$match"
+    return 0
+  fi
 
   _legion_abs_dir_or_raw "$fallback"
 }

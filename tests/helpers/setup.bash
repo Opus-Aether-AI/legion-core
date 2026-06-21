@@ -12,7 +12,7 @@ setup_test_env() {
     export TEST_TMPDIR="$BATS_TEST_TMPDIR"
     export AGENTS_HOME="$TEST_TMPDIR/agents"
     export HOME="$TEST_TMPDIR/home"
-    export SOURCE_CLONE="$AGENTS_HOME/sources/legion"
+    export SOURCE_CLONE="$AGENTS_HOME/sources/legion-core"
     export AGENTS_SKILLS_DIR="$AGENTS_HOME/skills"
     export CODEX_SKILLS_DIR="$HOME/.codex/skills"
     export CODEX_COMMANDS_DIR="$HOME/.codex/commands"

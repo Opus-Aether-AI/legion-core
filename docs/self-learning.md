@@ -59,10 +59,10 @@ Otherwise Legion falls back to catalog token matching and manual records.
 
 ## Daily Active Mode
 
-The installed `legion-refresh` cron runs:
+The installed `legion-core-refresh` cron runs:
 
 ```bash
-legion-self-learn run --repo ~/.agents/sources/legion --apply-memory --quiet
+legion-self-learn run --repo ~/.agents/sources/legion-core --apply-memory --quiet
 ```
 
 This writes:

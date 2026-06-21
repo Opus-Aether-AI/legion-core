@@ -7,7 +7,7 @@
 One will commands a host of agents — **GPT-5.x via Codex**, **Cursor**, **Claude** (and humans). legion-core gives you the parts that aren't domain-specific: scoped multi-model **delegation**, **telemetry**, a **health check**, **self-learning**, and **auto-healing** — so a new agent project starts from a working spine instead of a blank page.
 
 ```bash
-gh api repos/your-org/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s all
+gh api repos/Opus-Aether-AI/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s all
 ```
 
 ## What's inside (5 plugins)

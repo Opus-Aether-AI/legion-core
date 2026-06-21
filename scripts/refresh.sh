@@ -18,8 +18,8 @@
 set -euo pipefail
 
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
-SOURCE_CLONE="${SOURCE_CLONE:-$AGENTS_HOME/sources/legion}"
-MARKETPLACE_SLUG="legion"
+SOURCE_CLONE="${SOURCE_CLONE:-$AGENTS_HOME/sources/legion-core}"
+MARKETPLACE_SLUG="legion-core"
 
 record_refresh_failure() {
     local summary="$1" evidence="${2:-}"

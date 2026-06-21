@@ -29,7 +29,7 @@ if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "list" ]]
 fi
 
 if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "add" ]]; then
-    printf 'legion\n' >> "$MOCK_STATE_FILE"
+    printf 'legion-core\n' >> "$MOCK_STATE_FILE"
     printf 'added marketplace: %s\n' "${4:-}"
     exit 0
 fi
@@ -50,21 +50,21 @@ fi
 if [[ "${1:-}" == "plugin" && "${2:-}" == "install" ]]; then
     printf '✔ Successfully installed plugin: %s\n' "${3:-}"
     plugin_name="${3%@*}"
-    mkdir -p "$HOME/.claude/plugins/cache/legion/$plugin_name/0.1.0"
+    mkdir -p "$HOME/.claude/plugins/cache/legion-core/$plugin_name/0.1.0"
     exit 0
 fi
 
 if [[ "${1:-}" == "plugin" && "${2:-}" == "uninstall" ]]; then
     printf '✔ Successfully uninstalled: %s\n' "${3:-}"
-    rm -rf "$HOME/.claude/plugins/cache/legion/${3%@*}"
+    rm -rf "$HOME/.claude/plugins/cache/legion-core/${3%@*}"
     exit 0
 fi
 
 if [[ "${1:-}" == "plugin" && "${2:-}" == "list" ]]; then
-    for d in "$HOME/.claude/plugins/cache/legion/"*/; do
+    for d in "$HOME/.claude/plugins/cache/legion-core/"*/; do
         [[ -d "$d" ]] || continue
         name="$(basename "$d")"
-        printf '❯ %s@legion\n' "$name"
+        printf '❯ %s@legion-core\n' "$name"
         printf '  Version: 0.1.0\n'
         printf '  Scope: user\n'
     done

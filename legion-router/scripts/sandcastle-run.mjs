@@ -80,11 +80,36 @@ if (diffPath) {
   process.stdout.write(`${resultBranch}\n${diff}`);
 }
 
+// Sum token usage across iterations so the caller meters real cost instead of a
+// false zero. sandcastle exposes camelCase counts (undefined when the provider
+// can't parse usage); map to legion's snake_case shape. null => "unmeasured".
+const totals = (result?.iterations || []).reduce(
+  (acc, it) => {
+    const u = it?.usage;
+    if (!u) return acc;
+    acc.input_tokens += u.inputTokens || 0;
+    acc.cached_input_tokens += u.cacheReadInputTokens || 0;
+    acc.output_tokens += u.outputTokens || 0;
+    acc.seen = true;
+    return acc;
+  },
+  { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, seen: false },
+);
+const usage = totals.seen
+  ? {
+      input_tokens: totals.input_tokens,
+      cached_input_tokens: totals.cached_input_tokens,
+      output_tokens: totals.output_tokens,
+      reasoning_output_tokens: 0,
+    }
+  : null;
+
 process.stdout.write(
   `${JSON.stringify({
     status: "ok",
     sandbox,
     branch: resultBranch,
     diff_path: diffPath || null,
+    usage,
   })}\n`,
 );

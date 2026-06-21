@@ -107,6 +107,9 @@ run_sandcastle() {
     | "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
   rc=${PIPESTATUS[1]}
   set -e
+  # Surface the wrapper's stderr (e.g. the @ai-hero/sandcastle install hint on
+  # exit 3) — it lands in codex.err, which cmd_run never prints otherwise.
+  [[ "$rc" -ne 0 && -s "$art/codex.err" ]] && cat "$art/codex.err" >&2 || true
 }
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -346,6 +349,19 @@ cmd_run() {
   thread_id="$(codex_thread_id "$art/stream.jsonl")"
   if [[ -s "$art/last-message.txt" ]]; then last_msg="$(cat "$art/last-message.txt")"; else last_msg="$(codex_last_message "$art/stream.jsonl")"; fi
   usage="$(codex_usage "$art/stream.jsonl")"
+  # Sandcastle runs codex inside the sandbox, so the local stream is empty — take
+  # the token usage the wrapper summed from the run instead of reporting a false
+  # zero (which would also defeat --budget-tokens). null usage => leave the zeros
+  # but flag it so cost isn't silently presented as $0 for a real run.
+  if is_sandcastle_sandbox "$sandbox"; then
+    local sc_usage
+    sc_usage="$(jq -c '.usage' "$art/sandcastle-result.json" 2>/dev/null || echo null)"
+    if [[ -n "$sc_usage" && "$sc_usage" != "null" ]]; then
+      usage="$sc_usage"
+    else
+      note "⚠ sandcastle run reported no token usage (provider usage unavailable); cost is unmeasured"
+    fi
+  fi
   # Cost math must never abort the run (codex already did the work); default to 0.
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
 

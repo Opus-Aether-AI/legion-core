@@ -9,9 +9,8 @@
 # Usage (after cloning the repo, since it's private):
 #   bash scripts/install.sh all       # everything (default) — Claude + Codex
 #   bash scripts/install.sh minimal   # legion-router + legion-observability only
-#   bash scripts/install.sh <plugin>  # a single named plugin
+#   bash scripts/install.sh <plugin>  # install one named plugin
 #   bash scripts/install.sh --list    # show available plugins, don't install
-#   bash scripts/install.sh PLUGIN    # install one named plugin
 #
 # Harness control (default: all enabled except cron):
 #   --no-claude           Skip `claude plugin install` (Codex-only setup)
@@ -28,7 +27,7 @@
 #   bash scripts/install.sh --refresh-symlinks    # re-scan & sync ~/.agents/skills/ only
 #
 # Or via gh (no clone needed for first-time install):
-#   gh api repos/Opus-Aether-AI/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s opus
+#   gh api repos/Opus-Aether-AI/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s all
 #
 # Requires: gh (authenticated), jq, git. claude CLI optional (only for Claude marketplace flow).
 # Idempotent: re-running skips already-installed plugins and updates symlinks.

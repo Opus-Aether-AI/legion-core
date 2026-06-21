@@ -19,12 +19,33 @@ def test_default_repo_honors_legion_root_override(tmp_path, monkeypatch):
     assert self_learn.default_repo() == os.path.abspath(str(tmp_path))
 
 
-def test_default_repo_falls_back_to_git_toplevel(monkeypatch):
-    # With no override, the default resolves to the repo's git toplevel (where
-    # the script lives), not a cwd-relative guess.
+def test_default_repo_prefers_marketplace_root_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARKETPLACE_ROOT", str(tmp_path / "marketplace"))
+    monkeypatch.setenv("LEGION_ROOT", str(tmp_path / "other"))
+    assert self_learn.default_repo() == os.path.abspath(str(tmp_path / "marketplace"))
+
+
+def test_default_repo_walks_up_to_repo_marketplace(monkeypatch):
+    # With no override, the default walks up to the nearest marketplace root.
     monkeypatch.delenv("LEGION_ROOT", raising=False)
+    monkeypatch.delenv("LEGION_MARKETPLACE_ROOT", raising=False)
+    monkeypatch.delenv("MARKETPLACE_ROOT", raising=False)
     repo_root = os.path.abspath(os.path.join(HERE, "..", ".."))
     assert self_learn.default_repo() == repo_root
+
+
+def test_default_repo_walks_up_from_vendored_layout(tmp_path, monkeypatch):
+    consumer = tmp_path / "consumer"
+    scripts = consumer / "vendored" / "legion-core" / "legion-observability" / "scripts"
+    (consumer / ".claude-plugin").mkdir(parents=True)
+    (consumer / ".claude-plugin" / "marketplace.json").write_text("{}", encoding="utf-8")
+    scripts.mkdir(parents=True)
+    monkeypatch.delenv("LEGION_ROOT", raising=False)
+    monkeypatch.delenv("LEGION_MARKETPLACE_ROOT", raising=False)
+    monkeypatch.delenv("MARKETPLACE_ROOT", raising=False)
+    monkeypatch.setattr(self_learn, "_here", lambda: str(scripts))
+
+    assert self_learn.default_repo() == os.path.abspath(str(consumer))
 
 
 def _catalog(tmp_path):

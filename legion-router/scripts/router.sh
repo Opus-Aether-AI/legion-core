@@ -2,17 +2,19 @@
 set -euo pipefail
 
 # ── Legion Router — CLI / launchd manager ────────────────────────────
-# Manages the router.ts metering proxy (loopback :8082) as a launchd service.
-# Keys are OPTIONAL — the router runs as a pure meter without them.
+# Manages the router.ts metering proxy (loopback :8082) as a launchd service on
+# macOS, or as a foreground process everywhere else. Keys are OPTIONAL — the
+# router runs as a pure meter without them.
 #
-#   legion-router install     # set up launchd (stores keys in Keychain if given)
+#   legion-router install     # store keys + set up launchd on macOS
 #   legion-router uninstall   # remove plist + stop
 #   legion-router start|stop|restart|status|logs|errors
 #   legion-router dev         # run in foreground (debug)
 #
 # Service management (install/uninstall/start/stop/restart/status) uses launchd
-# + the macOS Keychain and is macOS-only. On Linux use `legion-router dev` (or
-# wrap scripts/router.ts in a systemd unit); `logs`/`errors`/`dev` are portable.
+# and is macOS-only. On Linux use `legion-router dev` (or wrap
+# scripts/router-wrapper.sh in a systemd unit); `install` still stores
+# credentials portably, and `logs`/`errors`/`dev` are portable.
 
 PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT_PATH="$PLUGIN_DIR/scripts/router.ts"
@@ -26,28 +28,49 @@ PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 
 BUN_PATH="${BUN_PATH:-$(command -v bun 2>/dev/null || echo "$HOME/.bun/bin/bun")}"
 ROUTER_PORT="${ROUTER_PORT:-8082}"
+source "$PLUGIN_DIR/scripts/lib/router-secrets.sh"
 
 red()    { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green()  { printf '\033[0;32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
 dim()    { printf '\033[0;90m%s\033[0m\n' "$*"; }
 
-# Service management goes through launchd + the macOS Keychain, so install/start/
-# stop/restart/status are macOS-only. `dev` (foreground bun) and `logs`/`errors`
-# (tail) are portable and the documented Linux path. Fail fast with a clear
-# pointer instead of dying mid-script on `launchctl: command not found`.
-require_macos() {  # $1 = subcommand, for the message
-  if [[ "$(uname -s)" != "Darwin" ]] || ! command -v launchctl >/dev/null 2>&1 \
-       || ! command -v security >/dev/null 2>&1; then
+# Service management goes through launchd, so uninstall/start/stop/restart/status
+# are macOS-only. `install` stores credentials everywhere, then installs launchd
+# only when available. Fail fast with a clear pointer instead of dying mid-script
+# on `launchctl: command not found`.
+require_launchd() {  # $1 = subcommand, for the message
+  if [[ "$(uname -s)" != "Darwin" ]] || ! command -v launchctl >/dev/null 2>&1; then
     red "legion-router $1 manages a launchd service and is macOS-only."
     yellow "On Linux, run the router in the foreground:  legion-router dev"
-    yellow "or wrap scripts/router.ts in a systemd unit / your process supervisor."
+    yellow "or wrap scripts/router-wrapper.sh in a systemd unit / your process supervisor."
     exit 1
   fi
 }
 
 check_installed() {
   [[ -f "$PLIST_PATH" ]] || { red "Not installed. Run: legion-router install"; exit 1; }
+}
+
+store_secret_if_present() {
+  local name="${1:?secret name required}" value="${2:-}" label="${3:?label required}" missing="${4:?missing message required}"
+  local backend="" path=""
+  if [[ -z "$value" ]]; then
+    yellow "$missing"
+    return 0
+  fi
+  if backend="$(legion_router_store_secret "$name" "$value")"; then
+    case "$backend" in
+      keychain) green "$label stored in Keychain ($(legion_router_secret_service "$name"))" ;;
+      libsecret) green "$label stored via secret-tool/libsecret ($(legion_router_secret_service "$name"))" ;;
+      file)
+        path="$(legion_router_secret_file_path "$name")"
+        green "$label stored in $path"
+        ;;
+    esac
+  else
+    yellow "Could not persist $label; set $(legion_router_secret_env "$name") in the environment when starting the router."
+  fi
 }
 
 cmd_install() {
@@ -69,20 +92,10 @@ cmd_install() {
   local anthropic_key="${cli_api_key:-${ANTHROPIC_API_KEY:-}}"
   local minimax_token="${cli_token:-${MINIMAX_AUTH_TOKEN:-}}"
 
-  if [[ -n "$anthropic_key" ]]; then
-    security delete-generic-password -s "legion-anthropic" >/dev/null 2>&1 || true
-    security add-generic-password -s "legion-anthropic" -a "legion-router" -w "$anthropic_key" >/dev/null 2>&1 \
-      && green "Anthropic key stored in Keychain (legion-anthropic)"
-  else
-    yellow "No Anthropic key — running as a meter; claude-* will pass through client auth."
-  fi
-  if [[ -n "$minimax_token" ]]; then
-    security delete-generic-password -s "legion-minimax" >/dev/null 2>&1 || true
-    security add-generic-password -s "legion-minimax" -a "legion-router" -w "$minimax_token" >/dev/null 2>&1 \
-      && green "MiniMax token stored in Keychain (legion-minimax)"
-  else
-    yellow "No MiniMax token — minimax-* models fall back to Anthropic."
-  fi
+  store_secret_if_present anthropic "$anthropic_key" "Anthropic key" \
+    "No Anthropic key — running as a meter; claude-* will pass through client auth."
+  store_secret_if_present minimax "$minimax_token" "MiniMax token" \
+    "No MiniMax token — minimax-* models fall back to Anthropic."
 
   local model_map="${MINIMAX_MODEL_MAP:-}"
   # model_map is interpolated raw into the plist XML — reject anything outside a
@@ -90,6 +103,13 @@ cmd_install() {
   if [[ -n "$model_map" && ! "$model_map" =~ ^[A-Za-z0-9.,:_/-]+$ ]]; then
     yellow "Ignoring MINIMAX_MODEL_MAP (unsafe characters): $model_map"
     model_map=""
+  fi
+
+  if [[ "$(uname -s)" != "Darwin" ]] || ! command -v launchctl >/dev/null 2>&1; then
+    yellow "launchd is unavailable here, so install only stored credentials."
+    yellow "Run the router with: legion-router dev"
+    yellow "or wrap scripts/router-wrapper.sh in your process supervisor."
+    return 0
   fi
 
   if launchctl list "$PLIST_LABEL" >/dev/null 2>&1; then
@@ -178,11 +198,11 @@ cmd_status() {
 
 cmd_logs()   { [[ -f "$LOG_FILE" ]] && tail -f "$LOG_FILE" || yellow "No log yet: $LOG_FILE"; }
 cmd_errors() { [[ -f "$ERR_FILE" ]] && tail -f "$ERR_FILE" || yellow "No error log yet: $ERR_FILE"; }
-cmd_dev()    { echo "Running in foreground (Ctrl+C to stop)..."; exec "$BUN_PATH" run "$SCRIPT_PATH"; }
+cmd_dev()    { echo "Running in foreground (Ctrl+C to stop)..."; exec /bin/bash "$WRAPPER_PATH"; }
 
-# Service-management commands need launchd + Keychain → macOS-only. dev/logs/
-# errors are portable. Gate the launchd-bound ones up front (see require_macos).
-case "${1:-}" in install|uninstall|start|stop|restart|status) require_macos "$1" ;; esac
+# Service-management commands need launchd → macOS-only. dev/logs/errors are
+# portable, and install stores credentials everywhere before the launchd step.
+case "${1:-}" in uninstall|start|stop|restart|status) require_launchd "$1" ;; esac
 
 case "${1:-}" in
   install)   cmd_install "$@" ;;

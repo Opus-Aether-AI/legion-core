@@ -60,22 +60,29 @@ def _here() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _find_marketplace_root(start: str) -> str:
+    current = os.path.abspath(start)
+    while current and current != os.path.dirname(current):
+        candidate = os.path.join(current, ".claude-plugin", "marketplace.json")
+        if os.path.exists(candidate):
+            return current
+        current = os.path.dirname(current)
+    return ""
+
+
 def default_repo() -> str:
-    # Location-agnostic, matching legion-doctor: explicit LEGION_ROOT wins, else
-    # the git toplevel of this script's dir, else <script>/../.. as a last resort.
-    # This keeps the default correct regardless of cwd or a non-standard layout.
-    env = os.environ.get("LEGION_ROOT")
+    # Prefer an explicit marketplace root override, else walk up from the script
+    # to the nearest consumer marketplace, else fall back to the standalone core.
+    env = (
+        os.environ.get("MARKETPLACE_ROOT")
+        or os.environ.get("LEGION_ROOT")
+        or os.environ.get("LEGION_MARKETPLACE_ROOT")
+    )
     if env:
         return os.path.abspath(os.path.expanduser(env))
-    try:
-        out = subprocess.run(
-            ["git", "-C", _here(), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        if out:
-            return out
-    except Exception:
-        pass
+    walked = _find_marketplace_root(_here())
+    if walked:
+        return walked
     return os.path.abspath(os.path.join(_here(), "..", ".."))
 
 

@@ -17,10 +17,11 @@
 set -euo pipefail
 
 HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-# Location-agnostic root (matches legion-doctor): explicit override wins, else the
-# git toplevel of this script's dir, else two levels up (legion-setup/scripts ->
-# legion-setup -> repo root) as a last resort.
-MARKETPLACE_ROOT="${LEGION_MARKETPLACE_ROOT:-$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || (cd "$HERE/../.." >/dev/null 2>&1 && pwd))}"
+# shellcheck disable=SC1091
+source "$HERE/legion-marketplace-root.sh"
+# Prefer an explicit root override, else walk up to the consumer marketplace, else
+# fall back to the standalone legion-core layout.
+MARKETPLACE_ROOT="$(legion_resolve_marketplace_root "$HERE" "$HERE/../..")"
 CODEX_CONFIG="${CODEX_CONFIG:-$HOME/.codex/config.toml}"
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 CODEX_SKILLS="${CODEX_SKILLS:-$HOME/.codex/skills}"

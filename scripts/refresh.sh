@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # refresh.sh — daily cron-callable refresh of the cross-harness skill source.
 #
-# Pulls the latest claude-skills source, re-syncs ~/.agents/skills/ symlinks,
+# Pulls the latest legion-core source, re-syncs ~/.agents/skills/ symlinks,
 # and (if claude CLI is present) refreshes the Claude marketplace cache.
 #
 # Installed by scripts/install.sh as a daily cron entry (see --cron-hour flag

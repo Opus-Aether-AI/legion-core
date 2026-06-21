@@ -124,6 +124,14 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
 - `danger-full-access` is **hard-blocked** unless `LEGION_ALLOW_DANGER=1`.
 - Task text is scanned for dangerous/injection patterns before any write run (override: `LEGION_ALLOW_UNSAFE=1`).
 
+> **The sandbox is the security boundary — not the task scanner.** `scan_task_text`
+> is a best-effort tripwire and is trivially bypassable (encodings, indirection);
+> never treat a passed scan as proof a task is safe. Real containment is the codex
+> `--sandbox` plus the isolated git worktree: a `workspace-write` run can still
+> modify any file *inside that worktree* (including repo dotfiles like `.zshenv`
+> if they exist there). For anything touching secrets or untrusted input, use a
+> `read-only` sandbox or refuse — do not rely on the scanner.
+
 ## Cost note
 
 GPT-5.x via Codex uses ChatGPT-subscription auth, which reports token counts but **no per-token price** — so GPT cost defaults to `$0` (token-count parity, not dollar). Set real prices in `config/costs.json` (or `LEGION_COSTS_FILE`) if you have API billing.

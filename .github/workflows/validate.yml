@@ -69,25 +69,24 @@ jobs:
             exit 1
           fi
 
-      - name: No stale pre-rename identifiers (Legion rename guard)
+      - name: No stale placeholder / pre-fork identifiers (Legion rename guard)
         run: |
           set -e
-          # The repo path is ALWAYS a leftover bug — guard it everywhere.
-          if git grep -nE 'legion-core/claude-skills' \
+          # The open-source placeholder org is ALWAYS a leftover bug — the
+          # canonical identity is Opus-Aether-AI/legion-core.
+          if git grep -nE 'your-org' \
                -- ':!CHANGELOG.md' ':!.github/workflows/validate.yml'; then
-            echo "::error::stale pre-rename repo path — use 'your-org/legion-core'"
+            echo "::error::placeholder org 'your-org' — use 'Opus-Aether-AI/legion-core'"
             exit 1
           fi
-          # The bare slug is legitimate ONLY in install.sh's migration shim (it
-          # detects + cleans up old-slug installs) and in the tests that exercise
-          # it. Anywhere else it's a leftover from an incomplete rename.
-          if git grep -nE 'legion-core-claude-skills' \
-               -- ':!CHANGELOG.md' ':!.github/workflows/validate.yml' \
-               ':!scripts/install.sh' ':!tests/'; then
-            echo "::error::stale pre-rename slug — use 'legion'"
+          # legion-core was forked from claude-skills; the pre-fork repo path is
+          # never valid here.
+          if git grep -nE 'Opus-Aether-AI/claude-skills' \
+               -- ':!CHANGELOG.md' ':!.github/workflows/validate.yml'; then
+            echo "::error::stale pre-fork repo path — use 'Opus-Aether-AI/legion-core'"
             exit 1
           fi
-          echo "no stale pre-rename identifiers"
+          echo "no stale identifiers"
 
   validate-plugins:
     name: validate-plugins

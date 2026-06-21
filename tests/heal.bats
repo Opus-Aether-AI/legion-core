@@ -106,6 +106,66 @@ EOF
   [ ! -f "$GH_LOG" ] || ! grep -q "pr create" "$GH_LOG"
 }
 
+@test "heal run: never commits legion runtime state (.legion/) into the PR branch" {
+  # Delegate fixes the description AND drops a .legion/.gitignore (as the real
+  # delegate.sh does). A .gitignore can't ignore itself, so without the reset
+  # guard `git add -A` would stage it into the heal PR.
+  cat > "$STUB/delegate" <<'EOF'
+#!/usr/bin/env bash
+sub="$1"; shift; repo=""
+while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; *) shift;; esac; done
+case "$sub" in
+  run)
+    mkdir -p "$repo/.legion"; printf '*\n' > "$repo/.legion/.gitignore"
+    while IFS= read -r f; do
+      printf -- '---\nname: p\ndescription: Fixed single-line description.\n---\nbody\n' > "$f"
+    done < <(find "$repo" -name SKILL.md)
+    echo '{"status":"ok"}' ;;
+  review) echo '{"approve":true}' ;;
+esac
+EOF
+  chmod +x "$STUB/delegate"
+  _mk_gh
+
+  LEGION_DELEGATE_BIN="$STUB/delegate" GH_BIN="$STUB/gh" BATS_BIN=true \
+    run bash "$HEAL" run --repo "$REPO" --max 5
+  [ "$status" -eq 0 ]
+  branch="$(git -C "$REPO" for-each-ref --format='%(refname:short)' 'refs/heads/legion-heal/descriptions-*' | head -1)"
+  [ -n "$branch" ]
+  run git -C "$REPO" ls-tree -r --name-only "$branch"
+  ! grep -q '\.legion' <<<"$output"
+}
+
+@test "heal run: rejects a costs 'fix' that just deletes the artifact (gate guard)" {
+  # Repair the block-scalar description so `costs` is the only FAIL finding, then
+  # corrupt costs.json so doctor reports it.
+  printf -- '---\nname: p\ndescription: Valid single line description.\n---\nbody\n' > "$REPO/p/SKILL.md"
+  printf '%s\n' '{}' > "$REPO/legion-router/config/costs.json"
+  git -C "$REPO" commit -aqm "only costs broken"; git -C "$REPO" push -q origin main
+
+  # delegate stub whose `run` "fixes" the finding by DELETING the file — which
+  # would flip the doctor check from FAIL to WARN (absent) and slip past --only.
+  cat > "$STUB/delegate" <<'EOF'
+#!/usr/bin/env bash
+sub="$1"; shift; repo=""
+while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; *) shift;; esac; done
+case "$sub" in
+  run) rm -f "$repo/legion-router/config/costs.json"; echo '{"status":"ok"}' ;;
+  review) echo '{"approve":true}' ;;
+esac
+EOF
+  chmod +x "$STUB/delegate"
+  _mk_gh
+
+  LEGION_DELEGATE_BIN="$STUB/delegate" GH_BIN="$STUB/gh" BATS_BIN=true \
+    run bash "$HEAL" run --repo "$REPO" --max 5
+  [[ "$output" == *"deleting its artifact"* ]]
+  [ ! -f "$GH_LOG" ] || ! grep -q "pr create" "$GH_LOG"
+  # No heal branch reached the remote
+  run git -C "$REPO" ls-remote --heads origin 'legion-heal/costs-*'
+  [ -z "$output" ]
+}
+
 @test "heal run: idempotent — skips a finding that already has an open PR" {
   _mk_delegate; _mk_gh '[{"number":7}]'
   LEGION_DELEGATE_BIN="$STUB/delegate" GH_BIN="$STUB/gh" BATS_BIN=true \

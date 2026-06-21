@@ -35,10 +35,32 @@ HEALABLE="descriptions mcp bridges frontmatter marketplace-schema plugins costs 
 note() { printf '%s\n' "$*" >&2; }
 die()  { printf 'legion-heal: %s\n' "$*" >&2; exit 2; }
 
-_sha8() { printf '%s' "$1" | { shasum 2>/dev/null || sha1sum; } | cut -c1-8; }
+_sha8() {
+  local h
+  h="$(printf '%s' "$1" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -c1-8)"
+  # Portable last resort (cksum is POSIX) so a missing shasum/sha1sum never
+  # collapses every branch name onto the same empty hash.
+  [[ -n "$h" ]] || h="$(printf '%s' "$1" | cksum | tr -cd '0-9' | cut -c1-8)"
+  printf '%s' "$h"
+}
 
 _is_healable() {  # check-name
   local c; for c in $HEALABLE; do [[ "$c" == "$1" ]] && return 0; done; return 1
+}
+
+# Guard against a "fix" that satisfies a check by DELETING its backing artifact.
+# legion-doctor's costs / telemetry-schema checks WARN (exit 0) when the file is
+# absent — that absence is correct for a consumer that doesn't vendor the engine,
+# but in a heal worktree it means `--only <check>` alone would green-light a
+# delegate that simply `rm`-ed an invalid file. Require the artifact to survive.
+_artifact_survived() {  # check  worktree
+  local pat=""
+  case "$1" in
+    costs)            pat='*/legion-router/config/costs.json' ;;
+    telemetry-schema) pat='*/legion-observability/schema/legion.span.v1.schema.json' ;;
+    *) return 0 ;;  # check has no delete-sensitive artifact
+  esac
+  [[ -n "$(find "$2" -path "$pat" -not -path '*/.git/*' 2>/dev/null | head -1)" ]]
 }
 
 _slug() {  # repo-dir → owner/name from the origin remote URL
@@ -130,6 +152,10 @@ heal_one() {
   if ! LEGION_ROOT="$wt" "$DOCTOR" --repo "$wt" --only "$check" >/dev/null 2>&1; then
     note "    gate failed: $check still red after fix"; _cleanup; echo rejected; return
   fi
+  # …and it must not have passed by deleting the artifact it was meant to repair.
+  if ! _artifact_survived "$check" "$wt"; then
+    note "    gate failed: $check 'fixed' by deleting its artifact"; _cleanup; echo rejected; return
+  fi
   if [[ -d "$wt/tests" ]] && command -v "$BATS" >/dev/null 2>&1; then
     if ! "$BATS" "$wt/tests/" >/dev/null 2>&1; then
       note "    gate failed: bats tests/ red after fix"; _cleanup; echo rejected; return
@@ -150,6 +176,10 @@ heal_one() {
 
   # SHIP — commit, push, open PR. Never merge.
   git -C "$wt" add -A
+  # Never let legion's own runtime state leak into a heal PR. delegate.sh writes
+  # .legion/.gitignore (`*`), but a .gitignore can't ignore itself, so `add -A`
+  # would otherwise stage it. Drop the whole .legion/ dir from the commit.
+  git -C "$wt" reset -q -- .legion 2>/dev/null || true
   git -C "$wt" -c commit.gpgsign=false commit -q -m "fix(heal): $check — ${msg:0:60}" \
     -m "Auto-healed by legion-heal from a legion-doctor finding." \
     -m "Co-Authored-By: legion-heal <noreply@legion-core>" 2>/dev/null

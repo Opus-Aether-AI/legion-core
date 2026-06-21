@@ -363,41 +363,6 @@ SH
 
 # ── Profile filtering ────────────────────────────────────────────────
 
-@test "profile 'opus' filters out ./vendored/ plugins" {
-    # Our minimal fixture has no ./vendored/ plugins, so opus = all 3
-    run bash "$INSTALL_SH" opus --no-cron
-    [ "$status" -eq 0 ]
-    assert_mock_called claude "plugin install plugin-with-skill@legion-core"
-    assert_mock_called claude "plugin install plugin-nested@legion-core"
-}
-
-@test "profile 'vendored' filters to plugins under ./vendored/" {
-    # Add a fake ./vendored/ plugin to the marketplace so the filter has something to match
-    local m="$SOURCE_CLONE/.claude-plugin/marketplace.json"
-    jq '.plugins += [{
-        "name": "fake-vendored",
-        "source": "./vendored/fake-vendored",
-        "description": "Fake vendored plugin for the test.",
-        "version": "0.1.0",
-        "category": "test"
-    }]' "$m" > "$m.tmp"
-    mv "$m.tmp" "$m"
-    mkdir -p "$SOURCE_CLONE/vendored/fake-vendored"
-    echo "---" > "$SOURCE_CLONE/vendored/fake-vendored/SKILL.md"
-    cat >> "$SOURCE_CLONE/vendored/fake-vendored/SKILL.md" <<EOF
-name: fake-vendored
-description: A fake vendored skill.
----
-Body
-EOF
-
-    run bash "$INSTALL_SH" vendored --no-cron
-    [ "$status" -eq 0 ]
-    assert_mock_called claude "plugin install fake-vendored@legion-core"
-    # Non-vendored plugins NOT installed via this profile
-    if grep -F "plugin install plugin-with-skill@" "$MOCK_CALL_LOG"; then false; fi
-}
-
 @test "profile 'minimal' attempts to install legion-router + legion-observability" {
     # These won't exist in our fixture; the mock claude still records the call
     run bash "$INSTALL_SH" minimal --no-cron

@@ -61,6 +61,21 @@ def _here() -> str:
 
 
 def default_repo() -> str:
+    # Location-agnostic, matching legion-doctor: explicit LEGION_ROOT wins, else
+    # the git toplevel of this script's dir, else <script>/../.. as a last resort.
+    # This keeps the default correct regardless of cwd or a non-standard layout.
+    env = os.environ.get("LEGION_ROOT")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    try:
+        out = subprocess.run(
+            ["git", "-C", _here(), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if out:
+            return out
+    except Exception:
+        pass
     return os.path.abspath(os.path.join(_here(), "..", ".."))
 
 

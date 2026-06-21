@@ -10,7 +10,7 @@
 #   bash scripts/install.sh all       # everything (default) — Claude + Codex + cron
 #   bash scripts/install.sh opus      # only Opus-original plugins
 #   bash scripts/install.sh vendored  # only vendored third-party
-#   bash scripts/install.sh minimal   # opus-core + codebase-memory only
+#   bash scripts/install.sh minimal   # legion-router + legion-observability only
 #   bash scripts/install.sh --list    # show available plugins, don't install
 #   bash scripts/install.sh PLUGIN    # install one named plugin
 #
@@ -679,7 +679,7 @@ case "$MODE" in
         setup_cross_harness
         setup_codex_skills
         setup_cursor_native
-        install_many opus-core opus-codebase-memory
+        install_many legion-router legion-observability
         setup_cron
         ;;
     *)

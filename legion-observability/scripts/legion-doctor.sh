@@ -112,7 +112,10 @@ check_frontmatter() {
 }
 
 check_costs() {
-  local cf="$LEGION_ROOT/legion-router/config/costs.json"
+  # Locate costs.json wherever legion-router lives — top-level (standalone core)
+  # or under vendored/ (when consumed by a downstream marketplace).
+  local cf; cf="$(find "$LEGION_ROOT" -path '*/legion-router/config/costs.json' -not -path '*/.git/*' 2>/dev/null | head -1)"
+  cf="${cf:-$LEGION_ROOT/legion-router/config/costs.json}"
   if [[ -f "$cf" ]] && jq -e '(.models | type == "array") and (.default | type == "object")' "$cf" >/dev/null 2>&1; then
     pass "costs.json valid ($(jq -r '.models | length' "$cf") model rows)"
   else
@@ -121,7 +124,8 @@ check_costs() {
 }
 
 check_telemetry_schema() {
-  local sf="$LEGION_ROOT/legion-observability/schema/legion.span.v1.schema.json"
+  local sf; sf="$(find "$LEGION_ROOT" -path '*/legion-observability/schema/legion.span.v1.schema.json' -not -path '*/.git/*' 2>/dev/null | head -1)"
+  sf="${sf:-$LEGION_ROOT/legion-observability/schema/legion.span.v1.schema.json}"
   if [[ -f "$sf" ]] && jq -e '.title == "legion.span.v1"' "$sf" >/dev/null 2>&1; then
     pass "telemetry schema present (legion.span.v1)"
   else
@@ -210,7 +214,8 @@ check_mcp() {
 # Guards the cross-harness path so an MCP block that breaks Codex/Cursor is
 # caught here, not in a user's config. Needs python3 (WARN-skip otherwise).
 check_bridges() {
-  local setup="$LEGION_ROOT/legion-setup/scripts"
+  local setup; setup="$(dirname "$(find "$LEGION_ROOT" -path '*/legion-setup/scripts/legion-codex-mcp-merge.py' -not -path '*/.git/*' 2>/dev/null | head -1)")"
+  [[ "$setup" == "." || -z "$setup" ]] && setup="$LEGION_ROOT/legion-setup/scripts"
   local codex_merge="$setup/legion-codex-mcp-merge.py" cursor_merge="$setup/legion-cursor-mcp-merge.py"
   if ! command -v python3 >/dev/null 2>&1; then warn "python3 absent — skipping bridge merge check"; return; fi
   [[ -f "$codex_merge" && -f "$cursor_merge" ]] || { warn "bridge merge scripts not found"; return; }

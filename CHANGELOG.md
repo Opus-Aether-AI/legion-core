@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/Opus-Aether-AI/legion-core/compare/v0.1.2...v0.1.3) (2026-06-21)
+
+
+### Fixed
+
+* **engine:** close heal-gate bypass, finish rename, portability + robustness ([#10](https://github.com/Opus-Aether-AI/legion-core/issues/10)) ([bff188f](https://github.com/Opus-Aether-AI/legion-core/commit/bff188fb02cc2a310e1e35d9215d93a909983b5b))
+
 ## [0.1.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.1.1...v0.1.2) (2026-06-21)
 
 

@@ -23,7 +23,7 @@ setup() {
 
     # Cron entry removed
     if [ -f "$FAKE_CRONTAB_FILE" ]; then
-        if grep -q "legion-refresh" "$FAKE_CRONTAB_FILE"; then
+        if grep -q "legion-core-refresh" "$FAKE_CRONTAB_FILE"; then
             false
         fi
     fi
@@ -47,7 +47,7 @@ setup() {
 
     # Cron entry removed
     if [ -f "$FAKE_CRONTAB_FILE" ]; then
-        if grep -q "legion-refresh" "$FAKE_CRONTAB_FILE"; then
+        if grep -q "legion-core-refresh" "$FAKE_CRONTAB_FILE"; then
             false
         fi
     fi
@@ -65,7 +65,7 @@ setup() {
 
     # Cron entry survives
     [ -f "$FAKE_CRONTAB_FILE" ]
-    grep -q "legion-refresh" "$FAKE_CRONTAB_FILE"
+    grep -q "legion-core-refresh" "$FAKE_CRONTAB_FILE"
 }
 
 @test "uninstall preserves non-managed symlinks in ~/.agents/skills/" {
@@ -89,7 +89,7 @@ setup() {
 
     grep -q "my other cron" "$FAKE_CRONTAB_FILE"
     grep -q "/some/other/script" "$FAKE_CRONTAB_FILE"
-    if grep -q "legion-refresh" "$FAKE_CRONTAB_FILE"; then
+    if grep -q "legion-core-refresh" "$FAKE_CRONTAB_FILE"; then
         false
     fi
 }
@@ -97,8 +97,8 @@ setup() {
 @test "--claude also removes claude marketplace + plugins" {
     # setup() ran install with --no-claude, so the mock state has no marketplace.
     # Populate it directly to simulate a real install having registered it.
-    echo "legion" > "$HOME/.mock-claude-marketplaces"
-    mkdir -p "$HOME/.claude/plugins/cache/legion/plugin-with-skill/0.1.0"
+    echo "legion-core" > "$HOME/.mock-claude-marketplaces"
+    mkdir -p "$HOME/.claude/plugins/cache/legion-core/plugin-with-skill/0.1.0"
 
     run bash "$UNINSTALL_SH" --claude
     [ "$status" -eq 0 ]
@@ -134,7 +134,7 @@ setup() {
 }
 
 @test "uninstall --all does everything (purge + claude)" {
-    echo "legion" > "$HOME/.mock-claude-marketplaces"
+    echo "legion-core" > "$HOME/.mock-claude-marketplaces"
 
     run bash "$UNINSTALL_SH" --all
     [ "$status" -eq 0 ]

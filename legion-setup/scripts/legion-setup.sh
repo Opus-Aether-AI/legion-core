@@ -10,12 +10,12 @@
 #   legion-setup uninstall [flags]
 #
 # First-time bootstrap (before this script exists on the machine) — one paste:
-#   gh api repos/your-org/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s all
+#   gh api repos/Opus-Aether-AI/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s all
 set -euo pipefail
 
 HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-REPO="${LEGION_REPO:-your-org/legion-core}"
-SLUG="${LEGION_SLUG:-legion}"
+REPO="${LEGION_REPO:-Opus-Aether-AI/legion-core}"
+SLUG="${LEGION_SLUG:-legion-core}"
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="$AGENTS_HOME/sources/$SLUG"
 PROFILE="${LEGION_PROFILE:-all}"

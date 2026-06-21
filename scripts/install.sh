@@ -27,18 +27,18 @@
 #   bash scripts/install.sh --refresh-symlinks    # re-scan & sync ~/.agents/skills/ only
 #
 # Or via gh (no clone needed for first-time install):
-#   gh api repos/your-org/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s opus
+#   gh api repos/Opus-Aether-AI/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s opus
 #
 # Requires: gh (authenticated), jq, git. claude CLI optional (only for Claude marketplace flow).
 # Idempotent: re-running skips already-installed plugins and updates symlinks.
 
 set -euo pipefail
 
-MARKETPLACE_REPO="your-org/legion-core"
-MARKETPLACE_SLUG="legion"
+MARKETPLACE_REPO="${LEGION_REPO:-Opus-Aether-AI/legion-core}"
+MARKETPLACE_SLUG="legion-core"
 
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
-SOURCE_CLONE="$AGENTS_HOME/sources/legion"
+SOURCE_CLONE="$AGENTS_HOME/sources/legion-core"
 SKILLS_DIR="$AGENTS_HOME/skills"
 LEGION_BIN_DIR="$AGENTS_HOME/bin"        # managed symlink farm for plugin CLIs (on PATH)
 
@@ -525,7 +525,7 @@ setup_cursor_native() {
 }
 
 # ── Cron: daily refresh ──────────────────────────────────────────────
-CRON_TAG="# legion-refresh"
+CRON_TAG="# legion-core-refresh"
 
 setup_cron() {
     [ "$DO_CRON" = "1" ] || return 0

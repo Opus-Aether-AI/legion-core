@@ -180,10 +180,10 @@ setup() {
     [ "$status" -eq 0 ]
 
     # Mock claude was called with `marketplace add` + per-plugin `install`
-    assert_mock_called claude "marketplace add your-org/legion-core"
-    assert_mock_called claude "plugin install plugin-with-skill@legion"
-    assert_mock_called claude "plugin install plugin-nested@legion"
-    assert_mock_called claude "plugin install plugin-claude-only@legion"
+    assert_mock_called claude "marketplace add Opus-Aether-AI/legion-core"
+    assert_mock_called claude "plugin install plugin-with-skill@legion-core"
+    assert_mock_called claude "plugin install plugin-nested@legion-core"
+    assert_mock_called claude "plugin install plugin-claude-only@legion-core"
 }
 
 @test "--no-claude skips all claude CLI invocations" {
@@ -311,7 +311,7 @@ SH
 @test "single plugin name installs only that one plugin" {
     run bash "$INSTALL_SH" plugin-with-skill --no-cron
     [ "$status" -eq 0 ]
-    assert_mock_called claude "plugin install plugin-with-skill@legion"
+    assert_mock_called claude "plugin install plugin-with-skill@legion-core"
     # Other plugins not installed via marketplace
     if grep -F "plugin install plugin-nested@" "$MOCK_CALL_LOG"; then
         false
@@ -324,7 +324,7 @@ SH
     run bash "$INSTALL_SH" all --no-claude
     [ "$status" -eq 0 ]
     [ -f "$FAKE_CRONTAB_FILE" ]
-    grep -q "# legion-refresh" "$FAKE_CRONTAB_FILE"
+    grep -q "# legion-core-refresh" "$FAKE_CRONTAB_FILE"
     grep -q "0 9 \* \* \*" "$FAKE_CRONTAB_FILE"
 }
 
@@ -348,7 +348,7 @@ SH
     [ "$status" -eq 0 ]
     grep -q "my other cron" "$FAKE_CRONTAB_FILE"
     grep -q "/some/other/script" "$FAKE_CRONTAB_FILE"
-    grep -q "legion-refresh" "$FAKE_CRONTAB_FILE"
+    grep -q "legion-core-refresh" "$FAKE_CRONTAB_FILE"
 }
 
 @test "re-running install replaces the cron entry, not duplicates it" {
@@ -356,7 +356,7 @@ SH
     bash "$INSTALL_SH" all --no-claude --cron-hour=4
 
     # Exactly one entry with our tag
-    [ "$(grep -c "legion-refresh" "$FAKE_CRONTAB_FILE")" = "1" ]
+    [ "$(grep -c "legion-core-refresh" "$FAKE_CRONTAB_FILE")" = "1" ]
     # The new hour wins
     grep -q "0 4 \* \* \*" "$FAKE_CRONTAB_FILE"
 }
@@ -367,8 +367,8 @@ SH
     # Our minimal fixture has no ./vendored/ plugins, so opus = all 3
     run bash "$INSTALL_SH" opus --no-cron
     [ "$status" -eq 0 ]
-    assert_mock_called claude "plugin install plugin-with-skill@legion"
-    assert_mock_called claude "plugin install plugin-nested@legion"
+    assert_mock_called claude "plugin install plugin-with-skill@legion-core"
+    assert_mock_called claude "plugin install plugin-nested@legion-core"
 }
 
 @test "profile 'vendored' filters to plugins under ./vendored/" {
@@ -393,7 +393,7 @@ EOF
 
     run bash "$INSTALL_SH" vendored --no-cron
     [ "$status" -eq 0 ]
-    assert_mock_called claude "plugin install fake-vendored@legion"
+    assert_mock_called claude "plugin install fake-vendored@legion-core"
     # Non-vendored plugins NOT installed via this profile
     if grep -F "plugin install plugin-with-skill@" "$MOCK_CALL_LOG"; then false; fi
 }
@@ -402,8 +402,8 @@ EOF
     # These won't exist in our fixture; the mock claude still records the call
     run bash "$INSTALL_SH" minimal --no-cron
     [ "$status" -eq 0 ]
-    assert_mock_called claude "plugin install legion-router@legion"
-    assert_mock_called claude "plugin install legion-observability@legion"
+    assert_mock_called claude "plugin install legion-router@legion-core"
+    assert_mock_called claude "plugin install legion-observability@legion-core"
 }
 
 # ── Idempotent install — already-installed branch ───────────────────
@@ -493,7 +493,7 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"plugin-with-skill"* ]]
     # Should have called `gh api` (we removed the local file)
-    assert_mock_called gh "api repos/your-org/legion-core/contents/.claude-plugin/marketplace.json"
+    assert_mock_called gh "api repos/Opus-Aether-AI/legion-core/contents/.claude-plugin/marketplace.json"
 }
 
 # ── Nested skill collision ──────────────────────────────────────────
@@ -567,7 +567,7 @@ EOF
 
     run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
-    assert_mock_called gh "repo clone your-org/legion-core"
+    assert_mock_called gh "repo clone Opus-Aether-AI/legion-core"
     [ -d "$SOURCE_CLONE" ]
 }
 

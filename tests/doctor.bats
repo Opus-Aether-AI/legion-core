@@ -55,18 +55,28 @@ _make_good() {
   [ "$status" -eq 1 ]
 }
 
-@test "doctor: costs passes on good, fails on broken" {
+@test "doctor: costs passes on good, warns when absent, fails when invalid" {
   LEGION_ROOT="$GOOD" run "$DOCTOR" --only costs
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ]; [[ "$output" == *PASS* ]]
+  # absent (a consumer that installs the engine as a dependency) → WARN, not fail
   LEGION_ROOT="$BROKEN" run "$DOCTOR" --only costs
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 0 ]; [[ "$output" == *WARN* ]]
+  # present but malformed → FAIL
+  inv="$BATS_TEST_TMPDIR/inv-costs"; mkdir -p "$inv/legion-router/config"
+  echo '{}' > "$inv/legion-router/config/costs.json"
+  LEGION_ROOT="$inv" run "$DOCTOR" --only costs
+  [ "$status" -eq 1 ]; [[ "$output" == *FAIL* ]]
 }
 
-@test "doctor: telemetry-schema passes on good, fails on broken" {
+@test "doctor: telemetry-schema passes on good, warns when absent, fails when invalid" {
   LEGION_ROOT="$GOOD" run "$DOCTOR" --only telemetry-schema
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ]; [[ "$output" == *PASS* ]]
   LEGION_ROOT="$BROKEN" run "$DOCTOR" --only telemetry-schema
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 0 ]; [[ "$output" == *WARN* ]]
+  inv="$BATS_TEST_TMPDIR/inv-tel"; mkdir -p "$inv/legion-observability/schema"
+  echo '{"title":"wrong"}' > "$inv/legion-observability/schema/legion.span.v1.schema.json"
+  LEGION_ROOT="$inv" run "$DOCTOR" --only telemetry-schema
+  [ "$status" -eq 1 ]; [[ "$output" == *FAIL* ]]
 }
 
 @test "doctor: frontmatter passes on good, fails on a bad SKILL.md" {

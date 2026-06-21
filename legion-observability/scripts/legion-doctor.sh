@@ -113,23 +113,27 @@ check_frontmatter() {
 
 check_costs() {
   # Locate costs.json wherever legion-router lives — top-level (standalone core)
-  # or under vendored/ (when consumed by a downstream marketplace).
+  # or under vendored/ (when consumed by a downstream marketplace). When the
+  # engine isn't present at all (a consumer that installs it as a dependency),
+  # this is WARN, not FAIL — the engine is validated in its own repo.
   local cf; cf="$(find "$LEGION_ROOT" -path '*/legion-router/config/costs.json' -not -path '*/.git/*' 2>/dev/null | head -1)"
-  cf="${cf:-$LEGION_ROOT/legion-router/config/costs.json}"
-  if [[ -f "$cf" ]] && jq -e '(.models | type == "array") and (.default | type == "object")' "$cf" >/dev/null 2>&1; then
+  if [[ -z "$cf" ]]; then
+    warn "costs.json not present (legion-router engine not vendored here — checked in legion-core)"
+  elif jq -e '(.models | type == "array") and (.default | type == "object")' "$cf" >/dev/null 2>&1; then
     pass "costs.json valid ($(jq -r '.models | length' "$cf") model rows)"
   else
-    fail "costs.json missing or invalid: $cf"
+    fail "costs.json invalid: $cf"
   fi
 }
 
 check_telemetry_schema() {
   local sf; sf="$(find "$LEGION_ROOT" -path '*/legion-observability/schema/legion.span.v1.schema.json' -not -path '*/.git/*' 2>/dev/null | head -1)"
-  sf="${sf:-$LEGION_ROOT/legion-observability/schema/legion.span.v1.schema.json}"
-  if [[ -f "$sf" ]] && jq -e '.title == "legion.span.v1"' "$sf" >/dev/null 2>&1; then
+  if [[ -z "$sf" ]]; then
+    warn "telemetry schema not present (legion-observability engine not vendored here — checked in legion-core)"
+  elif jq -e '.title == "legion.span.v1"' "$sf" >/dev/null 2>&1; then
     pass "telemetry schema present (legion.span.v1)"
   else
-    fail "telemetry schema missing or invalid: $sf"
+    fail "telemetry schema invalid: $sf"
   fi
 }
 

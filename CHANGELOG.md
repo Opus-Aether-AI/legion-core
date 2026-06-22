@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.6.0...v0.7.0) (2026-06-22)
+
+
+### Added
+
+* **observability:** add `legion-share gate` to enforce the codex balance ([#29](https://github.com/Opus-Aether-AI/legion-core/issues/29)) ([4372be0](https://github.com/Opus-Aether-AI/legion-core/commit/4372be075f1f4feaa96b92b97f92976fb97bab9a)), closes [#25](https://github.com/Opus-Aether-AI/legion-core/issues/25)
+
 ## [0.6.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.5.0...v0.6.0) (2026-06-22)
 
 

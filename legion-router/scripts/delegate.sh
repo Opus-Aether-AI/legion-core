@@ -32,6 +32,8 @@ _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_self_dir/lib/codex-json.sh"
 # shellcheck source=lib/cost.sh
 source "$_self_dir/lib/cost.sh"
+# shellcheck source=lib/sandbox-setup.sh
+source "$_self_dir/lib/sandbox-setup.sh"
 
 CODEX_BIN="${CODEX_BIN:-codex}"
 LEGION_ROUTER_URL="${LEGION_ROUTER_URL:-http://127.0.0.1:8082}"
@@ -43,6 +45,13 @@ LEGION_REPOS_FILE="${LEGION_REPOS_FILE:-$HOME/.claude/logs/legion/repos.jsonl}"
 
 die() { printf 'legion-delegate: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
+
+SANDBOX_DEV_PID_TO_TEARDOWN=""
+cleanup_sandbox_dev_on_exit() {
+  sandbox_teardown "$SANDBOX_DEV_PID_TO_TEARDOWN" || true
+  SANDBOX_DEV_PID_TO_TEARDOWN=""
+}
+trap cleanup_sandbox_dev_on_exit EXIT
 
 ROUTE_BIN="$_self_dir/legion-route.py"
 REVIEW_SCHEMA="$_self_dir/../schema/review-verdict.schema.json"
@@ -101,8 +110,10 @@ run_sandcastle() {
   set +e
   jq -cn \
     --arg task "$task" --arg model "$1" --arg sandbox "$sandbox" \
-    --arg cwd "$wt" --arg base "$base" --arg branch "$branch" --arg diff "$art/diff.patch" --arg effort "$effort" \
+    --arg cwd "$wt" --arg main_repo "$repo" --arg base "$base" --arg branch "$branch" --arg diff "$art/diff.patch" \
+    --arg effort "$effort" --argjson untrusted "$untrusted" \
     '{task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
+      main_repo:$main_repo, untrusted:$untrusted,
       effort:(if $effort=="" then null else $effort end)}' \
     | "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
   rc=${PIPESTATUS[1]}
@@ -255,6 +266,8 @@ require_git_repo() {
 cmd_run() {
   local model="" sandbox="" task="" repo="$PWD" base="HEAD" archetype="" effort=""
   local budget=0 do_apply=0 keep=0 preset_run_id=""
+  local untrusted=0
+  [[ "${LEGION_UNTRUSTED:-0}" == "1" ]] && untrusted=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --model) model="$2"; shift 2 ;;
@@ -268,6 +281,7 @@ cmd_run() {
       --budget-tokens) budget="$2"; shift 2 ;;
       --apply) do_apply=1; shift ;;
       --keep) keep=1; shift ;;
+      --untrusted) untrusted=1; shift ;;
       --quiet) QUIET=1; shift ;;
       *) die "run: unknown arg '$1'" ;;
     esac
@@ -314,6 +328,11 @@ cmd_run() {
   local branch="legion/delegate-$RUN_ID"
   note "→ worktree $wt (branch $branch, base $base)"
   git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" || die "worktree add failed"
+  local sandbox_dev_pid=""
+  if ! is_sandcastle_sandbox "$sandbox"; then
+    sandbox_dev_pid="$(LEGION_SANDBOX_ARTIFACT_DIR="$art" LEGION_SANDBOX_QUIET="${QUIET:-0}" sandbox_setup "$wt" "$repo" "$untrusted" || true)"
+    SANDBOX_DEV_PID_TO_TEARDOWN="$sandbox_dev_pid"
+  fi
   write_run_state running
 
   local start_ms end_ms dur rc=0 used_model=""
@@ -404,6 +423,7 @@ cmd_run() {
   # The captured diff/last-message/stream live under runs/ (preserved); the worktree
   # itself is disposable. Remove it + its branch unless --keep, so runs don't leak
   # worktrees and orphaned legion/delegate-* branches across a long autonomous loop.
+  cleanup_sandbox_dev_on_exit
   local wt_report="$wt"
   if [[ "$keep" -eq 0 ]]; then
     # Redirect stdout too — `git branch -D` prints "Deleted branch …" which would
@@ -643,7 +663,7 @@ legion-delegate — delegate a scoped task to an external model agent (Codex / G
 
   run      [--archetype A | --model M] [--sandbox read-only|workspace-write|docker|podman|vercel]
            [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
-           [--base REF] [--budget-tokens N] [--apply] [--keep]
+           [--base REF] [--budget-tokens N] [--apply] [--keep] [--untrusted]
   review   [--archetype A | --model M] --base BRANCH [--repo DIR] [--reasoning-effort E]
            -> structured verdict (codex --output-schema)
   resume   --run RUN_ID [--task T|stdin] [--model M] [--repo DIR] [--reasoning-effort E]

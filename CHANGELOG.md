@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.5.0...v0.6.0) (2026-06-22)
+
+
+### Added
+
+* **router:** sandbox/worktree lifecycle — setup + teardown ([#23](https://github.com/Opus-Aether-AI/legion-core/issues/23)) ([4a20a27](https://github.com/Opus-Aether-AI/legion-core/commit/4a20a2783cbb94006673df8fc6670d2cc98b8089))
+
 ## [0.5.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.4.0...v0.5.0) (2026-06-22)
 
 

@@ -47,6 +47,22 @@ legion-delegate review --model gpt-5.5 --base main --repo .
 
 Requires: `codex` CLI for `legion-delegate`, Cursor CLI (`agent` or `cursor-agent`) for `legion-cursor`, plus `jq` and `git`. The proxy additionally needs `bun`.
 
+## Container/VM sandboxing (optional)
+
+The zero-dependency default is still an isolated git worktree plus `codex exec`
+with `read-only` or `workspace-write`. For real OS/VM isolation around an
+explicit delegation, install Sandcastle in your working copy:
+
+```bash
+npm i -D @ai-hero/sandcastle
+legion-delegate run --model gpt-5.5 --sandbox docker --task "..." --repo .
+legion-delegate run --model gpt-5.5 --sandbox vercel --task "..." --repo .
+```
+
+`docker`, `podman`, and `vercel` are opt-in blast-radius protection only. If
+Sandcastle is absent, those modes fail with an install hint instead of falling
+back to the default worktree path.
+
 ## Layout
 
 ```
@@ -54,6 +70,7 @@ legion-router/
 ├── bin/legion-delegate          # PATH shim
 ├── scripts/
 │   ├── delegate.sh              # the delegation CLI
+│   ├── sandcastle-run.mjs       # optional Sandcastle bridge for docker/podman/vercel
 │   └── lib/
 │       ├── codex-json.sh        # parse `codex exec --json` streams (single point of codex-schema knowledge)
 │       └── cost.sh              # per-model USD cost from config/costs.json

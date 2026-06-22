@@ -173,6 +173,49 @@ make_test_repo() {
     assert_mock_called codex "skip-git-repo-check"
 }
 
+@test "delegate run: explicit container sandbox accepts flag and fails with Sandcastle install hint when absent" {
+    if node -e 'import("@ai-hero/sandcastle")' >/dev/null 2>&1; then
+      skip "@ai-hero/sandcastle is installed; missing-optional-dependency path not applicable"
+    fi
+    local repo; repo="$(make_test_repo run2docker)"
+    run "$DELEGATE" run --model gpt-5.4 --sandbox docker --task "x" --repo "$repo" --quiet
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
+    [[ "$output" != *"invalid --sandbox"* ]]
+    assert_mock_not_called codex
+}
+
+@test "delegate run: podman and vercel sandbox values parse as Sandcastle modes" {
+    if node -e 'import("@ai-hero/sandcastle")' >/dev/null 2>&1; then
+      skip "@ai-hero/sandcastle is installed; missing-optional-dependency path not applicable"
+    fi
+    local repo; repo="$(make_test_repo run2podman)"
+    run "$DELEGATE" run --model gpt-5.4 --sandbox podman --task "x" --repo "$repo" --quiet
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
+    [[ "$output" != *"invalid --sandbox"* ]]
+
+    repo="$(make_test_repo run2vercel)"
+    run "$DELEGATE" run --model gpt-5.4 --sandbox vercel --task "x" --repo "$repo" --quiet
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
+    [[ "$output" != *"invalid --sandbox"* ]]
+}
+
+@test "sandcastle-run: missing optional package exits 3 with install hint" {
+    if node -e 'import("@ai-hero/sandcastle")' >/dev/null 2>&1; then
+      skip "@ai-hero/sandcastle is installed; missing-optional-dependency path not applicable"
+    fi
+    local repo; repo="$(make_test_repo scr1)"
+    run bash -c "printf '%s' '{\"task\":\"x\",\"model\":\"gpt-5.4\",\"sandbox\":\"docker\",\"cwd\":\"$repo\",\"base\":\"HEAD\"}' | node '$REPO_ROOT/legion-router/scripts/sandcastle-run.mjs'"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
+}
+
+@test "delegate run: live Sandcastle docker/vercel execution is manual" {
+    skip "manual: requires @ai-hero/sandcastle plus docker/podman/vercel provider credentials"
+}
+
 @test "delegate run: reads task from stdin when --task omitted" {
     local repo; repo="$(make_test_repo run3)"
     run bash -c "printf 'task via stdin' | '$DELEGATE' run --model gpt-5.5 --repo '$repo' --quiet"

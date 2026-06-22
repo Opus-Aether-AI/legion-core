@@ -8,6 +8,7 @@ default 0.5).
 
   legion-share            # JSON report: share by runs + tokens, per-model, status
   legion-share next       # -> "codex" or "opus": who should do the NEXT task to converge
+  legion-share gate       # -> one-line directive; exit 1 when under target (for hooks/CI)
 
 Pure stdlib (tomllib, 3.11+). Importable for tests.
 """
@@ -110,9 +111,31 @@ def recommend_next(share_runs, total_runs, target):
     return "codex" if (total_runs == 0 or share_runs < target) else "opus"
 
 
+def gate(c, tgt):
+    """Enforcement surface for the harness hook / CI: turn the measured share into
+    a one-line directive + exit code. Exit code 1 means "under target — delegate
+    the next eligible slice to codex"; 0 means no action (on balance, no data yet,
+    or unmeasurable). The opus-core balance hook prints the directive into context
+    when this returns 1, so an off-target session is nudged instead of silently
+    hand-cranking everything inline.
+    """
+    runs, share = c["total_runs"], c["codex_share_runs"]
+    pct, tpct = round(share * 100), round(tgt * 100)
+    if c["codex_runs"] > 0 and c["opus_runs"] == 0:
+        return ("legion-share: only codex work is logged — Opus self-work isn't being "
+                "recorded, so the share is unmeasurable.", 0)
+    if runs == 0:
+        return ("legion-share: no work logged yet.", 0)
+    if share < tgt:
+        return (f"legion-share: codex share {pct}% < {tpct}% target — route the next eligible "
+                f"(mechanical / bulk / parallelizable / second-opinion) slice to codex via "
+                f"`legion-delegate` instead of doing it inline.", 1)
+    return (f"legion-share: codex share {pct}% >= {tpct}% target — on balance.", 0)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Measure + drive the codex work share.")
-    ap.add_argument("cmd", nargs="?", default="report", choices=["report", "next"])
+    ap.add_argument("cmd", nargs="?", default="report", choices=["report", "next", "gate"])
     ap.add_argument("--dir", default=_DEF_SPANS)
     ap.add_argument("--routing", default=_DEF_ROUTING)
     ap.add_argument("--target", type=float, default=None)
@@ -122,6 +145,10 @@ def main(argv=None):
     if a.cmd == "next":
         print(recommend_next(c["codex_share_runs"], c["total_runs"], tgt))
         return 0
+    if a.cmd == "gate":
+        line, code = gate(c, tgt)
+        print(line)
+        return code
     c["target"] = tgt
     # The share is only meaningful if BOTH sides are logged. An all-codex corpus means
     # Opus isn't logging its self-work — report that honestly instead of a false "met".

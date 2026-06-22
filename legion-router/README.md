@@ -63,6 +63,40 @@ legion-delegate run --model gpt-5.5 --sandbox vercel --task "..." --repo .
 Sandcastle is absent, those modes fail with an install hint instead of falling
 back to the default worktree path.
 
+## Sandbox lifecycle
+
+`legion-delegate run` looks for optional lifecycle config in the target repo at
+`.legion/sandbox.json`:
+
+```json
+{
+  "install": "pnpm install",
+  "dev": "pnpm dev",
+  "copy": [".env.local", ".npmrc"]
+}
+```
+
+All fields are optional. Setup runs after the isolated environment is created:
+
+- `install`: runs inside the fresh worktree/sandbox. If omitted, Legion
+  auto-detects a package install command from `bun.lockb`/`bun.lock`,
+  `pnpm-lock.yaml`, `yarn.lock`, or `package-lock.json`. With no config and no
+  supported lockfile, install is skipped.
+- `copy`: trusted runs only. Each relative path is copied from the main repo
+  root into the isolated environment at the same path. For attacker-controlled
+  prompts, pass `--untrusted` or set `LEGION_UNTRUSTED=1`; credential copying is
+  skipped and the rest of setup still runs. `legion-intake` always delegates
+  GitHub issue bodies as untrusted.
+- `dev`: opt-in. When set, Legion starts the command in the background inside
+  the isolated environment, records its PID under the run artifacts, and stops it
+  at run end even when `--keep` retains the worktree. Parallel worktrees can
+  still clash if the dev command uses a fixed port.
+
+For `--sandbox docker|podman|vercel`, install and dev setup run through
+Sandcastle sandbox hooks, and trusted copy paths are passed through
+Sandcastle's `copyToWorktree` option. Sandcastle owns deletion of the container
+or VM when the run completes.
+
 ## Layout
 
 ```

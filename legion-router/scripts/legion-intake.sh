@@ -86,7 +86,7 @@ agent() { env -u GH_TOKEN -u GITHUB_TOKEN -u CODEX_AUTH -u OPENAI_API_KEY "$DELE
 if [[ "$mode" == "explore" ]]; then
   task="$task"$'\n\n'"Return: a short assessment — root cause if visible, the files involved, and whether this is safe to auto-implement (yes/no) with one-line reasoning."
   set +e
-  result="$(agent run --sandbox read-only --model "$model" --task "$task" --repo "$PWD")"
+  result="$(agent run --sandbox read-only --model "$model" --task "$task" --repo "$PWD" --untrusted)"
   rc=$?
   set -e
   summary="$(last_message "$result")"
@@ -96,7 +96,7 @@ if [[ "$mode" == "explore" ]]; then
 fi
 
 set +e
-result="$(agent run --sandbox workspace-write --model "$model" --task "$task" --repo "$PWD")"
+result="$(agent run --sandbox workspace-write --model "$model" --task "$task" --repo "$PWD" --untrusted)"
 rc=$?
 set -e
 status="$(jq -r '.status // "failed"' <<<"$result" 2>/dev/null || echo failed)"

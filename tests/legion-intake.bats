@@ -91,6 +91,7 @@ make_patch() {
   assert_mock_called gh "issue view 7 --repo acme/widgets --json title,body"
   assert_mock_called gh "issue comment 7 --repo acme/widgets --body-file -"
   assert_mock_called legion-delegate "--sandbox read-only --model gpt-5.4"
+  grep -Fq -- "--untrusted" "$MOCK_CALL_LOG"
   grep -Fq "Title: Bug title" "$MOCK_CALL_LOG"
   grep -Fq "🤖 legion-intake explore" "$MOCK_GH_COMMENTS"
   grep -Fq "assessment" "$MOCK_GH_COMMENTS"
@@ -108,6 +109,7 @@ make_patch() {
   # Branch is suffixed with the delegate run id so reruns don't collide.
   assert_mock_called gh "pr create --repo acme/widgets --base main --head agent/issue-9-r123 --title Fix bug"
   assert_mock_called legion-delegate "--sandbox workspace-write --model gpt-5.4"
+  grep -Fq -- "--untrusted" "$MOCK_CALL_LOG"
   [ "$(git -C "$REPO_DIR" branch --show-current)" = "agent/issue-9-r123" ]
   [ "$(git -C "$REPO_DIR" show HEAD:demo.txt)" = "new" ]
   git -C "$REPO_DIR" ls-remote --exit-code --heads origin agent/issue-9-r123 >/dev/null

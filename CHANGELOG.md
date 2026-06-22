@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.4.0...v0.5.0) (2026-06-22)
+
+
+### Added
+
+* **intake:** GitHub issue/label AFK agent intake lane (P10 loop edge) ([#19](https://github.com/Opus-Aether-AI/legion-core/issues/19)) ([bca383e](https://github.com/Opus-Aether-AI/legion-core/commit/bca383ebfa87cba16400175de10b6037a8a26bcd))
+
 ## [0.4.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.3.1...v0.4.0) (2026-06-22)
 
 

@@ -25,7 +25,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8082 claude ...
 curl -s http://127.0.0.1:8082/stats | jq '{totalCostUsd, byUpstream}'
 ```
 
-The proxy binds **loopback only** — that is the sole auth on `/ingest`. Secrets resolve from env → `legion-*` Keychain items → legacy `legion-*` items (reuses a sibling model-router install's creds). Per-model cost comes from `config/costs.json` (one source of truth, shared with `legion-delegate` and `legion-report`).
+The proxy binds **loopback only** — that is the sole auth on `/ingest`. Secrets resolve from direct env vars first, then from the best available local store at runtime: macOS Keychain via `security` on Darwin, `secret-tool`/libsecret on Linux when present, then 0600 files under `${XDG_CONFIG_HOME:-~/.config}/legion/router`. Per-model cost comes from `config/costs.json` (one source of truth, shared with `legion-delegate` and `legion-report`).
 
 ## Why a sidecar, not a proxy, for GPT
 

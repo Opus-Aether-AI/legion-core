@@ -60,22 +60,34 @@ def _here() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _find_marketplace_root(start: str) -> str:
+    # Return the OUTERMOST marketplace.json, not the first one going up. When
+    # legion-core is vendored (consumer/vendored/legion-core/...), the nearest
+    # match is legion-core's OWN marketplace.json; the consumer's sits at the
+    # repo root above it. Standalone legion-core has a single match (its root).
+    current = os.path.abspath(start)
+    match = ""
+    while current and current != os.path.dirname(current):
+        candidate = os.path.join(current, ".claude-plugin", "marketplace.json")
+        if os.path.exists(candidate):
+            match = current
+        current = os.path.dirname(current)
+    return match
+
+
 def default_repo() -> str:
-    # Location-agnostic, matching legion-doctor: explicit LEGION_ROOT wins, else
-    # the git toplevel of this script's dir, else <script>/../.. as a last resort.
-    # This keeps the default correct regardless of cwd or a non-standard layout.
-    env = os.environ.get("LEGION_ROOT")
+    # Prefer an explicit marketplace root override, else walk up from the script
+    # to the outermost consumer marketplace, else fall back to the standalone core.
+    env = (
+        os.environ.get("MARKETPLACE_ROOT")
+        or os.environ.get("LEGION_ROOT")
+        or os.environ.get("LEGION_MARKETPLACE_ROOT")
+    )
     if env:
         return os.path.abspath(os.path.expanduser(env))
-    try:
-        out = subprocess.run(
-            ["git", "-C", _here(), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        if out:
-            return out
-    except Exception:
-        pass
+    walked = _find_marketplace_root(_here())
+    if walked:
+        return walked
     return os.path.abspath(os.path.join(_here(), "..", ".."))
 
 

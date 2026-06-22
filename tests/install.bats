@@ -43,6 +43,8 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"install.sh"* ]]
     [[ "$output" == *"Usage"* ]] || [[ "$output" == *"--no-claude"* ]]
+    [[ "$output" != *" opus"* ]]
+    [[ "$output" != *" vendored"* ]]
 }
 
 @test "-h is an alias for --help" {
@@ -457,7 +459,7 @@ EOF
 @test "fetch_plugins falls back to gh API when source clone is missing" {
     # Remove the clone — install should still work via gh
     rm -rf "$SOURCE_CLONE"
-    # But fetch_plugins is only called during --list or during all/opus/... profile install
+    # But fetch_plugins is only called during --list or during all/... profile install
     # When the clone is gone, setup_source_clone will try to clone via gh.
     # Test --list which only needs fetch_plugins.
 

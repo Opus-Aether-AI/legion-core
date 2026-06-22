@@ -22,6 +22,15 @@ setup() {
   export PATH="$ROOT/legion-router/bin:$BATS_TEST_DIRNAME/mocks/bin:$PATH"
 }
 
+_copy_cursor_setup_scripts() {
+  local dest="$1"
+  mkdir -p "$dest"
+  cp "$ROOT/legion-setup/scripts/legion-cursor-setup.sh" "$dest/"
+  cp "$ROOT/legion-setup/scripts/legion-cursor-mcp-merge.py" "$dest/"
+  cp "$ROOT/legion-setup/scripts/legion-cursor-bridge.py" "$dest/"
+  cp "$ROOT/legion-setup/scripts/legion-marketplace-root.sh" "$dest/"
+}
+
 # legion-core ships no MCP plugins itself, so the bridge is exercised against a
 # fixture marketplace that declares one (the same shape a consumer adds).
 _mkt_with_mcp() {  # $1 = marketplace dir
@@ -53,6 +62,22 @@ _mkt_with_mcp() {  # $1 = marketplace dir
 
   [ "$(cat "$CURSOR_MCP_CONFIG")" = "$first" ]
   jq -e '.mcpServers["user-server"].command == "echo"' "$CURSOR_MCP_CONFIG"
+}
+
+@test "cursor setup: auto-detects the consumer marketplace when legion-core is vendored" {
+  local consumer="$BATS_TEST_TMPDIR/consumer"
+  local vendored="$consumer/vendored/legion-core/legion-setup/scripts"
+  mkdir -p "$consumer/.claude-plugin" "$consumer/dummy-mcp/.claude-plugin"
+  printf '%s\n' '{"name":"consumer","owner":{"name":"o"},"version":"0.0.0","plugins":[{"name":"dummy-mcp","source":"./dummy-mcp"}]}' \
+    > "$consumer/.claude-plugin/marketplace.json"
+  printf '%s\n' '{"name":"dummy-mcp","version":"0.0.0","description":"d","mcpServers":{"dummy":{"command":"echo","args":["hi"]}}}' \
+    > "$consumer/dummy-mcp/.claude-plugin/plugin.json"
+  _copy_cursor_setup_scripts "$vendored"
+
+  unset LEGION_MARKETPLACE_ROOT MARKETPLACE_ROOT
+  run "$vendored/legion-cursor-setup.sh" mcp
+  [ "$status" -eq 0 ]
+  jq -e '.mcpServers.dummy.command == "echo"' "$CURSOR_MCP_CONFIG"
 }
 
 @test "cursor setup: verify detects a drifted Legion MCP spec" {

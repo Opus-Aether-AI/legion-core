@@ -388,17 +388,20 @@ make_test_repo() {
 }
 
 # ── service-management portability preflight (M4) ────────────────────
-@test "router: service commands refuse on non-macOS, pointing to dev/systemd" {
+@test "router on non-macOS: install stores creds (exit 0); service commands refuse" {
     local fakebin="$TEST_TMPDIR/fakebin"; mkdir -p "$fakebin"
     printf '#!/usr/bin/env bash\necho Linux\n' > "$fakebin/uname"
     chmod +x "$fakebin/uname"
     local router="$REPO_ROOT/legion-router/scripts/router.sh"
 
+    # install is portable: it stores credentials everywhere, then skips the
+    # launchd step on non-macOS (exit 0) and points at the foreground runner.
     PATH="$fakebin:$PATH" run bash "$router" install
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"macOS-only"* ]]
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"only stored credentials"* ]]
     [[ "$output" == *"legion-router dev"* ]]
 
+    # status/start/stop genuinely need launchd → still refuse on non-macOS.
     PATH="$fakebin:$PATH" run bash "$router" status
     [ "$status" -eq 1 ]
     [[ "$output" == *"macOS-only"* ]]

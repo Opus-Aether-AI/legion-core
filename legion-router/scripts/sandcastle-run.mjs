@@ -4,8 +4,8 @@
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const INSTALL_HINT =
   "@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle";
@@ -115,17 +115,30 @@ const devCommand =
 const copyPaths = Array.isArray(sandboxConfig.copy)
   ? sandboxConfig.copy.filter(safeRelativePath)
   : [];
-const existingCopyPaths = untrusted
-  ? copyPaths
-  : copyPaths.filter((path) => {
-      if (existsSync(join(mainRepo, path))) return true;
-      console.error(`sandcastle-run: warning: copy path missing: ${path}`);
-      return false;
-    });
-const copyToWorktree = untrusted ? [] : existingCopyPaths;
 
+// copyToWorktree resolves paths relative to the run's `cwd` (the anchor worktree),
+// but configured creds (e.g. .env.local) are gitignored and live in the MAIN repo,
+// not in this fresh worktree. Stage them into `cwd` first so copyToWorktree finds
+// them, then list them. Trusted runs only — untrusted (issue-triggered) gets none.
+let copyToWorktree = [];
 if (untrusted && copyPaths.length > 0) {
   console.error("sandcastle-run: creds skipped (untrusted run)");
+} else if (!untrusted) {
+  for (const rel of copyPaths) {
+    const src = join(mainRepo, rel);
+    if (!existsSync(src)) {
+      console.error(`sandcastle-run: warning: copy path missing: ${rel}`);
+      continue;
+    }
+    try {
+      const dest = join(cwd, rel);
+      mkdirSync(dirname(dest), { recursive: true });
+      cpSync(src, dest, { recursive: true });
+      copyToWorktree.push(rel);
+    } catch (error) {
+      console.error(`sandcastle-run: warning: copy failed for ${rel}: ${error.message}`);
+    }
+  }
 }
 
 // Setup runs INSIDE the sandbox once it's ready. SandboxHooks.sandbox.onSandboxReady

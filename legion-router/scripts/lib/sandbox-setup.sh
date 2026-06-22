@@ -41,7 +41,7 @@ sandbox_valid_relative_path() {
   [[ "$path" != "." ]] || return 1
   [[ "$path" != /* ]] || return 1
   case "$path" in
-    *../*|../*|*/..) return 1 ;;
+    ..|*../*|../*|*/..) return 1 ;;
   esac
   return 0
 }
@@ -74,7 +74,9 @@ sandbox_run_install() {
     return 0
   fi
   sandbox_log "install: $install_cmd"
-  if (cd "$worktree_dir" && bash -c "$install_cmd"); then
+  # Redirect install stdout to stderr: sandbox_setup's stdout carries ONLY the dev
+  # PID, and package-manager progress on stdout would corrupt that value.
+  if (cd "$worktree_dir" && bash -c "$install_cmd") >&2; then
     return 0
   fi
   sandbox_warn "install failed; continuing"
@@ -159,8 +161,10 @@ sandbox_setup() {
   json="$(sandbox_config_json "$main_repo_dir")"
   install_cmd="$(sandbox_json_string "$json" install)"
   [[ -n "$install_cmd" ]] || install_cmd="$(sandbox_detect_install "$worktree_dir")"
-  sandbox_run_install "$worktree_dir" "$install_cmd"
+  # Copy creds BEFORE install: a configured cred (e.g. .npmrc for a private
+  # registry) must exist in the worktree before the install command runs.
   sandbox_copy_credentials "$worktree_dir" "$main_repo_dir" "$untrusted" "$json"
+  sandbox_run_install "$worktree_dir" "$install_cmd"
   dev_cmd="$(sandbox_json_string "$json" dev)"
   sandbox_start_dev "$worktree_dir" "$dev_cmd"
   return 0

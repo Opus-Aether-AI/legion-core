@@ -129,6 +129,27 @@ EOF
   [ -f "$art/sandbox-dev.json" ]
 }
 
+@test "sandbox_setup: install stdout does not corrupt the dev PID on stdout" {
+  make_dirs dev
+  write_dev_mock
+  # install prints to stdout; the returned value must still be a bare numeric PID.
+  printf '{"install":"echo installing-deps","dev":"dev-server"}\n' > "$MAIN_DIR/.legion/sandbox.json"
+  local art="$TEST_TMPDIR/artifacts2"
+  mkdir -p "$art"
+  export LIB WT_DIR MAIN_DIR art
+
+  run bash -c '
+    source "$LIB"
+    pid="$(LEGION_SANDBOX_ARTIFACT_DIR="$art" sandbox_setup "$WT_DIR" "$MAIN_DIR" 0)"
+    [[ "$pid" =~ ^[0-9]+$ ]]   # no "installing-deps" prepended
+    sandbox_teardown "$pid"
+    wait "$pid" 2>/dev/null || true
+    ! kill -0 "$pid" 2>/dev/null
+  '
+
+  [ "$status" -eq 0 ]
+}
+
 @test "sandbox_setup: dev server is not started when dev is absent" {
   make_dirs no-dev
 

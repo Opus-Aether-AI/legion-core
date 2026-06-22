@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.3.1...v0.4.0) (2026-06-22)
+
+
+### Added
+
+* **router:** optional container/VM sandbox via @ai-hero/sandcastle (P16) ([#18](https://github.com/Opus-Aether-AI/legion-core/issues/18)) ([1cb7b6d](https://github.com/Opus-Aether-AI/legion-core/commit/1cb7b6de30f889f5509d878a329e6cc8477eb7a1))
+
 ## [0.3.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.3.0...v0.3.1) (2026-06-22)
 
 

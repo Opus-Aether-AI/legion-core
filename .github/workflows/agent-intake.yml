@@ -1,0 +1,97 @@
+name: agent-intake
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: Issue number to process.
+        required: true
+        type: number
+      mode:
+        description: Intake mode (`explore` or `implement`).
+        required: true
+        type: string
+
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  # Queue one intake run at a time so AFK work stays bounded and reviewable.
+  group: agent-intake
+  cancel-in-progress: false
+
+jobs:
+  intake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Secrets are scoped to the specific steps that need them (NOT job-level), so
+    # checkout / setup / codex-install never see them. The agent itself runs with
+    # secrets scrubbed from its env inside legion-intake.sh — the issue body is
+    # untrusted, so a prompt injection must not be able to read a token.
+    env:
+      CODEX_HOME: ${{ runner.temp }}/codex-home
+    steps:
+      # Maintainer setup:
+      # 1. Create labels `agent:explore` and `agent:implement`.
+      # 2. Prefer CODEX_AUTH = contents of ~/.codex/auth.json from a machine where
+      #    `codex login status` is healthy. As a fallback, set OPENAI_API_KEY instead.
+      # 3. If neither secret exists we comment on the issue and exit 0 by design.
+      - name: Guard intake auth
+        id: auth
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${CODEX_AUTH:-}" || -n "${OPENAI_API_KEY:-}" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh issue comment "${{ inputs.issue_number }}" --repo "${{ github.repository }}" \
+            --body "intake lane not configured: set CODEX_AUTH secret"
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+
+      - if: steps.auth.outputs.configured == 'true'
+        uses: actions/checkout@v5
+
+      - if: steps.auth.outputs.configured == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - if: steps.auth.outputs.configured == 'true'
+        name: Install Codex CLI
+        run: |
+          set -euo pipefail
+          npm install -g @openai/codex
+          codex --version
+
+      - if: steps.auth.outputs.configured == 'true'
+        name: Configure Codex auth
+        env:
+          CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$CODEX_HOME"
+          if [[ -n "${CODEX_AUTH:-}" ]]; then
+            printf '%s' "$CODEX_AUTH" > "$CODEX_HOME/auth.json"
+          else
+            printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key >/dev/null
+          fi
+          codex login status >/dev/null
+
+      - if: steps.auth.outputs.configured == 'true'
+        name: Run intake lane
+        # Only GH_TOKEN (for posting/PR) — codex reads auth from $CODEX_HOME/auth.json.
+        # legion-intake.sh scrubs GH_TOKEN from the agent subprocess.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash legion-router/scripts/legion-intake.sh "${{ inputs.mode }}" \
+            --issue "${{ inputs.issue_number }}" \
+            --repo "${{ github.repository }}"

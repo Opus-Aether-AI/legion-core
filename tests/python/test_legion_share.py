@@ -88,3 +88,35 @@ def test_recommend_next_converges_to_target():
     assert ls.recommend_next(0.33, 3, 0.5) == "codex"    # under target -> codex
     assert ls.recommend_next(0.60, 5, 0.5) == "opus"     # at/over target -> opus
     assert ls.recommend_next(0.50, 4, 0.5) == "opus"     # exactly met -> opus
+
+
+def test_gate_under_target_signals_delegate():
+    # All Opus, no codex -> under target -> exit 1 + a delegate directive.
+    c = ls.compute([_span("opus", "opus", 100), _span("opus", "opus", 100)])
+    line, code = ls.gate(c, 0.5)
+    assert code == 1
+    assert "legion-delegate" in line and "<" in line
+
+
+def test_gate_met_is_quiet():
+    c = ls.compute([_span("codex", "gpt-5.4", 100), _span("opus", "opus", 100)])
+    line, code = ls.gate(c, 0.5)
+    assert code == 0 and "on balance" in line
+
+
+def test_gate_empty_and_codex_only_are_neutral():
+    assert ls.gate(ls.compute([]), 0.5)[1] == 0                          # no data -> no nudge
+    assert ls.gate(ls.compute([_span("codex", "g", 100)]), 0.5)[1] == 0  # codex-only -> unmeasurable
+
+
+def test_gate_cli_exit_code(capsys):
+    # Under target via the CLI surface (crafted spans dir), gate exits 1.
+    import json as _json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "spans.jsonl"), "w") as fh:
+            fh.write(_json.dumps(_span("opus", "opus", 100)) + "\n")
+        code = ls.main(["gate", "--dir", d, "--routing", "/nope", "--target", "0.5"])
+    assert code == 1
+    assert "legion-delegate" in capsys.readouterr().out

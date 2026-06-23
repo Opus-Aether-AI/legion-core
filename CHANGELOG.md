@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.7.1...v0.7.2) (2026-06-23)
+
+
+### Changed
+
+* **observability:** load dynamic context profile groups ([#34](https://github.com/Opus-Aether-AI/legion-core/issues/34)) ([97e9d59](https://github.com/Opus-Aether-AI/legion-core/commit/97e9d59e9bfb71992a1b2dbc2c849ecd7e06984f))
+
 ## [0.7.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.7.0...v0.7.1) (2026-06-23)
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.7.0...v0.7.1) (2026-06-23)
+
+
+### Fixed
+
+* **router:** guard forced proxy configuration ([c8aee61](https://github.com/Opus-Aether-AI/legion-core/commit/c8aee610505d0060fa36e7999a1c5abbcfb1f1f0))
+
 ## [0.7.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.6.0...v0.7.0) (2026-06-22)
 
 

@@ -14,6 +14,8 @@ See everything Legion's multi-model runs do — per-executor **cost, success rat
 | `legion-doctor` | `scripts/legion-doctor.sh` | CI-usable verifier; exits nonzero on any hard-check failure. |
 | `legion-catalog` | `scripts/legion-catalog.py` | Read-only inventory of plugins, skills, agents, commands, hooks, and MCPs. |
 | `legion-self-learn` | `scripts/legion-self-learn.py` | Daily self-learning loop: spans + review findings + trigger evals + manual bug records -> entity-scoped memory/proposals; optional source candidates run in isolated copies and are kept only on measured scorecard improvement. |
+| `legion-context-profile` | `scripts/legion-context-profile.py` | Reversibly trim active Codex/.agents skills and Claude plugins to a repo profile when context budget gets noisy. |
+| `legion-session-learn` | `scripts/legion-session-learn.py` | Mine recent Claude/Codex/Cursor sessions and project memories for recurring gotchas, then optionally record them into self-learning outcomes. |
 
 ## Quick start
 
@@ -24,6 +26,8 @@ legion-report --by model --html > report.html
 cat ~/.claude/logs/legion/spans/*.jsonl | legion-otel-export --dry-run | jq .
 legion-self-learn run --apply-memory       # safe daily mode
 legion-self-learn hints                    # active learned guardrails
+legion-context-profile apply --dry-run     # preview skill/plugin context trim
+legion-session-learn --query moneyball --record
 
 # Emit a span from any runner/executor:
 legion-trace emit --executor codex --model gpt-5.5 --status ok \

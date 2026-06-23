@@ -92,6 +92,27 @@ _mkt_with_mcp() {  # $1 = marketplace dir
   echo "$output" | grep -q 'MCP dummy registered but drifted'
 }
 
+@test "cursor setup: mcp repairs a drifted Legion MCP spec" {
+  local mkt="$BATS_TEST_TMPDIR/mkt"; _mkt_with_mcp "$mkt"
+  mkdir -p "$(dirname "$CURSOR_MCP_CONFIG")"
+  printf '%s\n' '{"mcpServers":{"dummy":{"command":"/stale/dummy","args":[]}}}' > "$CURSOR_MCP_CONFIG"
+
+  LEGION_MARKETPLACE_ROOT="$mkt" run "$SETUP_SH" mcp
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"updated: dummy"* ]]
+  jq -e '.mcpServers.dummy.command == "echo"' "$CURSOR_MCP_CONFIG"
+}
+
+@test "cursor mcp merge: adds startup timeout for slow MCP servers" {
+  mkdir -p "$(dirname "$CURSOR_MCP_CONFIG")"
+  printf '%s\n' '{"mcpServers":{}}' > "$CURSOR_MCP_CONFIG"
+  run bash -c "printf '%s' '{\"playwright\":{\"command\":\"npx\",\"args\":[\"-y\",\"@playwright/mcp@latest\"]},\"codebase-memory\":{\"command\":\"/tmp/memory\",\"args\":[]}}' | '$MERGE_PY' --config '$CURSOR_MCP_CONFIG'"
+  [ "$status" -eq 0 ]
+  jq -e '.mcpServers.playwright.startup_timeout_sec == 120' "$CURSOR_MCP_CONFIG"
+  jq -e '."mcpServers"."codebase-memory".startup_timeout_sec == 120' "$CURSOR_MCP_CONFIG"
+}
+
 @test "cursor setup: verify requires Legion-generated agents, not any user agent" {
   "$SETUP_SH" mcp >/dev/null
   mkdir -p "$CURSOR_AGENTS"

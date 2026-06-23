@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # legion-doctor — verify a Legion install is wired correctly. Exits nonzero on any
-# hard-check failure (CI-usable). codex/router checks are warnings, not failures.
+# hard-check failure (CI-usable). Codex checks are warnings. Router checks are
+# warnings unless Claude is configured to force traffic through the local proxy.
 #
 #   legion-doctor [--repo DIR] [--only CHECK] [--record-failures]
 #   checks: marketplace-schema plugins frontmatter descriptions mcp bridges
@@ -263,7 +264,25 @@ check_router() {
   if curl -sf -m 2 "http://127.0.0.1:$ROUTER_PORT/health" >/dev/null 2>&1; then
     pass "router responding on 127.0.0.1:$ROUTER_PORT"
   else
-    warn "router not running on :$ROUTER_PORT (optional — legion-router start)"
+    local base_url=""
+    if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
+      base_url="$ANTHROPIC_BASE_URL"
+    elif [[ -f "$HOME/.claude/settings.json" ]] && command -v jq >/dev/null 2>&1; then
+      base_url="$(jq -r '.env.ANTHROPIC_BASE_URL // ""' "$HOME/.claude/settings.json" 2>/dev/null || true)"
+    fi
+
+    case "$base_url" in
+      "http://127.0.0.1:$ROUTER_PORT"|\
+      "http://127.0.0.1:$ROUTER_PORT/"|\
+      "http://localhost:$ROUTER_PORT"|\
+      "http://localhost:$ROUTER_PORT/")
+        fail "Claude is configured with ANTHROPIC_BASE_URL=$base_url but the router is not healthy on :$ROUTER_PORT" \
+          "plugin:legion-router"
+        ;;
+      *)
+        warn "router not running on :$ROUTER_PORT (optional — legion-router start)"
+        ;;
+    esac
   fi
 }
 

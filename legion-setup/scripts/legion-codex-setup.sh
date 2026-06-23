@@ -12,8 +12,9 @@
 #   legion-codex-setup bridge     # turn subagents + slash commands into Codex skills
 #   legion-codex-setup verify     # read-only: MCPs / skills / bridges / legion-claude / codex
 #
-# Idempotent + non-destructive: MCP registration only APPENDS servers Codex doesn't
-# already have (use --force to re-render). Nothing here touches your auth or models.
+# Idempotent + non-destructive: MCP registration preserves unrelated servers and
+# reconciles marketplace-owned server names when specs drift. Nothing here touches
+# your auth or models.
 set -euo pipefail
 
 HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"

@@ -685,6 +685,7 @@ export function resetCircuitBreaker() {
 const server = Bun.serve({
 	port: PORT,
 	hostname: "127.0.0.1", // loopback-only: the only auth on /ingest, and the proxy is local-only by design
+	idleTimeout: 255, // Bun defaults to 10s, which kills long streaming LLM responses mid-flight ("Connection closed mid-response"). 255s = Bun's max.
 	async fetch(req) {
 		const url = new URL(req.url);
 		const path = url.pathname + url.search;

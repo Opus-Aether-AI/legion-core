@@ -80,7 +80,7 @@ _copy_codex_setup_scripts() {
   grep -q '^\[mcp_servers.dummy\]' "$CODEX_CONFIG"
 }
 
-@test "merge: never clobbers a user's existing block" {
+@test "merge: reconciles a stale marketplace block and preserves unrelated config" {
   mkdir -p "$(dirname "$CODEX_CONFIG")"
   cat > "$CODEX_CONFIG" <<'TOML'
 model = "gpt-5.5"
@@ -89,11 +89,30 @@ model = "gpt-5.5"
 command = "MINE"
 args = ["custom"]
 TOML
-  echo '{"context7":{"command":"npx","args":["-y","x"]},"new":{"command":"n","args":[]}}' \
-    | python3 "$MERGE_PY" --config "$CODEX_CONFIG"
-  # existing context7 preserved verbatim, only `new` appended
-  grep -qF 'command = "MINE"' "$CODEX_CONFIG"
+  run bash -c "echo '{\"context7\":{\"command\":\"npx\",\"args\":[\"-y\",\"x\"]},\"new\":{\"command\":\"n\",\"args\":[]}}' | python3 '$MERGE_PY' --config '$CODEX_CONFIG'"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.updated == ["context7"] and .added == ["new"]'
+  grep -qF 'model = "gpt-5.5"' "$CODEX_CONFIG"
+  grep -qF 'command = "npx"' "$CODEX_CONFIG"
+  ! grep -qF 'command = "MINE"' "$CODEX_CONFIG"
   grep -q '^\[mcp_servers.new\]' "$CODEX_CONFIG"
+}
+
+@test "merge: skips an existing server when the rendered spec is current" {
+  mkdir -p "$(dirname "$CODEX_CONFIG")"
+  echo '{"context7":{"command":"npx","args":["-y","x"]}}' | python3 "$MERGE_PY" --config "$CODEX_CONFIG"
+  local first; first="$(cat "$CODEX_CONFIG")"
+  run bash -c "echo '{\"context7\":{\"command\":\"npx\",\"args\":[\"-y\",\"x\"]}}' | python3 '$MERGE_PY' --config '$CODEX_CONFIG'"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.skipped == ["context7"] and .updated == [] and .added == []'
+  [ "$(cat "$CODEX_CONFIG")" = "$first" ]
+}
+
+@test "merge: adds startup timeout for slow MCP servers" {
+  mkdir -p "$(dirname "$CODEX_CONFIG")"
+  echo '{"playwright":{"command":"npx","args":["-y","@playwright/mcp@latest"]},"codebase-memory":{"command":"/tmp/memory","args":[]}}' \
+    | python3 "$MERGE_PY" --config "$CODEX_CONFIG"
+  [ "$(grep -c '^startup_timeout_sec = 120$' "$CODEX_CONFIG")" -eq 2 ]
 }
 
 @test "merge: --force re-renders an existing server" {

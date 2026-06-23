@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Resolve this script's real location even when invoked through a symlink.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+root="$(cd -P "$(dirname "$src")/.." >/dev/null 2>&1 && pwd)"
+exec python3 "$root/scripts/legion-context-profile.py" "$@"

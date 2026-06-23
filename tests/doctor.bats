@@ -124,6 +124,22 @@ _make_good() {
   [[ "$output" == *WARN* ]]
 }
 
+@test "doctor: router fails when Claude is configured to force the local proxy" {
+  home="$BATS_TEST_TMPDIR/proxy-home"
+  mkdir -p "$home/.claude"
+  printf '%s\n' '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:59999"}}' > "$home/.claude/settings.json"
+
+  HOME="$home" ROUTER_PORT=59999 run "$DOCTOR" --repo "$GOOD" --only router
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ANTHROPIC_BASE_URL=http://127.0.0.1:59999"* ]]
+}
+
+@test "doctor: router fails when ANTHROPIC_BASE_URL env forces the local proxy" {
+  ANTHROPIC_BASE_URL="http://localhost:59999" ROUTER_PORT=59999 run "$DOCTOR" --repo "$GOOD" --only router
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ANTHROPIC_BASE_URL=http://localhost:59999"* ]]
+}
+
 @test "doctor: unknown check exits 2" {
   run "$DOCTOR" --repo "$GOOD" --only nope
   [ "$status" -eq 2 ]

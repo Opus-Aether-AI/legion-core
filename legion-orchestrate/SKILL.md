@@ -9,6 +9,26 @@ description: Use to deliver a multi-step coding goal with Legion's dynamic MULTI
 
 The Claude "ultracode" loop (decompose → fan out → adversarially verify → synthesize → gate), but **executor-aware**: Opus conducts, **GPT-5.4 does the bulk of coding in parallel**, **GPT-5.5 verifies**, all metered and kept at ≥50% codex ([[project_legion_marketplace]]).
 
+## Preflight
+
+Before decomposing, run a bounded install check:
+
+```bash
+legion-self-learn hints --entity skill:legion-orchestrate
+legion-doctor --only codex
+legion-doctor --only router
+```
+
+Treat the self-learning hints as workflow guardrails for this run. They are the
+durable memory from prior failures and reviews; do not mine broad session logs
+here unless the user explicitly asks Legion to learn from past sessions.
+
+Router failure is only blocking when the current Claude process or
+`~/.claude/settings.json` forces `ANTHROPIC_BASE_URL` to the local `:8082`
+proxy. If it fails in that mode, remove the global proxy env or start/fix
+`legion-router` before orchestration; otherwise Claude API calls can fail before
+fan-out even begins. Do not run broad session/log greps as preflight.
+
 ## The loop
 
 1. **Decompose** (Opus) — break the goal into **dependency-aware slices**. Independent slices can run in parallel; dependent ones are sequenced.

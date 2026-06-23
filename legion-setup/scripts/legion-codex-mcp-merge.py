@@ -4,8 +4,9 @@
 Codex CLI reads MCP servers from `[mcp_servers.<name>]` tables in its config.toml,
 using the SAME shape Claude Code declares under a plugin's `mcpServers` key
 (command / args / env, or url / bearer_token_env_var). This tool renders those
-tables and APPENDS only the ones not already present — it never edits or reorders
-a block the user (or a prior run) already wrote, so it is safe to re-run.
+tables. Matching marketplace-owned server names are reconciled in place: if an
+existing block has drifted (for example a stale Playwright package), it is
+removed and re-rendered. Unrelated server names are preserved.
 
   echo '{"context7":{"command":"npx","args":["-y","@upstash/context7-mcp@latest"]}}' \
     | legion-codex-mcp-merge.py --config ~/.codex/config.toml
@@ -13,7 +14,7 @@ a block the user (or a prior run) already wrote, so it is safe to re-run.
 stdin : JSON object  { "<server-name>": { command|args|env | url|bearer_token_env_var } }
 stdout: JSON summary  { "added": [...], "skipped": [...], "updated": [...], "config": "<path>" }
 
---force re-renders servers that already exist (removes the old block, appends fresh).
+--force re-renders servers that already exist even when the rendered spec matches.
 --dry-run computes the summary + would-be file without writing.
 """
 from __future__ import annotations
@@ -27,6 +28,8 @@ import sys
 # key in TOML matches [A-Za-z0-9_-]+. We deliberately do NOT touch quoted/dotted
 # keys — those are out of scope and safer left alone.
 _SECTION_RE = re.compile(r"^\[mcp_servers\.([A-Za-z0-9_-]+)\]\s*$", re.MULTILINE)
+_SLOW_STARTUP_SERVERS = {"codebase-memory", "playwright"}
+_SLOW_STARTUP_COMMANDS = {"npx", "bunx", "uvx", "pnpm dlx"}
 
 
 def _existing_sections(text: str) -> set[str]:
@@ -49,21 +52,48 @@ def _render(name: str, spec: dict) -> str:
         if env:
             pairs = ", ".join(f"{k} = {json.dumps(v)}" for k, v in env.items())
             lines.append("env = { " + pairs + " }")
+    if spec.get("startup_timeout_sec"):
+        lines.append(f"startup_timeout_sec = {int(spec['startup_timeout_sec'])}")
     return "\n".join(lines) + "\n"
+
+
+def _section_span(text: str, name: str) -> tuple[int, int] | None:
+    header = re.compile(rf"^\[mcp_servers\.{re.escape(name)}\]\s*$", re.MULTILINE)
+    m = header.search(text)
+    if not m:
+        return None
+    nxt = re.compile(r"^\[", re.MULTILINE).search(text, m.end())
+    end = nxt.start() if nxt else len(text)
+    return m.start(), end
+
+
+def _section_text(text: str, name: str) -> str:
+    span = _section_span(text, name)
+    return "" if span is None else text[span[0] : span[1]].strip() + "\n"
 
 
 def _strip_section(text: str, name: str) -> str:
     """Remove an existing [mcp_servers.<name>] block: from its header to the next
-    top-level [header] or EOF. Used only under --force."""
-    header = re.compile(rf"^\[mcp_servers\.{re.escape(name)}\]\s*$", re.MULTILINE)
-    m = header.search(text)
-    if not m:
+    top-level [header] or EOF."""
+    span = _section_span(text, name)
+    if span is None:
         return text
-    nxt = re.compile(r"^\[", re.MULTILINE).search(text, m.end())
-    end = nxt.start() if nxt else len(text)
-    out = text[: m.start()] + text[end:]
+    start, end = span
+    out = text[:start] + text[end:]
     # Collapse the blank-line gap the removal may leave behind.
     return re.sub(r"\n{3,}", "\n\n", out)
+
+
+def _normalize_spec(name: str, spec: dict) -> dict:
+    normalized = dict(spec)
+    command = str(normalized.get("command") or "")
+    if (
+        not normalized.get("url")
+        and not normalized.get("startup_timeout_sec")
+        and (name in _SLOW_STARTUP_SERVERS or command in _SLOW_STARTUP_COMMANDS)
+    ):
+        normalized["startup_timeout_sec"] = 120
+    return normalized
 
 
 def merge(text: str, servers: dict, force: bool) -> tuple[str, dict]:
@@ -71,16 +101,18 @@ def merge(text: str, servers: dict, force: bool) -> tuple[str, dict]:
     added, skipped, updated = [], [], []
     appended = []
     for name in sorted(servers):
+        spec = _normalize_spec(name, servers[name])
+        rendered = _render(name, spec)
         if name in existing:
-            if force:
+            if force or _section_text(text, name) != rendered:
                 text = _strip_section(text, name)
                 updated.append(name)
-                appended.append(_render(name, servers[name]))
+                appended.append(rendered)
             else:
                 skipped.append(name)
             continue
         added.append(name)
-        appended.append(_render(name, servers[name]))
+        appended.append(rendered)
     if appended:
         sep = "" if text.endswith("\n\n") or text == "" else ("\n" if text.endswith("\n") else "\n\n")
         text = text + sep + "\n".join(appended)

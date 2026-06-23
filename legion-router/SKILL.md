@@ -140,3 +140,8 @@ GPT-5.x via Codex uses ChatGPT-subscription auth, which reports token counts but
 ## Routing proxy (optional, opt-in)
 
 The bundled `:8082` proxy meters Claude/MiniMax traffic translation-free (base-URL+auth swap). It is **opt-in** — only traffic you explicitly point at it via `ANTHROPIC_BASE_URL` is routed; your main session is never forced through it. See `references/routing-policy.md`.
+
+Do **not** set a global `ANTHROPIC_BASE_URL=http://127.0.0.1:8082` unless
+`legion-doctor --only router` is clean in the same environment. A forced global
+proxy turns router downtime, launchd drift, or stream timeout bugs into repeated
+Claude API failures. Prefer per-command opt-in for metering experiments.

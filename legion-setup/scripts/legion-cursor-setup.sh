@@ -69,6 +69,20 @@ collect_mcp_servers() {
   printf '%s' "$acc"
 }
 
+normalize_mcp_servers() {
+  jq -c '
+    def slow_command: ["npx", "bunx", "uvx", "pnpm dlx"];
+    with_entries(
+      .value = (
+        if (.value.url? or .value.startup_timeout_sec?) then .value
+        elif ((.value.command // "") as $cmd | (.key == "codebase-memory" or .key == "playwright" or (slow_command | index($cmd)))) then
+          .value + {"startup_timeout_sec": 120}
+        else .value end
+      )
+    )
+  '
+}
+
 cmd_mcp() {
   need python3
   [[ -f "$MCP_MERGE_PY" ]] || { red "merge helper not found: $MCP_MERGE_PY"; exit 1; }
@@ -121,7 +135,7 @@ cmd_verify() {
 
   if [[ -f "$CURSOR_MCP_CONFIG" ]]; then
     local want expected
-    expected="$(collect_mcp_servers)"
+    expected="$(collect_mcp_servers | normalize_mcp_servers)"
     want="$(jq -r 'keys[]' <<<"$expected" 2>/dev/null || true)"
     while IFS= read -r name; do
       [[ -z "$name" ]] && continue

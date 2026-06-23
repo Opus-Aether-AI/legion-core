@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Merge marketplace MCP servers into Cursor's ~/.cursor/mcp.json.
 
-Cursor uses a JSON object with an `mcpServers` key. This helper preserves any
-existing user-managed servers and only adds missing Legion marketplace servers
-unless --force is passed.
+Cursor uses a JSON object with an `mcpServers` key. This helper preserves
+unrelated user-managed servers and reconciles marketplace-owned server names in
+place. If a known server has drifted, for example a stale Playwright package, it
+is replaced with the current marketplace spec.
 """
 from __future__ import annotations
 
@@ -12,6 +13,21 @@ import json
 import os
 import sys
 import tempfile
+
+_SLOW_STARTUP_SERVERS = {"codebase-memory", "playwright"}
+_SLOW_STARTUP_COMMANDS = {"npx", "bunx", "uvx", "pnpm dlx"}
+
+
+def normalize_spec(name: str, spec: dict) -> dict:
+    normalized = dict(spec)
+    command = str(normalized.get("command") or "")
+    if (
+        not normalized.get("url")
+        and not normalized.get("startup_timeout_sec")
+        and (name in _SLOW_STARTUP_SERVERS or command in _SLOW_STARTUP_COMMANDS)
+    ):
+        normalized["startup_timeout_sec"] = 120
+    return normalized
 
 
 def merge(config: dict, servers: dict, force: bool) -> tuple[dict, dict]:
@@ -22,14 +38,15 @@ def merge(config: dict, servers: dict, force: bool) -> tuple[dict, dict]:
     skipped: list[str] = []
     updated: list[str] = []
     for name in sorted(servers):
-        if name in current and not force:
+        spec = normalize_spec(name, servers[name])
+        if name in current and not force and current[name] == spec:
             skipped.append(name)
             continue
         if name in current:
             updated.append(name)
         else:
             added.append(name)
-        current[name] = servers[name]
+        current[name] = spec
     return config, {"added": added, "skipped": skipped, "updated": updated}
 
 

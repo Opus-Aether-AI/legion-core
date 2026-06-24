@@ -84,9 +84,16 @@ def _out_tokens(s):
     return _num(t.get("output_tokens", 0)) + _num(t.get("reasoning_output_tokens", 0))
 
 
+def is_synthetic_opus_baseline(s):
+    artifacts = s.get("artifacts") or {}
+    return isinstance(artifacts, dict) and artifacts.get("synthetic_opus_baseline") is True
+
+
 def compute(spans):
     failed = sum(1 for s in spans if s.get("status") != "ok")
     ok = [s for s in spans if s.get("status") == "ok"]   # share = successful work only (failures don't count)
+    if any((not is_codex(s.get("executor"))) and not is_synthetic_opus_baseline(s) for s in ok):
+        ok = [s for s in ok if not is_synthetic_opus_baseline(s)]
     runs = len(ok)
     codex = sum(1 for s in ok if is_codex(s.get("executor")))
     codex_tok = sum(_out_tokens(s) for s in ok if is_codex(s.get("executor")))

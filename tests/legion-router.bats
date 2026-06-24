@@ -8,6 +8,7 @@ setup() {
     setup_test_env
     LIB="$REPO_ROOT/legion-router/scripts/lib"
     DELEGATE="$REPO_ROOT/legion-router/scripts/delegate.sh"
+    SHARE="$REPO_ROOT/legion-observability/bin/legion-share"
     FIXTURE="$BATS_TEST_DIRNAME/fixtures/codex-json/turn-with-diff.jsonl"
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
     export LEGION_COSTS_FILE="$REPO_ROOT/legion-router/config/costs.json"
@@ -99,8 +100,45 @@ make_test_repo() {
     [ -s "$diff" ]
     grep -q "MOCK_CODEX_CHANGE" "$diff"
     # span written
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r 'select(.executor==\"codex\") | .executor'"
     [ "$output" = "codex" ]
+}
+
+@test "delegate run: auto-emits an Opus baseline span for share measurement" {
+    local repo; repo="$(make_test_repo share0)"
+    run "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -src '[.[].executor] | sort'"
+    [ "$output" = '["codex","opus-baseline"]' ]
+
+    run "$SHARE" --dir "$LEGION_TELEMETRY_DIR"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "met" and .codex_runs == 1 and .opus_runs == 1'
+}
+
+@test "delegate run: synthetic Opus baseline is ignored when real Opus work exists" {
+    local repo; repo="$(make_test_repo share1)"
+    run "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    "$REPO_ROOT/legion-observability/bin/legion-trace" emit \
+      --executor opus --model opus --status ok >/dev/null
+
+    run "$SHARE" --dir "$LEGION_TELEMETRY_DIR"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "met" and .total_runs == 2 and .codex_runs == 1 and .opus_runs == 1'
+}
+
+@test "delegate run: synthetic Opus baseline is ignored when any real non-Codex work exists" {
+    local repo; repo="$(make_test_repo share2)"
+    run "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    "$REPO_ROOT/legion-observability/bin/legion-trace" emit \
+      --executor claude --model opus --status ok >/dev/null
+
+    run "$SHARE" --dir "$LEGION_TELEMETRY_DIR"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "met" and .total_runs == 2 and .codex_runs == 1 and .opus_runs == 1'
 }
 
 @test "delegate run: writes a legion.run-state.v1 registry record (running→terminal)" {
@@ -153,7 +191,7 @@ make_test_repo() {
 @test "delegate run: standalone span is its own trace root (trace_id=run_id, parent null)" {
     local repo; repo="$(make_test_repo trace0)"
     "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet >/dev/null
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec '{same:(.trace_id==.run_id), parent:.parent_id}'"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | {same:(.trace_id==.run_id), parent:.parent_id}'"
     [ "$output" = '{"same":true,"parent":null}' ]
 }
 
@@ -161,7 +199,7 @@ make_test_repo() {
     local repo; repo="$(make_test_repo trace1)"
     LEGION_TRACE_ID="trace-abc" LEGION_PARENT_ID="parent-xyz" \
         "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet >/dev/null
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec '{t:.trace_id, p:.parent_id}'"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | {t:.trace_id, p:.parent_id}'"
     [ "$output" = '{"t":"trace-abc","p":"parent-xyz"}' ]
 }
 
@@ -242,6 +280,9 @@ make_test_repo() {
     MOCK_CODEX_FAIL=1 run "$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --quiet
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.status == "failed"'
+    run bash -c "jq -s '[.[] | select(.artifacts.synthetic_opus_baseline == true)] | length' '$LEGION_TELEMETRY_DIR'/*.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ]
 }
 
 @test "delegate run: --budget-tokens marks over_budget when exceeded" {

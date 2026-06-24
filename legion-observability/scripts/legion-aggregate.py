@@ -47,10 +47,17 @@ def _num(x):
     return x if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x else 0
 
 
+def _is_synthetic_opus_baseline(span):
+    artifacts = span.get("artifacts") or {}
+    return isinstance(artifacts, dict) and artifacts.get("synthetic_opus_baseline") is True
+
+
 def aggregate(spans, by="executor"):
     groups = {}
     for s in spans:
         if not isinstance(s, dict) or s.get("schema") != "legion.span.v1":
+            continue
+        if _is_synthetic_opus_baseline(s):
             continue
         key = s.get(by) or "unknown"
         g = groups.setdefault(key, {"count": 0, "ok": 0, "cost_usd": 0.0, "_dur": []})

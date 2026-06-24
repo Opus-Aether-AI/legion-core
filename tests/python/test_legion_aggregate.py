@@ -54,6 +54,22 @@ def test_aggregate_by_model_and_status():
     assert "ok" in agg.aggregate(spans, by="status")["groups"]
 
 
+def test_aggregate_ignores_synthetic_opus_baselines():
+    spans = [
+        {"schema": "legion.span.v1", "executor": "codex", "model": "gpt-5.4", "status": "ok"},
+        {
+            "schema": "legion.span.v1",
+            "executor": "opus-baseline",
+            "model": "opus-baseline",
+            "status": "ok",
+            "artifacts": {"synthetic_opus_baseline": True},
+        },
+    ]
+    r = agg.aggregate(spans)
+    assert "opus-baseline" not in r["groups"]
+    assert r["total"]["count"] == 1
+
+
 def test_num_rejects_bool_nan_and_strings():
     assert agg._num(True) == 0          # bool is int 1 in Python — must be rejected
     assert agg._num(False) == 0

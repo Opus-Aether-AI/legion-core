@@ -173,6 +173,21 @@ make_test_repo() {
     assert_mock_called codex "skip-git-repo-check"
 }
 
+@test "delegate run: span records copied secret names without values" {
+    local repo; repo="$(make_test_repo secret-audit)"
+    mkdir -p "$repo/.legion"
+    printf 'TOKEN=super-secret\n' > "$repo/.env.local"
+    printf '{"copy":[".env.local"]}\n' > "$repo/.legion/sandbox.json"
+
+    run "$DELEGATE" run --model gpt-5.5 --task "touch foo" --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | .artifacts.copied_secret_names'"
+    [ "$output" = '[".env.local"]' ]
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor==\"codex\") | tostring | contains(\"super-secret\") | not'"
+    [ "$status" -eq 0 ]
+}
+
 @test "delegate run: explicit container sandbox accepts flag and fails with Sandcastle install hint when absent" {
     if node -e 'import("@ai-hero/sandcastle")' >/dev/null 2>&1; then
       skip "@ai-hero/sandcastle is installed; missing-optional-dependency path not applicable"

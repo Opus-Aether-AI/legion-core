@@ -63,7 +63,7 @@
       "name": "legion-orchestrate",
       "source": "./legion-orchestrate",
       "description": "Legion's dynamic MULTI-MODEL orchestrator — the ultracode loop (decompose -> fan out -> cross-model verify -> synthesize -> gate) made executor-aware: Opus conducts, GPT-5.4 does the bulk of coding in PARALLEL, GPT-5.5 verifies. Ships `legion-fanout` (run scoped slices in parallel across executors via legion-delegate, collect verified diffs + cost) + a SKILL playbook with an LEGION_ULTRACODE max-exhaustive mode (wide fan-out, multi-vote cross-model verify, loop-until-dry).",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "category": "agent-orchestration",
       "keywords": [
         "orchestration",

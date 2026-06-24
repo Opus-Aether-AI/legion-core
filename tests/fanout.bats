@@ -4,10 +4,11 @@
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   FANOUT="$ROOT/legion-orchestrate/bin/legion-fanout"
-  export PATH="$BATS_TEST_DIRNAME/mocks/bin:$PATH"     # mock `codex`
+  export PATH="$ROOT/legion-router/bin:$ROOT/legion-observability/bin:$BATS_TEST_DIRNAME/mocks/bin:$PATH"     # mock `codex`
   # Pin the REAL delegate: tests/mocks/bin also carries a legion-delegate stub (for
   # legion-claude's fallback tests) that would otherwise shadow the real one here.
   export LEGION_DELEGATE="$ROOT/legion-router/bin/legion-delegate"
+  export LEGION_TELEMETRY="$ROOT/legion-observability/bin/legion-trace"
   export LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans"
   REPO="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$REPO"
@@ -17,6 +18,35 @@ setup() {
   printf 'a\n' > "$REPO/a.ts"
   git -C "$REPO" add -A
   git -C "$REPO" -c user.email=t@t.c -c user.name=t commit -qm init
+}
+
+@test "fanout: resolves legion-route from PATH before source-tree fallback" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$bin"
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"executor":"self","model":"path-stub"}'
+SH
+  chmod +x "$bin/legion-route"
+
+  printf '%s\n' '{"archetype":"implement-feature","task":"build A"}' > "$BATS_TEST_TMPDIR/path.jsonl"
+  PATH="$bin:$PATH" run "$FANOUT" --slices "$BATS_TEST_TMPDIR/path.jsonl" --repo "$REPO"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.inline == 1 and .ok == 0'
+}
+
+@test "fanout: missing telemetry command does not block work" {
+  local isolated="$BATS_TEST_TMPDIR/isolated/legion-fanout.sh"
+  mkdir -p "$(dirname "$isolated")"
+  cp "$ROOT/legion-orchestrate/scripts/legion-fanout.sh" "$isolated"
+  chmod +x "$isolated"
+
+  printf '%s\n' '{"archetype":"implement-feature","task":"build A"}' > "$BATS_TEST_TMPDIR/no-telemetry.jsonl"
+  local clean_path="$ROOT/legion-router/bin:$BATS_TEST_DIRNAME/mocks/bin:$(dirname "$(command -v python3)"):$(dirname "$(command -v jq)"):$(dirname "$(command -v git)"):/usr/bin:/bin:/usr/sbin:/sbin"
+  PATH="$clean_path" LEGION_TELEMETRY= \
+    run "$isolated" --slices "$BATS_TEST_TMPDIR/no-telemetry.jsonl" --repo "$REPO"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 1 and .failed == 0'
 }
 
 @test "fanout: delegates codex slices in parallel + returns self slices inline" {

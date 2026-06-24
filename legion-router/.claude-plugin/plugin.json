@@ -1,7 +1,7 @@
 {
   "name": "legion-router",
   "description": "Legion's multi-model brain: delegate scoped tasks from Opus to external model agents (Codex / GPT-5.5 / GPT-5.4 and Cursor Agent) and bring back a verified, metered diff. Ships `legion-delegate` for Codex, `legion-cursor` for Cursor Agent headless runs, the `legion-router` loopback :8082 Anthropic-compatible metering proxy (claude-* / minimax-* pass-through + /ingest), plus the shared cost table and codex-json parser. One orchestrator, a legion of models.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "author": {
     "name": "legion-core"
   },

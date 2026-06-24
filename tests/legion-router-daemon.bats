@@ -9,8 +9,19 @@ setup() {
   command -v jq  >/dev/null 2>&1 || skip "jq not installed"
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   PORT=8189
+  UPSTREAM_PORT=8190
   export LEGION_COSTS_FILE="$REPO_ROOT/legion-router/config/costs.json"
-  ROUTER_PORT="$PORT" bun run "$REPO_ROOT/legion-router/scripts/router.ts" \
+  ROUTER_STREAM_UPSTREAM_PORT="$UPSTREAM_PORT" bun run "$REPO_ROOT/tests/fixtures/router-stream-upstream.ts" \
+    >"$BATS_TEST_TMPDIR/upstream.log" 2>&1 &
+  UPSTREAM_PID=$!
+  if ! curl -sf --retry 40 --retry-connrefused --retry-delay 1 -m 2 \
+        "http://127.0.0.1:$UPSTREAM_PORT/health" >/dev/null 2>&1; then
+    cat "$BATS_TEST_TMPDIR/upstream.log" >&2
+    return 1
+  fi
+  ROUTER_PORT="$PORT" OLLAMA_MODELS="local-stream" OLLAMA_BASE_URL="http://127.0.0.1:$UPSTREAM_PORT" \
+    UPSTREAM_TIMEOUT_MS=200 \
+    STREAM_UPSTREAM_TIMEOUT_MS=0 bun run "$REPO_ROOT/legion-router/scripts/router.ts" \
     >"$BATS_TEST_TMPDIR/router.log" 2>&1 &
   ROUTER_PID=$!
   if ! curl -sf --retry 40 --retry-connrefused --retry-delay 1 -m 2 \
@@ -21,7 +32,14 @@ setup() {
 }
 
 teardown() {
-  [[ -n "${ROUTER_PID:-}" ]] && kill "$ROUTER_PID" 2>/dev/null || true
+  if [[ -n "${ROUTER_PID:-}" ]]; then
+    kill "$ROUTER_PID" 2>/dev/null || true
+    wait "$ROUTER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${UPSTREAM_PID:-}" ]]; then
+    kill "$UPSTREAM_PID" 2>/dev/null || true
+    wait "$UPSTREAM_PID" 2>/dev/null || true
+  fi
 }
 
 @test "router: starts with no keys (degraded, not crashed)" {
@@ -84,4 +102,42 @@ teardown() {
   run curl -s "http://127.0.0.1:$PORT/stats"
   echo "$output" | jq -e '.totalRequests == 0'
   echo "$output" | jq -e '.totalCostUsd == 0'
+}
+
+@test "router: concurrent streaming responses complete and are metered" {
+  local pids=()
+  local i
+  for i in 1 2 3 4 5 6; do
+    curl -sS -N -X POST "http://127.0.0.1:$PORT/v1/messages" \
+      -H 'content-type: application/json' \
+      -d '{"model":"local-stream","stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+      >"$BATS_TEST_TMPDIR/stream-$i.out" &
+    pids+=("$!")
+  done
+
+  for pid in "${pids[@]}"; do
+    wait "$pid"
+  done
+
+  for i in 1 2 3 4 5 6; do
+    grep -q 'message_delta' "$BATS_TEST_TMPDIR/stream-$i.out"
+    grep -q 'message_stop' "$BATS_TEST_TMPDIR/stream-$i.out"
+    ! grep -q 'upstream_stream_error' "$BATS_TEST_TMPDIR/stream-$i.out"
+  done
+
+  run curl -s "http://127.0.0.1:$PORT/stats"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.totalRequests == 6'
+  echo "$output" | jq -e '.totalInputTokens == 18'
+  echo "$output" | jq -e '.totalOutputTokens == 42'
+  echo "$output" | jq -e '.byUpstream.ollama.requests == 6'
+}
+
+@test "router: stream fetch setup still has a finite header timeout" {
+  run bash -c "curl -s -o /dev/null -w '%{http_code}' -m 3 -N -X POST 'http://127.0.0.1:$PORT/v1/messages' \
+    -H 'content-type: application/json' \
+    -H 'x-test-hang-headers: 1' \
+    -d '{\"model\":\"local-stream\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "502" ]
 }

@@ -32,6 +32,7 @@ function nonNegInt(x: unknown): number {
 
 const PORT = _optionalEnvInt("ROUTER_PORT", 8082);
 const UPSTREAM_TIMEOUT = _optionalEnvInt("UPSTREAM_TIMEOUT_MS", 120_000);
+const STREAM_UPSTREAM_TIMEOUT = _optionalEnvInt("STREAM_UPSTREAM_TIMEOUT_MS", 0);
 const LOG_FORMAT = _optionalEnv("LOG_FORMAT", "json");
 const AUTO_TIER = process.env.AUTO_TIER === "true"; // Enable automatic model tiering by request size
 
@@ -260,36 +261,99 @@ function mergeSSEUsage(data: string, acc: Record<string, unknown>): Record<strin
 	return acc;
 }
 
-// Extract usage from a streaming SSE response (reads the tee'd copy)
-async function extractUsageFromStream(
+function parseSSEUsageChunk(text: string, acc: Record<string, unknown>): { buffer: string; usage: Record<string, unknown> } {
+	let usage = acc;
+	const lines = text.split("\n");
+	const buffer = lines.pop() ?? "";
+	for (const line of lines) {
+		if (line.startsWith("data: ")) {
+			usage = mergeSSEUsage(line.slice(6).trim(), usage);
+		}
+	}
+	return { buffer, usage };
+}
+
+// Forward an SSE response with one reader while metering usage from the same
+// chunks. Avoid ReadableStream.tee(): under high concurrency tee doubles the
+// buffering/backpressure surface and has been observed to make long subagent
+// streams fail with closed sockets.
+function meteredSSEStream(
 	stream: ReadableStream<Uint8Array>,
 	model: string,
 	upstream: string,
 	status: number,
-): Promise<void> {
-	const reader = stream.getReader();
+): ReadableStream<Uint8Array> {
 	const decoder = new TextDecoder();
+	const encoder = new TextEncoder();
+	const reader = stream.getReader();
 	let buffer = "";
 	let usage: Record<string, unknown> = {};
+	let recorded = false;
 
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			buffer += decoder.decode(value, { stream: true });
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-			for (const line of lines) {
-				if (line.startsWith("data: ")) {
-					usage = mergeSSEUsage(line.slice(6).trim(), usage);
+	const record = (finalStatus: number) => {
+		if (recorded) return;
+		recorded = true;
+		recordUsage(model, upstream, finalStatus, Object.keys(usage).length > 0 ? usage : undefined);
+	};
+
+	return new ReadableStream<Uint8Array>({
+		async start(controller) {
+			try {
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					if (!value) continue;
+					controller.enqueue(value);
+					const parsed = parseSSEUsageChunk(buffer + decoder.decode(value, { stream: true }), usage);
+					buffer = parsed.buffer;
+					usage = parsed.usage;
 				}
+				const tail = decoder.decode();
+				if (tail || buffer) {
+					const parsed = parseSSEUsageChunk(`${buffer}${tail}\n`, usage);
+					usage = parsed.usage;
+				}
+				record(status);
+				controller.close();
+			} catch (err) {
+				log("warn", "upstream stream interrupted", { model, upstream, error: String(err) });
+				record(599);
+				try {
+					controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
+						type: "error",
+						error: { type: "upstream_stream_error", message: "upstream stream interrupted" },
+					})}\n\n`));
+					controller.close();
+				} catch {
+					try { controller.error(err); } catch { /* already closed */ }
+				}
+			} finally {
+				reader.releaseLock();
 			}
-		}
-	} finally {
-		reader.releaseLock();
+		},
+		cancel(reason) {
+			record(499);
+			return reader.cancel(reason);
+		},
+	});
+}
+
+function upstreamFetchTimeout(isStream: boolean): { signal?: AbortSignal; clearAfterHeaders: () => void } {
+	if (!isStream || STREAM_UPSTREAM_TIMEOUT > 0) {
+		const timeout = isStream ? STREAM_UPSTREAM_TIMEOUT : UPSTREAM_TIMEOUT;
+		return {
+			signal: timeout > 0 ? AbortSignal.timeout(timeout) : undefined,
+			clearAfterHeaders: () => {},
+		};
 	}
 
-	recordUsage(model, upstream, status, Object.keys(usage).length > 0 ? usage : undefined);
+	if (UPSTREAM_TIMEOUT <= 0) return { clearAfterHeaders: () => {} };
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT);
+	return {
+		signal: controller.signal,
+		clearAfterHeaders: () => clearTimeout(timer),
+	};
 }
 
 function isCircuitOpen(): boolean {
@@ -542,12 +606,18 @@ async function proxyUpstream(req: Request, path: string, parsed: ParsedRequest):
 	const headers = buildHeaders(req, routing.authHeader, routing.upstream);
 
 	try {
-		const upstreamRes = await fetch(target, {
-			method: req.method,
-			headers,
-			body,
-			signal: AbortSignal.timeout(UPSTREAM_TIMEOUT),
-		});
+		const timeout = upstreamFetchTimeout(isStream);
+		let upstreamRes: Response;
+		try {
+			upstreamRes = await fetch(target, {
+				method: req.method,
+				headers,
+				body,
+				signal: timeout.signal,
+			});
+		} finally {
+			timeout.clearAfterHeaders();
+		}
 
 		if (isMiniMax && upstreamRes.status >= 500 && ANTHROPIC_KEY) {
 			recordMiniMaxFailure();
@@ -581,11 +651,11 @@ async function proxyUpstream(req: Request, path: string, parsed: ParsedRequest):
 			});
 		}
 
-		// For streaming responses, tee the body to extract usage from final SSE event
+		// For streaming responses, meter from the same reader that forwards to
+		// the client. This keeps concurrent streams independent and avoids tee
+		// backpressure/buffering interactions.
 		if (isStream && upstreamRes.body) {
-			const [clientStream, usageStream] = upstreamRes.body.tee();
-			// Extract usage from the stream in the background (non-blocking)
-			extractUsageFromStream(usageStream, routing.model, routing.upstream, upstreamRes.status).catch(() => { /* non-critical */ });
+			const clientStream = meteredSSEStream(upstreamRes.body, routing.model, routing.upstream, upstreamRes.status);
 			return new Response(clientStream, {
 				status: upstreamRes.status,
 				statusText: upstreamRes.statusText,
@@ -791,12 +861,18 @@ async function fallbackToAnthropic(
 	const fallbackHeaders = buildHeaders(req, { "x-api-key": ANTHROPIC_KEY }, ANTHROPIC_BASE);
 	const fallbackTarget = `${ANTHROPIC_BASE}${path}`;
 
-	const res = await fetch(fallbackTarget, {
-		method: req.method,
-		headers: fallbackHeaders,
-		body: fallbackBody,
-		signal: AbortSignal.timeout(UPSTREAM_TIMEOUT),
-	});
+	const timeout = upstreamFetchTimeout(parsedBody?.stream === true);
+	let res: Response;
+	try {
+		res = await fetch(fallbackTarget, {
+			method: req.method,
+			headers: fallbackHeaders,
+			body: fallbackBody,
+			signal: timeout.signal,
+		});
+	} finally {
+		timeout.clearAfterHeaders();
+	}
 
 	log("info", "Anthropic fallback", { status: res.status });
 

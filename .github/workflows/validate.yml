@@ -69,6 +69,21 @@ jobs:
             exit 1
           fi
 
+      - name: Legion engine plugins are vendored together
+        run: |
+          set -euo pipefail
+          required='["legion-router","legion-observability","legion-orchestrate","legion-setup","legion-codex-mode"]'
+          missing=$(jq -r --argjson required "$required" '
+            [.plugins[].name] as $names
+            | $required[]
+            | . as $required_name
+            | select(($names | index($required_name)) == null)
+          ' .claude-plugin/marketplace.json)
+          if [ -n "$missing" ]; then
+            echo "::error::Legion core marketplace must ship the engine plugins together. Missing: $missing"
+            exit 1
+          fi
+
       - name: No stale placeholder / pre-fork identifiers (Legion rename guard)
         run: |
           set -e

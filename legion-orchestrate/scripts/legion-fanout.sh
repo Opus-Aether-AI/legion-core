@@ -14,9 +14,37 @@
 set -euo pipefail
 
 _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LEGION_DELEGATE="${LEGION_DELEGATE:-$(command -v legion-delegate 2>/dev/null || echo "$_self/../../legion-router/bin/legion-delegate")}"
-LEGION_ROUTE="${LEGION_ROUTE:-$_self/../../legion-router/scripts/legion-route.py}"
-LEGION_TELEMETRY="${LEGION_TELEMETRY:-$_self/../../legion-observability/scripts/legion-telemetry.sh}"
+
+resolve_legion_cmd() {
+  local cmd="$1" fallback="$2"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    command -v "$cmd"
+    return 0
+  fi
+  if [[ -x "$fallback" ]]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  echo "legion-fanout: required Legion command '$cmd' not found on PATH and fallback missing: $fallback" >&2
+  exit 2
+}
+
+resolve_optional_legion_cmd() {
+  local cmd="$1" fallback="$2"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    command -v "$cmd"
+    return 0
+  fi
+  if [[ -x "$fallback" ]]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  return 0
+}
+
+LEGION_DELEGATE="${LEGION_DELEGATE:-$(resolve_legion_cmd legion-delegate "$_self/../../legion-router/bin/legion-delegate")}"
+LEGION_ROUTE="${LEGION_ROUTE:-$(resolve_legion_cmd legion-route "$_self/../../legion-router/bin/legion-route")}"
+LEGION_TELEMETRY="${LEGION_TELEMETRY:-$(resolve_optional_legion_cmd legion-trace "$_self/../../legion-observability/bin/legion-trace")}"
 LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$HOME/.claude/logs/legion/registry}"
 
 # Preallocate a queued run-state record so a fan-out's pending slices show as
@@ -97,7 +125,7 @@ launch_slice() {
   # self archetypes are NOT delegated — return for Opus to do inline (drop the queued
   # record: it's not a delegated agent).
   if [[ -n "$arch" ]]; then
-    ex="$(python3 "$LEGION_ROUTE" "$arch" 2>/dev/null | jq -r '.executor // ""' 2>/dev/null || echo "")"
+    ex="$("$LEGION_ROUTE" "$arch" 2>/dev/null | jq -r '.executor // ""' 2>/dev/null || echo "")"
     if [[ "$ex" == "self" ]]; then
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
       jq -cn --arg a "$arch" --arg t "$task" '{status:"inline",archetype:$a,task:$t,note:"Opus should do this inline"}' > "$work/slice-$i.out"
@@ -154,9 +182,9 @@ fi
 
 # Root span for the fan-out itself, so the delegate spans form a tree under it.
 # Best-effort: telemetry is observability, never block the run on it.
-if [[ -f "$LEGION_TELEMETRY" ]]; then
+if [[ -x "$LEGION_TELEMETRY" ]]; then
   total_cost="$(jq -s '[.[].cost_usd // 0] | add' "$results" 2>/dev/null || echo 0)"
-  bash "$LEGION_TELEMETRY" emit \
+  "$LEGION_TELEMETRY" emit \
     --executor orchestrator --model legion-fanout --status ok \
     --run-id "$FANOUT_RUN_ID" --trace-id "$FANOUT_TRACE_ID" \
     --parent-id "$FANOUT_INHERITED_PARENT" \

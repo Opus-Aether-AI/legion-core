@@ -36,6 +36,7 @@ const {
   main_repo: mainRepo = cwd,
   base = "HEAD",
   diff_path: diffPath,
+  artifact_dir: artifactDir,
   untrusted = false,
 } = job;
 
@@ -138,6 +139,17 @@ if (untrusted && copyPaths.length > 0) {
     } catch (error) {
       console.error(`sandcastle-run: warning: copy failed for ${rel}: ${error.message}`);
     }
+  }
+}
+if (copyToWorktree.length > 0) {
+  const copiedSecretsPath = join(artifactDir || (diffPath ? dirname(diffPath) : cwd), "copied-secrets.json");
+  try {
+    writeFileSync(
+      copiedSecretsPath,
+      `${JSON.stringify({ copied_secret_names: copyToWorktree })}\n`,
+    );
+  } catch (error) {
+    console.error(`sandcastle-run: warning: copied-secret audit failed: ${error.message}`);
   }
 }
 

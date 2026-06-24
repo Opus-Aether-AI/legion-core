@@ -84,12 +84,14 @@ EOF
   printf 'TOKEN=secret\n' > "$MAIN_DIR/.env"
   printf '{"k":"v"}\n' > "$MAIN_DIR/config/secret.json"
   printf '{"copy":[".env","config/secret.json"]}\n' > "$MAIN_DIR/.legion/sandbox.json"
+  local art="$TEST_TMPDIR/copy-artifacts"
 
-  run bash -c "source '$LIB'; sandbox_setup '$WT_DIR' '$MAIN_DIR' 0 >/dev/null"
+  run bash -c "source '$LIB'; LEGION_SANDBOX_ARTIFACT_DIR='$art' sandbox_setup '$WT_DIR' '$MAIN_DIR' 0 >/dev/null"
 
   [ "$status" -eq 0 ]
   [ "$(cat "$WT_DIR/.env")" = "TOKEN=secret" ]
   [ "$(cat "$WT_DIR/config/secret.json")" = '{"k":"v"}' ]
+  jq -e '.copied_secret_names == [".env","config/secret.json"]' "$art/copied-secrets.json"
 }
 
 @test "sandbox_setup: copy is skipped for untrusted run" {

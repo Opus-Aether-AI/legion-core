@@ -110,10 +110,11 @@ run_sandcastle() {
   set +e
   jq -cn \
     --arg task "$task" --arg model "$1" --arg sandbox "$sandbox" \
-    --arg cwd "$wt" --arg main_repo "$repo" --arg base "$base" --arg branch "$branch" --arg diff "$art/diff.patch" \
+    --arg cwd "$wt" --arg main_repo "$repo" --arg base "$base" --arg branch "$branch" \
+    --arg diff "$art/diff.patch" --arg artifact_dir "$art" \
     --arg effort "$effort" --argjson untrusted "$untrusted" \
     '{task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
-      main_repo:$main_repo, untrusted:$untrusted,
+      main_repo:$main_repo, artifact_dir:$artifact_dir, untrusted:$untrusted,
       effort:(if $effort=="" then null else $effort end)}' \
     | "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
   rc=${PIPESTATUS[1]}
@@ -156,10 +157,50 @@ scan_task_text() {
 }
 
 # ── Telemetry + metering ─────────────────────────────────────────────
+LEGION_OPUS_BASELINE_EMITTED=0
+
+emit_opus_baseline_span() {
+  local delegated_executor="$1" delegated_model="$2" delegated_task="$3"
+  [[ "${LEGION_AUTO_OPUS_BASELINE:-1}" == "1" ]] || return 0
+  [[ "$LEGION_OPUS_BASELINE_EMITTED" == "0" ]] || return 0
+  # A parent orchestrator, such as legion-fanout, already emits the root span.
+  [[ -z "${LEGION_PARENT_ID:-}" ]] || return 0
+  [[ -n "${RUN_ID:-}" ]] || return 0
+
+  LEGION_OPUS_BASELINE_EMITTED=1
+  mkdir -p "$LEGION_TELEMETRY_DIR"
+  local baseline_run="${RUN_ID}-opus-baseline"
+  local trace_id="${LEGION_TRACE_ID:-$RUN_ID}"
+  jq -cn \
+    --arg schema "legion.span.v1" --arg ts "$(_now)" \
+    --arg run_id "$baseline_run" --arg trace_id "$trace_id" \
+    --arg executor "opus-baseline" --arg model "opus-baseline" --arg archetype "${archetype:-}" \
+    --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
+    --arg task "legion-delegate orchestration baseline" \
+    --arg delegated_task "$delegated_task" \
+    --arg delegated_run_id "$RUN_ID" \
+    --arg delegated_executor "$delegated_executor" \
+    --arg delegated_model "$delegated_model" '
+    {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id, parent_id:null,
+     executor:$executor, model:$model, archetype:$archetype, task:$task, status:"ok",
+     target_type:(if $target_type=="" then null else $target_type end),
+     target_name:(if $target_name=="" then null else $target_name end),
+     duration_ms:0, cost_usd:0, tokens:{},
+     artifacts:{synthetic_opus_baseline:true,
+                delegated_run_id:$delegated_run_id,
+                delegated_executor:$delegated_executor,
+                delegated_model:$delegated_model,
+                delegated_task:$delegated_task}}' \
+    >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
+}
+
 # emit_span <executor> <model> <status> <duration_ms> <cost_usd> <usage_json> <task> <artifacts_json>
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
   mkdir -p "$LEGION_TELEMETRY_DIR"
+  case "$executor" in
+    codex*) [[ "$status" == "ok" ]] && emit_opus_baseline_span "$executor" "$model" "$task" ;;
+  esac
   # Trace context: a parent orchestrator (e.g. legion-fanout) exports
   # LEGION_TRACE_ID + LEGION_PARENT_ID so sibling delegate spans hang under one
   # OTel trace tree. A standalone run falls back to being its own root
@@ -405,9 +446,14 @@ cmd_run() {
     note "⚠ budget exceeded: $total_tokens > $budget tokens (advisory — codex cannot be pre-empted mid-run)"
   fi
 
-  local artifacts
+  local artifacts copied_secret_names
+  copied_secret_names="[]"
+  if [[ -s "$art/copied-secrets.json" ]]; then
+    copied_secret_names="$(jq -c '.copied_secret_names // []' "$art/copied-secrets.json" 2>/dev/null || echo '[]')"
+  fi
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" --arg stream "$art/stream.jsonl" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream}')"
+    --argjson copied_secret_names "$copied_secret_names" \
+    '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream, copied_secret_names:$copied_secret_names}')"
   emit_span "codex" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
   write_run_state "$status"

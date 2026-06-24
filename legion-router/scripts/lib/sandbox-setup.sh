@@ -85,7 +85,7 @@ sandbox_run_install() {
 
 sandbox_copy_credentials() {
   local worktree_dir="$1" main_repo_dir="$2" untrusted="$3" json="$4"
-  local paths=() rel src dest
+  local paths=() copied=() rel src dest artifact_dir copied_record
   while IFS= read -r rel; do
     [[ -n "$rel" ]] && paths+=("$rel")
   done < <(sandbox_copy_paths "$json")
@@ -114,11 +114,21 @@ sandbox_copy_credentials() {
     rm -rf "$dest"
     if cp -a "$src" "$dest"; then
       sandbox_git_exclude_path "$worktree_dir" "$rel"
+      copied+=("$rel")
       sandbox_log "copied creds: $rel"
     else
       sandbox_warn "copy failed: $rel"
     fi
   done
+  if [[ "${#copied[@]}" -gt 0 ]]; then
+    artifact_dir="${LEGION_SANDBOX_ARTIFACT_DIR:-}"
+    if [[ -n "$artifact_dir" ]]; then
+      mkdir -p "$artifact_dir" 2>/dev/null || return 0
+      copied_record="$artifact_dir/copied-secrets.json"
+      jq -cn '$ARGS.positional' --args "${copied[@]}" \
+        | jq -c '{copied_secret_names:.}' >"$copied_record" 2>/dev/null || true
+    fi
+  fi
   return 0
 }
 

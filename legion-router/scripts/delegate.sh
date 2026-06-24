@@ -110,10 +110,11 @@ run_sandcastle() {
   set +e
   jq -cn \
     --arg task "$task" --arg model "$1" --arg sandbox "$sandbox" \
-    --arg cwd "$wt" --arg main_repo "$repo" --arg base "$base" --arg branch "$branch" --arg diff "$art/diff.patch" \
+    --arg cwd "$wt" --arg main_repo "$repo" --arg base "$base" --arg branch "$branch" \
+    --arg diff "$art/diff.patch" --arg artifact_dir "$art" \
     --arg effort "$effort" --argjson untrusted "$untrusted" \
     '{task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
-      main_repo:$main_repo, untrusted:$untrusted,
+      main_repo:$main_repo, artifact_dir:$artifact_dir, untrusted:$untrusted,
       effort:(if $effort=="" then null else $effort end)}' \
     | "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
   rc=${PIPESTATUS[1]}
@@ -445,9 +446,14 @@ cmd_run() {
     note "⚠ budget exceeded: $total_tokens > $budget tokens (advisory — codex cannot be pre-empted mid-run)"
   fi
 
-  local artifacts
+  local artifacts copied_secret_names
+  copied_secret_names="[]"
+  if [[ -s "$art/copied-secrets.json" ]]; then
+    copied_secret_names="$(jq -c '.copied_secret_names // []' "$art/copied-secrets.json" 2>/dev/null || echo '[]')"
+  fi
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" --arg stream "$art/stream.jsonl" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream}')"
+    --argjson copied_secret_names "$copied_secret_names" \
+    '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream, copied_secret_names:$copied_secret_names}')"
   emit_span "codex" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
   write_run_state "$status"

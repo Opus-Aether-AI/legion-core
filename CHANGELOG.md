@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.3](https://github.com/Opus-Aether-AI/legion-core/compare/v0.7.2...v0.7.3) (2026-06-24)
+
+
+### Fixed
+
+* resolve open legion-core issues ([#40](https://github.com/Opus-Aether-AI/legion-core/issues/40)) ([b08cee0](https://github.com/Opus-Aether-AI/legion-core/commit/b08cee029ec732e42e6f20c9efb2c0184dc6b7c6))
+
 ## [0.7.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.7.1...v0.7.2) (2026-06-23)
 
 

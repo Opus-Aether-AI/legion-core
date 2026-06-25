@@ -34,6 +34,6 @@ that domain agents build on, so the bar is: stays generic, stays green.
 
 ## Provenance
 
-This core was extracted from the private Legion marketplace and sanitized of
+This core was extracted from the broader Legion marketplace and sanitized of
 org-specific references. See `docs/building-an-agent.md` for how to base a new
 agent on it.

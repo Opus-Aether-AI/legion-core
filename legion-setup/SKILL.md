@@ -20,10 +20,10 @@ legion-setup install            # all plugins (default); or: opus | vendored | m
 If it's a brand-new machine (nothing installed yet), bootstrap with one paste — this installs the marketplace, the plugins, cross-harness skills for Codex/Cursor/opencode, shared CLIs, a daily refresh/self-learning cron, **and this skill** (so updates are one word afterwards):
 
 ```bash
-gh api repos/Opus-Aether-AI/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s all
+curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash -s all
 ```
 
-Requires `gh` authenticated (`gh auth login`), `jq`, `git`.
+Requires `curl`, `jq`, `git`.
 
 ## Update (every time after)
 

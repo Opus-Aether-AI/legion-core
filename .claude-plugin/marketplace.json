@@ -5,7 +5,7 @@
   },
   "version": "0.7.3",
   "metadata": {
-    "description": "Legion — a private, multi-model Claude Code plugin marketplace. Opus orchestrates and delegates the bulk of coding to GPT-5.4/5.5 via the Codex CLI, metered, balanced (codex >=50%), and self-healing on quota. Ships the Legion plugins (legion-router delegation+routing+metering, legion-orchestrate dynamic multi-model fan-out/ultracode, legion-observability telemetry+doctor+dashboard+self-learning, legion-setup one-skill install/update) alongside the Opus-original plugins (opus-core, opus-agent-infra, opus-commands, awspex, opus-monorepo, …) and 55+ vendored third-party plugins auto-synced weekly. One orchestrator, a legion of models.",
+    "description": "Legion Core — a model-agnostic orchestration engine for AI coding agents. It ships scoped delegation, multi-model fan-out, telemetry/cost reporting, doctor/self-learning/heal loops, and cross-harness setup for Claude Code, Codex, and Cursor. One orchestrator, a legion of models.",
     "repository": "https://github.com/Opus-Aether-AI/legion-core"
   },
   "plugins": [
@@ -31,7 +31,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "UNLICENSED"
+      "license": "Apache-2.0"
     },
     {
       "name": "legion-observability",
@@ -57,7 +57,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "UNLICENSED"
+      "license": "Apache-2.0"
     },
     {
       "name": "legion-orchestrate",
@@ -80,7 +80,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "UNLICENSED"
+      "license": "Apache-2.0"
     },
     {
       "name": "legion-setup",
@@ -103,7 +103,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "UNLICENSED"
+      "license": "Apache-2.0"
     },
     {
       "name": "legion-codex-mode",
@@ -125,7 +125,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "UNLICENSED"
+      "license": "Apache-2.0"
     }
   ]
 }

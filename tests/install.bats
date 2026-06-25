@@ -412,10 +412,10 @@ SH
     [[ "$output" == *"jq required"* ]]
 }
 
-@test "preflight fails when gh is not on PATH" {
-    PATH="$(path_without gh)" run bash "$INSTALL_SH" all
+@test "preflight fails when curl is not on PATH" {
+    PATH="$(path_without curl)" run bash "$INSTALL_SH" all
     [ "$status" -eq 1 ]
-    [[ "$output" == *"gh required"* ]]
+    [[ "$output" == *"curl required"* ]]
 }
 
 @test "preflight fails when git is not on PATH (with cross-harness on)" {
@@ -432,8 +432,20 @@ SH
     [[ "$output" == *"claude CLI not found"* ]]
 }
 
-@test "preflight fails when gh is not authenticated" {
-    # Make gh's auth status return failure for this test
+# ── fetch_plugins fallback to raw GitHub ────────────────────────────
+
+@test "fetch_plugins falls back to raw GitHub when source clone is missing" {
+    rm -rf "$SOURCE_CLONE"
+
+    run bash "$INSTALL_SH" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"plugin-with-skill"* ]]
+    assert_mock_called curl ".claude-plugin/marketplace.json"
+}
+
+@test "preflight no longer requires gh authentication" {
+    # Make gh's auth status return failure; install should not care because the
+    # public path uses curl + git.
     local broken_gh="$TEST_TMPDIR/broken-gh"
     mkdir -p "$broken_gh"
     cat > "$broken_gh/gh" <<'EOF'
@@ -449,25 +461,10 @@ EOF
 
     local mocks_dir="$BATS_TEST_DIRNAME/mocks/bin"
     local clean_path="${PATH//$mocks_dir:/}"
-    PATH="$broken_gh:$clean_path" run bash "$INSTALL_SH" all
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"gh not authenticated"* ]]
-}
-
-# ── fetch_plugins fallback to gh API ────────────────────────────────
-
-@test "fetch_plugins falls back to gh API when source clone is missing" {
-    # Remove the clone — install should still work via gh
-    rm -rf "$SOURCE_CLONE"
-    # But fetch_plugins is only called during --list or during all/... profile install
-    # When the clone is gone, setup_source_clone will try to clone via gh.
-    # Test --list which only needs fetch_plugins.
-
-    run bash "$INSTALL_SH" --list
+    PATH="$broken_gh:$mocks_dir:$clean_path" run bash "$INSTALL_SH" --list
     [ "$status" -eq 0 ]
     [[ "$output" == *"plugin-with-skill"* ]]
-    # Should have called `gh api` (we removed the local file)
-    assert_mock_called gh "api repos/Opus-Aether-AI/legion-core/contents/.claude-plugin/marketplace.json"
+    assert_mock_not_called gh
 }
 
 # ── Nested skill collision ──────────────────────────────────────────
@@ -529,19 +526,27 @@ EOF
     [[ "$output" == *"failed"* ]]
 }
 
-@test "setup_source_clone calls gh repo clone when source dir is missing" {
+@test "setup_source_clone calls git clone when source dir is missing" {
     # Remove the local clone — fresh-machine scenario
     rm -rf "$SOURCE_CLONE"
-    # gh mock's "repo clone" reads $MOCK_GH_CLONE_SOURCE
-    export MOCK_GH_CLONE_SOURCE="$SOURCE_CLONE.fixture-backup"
-    # Use the original fixture as the "remote"
+    local remote="$SOURCE_CLONE.fixture-backup"
+    export LEGION_REPO_URL="$remote"
+    export LEGION_RAW_BASE="file://$remote"
+
+    # Use the original fixture as the "remote".
     mkdir -p "$SOURCE_CLONE.fixture-backup/.claude-plugin"
     cp "$BATS_TEST_DIRNAME/fixtures/marketplace-minimal.json" "$SOURCE_CLONE.fixture-backup/.claude-plugin/marketplace.json"
     cp -R "$BATS_TEST_DIRNAME/fixtures/plugins/"* "$SOURCE_CLONE.fixture-backup/"
+    (
+        cd "$remote"
+        git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "init test remote"
+    )
 
     run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
-    assert_mock_called gh "repo clone Opus-Aether-AI/legion-core"
+    [[ "$output" == *"Cloning $remote"* ]]
     [ -d "$SOURCE_CLONE" ]
 }
 

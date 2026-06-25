@@ -7,7 +7,7 @@
 One will commands a host of agents — **GPT-5.x via Codex**, **Cursor**, **Claude** (and humans). legion-core gives you the parts that aren't domain-specific: scoped multi-model **delegation**, **telemetry**, a **health check**, **self-learning**, and **auto-healing** — so a new agent project starts from a working spine instead of a blank page.
 
 ```bash
-gh api repos/Opus-Aether-AI/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s all
+curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash -s all
 ```
 
 ## What's inside (5 plugins)
@@ -33,27 +33,22 @@ See [`docs/building-an-agent.md`](docs/building-an-agent.md) for the full recipe
 
 ## Install as a package
 
-legion-core is also published as a private npm package on **GitHub Packages**, so a
-downstream agent can pin a versioned copy of the engine (bins + scripts + plugins)
-instead of cloning. This is additive — the marketplace / source-clone paths still work.
+legion-core is published as a public npm package, so a downstream agent can pin a
+versioned copy of the engine (bins + scripts + plugins) instead of cloning. This is
+additive — the marketplace / source-clone paths still work.
 
 ```bash
-# 1. Point the scope at GitHub Packages + add a read:packages token.
-#    In your project .npmrc (commit the registry line; keep the token out of git):
-@opus-aether-ai:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}   # token with read:packages
-
-# 2. Install it.
+# Install it.
 npm install @opus-aether-ai/legion-core            # or: bun add / pnpm add
 
-# 3. The engine CLIs are now on your project's bin path.
+# The engine CLIs are now on your project's bin path.
 npx legion-doctor --help
 npx legion-delegate run --archetype fix-bug --task "…" --repo .
 ```
 
 Publishing is automated: the [`publish-package`](.github/workflows/publish-package.yml)
-workflow runs on each GitHub Release (and on demand) and uses the built-in
-`GITHUB_TOKEN`. The package version tracks the release version via release-please.
+workflow runs on each GitHub Release (and on demand) and uses `NPM_TOKEN`. The package
+version tracks the release version via release-please.
 
 ## Configuration
 
@@ -87,4 +82,4 @@ legion-observability/bin/legion-doctor        # install / schema / MCP / bridge 
 
 ## License
 
-[Apache-2.0](LICENSE). Built from the private Legion marketplace; this core is the model-agnostic subset, intended to be reusable and (eventually) open.
+[Apache-2.0](LICENSE). This is the reusable, model-agnostic Legion engine.

@@ -28,18 +28,12 @@ source to a git-subdir source pointing at legion-core:
 Then `scripts/vendor.sh` materialises them into `vendored/legion-*` and the
 in-repo `legion-*` dirs are removed. Current legion-core main: `2d25d6f5a59c22e93f4734ca72121b5f6a2cfd84`.
 
-### The one manual prerequisite
+### Access model
 
-legion-core is **private**, so `sync-vendored.yml`'s weekly auto-refresh needs a
-token with read access to it (the default `GITHUB_TOKEN` is scoped to one repo):
-
-1. Create a fine-grained PAT (or GitHub App) with **contents: read** on
-   `Opus-Aether-AI/legion-core`.
-2. Add it to legion-code as the secret **`VENDOR_SYNC_TOKEN`** and pass it to the
-   clone/ls-remote steps in `sync-vendored.yml`.
-
-Until then, the vendored copy is still valid (it's committed); it just won't
-auto-refresh.
+legion-core is public, so `sync-vendored.yml` can refresh it using unauthenticated
+`git ls-remote` / `git clone` calls unless GitHub rate limits become a problem. If a
+future private fork is used, configure `VENDOR_SYNC_TOKEN` with read access and pass it
+to the clone/ls-remote steps.
 
 ## Alternative: push-mirror (core → code)
 

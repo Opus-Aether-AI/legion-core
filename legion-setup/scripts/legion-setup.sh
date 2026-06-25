@@ -10,11 +10,12 @@
 #   legion-setup uninstall [flags]
 #
 # First-time bootstrap (before this script exists on the machine) — one paste:
-#   gh api repos/Opus-Aether-AI/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s all
+#   curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash -s all
 set -euo pipefail
 
 HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO="${LEGION_REPO:-Opus-Aether-AI/legion-core}"
+RAW_BASE="${LEGION_RAW_BASE:-https://raw.githubusercontent.com/${REPO}/main}"
 SLUG="${LEGION_SLUG:-legion-core}"
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="$AGENTS_HOME/sources/$SLUG"
@@ -28,9 +29,9 @@ is_installed() { [[ -d "$SOURCE_CLONE/.git" ]]; }
 
 do_install() {
   local profile="${1:-$PROFILE}"
-  command -v gh >/dev/null 2>&1 || { red "gh CLI required (https://cli.github.com), then: gh auth login"; exit 1; }
+  command -v curl >/dev/null 2>&1 || { red "curl required (https://curl.se)"; exit 1; }
   green "Installing Legion ($REPO, profile=$profile) …"
-  gh api "repos/$REPO/contents/scripts/install.sh" --jq '.content' | base64 -d | bash -s "$profile"
+  curl -fsSL "${RAW_BASE%/}/scripts/install.sh" | bash -s "$profile"
   green "✓ Installed. Update anytime by asking Claude to 'update legion', or: legion-setup update"
 }
 
@@ -53,7 +54,11 @@ cmd_status() {
     yellow "Legion not installed (no source clone at $SOURCE_CLONE). Run: legion-setup install"
   fi
   if command -v claude >/dev/null 2>&1; then
-    claude plugin marketplace list 2>/dev/null | grep -i "$SLUG" && green "marketplace registered" || yellow "marketplace not registered with claude"
+    if claude plugin marketplace list 2>/dev/null | grep -i "$SLUG" >/dev/null; then
+      green "marketplace registered"
+    else
+      yellow "marketplace not registered with claude"
+    fi
   fi
 }
 

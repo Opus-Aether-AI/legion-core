@@ -6,7 +6,7 @@
 # ~/.agents/skills/ — via symlinks into a single source clone. A daily cron entry
 # can be enabled to keep the clone fresh.
 #
-# Usage (after cloning the repo, since it's private):
+# Usage:
 #   bash scripts/install.sh all       # everything (default) — Claude + Codex
 #   bash scripts/install.sh minimal   # legion-router + legion-observability only
 #   bash scripts/install.sh <plugin>  # install one named plugin
@@ -26,16 +26,24 @@
 # Maintenance:
 #   bash scripts/install.sh --refresh-symlinks    # re-scan & sync ~/.agents/skills/ only
 #
-# Or via gh (no clone needed for first-time install):
-#   gh api repos/Opus-Aether-AI/legion-core/contents/scripts/install.sh --jq '.content' | base64 -d | bash -s all
+# Or without cloning first:
+#   curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash -s all
 #
-# Requires: gh (authenticated), jq, git. claude CLI optional (only for Claude marketplace flow).
+# Requires: curl, jq, git. claude CLI optional (only for Claude marketplace flow).
 # Idempotent: re-running skips already-installed plugins and updates symlinks.
 
 set -euo pipefail
 
 MARKETPLACE_REPO="${LEGION_REPO:-Opus-Aether-AI/legion-core}"
 MARKETPLACE_SLUG="legion-core"
+MARKETPLACE_CLONE_URL="${LEGION_REPO_URL:-}"
+if [ -z "$MARKETPLACE_CLONE_URL" ]; then
+    case "$MARKETPLACE_REPO" in
+        http://*|https://*|git@*|file://*|/*) MARKETPLACE_CLONE_URL="$MARKETPLACE_REPO" ;;
+        *) MARKETPLACE_CLONE_URL="https://github.com/${MARKETPLACE_REPO}.git" ;;
+    esac
+fi
+MARKETPLACE_RAW_BASE="${LEGION_RAW_BASE:-https://raw.githubusercontent.com/${MARKETPLACE_REPO}/main}"
 
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="$AGENTS_HOME/sources/legion-core"
@@ -88,18 +96,20 @@ preflight() {
         red "jq required. Install with: brew install jq  (or apt-get install jq)"
         exit 1
     fi
-    if ! command -v gh >/dev/null 2>&1; then
-        red "gh required (repo is private). Install: brew install gh && gh auth login"
-        exit 1
-    fi
-    if ! gh auth status >/dev/null 2>&1; then
-        red "gh not authenticated. Run: gh auth login"
+    if ! command -v curl >/dev/null 2>&1; then
+        red "curl required. Install curl or clone the repo and run scripts/install.sh locally."
         exit 1
     fi
     if [ "$DO_CROSS_HARNESS" = "1" ] && ! command -v git >/dev/null 2>&1; then
         red "git required for cross-harness symlinks. Install git or pass --no-cross-harness."
         exit 1
     fi
+}
+
+# ── Public file fetch helper ─────────────────────────────────────────
+fetch_public_file() {
+    local path="$1"
+    curl -fsSL "${MARKETPLACE_RAW_BASE%/}/$path"
 }
 
 # ── Add marketplace (idempotent) ─────────────────────────────────────
@@ -120,8 +130,7 @@ fetch_plugins() {
     if [ -f "$SOURCE_CLONE/.claude-plugin/marketplace.json" ]; then
         cat "$SOURCE_CLONE/.claude-plugin/marketplace.json"
     else
-        gh api "repos/${MARKETPLACE_REPO}/contents/.claude-plugin/marketplace.json?ref=main" \
-            --jq '.content' | base64 -d
+        fetch_public_file ".claude-plugin/marketplace.json"
     fi
 }
 
@@ -194,8 +203,8 @@ setup_source_clone() {
             git -C "$SOURCE_CLONE" reset --hard origin/main --quiet
         fi
     else
-        bold "Cloning $MARKETPLACE_REPO → $SOURCE_CLONE"
-        gh repo clone "$MARKETPLACE_REPO" "$SOURCE_CLONE" -- --depth 1 --quiet
+        bold "Cloning $MARKETPLACE_CLONE_URL → $SOURCE_CLONE"
+        git clone --depth 1 --quiet "$MARKETPLACE_CLONE_URL" "$SOURCE_CLONE"
     fi
 }
 
@@ -256,7 +265,7 @@ setup_skill_symlinks() {
                 # keep it; otherwise prepend it. So vercel-plugin/skills/vercel-firewall
                 # → "vercel-firewall" (no dup), and vercel-plugin/skills/auth → "vercel-auth".
                 local link_name
-                if [ "${skill_name#${namespace}-}" != "$skill_name" ] || [ "$skill_name" = "$namespace" ]; then
+                if [ "${skill_name#"${namespace}"-}" != "$skill_name" ] || [ "$skill_name" = "$namespace" ]; then
                     link_name="$skill_name"
                 else
                     link_name="${namespace}-${skill_name}"

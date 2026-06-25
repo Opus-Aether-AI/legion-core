@@ -5,7 +5,7 @@
 #
 # Each test runs in total isolation:
 #   - $AGENTS_HOME, $HOME, $PATH all redirected to temp dirs
-#   - Mocks for claude/gh/crontab/git replace the real CLIs
+#   - Mocks for claude/curl/gh/crontab replace the real CLIs
 #   - System ~/.agents, ~/.codex, real crontab are NEVER touched
 
 setup_test_env() {
@@ -18,14 +18,15 @@ setup_test_env() {
     export CODEX_COMMANDS_DIR="$HOME/.codex/commands"
     export FAKE_CRONTAB_FILE="$HOME/.fake-crontab"
     export MOCK_CALL_LOG="$TEST_TMPDIR/mock-calls.log"
-    # Independent fixture for the gh API mock — survives even when tests
-    # delete the source clone (e.g., "fetch_plugins falls back to gh API")
+    # Independent fixture for the curl/gh API mocks — survives even when tests
+    # delete the source clone (e.g., "fetch_plugins falls back to raw GitHub")
     export MOCK_GH_FIXTURE="$TEST_TMPDIR/mock-gh-marketplace.json"
+    export MOCK_CURL_FIXTURE="$MOCK_GH_FIXTURE"
 
     mkdir -p "$AGENTS_HOME" "$HOME/.codex" "$HOME/.claude/plugins/cache"
     : > "$MOCK_CALL_LOG"
 
-    # Mocks shadow real CLIs (claude, gh, crontab); real git/jq/mkdir remain.
+    # Mocks shadow selected CLIs (claude, curl, gh, crontab); real git/jq/mkdir remain.
     # The mocks dir is *prepended* so real PATH still works for everything else.
     export PATH="$BATS_TEST_DIRNAME/mocks/bin:$PATH"
 
@@ -130,6 +131,7 @@ path_without() {
         chmod cp mv git base64 readlink jq dirname basename head tail tr sort
         uniq wc gzip cut tee xargs id date
         mktemp
+        curl
     )
     for cmd in "${needed[@]}"; do
         [ "$cmd" = "$hidden_cmd" ] && continue

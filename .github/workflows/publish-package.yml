@@ -1,27 +1,25 @@
 name: publish-package
 
-# Manual escape hatch to (re)publish @opus-aether-ai/legion-core to GitHub
-# Packages from whatever is currently on the default branch — for a first
-# publish, a recovery, or a re-push.
+# Manual escape hatch to (re)publish @opus-aether-ai/legion-core to public npm
+# from whatever is currently on the default branch — for a first publish, a
+# recovery, or a re-push.
 #
 # The NORMAL path is automatic: release-please.yml publishes inline when it cuts
 # a release (gated on `release_created`). This workflow is dispatch-only because a
 # `release: published` event raised by release-please's GITHUB_TOKEN does NOT
 # trigger workflows, so a `release:` trigger here would never fire anyway.
 #
-# This is an ADDITIVE distribution channel: legion-core is still consumable as a
+# This is an additive distribution channel: legion-core is still consumable as a
 # Claude Code marketplace (`claude plugin marketplace add Opus-Aether-AI/legion-core`)
 # and via a source clone.
 #
-# Auth: the built-in GITHUB_TOKEN has `packages: write` for a package linked to
-# this repo, so no extra secret is needed to publish.
+# Auth: configure NPM_TOKEN with publish rights for the @opus-aether-ai scope.
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: publish-package-${{ github.ref }}
@@ -37,8 +35,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          registry-url: https://npm.pkg.github.com
-          scope: "@opus-aether-ai"
+          registry-url: https://registry.npmjs.org
 
       - name: Version is in sync with the marketplace
         run: |
@@ -51,7 +48,7 @@ jobs:
           fi
           echo "version $pkg in sync"
 
-      - name: Publish to GitHub Packages
+      - name: Publish to npm
         run: npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

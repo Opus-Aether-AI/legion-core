@@ -150,6 +150,16 @@ def test_load_corpus_reads_packaged_local_smoke():
     assert len(corpus["cases"]) == 3
 
 
+def test_load_corpus_reads_packaged_heldout_default_modes():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    corpus = bench.load_corpus(repo, "heldout-oss-36")
+    modes = bench._selected_corpus_modes(corpus, [])
+
+    assert corpus["corpus"] == "heldout-oss-36"
+    assert len(corpus["cases"]) == 36
+    assert [mode["id"] for mode in modes] == ["scripted-baseline", "scripted-oracle"]
+
+
 def test_load_suite_extends_relative_to_absolute_suite_path(tmp_path):
     repo = tmp_path / "target-repo"
     repo.mkdir()
@@ -286,6 +296,32 @@ def test_task_case_validates_jsonl_contains(tmp_path):
     assert result["ok"] is True
 
 
+def test_task_case_validates_command_validator(tmp_path):
+    result = bench.run_task_case(
+        {
+            "id": "task.command-validator",
+            "type": "task",
+            "files": {
+                "app.py": "VALUE = 7\n",
+                "test_app.py": "from app import VALUE\nassert VALUE == 7\n",
+            },
+            "command": ["python3", "-c", "print('ready')"],
+            "validators": [
+                {
+                    "type": "command",
+                    "command": ["python3", "test_app.py"],
+                    "cwd": "{workspace}",
+                }
+            ],
+        },
+        str(tmp_path),
+        str(tmp_path / "run"),
+    )
+
+    assert result["ok"] is True
+    assert result["details"]["validators"][0]["type"] == "command"
+
+
 def test_learning_lift_payload_scores_before_after_memory(tmp_path):
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
     payload = bench.learning_lift_payload(
@@ -387,6 +423,162 @@ def test_corpus_runner_reports_mode_lift_and_reliability(tmp_path):
     assert candidate["pass"] == 3
     assert comparison["delta_pct_points"] == 66.667
     assert comparison["reliable"] is False
+
+
+def test_corpus_plan_marks_heldout_reliable():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    corpus = bench.load_corpus(repo, "heldout-oss-36")
+    modes = bench._selected_corpus_modes(corpus, [])
+    plan = bench.corpus_plan(
+        corpus,
+        modes,
+        baseline_mode="scripted-baseline",
+        repeat=1,
+        reliability_min_cases=30,
+    )
+
+    assert plan["case_count"] == 36
+    assert plan["total_case_runs"] == 72
+    assert plan["comparisons"]["scripted-baseline..scripted-oracle"]["reliable"] is True
+    assert plan["has_live_modes_selected"] is False
+
+
+def test_corpus_summary_reports_paired_stats_and_failure_clusters(tmp_path):
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    corpus = bench.load_corpus(repo, "heldout-oss-36")
+    modes = bench._selected_corpus_modes(corpus, [])
+    run_dir = tmp_path / "heldout"
+    results = []
+    for mode in modes:
+        for case in corpus["cases"][:3]:
+            results.append(
+                bench.run_corpus_case_mode(
+                    case,
+                    mode,
+                    repo=repo,
+                    run_dir=str(run_dir),
+                    repeat_index=1,
+                )
+            )
+
+    summary = bench.summarize_corpus_run(
+        {**corpus, "required_clean_modes": ["scripted-oracle"]},
+        results,
+        run_id="heldout-test",
+        repo=repo,
+        baseline_mode="scripted-baseline",
+        reliability_min_cases=3,
+    )
+    comparison = summary["comparisons"]["scripted-baseline..scripted-oracle"]
+
+    assert summary["ok"] is True
+    assert summary["modes"]["scripted-baseline"]["metrics"]["pass"] == 0
+    assert summary["modes"]["scripted-oracle"]["metrics"]["pass"] == 3
+    assert comparison["paired"]["candidate_only_pass"] == 3
+    assert comparison["paired"]["baseline_only_pass"] == 0
+    assert comparison["paired"]["significant_95"] is False
+    assert summary["failure_clusters"]
+
+
+def test_corpus_summary_allows_live_modes_without_clean_control():
+    corpus = {
+        "corpus": "live-demo",
+        "required_clean_modes": ["scripted-oracle"],
+    }
+    results = [
+        {
+            "id": "case-1",
+            "attempt": 1,
+            "mode": "direct-codex",
+            "dimension": "implementation",
+            "required": True,
+            "status": "fail",
+            "reason": "validator failed",
+            "metrics": {"duration_ms": 10, "cost_usd": 0.01, "tokens": 100},
+        },
+        {
+            "id": "case-1",
+            "attempt": 1,
+            "mode": "legion-delegate",
+            "dimension": "implementation",
+            "required": True,
+            "status": "pass",
+            "metrics": {"duration_ms": 12, "cost_usd": 0.02, "tokens": 120},
+        },
+    ]
+
+    summary = bench.summarize_corpus_run(
+        corpus,
+        results,
+        run_id="live-demo",
+        repo=".",
+        baseline_mode="direct-codex",
+        reliability_min_cases=1,
+    )
+
+    comparison = summary["comparisons"]["direct-codex..legion-delegate"]
+    assert summary["ok"] is True
+    assert summary["required_clean_modes"] == []
+    assert comparison["paired"]["candidate_only_pass"] == 1
+    assert comparison["reliable"] is True
+
+
+def test_render_corpus_markdown_includes_paired_table():
+    summary = {
+        "corpus": "demo",
+        "generated_at": "2026-06-27T00:00:00Z",
+        "run_id": "run",
+        "commit": "abc",
+        "baseline_mode": "base",
+        "reliability_min_cases": 30,
+        "modes": {
+            "base": {
+                "metrics": {
+                    "pass": 1,
+                    "case_runs": 2,
+                    "pass_rate": 0.5,
+                    "pass_rate_ci95": {"low": 0.1, "high": 0.9},
+                    "cost_usd": 0,
+                    "tokens": 0,
+                    "mean_duration_ms": 10,
+                    "p95_duration_ms": 12,
+                }
+            },
+            "cand": {
+                "metrics": {
+                    "pass": 2,
+                    "case_runs": 2,
+                    "pass_rate": 1,
+                    "pass_rate_ci95": {"low": 0.2, "high": 1},
+                    "cost_usd": 0,
+                    "tokens": 0,
+                    "mean_duration_ms": 11,
+                    "p95_duration_ms": 13,
+                }
+            },
+        },
+        "comparisons": {
+            "base..cand": {
+                "delta_pct_points": 50,
+                "relative_improvement_pct": 100,
+                "reliable": False,
+                "paired": {
+                    "candidate_only_pass": 1,
+                    "baseline_only_pass": 0,
+                    "mcnemar_exact_p_value": 1.0,
+                },
+                "cost_usd_delta": 0,
+                "duration_ms_delta": 1,
+            }
+        },
+        "failure_clusters": [],
+    }
+
+    markdown = bench.render_corpus_markdown(summary, {"run_path": "/tmp/run.json"})
+
+    assert "Mode Results" in markdown
+    assert "Candidate paired wins" in markdown
+    assert "`base..cand`" in markdown
 
 
 def test_write_run_artifacts_and_span(tmp_path):

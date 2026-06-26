@@ -602,6 +602,63 @@
         }
       ],
       "required": true
+    },
+    {
+      "id": "task.heldout-corpus-packaged",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "The packaged held-out corpus should have enough cases for reliable comparisons.",
+      "target_type": "plugin",
+      "target_name": "legion-observability",
+      "command": [
+        "bash",
+        "-lc",
+        "jq -r '.schema + \" \" + .corpus + \" \" + (.cases | length | tostring) + \" \" + (.reliability_min_cases | tostring)' {repo}/legion-observability/bench/corpora/heldout-oss-36.json > {workspace}/heldout-meta.txt"
+      ],
+      "validators": [
+        {
+          "type": "file_contains",
+          "path": "{workspace}/heldout-meta.txt",
+          "text": "legion.bench.corpus.v1 heldout-oss-36 36 30"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "task.heldout-corpus-dry-run",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "The held-out corpus dry-run should prove selected modes meet the reliability floor without model spend.",
+      "target_type": "plugin",
+      "target_name": "legion-observability",
+      "command": [
+        "bash",
+        "-lc",
+        "LEGION_BENCH_DIR={workspace}/bench {repo}/legion-observability/bin/legion-bench corpus --corpus heldout-oss-36 --repo {repo} --dry-run --require-reliable --json > {workspace}/heldout-plan.json && jq -r '.corpus, .case_count, .total_case_runs, .comparisons[\"scripted-baseline..scripted-oracle\"].reliable' {workspace}/heldout-plan.json > {workspace}/heldout-plan.txt"
+      ],
+      "validators": [
+        {
+          "type": "file_contains",
+          "path": "{workspace}/heldout-plan.txt",
+          "text": "heldout-oss-36"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/heldout-plan.txt",
+          "text": "36"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/heldout-plan.txt",
+          "text": "72"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/heldout-plan.txt",
+          "text": "true"
+        }
+      ],
+      "required": true
     }
   ]
 }

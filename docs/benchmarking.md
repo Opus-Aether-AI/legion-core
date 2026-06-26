@@ -55,6 +55,8 @@ legion-bench run --suite core --repo . --json
 legion-bench run --suite stable --repo . --json --strict
 legion-bench stable --suite stable --repo . --repeat 3 --strict
 legion-bench corpus --corpus local-smoke --repo . --json
+legion-bench corpus --corpus heldout-oss-36 --repo . --dry-run --require-reliable --json
+legion-bench corpus --corpus heldout-oss-36 --repo . --require-reliable --report-md /tmp/heldout.md --json
 legion-bench compare --baseline runs/base.json --candidate runs/candidate.json
 legion-bench gate --baseline runs/base.json --candidate runs/candidate.json
 legion-bench learning-lift --repo . --json
@@ -81,7 +83,7 @@ legion-bench learning-lift --repo . --json
 - flake cases, defined as the same case producing inconsistent statuses
 - the run artifact path for every iteration
 
-`corpus` is the live A/B layer. A corpus defines cases, validators, and harness
+`corpus` is the A/B layer. A corpus defines cases, validators, and harness
 modes, then runs every selected mode on the same cases:
 
 ```bash
@@ -101,8 +103,14 @@ The runner writes per-case workspaces and artifacts under
 JSON/JSONL, and aggregates pass rate, duration, cost, tokens, and span count.
 Relative lift is only marked reliable once the comparison has at least
 `reliability_min_cases` case-runs, default `30`.
-See `legion-observability/bench/corpora/README.md` for a direct-Codex versus
-`legion-delegate` live corpus template.
+
+`heldout-oss-36` is the first packaged reliable corpus. Its default modes are
+`scripted-baseline` and `scripted-oracle`, so it can run in CI without model
+spend while proving validators, paired stats, failure clustering, reliability,
+and report rendering. Live agent modes (`direct-codex`, `legion-delegate`,
+`direct-claude`, `cursor-agent`, `legion-cursor`) are selected explicitly.
+See `legion-observability/bench/corpora/README.md` for direct-Codex versus
+Legion commands and auth requirements.
 
 `compare` reports Harness Bench-style lift fields for the headline score:
 
@@ -228,11 +236,16 @@ Current stable rollup metrics:
 Current corpus metrics:
 
 - per-mode `case_runs`, `pass`, `fail`, `pass_rate`
+- per-mode Wilson 95% pass-rate confidence interval
 - per-mode `required_fail`
-- per-mode `duration_ms`, `cost_usd`, `tokens`, `span_count`
+- per-mode total/mean/p95 `duration_ms`, `cost_usd`, `tokens`, `span_count`
 - per-dimension pass rates
 - baseline-vs-candidate `delta_pct_points`
 - baseline-vs-candidate `relative_improvement_pct`
+- paired comparison counts (`candidate_only_pass`, `baseline_only_pass`,
+  `both_pass`, `both_fail`)
+- exact McNemar p-value for paired pass/fail disagreement
+- failure clusters by mode, dimension, and reason
 - reliability flag based on sample size
 
 Future live suites should add `orchestration_match`, validator-specific
@@ -287,10 +300,15 @@ the existing `--apply-source` scorecard gate.
    deterministic gating and flake detection.
 8. Done: add `legion-bench corpus`, a generic A/B corpus runner for real
    direct-harness vs Legion measurements with sample-size reliability flags.
-9. Next: add packaged optional adapters for SWE-bench Lite/Verified,
-   Aider Polyglot-style exercises, and Legion-specific fixture repos.
-10. Next: add CI optional workflow or manual `workflow_dispatch` for full
-   benchmark runs.
+9. Done: add `heldout-oss-36`, a 36-case held-out corpus with no-spend default
+   modes plus explicit live adapters for direct Codex, Claude Code, Cursor
+   Agent, `legion-delegate`, and `legion-cursor`.
+10. Done: add paired statistics, Wilson intervals, failure clusters, corpus
+   dry-run planning, and Markdown report output.
+11. Done: add a manual `legion-live-bench` workflow with an explicit live-spend
+   guard before model-backed modes run.
+12. Next: add packaged optional adapters for SWE-bench Lite/Verified and Aider
+   Polyglot-style exercises.
 
 ## Non-goals
 

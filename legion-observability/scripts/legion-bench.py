@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -322,6 +323,14 @@ def load_corpus(repo: str, corpus: str) -> dict[str, Any]:
         if mode_id in seen_modes:
             raise ValueError(f"{path} has duplicate mode id: {mode_id}")
         seen_modes.add(mode_id)
+    seen_cases: set[str] = set()
+    for case in cases:
+        case_id = _text(_dict(case).get("id"))
+        if not case_id:
+            raise ValueError(f"{path} has a case without id")
+        if case_id in seen_cases:
+            raise ValueError(f"{path} has duplicate case id: {case_id}")
+        seen_cases.add(case_id)
     payload["_path"] = path
     return payload
 
@@ -482,6 +491,7 @@ def run_task_validators(
     context: dict[str, str],
     stdout: str,
     stderr: str,
+    env: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for raw_validator in validators:
@@ -521,6 +531,25 @@ def run_task_validators(
             path = _text(_render(validator.get("path"), context))
             expected = _dict(_render(validator.get("match"), context))
             results.append(_validator_result(kind, _validate_jsonl_contains(path, expected), path))
+        elif kind == "command":
+            command = validator.get("command")
+            cwd = _text(_render(validator.get("cwd") or "{workspace}", context))
+            timeout = int(validator.get("timeout") or 120)
+            expected_exit = int(validator.get("expect_exit") or 0)
+            result = _run_process_command(
+                command,
+                context=context,
+                cwd=cwd,
+                env=env or os.environ.copy(),
+                timeout=timeout,
+            )
+            ok = result.get("returncode") == expected_exit
+            detail = (
+                f"exit={result.get('returncode')} expected={expected_exit}; "
+                f"stdout={_short(_text(result.get('stdout')), 500)}; "
+                f"stderr={_short(_text(result.get('stderr')), 500)}"
+            )
+            results.append(_validator_result(kind, ok, detail))
         else:
             results.append(_validator_result(kind or "unknown", False, "unknown validator"))
     return results
@@ -679,6 +708,7 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
             context=context,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            env=env,
         )
         exit_ok = proc.returncode == expected_exit
         validators_ok = all(result.get("ok") for result in validator_results)
@@ -1623,6 +1653,12 @@ def _mode_by_id(corpus: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _selected_corpus_modes(corpus: dict[str, Any], requested: list[str]) -> list[dict[str, Any]]:
     modes = _mode_by_id(corpus)
     if not requested:
+        default_modes = [_text(mode_id) for mode_id in _list(corpus.get("default_modes")) if _text(mode_id)]
+        if default_modes:
+            missing_defaults = [mode_id for mode_id in default_modes if mode_id not in modes]
+            if missing_defaults:
+                raise ValueError(f"unknown default corpus mode(s): {', '.join(missing_defaults)}")
+            return [modes[mode_id] for mode_id in default_modes]
         return [modes[_text(_dict(mode).get("id"))] for mode in _list(corpus.get("modes"))]
     missing = [mode_id for mode_id in requested if mode_id not in modes]
     if missing:
@@ -1663,6 +1699,128 @@ def _case_mode_validators(case: dict[str, Any], mode: dict[str, Any]) -> list[An
     return validators
 
 
+def _mean(values: list[int]) -> float:
+    return round(sum(values) / len(values), 3) if values else 0.0
+
+
+def _percentile(values: list[int], percentile: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return int(ordered[0])
+    rank = (len(ordered) - 1) * (percentile / 100.0)
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return int(ordered[lower])
+    weight = rank - lower
+    return int(round(ordered[lower] * (1 - weight) + ordered[upper] * weight))
+
+
+def _wilson_interval(successes: int, total: int, z: float = 1.959963984540054) -> dict[str, float | None]:
+    if total <= 0:
+        return {"low": None, "high": None}
+    phat = successes / total
+    denominator = 1 + z * z / total
+    center = (phat + z * z / (2 * total)) / denominator
+    margin = z * math.sqrt((phat * (1 - phat) + z * z / (4 * total)) / total) / denominator
+    return {
+        "low": round(max(0.0, center - margin), 6),
+        "high": round(min(1.0, center + margin), 6),
+    }
+
+
+def _mcnemar_exact_p_value(baseline_only_pass: int, candidate_only_pass: int) -> float | None:
+    discordant = baseline_only_pass + candidate_only_pass
+    if discordant == 0:
+        return None
+    smaller = min(baseline_only_pass, candidate_only_pass)
+    tail = sum(math.comb(discordant, index) for index in range(smaller + 1)) * (0.5 ** discordant)
+    return round(min(1.0, 2 * tail), 12)
+
+
+def _corpus_case_key(result: dict[str, Any]) -> tuple[str, int]:
+    return _text(result.get("id")), int(result.get("attempt") or 1)
+
+
+def _paired_mode_comparison(
+    results: list[dict[str, Any]],
+    *,
+    baseline_mode: str,
+    candidate_mode: str,
+) -> dict[str, Any]:
+    baseline = {
+        _corpus_case_key(result): result
+        for result in results
+        if _text(result.get("mode")) == baseline_mode
+    }
+    candidate = {
+        _corpus_case_key(result): result
+        for result in results
+        if _text(result.get("mode")) == candidate_mode
+    }
+    keys = sorted(set(baseline) & set(candidate))
+    both_pass = both_fail = baseline_only_pass = candidate_only_pass = 0
+    candidate_wins: list[str] = []
+    baseline_wins: list[str] = []
+    for key in keys:
+        base_ok = baseline[key].get("status") == "pass"
+        cand_ok = candidate[key].get("status") == "pass"
+        case_label = f"{key[0]}#{key[1]}"
+        if base_ok and cand_ok:
+            both_pass += 1
+        elif not base_ok and not cand_ok:
+            both_fail += 1
+        elif base_ok:
+            baseline_only_pass += 1
+            baseline_wins.append(case_label)
+        else:
+            candidate_only_pass += 1
+            candidate_wins.append(case_label)
+    p_value = _mcnemar_exact_p_value(baseline_only_pass, candidate_only_pass)
+    discordant = baseline_only_pass + candidate_only_pass
+    return {
+        "paired_case_runs": len(keys),
+        "both_pass": both_pass,
+        "both_fail": both_fail,
+        "baseline_only_pass": baseline_only_pass,
+        "candidate_only_pass": candidate_only_pass,
+        "net_candidate_wins": candidate_only_pass - baseline_only_pass,
+        "discordant": discordant,
+        "candidate_win_rate_on_discordant": _rate(candidate_only_pass, discordant),
+        "mcnemar_exact_p_value": p_value,
+        "significant_95": bool(p_value is not None and p_value < 0.05),
+        "candidate_wins": candidate_wins[:25],
+        "baseline_wins": baseline_wins[:25],
+    }
+
+
+def _failure_clusters(results: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:
+    clusters: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for result in results:
+        if result.get("status") == "pass":
+            continue
+        reason = _text(result.get("reason")) or "unknown"
+        # Keep validator counts stable across paths by removing long stdout/stderr fragments.
+        reason = reason.split("; stdout=", 1)[0]
+        key = (_text(result.get("mode")), _text(result.get("dimension")) or "corpus", reason)
+        entry = clusters.setdefault(
+            key,
+            {
+                "mode": key[0],
+                "dimension": key[1],
+                "reason": key[2],
+                "count": 0,
+                "cases": [],
+            },
+        )
+        entry["count"] += 1
+        if len(entry["cases"]) < 10:
+            entry["cases"].append(_text(result.get("id")))
+    return sorted(clusters.values(), key=lambda item: (-int(item["count"]), item["mode"], item["dimension"]))[:limit]
+
+
 def run_corpus_case_mode(
     case: dict[str, Any],
     mode: dict[str, Any],
@@ -1682,6 +1840,7 @@ def run_corpus_case_mode(
     os.makedirs(logs, exist_ok=True)
     task = _text(case.get("task")) or _text(case.get("prompt")) or _text(case.get("summary"))
     task_file = os.path.join(workspace, "task.txt")
+    case_file = os.path.join(workspace, "case.json")
     context = {
         "repo": os.path.abspath(repo),
         "workspace": workspace,
@@ -1692,17 +1851,27 @@ def run_corpus_case_mode(
         "run_dir": run_dir,
         "task": task,
         "task_file": task_file,
+        "case_file": case_file,
         "attempt": str(repeat_index),
     }
     _write_fixture_files(workspace, _dict(case.get("files")), context)
     with open(task_file, "w", encoding="utf-8") as handle:
         handle.write(task)
         handle.write("\n")
+    _write_json(case_file, _dict(_render(case, context)))
 
     env = os.environ.copy()
     env.update({
         "HOME": home,
         "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
+        "LEGION_BENCH_REPO": os.path.abspath(repo),
+        "LEGION_BENCH_WORKSPACE": workspace,
+        "LEGION_BENCH_HOME": home,
+        "LEGION_BENCH_LOGS": logs,
+        "LEGION_BENCH_CASE_ID": case_id,
+        "LEGION_BENCH_MODE_ID": mode_id,
+        "LEGION_BENCH_TASK_FILE": task_file,
+        "LEGION_BENCH_CASE_FILE": case_file,
         "PYTHONUNBUFFERED": "1",
     })
     env.update({key: str(value) for key, value in _dict(_render(mode.get("env"), context)).items()})
@@ -1734,6 +1903,7 @@ def run_corpus_case_mode(
                     "workspace": workspace,
                     "logs": logs,
                     "task_file": task_file,
+                    "case_file": case_file,
                     "setup": setup_results,
                     "stdout": _short(_text(result.get("stdout")), 4000),
                     "stderr": _short(_text(result.get("stderr")), 4000),
@@ -1753,6 +1923,7 @@ def run_corpus_case_mode(
         context=context,
         stdout=_text(command_result.get("stdout")),
         stderr=_text(command_result.get("stderr")),
+        env=env,
     )
     exit_ok = command_result.get("returncode") == expected_exit
     validators_ok = all(result.get("ok") for result in validator_results)
@@ -1784,6 +1955,7 @@ def run_corpus_case_mode(
             "logs": logs,
             "task": task,
             "task_file": task_file,
+            "case_file": case_file,
             "setup": setup_results,
             "cmd": command_result.get("cmd"),
             "cwd": cwd,
@@ -1801,6 +1973,7 @@ def _summarize_corpus_mode(results: list[dict[str, Any]]) -> dict[str, Any]:
     passed = sum(1 for result in results if result.get("status") == "pass")
     required = [result for result in results if result.get("required")]
     required_pass = sum(1 for result in required if result.get("status") == "pass")
+    durations = [int(_dict(result.get("metrics")).get("duration_ms") or 0) for result in results]
     dimensions: dict[str, dict[str, Any]] = {}
     for result in results:
         dimension = _text(result.get("dimension")) or "corpus"
@@ -1817,11 +1990,15 @@ def _summarize_corpus_mode(results: list[dict[str, Any]]) -> dict[str, Any]:
         "pass": passed,
         "fail": case_runs - passed,
         "pass_rate": _rate(passed, case_runs),
+        "pass_rate_ci95": _wilson_interval(passed, case_runs),
         "required_case_runs": len(required),
         "required_pass": required_pass,
         "required_fail": len(required) - required_pass,
         "required_pass_rate": _rate(required_pass, len(required)),
+        "required_pass_rate_ci95": _wilson_interval(required_pass, len(required)),
         "duration_ms": sum(int(_dict(result.get("metrics")).get("duration_ms") or 0) for result in results),
+        "mean_duration_ms": _mean(durations),
+        "p95_duration_ms": _percentile(durations, 95),
         "cost_usd": round(sum(float(_dict(result.get("metrics")).get("cost_usd") or 0.0) for result in results), 6),
         "tokens": sum(int(_dict(result.get("metrics")).get("tokens") or 0) for result in results),
         "span_count": sum(int(_dict(result.get("metrics")).get("span_count") or 0) for result in results),
@@ -1842,6 +2019,21 @@ def summarize_corpus_run(
     for result in results:
         by_mode.setdefault(_text(result.get("mode")), []).append(result)
     modes = {mode_id: _summarize_corpus_mode(items) for mode_id, items in sorted(by_mode.items())}
+    configured_clean_modes = [
+        mode_id
+        for mode_id in (_text(item) for item in _list(corpus.get("required_clean_modes")))
+        if mode_id
+    ]
+    required_clean_modes = [mode_id for mode_id in configured_clean_modes if mode_id in modes]
+    if required_clean_modes:
+        ok = all(
+            int(_dict(_dict(modes[mode_id]).get("metrics")).get("required_fail") or 0) == 0
+            for mode_id in required_clean_modes
+        )
+    elif configured_clean_modes:
+        ok = True
+    else:
+        ok = all(_dict(summary.get("metrics")).get("required_fail") == 0 for summary in modes.values())
     comparisons: dict[str, dict[str, Any]] = {}
     baseline = _dict(_dict(modes.get(baseline_mode)).get("metrics"))
     for mode_id, summary in modes.items():
@@ -1852,6 +2044,11 @@ def summarize_corpus_run(
         candidate_rate = _num(candidate.get("pass_rate"))
         case_runs = min(int(baseline.get("case_runs") or 0), int(candidate.get("case_runs") or 0))
         delta = round(candidate_rate - baseline_rate, 6)
+        paired = _paired_mode_comparison(
+            results,
+            baseline_mode=baseline_mode,
+            candidate_mode=mode_id,
+        )
         comparisons[f"{baseline_mode}..{mode_id}"] = {
             "baseline": baseline_mode,
             "candidate": mode_id,
@@ -1864,6 +2061,10 @@ def summarize_corpus_run(
             "case_runs": case_runs,
             "reliable": case_runs >= reliability_min_cases,
             "reliability_min_cases": reliability_min_cases,
+            "paired": paired,
+            "cost_usd_delta": round(float(candidate.get("cost_usd") or 0.0) - float(baseline.get("cost_usd") or 0.0), 6),
+            "duration_ms_delta": int(candidate.get("duration_ms") or 0) - int(baseline.get("duration_ms") or 0),
+            "tokens_delta": int(candidate.get("tokens") or 0) - int(baseline.get("tokens") or 0),
         }
     return {
         "schema": "legion.bench.corpus-summary.v1",
@@ -1874,9 +2075,11 @@ def summarize_corpus_run(
         "commit": _git_commit(repo),
         "baseline_mode": baseline_mode,
         "reliability_min_cases": reliability_min_cases,
-        "ok": all(_dict(summary.get("metrics")).get("required_fail") == 0 for summary in modes.values()),
+        "required_clean_modes": required_clean_modes,
+        "ok": ok,
         "modes": modes,
         "comparisons": comparisons,
+        "failure_clusters": _failure_clusters(results),
     }
 
 
@@ -1937,6 +2140,150 @@ def write_corpus_artifacts(
     }
 
 
+def corpus_plan(
+    corpus: dict[str, Any],
+    modes: list[dict[str, Any]],
+    *,
+    baseline_mode: str,
+    repeat: int,
+    reliability_min_cases: int,
+) -> dict[str, Any]:
+    case_count = len(_list(corpus.get("cases")))
+    mode_ids = [_text(mode.get("id")) for mode in modes]
+    comparisons = {}
+    for mode_id in mode_ids:
+        if mode_id == baseline_mode:
+            continue
+        case_runs = case_count * repeat
+        comparisons[f"{baseline_mode}..{mode_id}"] = {
+            "baseline": baseline_mode,
+            "candidate": mode_id,
+            "case_runs": case_runs,
+            "reliable": case_runs >= reliability_min_cases,
+            "reliability_min_cases": reliability_min_cases,
+        }
+    live_modes = [
+        mode_id
+        for mode_id, mode in zip(mode_ids, modes)
+        if bool(mode.get("live")) or _text(mode.get("kind")) in {"live", "agent"}
+    ]
+    return {
+        "schema": "legion.bench.corpus-plan.v1",
+        "generated_at": _iso_utc(),
+        "corpus": corpus.get("corpus"),
+        "corpus_path": corpus.get("_path"),
+        "description": corpus.get("description"),
+        "case_count": case_count,
+        "repeat": repeat,
+        "mode_count": len(mode_ids),
+        "modes": mode_ids,
+        "baseline_mode": baseline_mode,
+        "case_runs_per_mode": case_count * repeat,
+        "total_case_runs": case_count * repeat * len(mode_ids),
+        "reliability_min_cases": reliability_min_cases,
+        "comparisons": comparisons,
+        "has_live_modes_selected": bool(live_modes),
+        "live_modes_selected": live_modes,
+        "dimensions": dict(sorted({
+            _text(_dict(case).get("dimension")) or "corpus": sum(
+                1 for item in _list(corpus.get("cases"))
+                if (_text(_dict(item).get("dimension")) or "corpus")
+                == (_text(_dict(case).get("dimension")) or "corpus")
+            )
+            for case in _list(corpus.get("cases"))
+        }.items())),
+    }
+
+
+def _markdown_float(value: Any, digits: int = 3) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def render_corpus_markdown(summary: dict[str, Any], artifacts: dict[str, str]) -> str:
+    lines = [
+        f"# Legion Corpus Benchmark: {summary.get('corpus')}",
+        "",
+        f"- generated: `{summary.get('generated_at')}`",
+        f"- run id: `{summary.get('run_id')}`",
+        f"- commit: `{summary.get('commit')}`",
+        f"- baseline mode: `{summary.get('baseline_mode')}`",
+        f"- reliability floor: `{summary.get('reliability_min_cases')}` paired case-runs",
+        f"- run artifact: `{artifacts.get('run_path', '')}`",
+        "",
+        "## Mode Results",
+        "",
+        "| Mode | Pass | Case-runs | Pass rate | 95% CI | Cost | Tokens | Mean ms | P95 ms |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for mode_id, mode_summary in _dict(summary.get("modes")).items():
+        metrics = _dict(_dict(mode_summary).get("metrics"))
+        ci = _dict(metrics.get("pass_rate_ci95"))
+        ci_text = f"{_markdown_float(ci.get('low'))}-{_markdown_float(ci.get('high'))}"
+        lines.append(
+            "| "
+            f"`{mode_id}` | "
+            f"{int(metrics.get('pass') or 0)} | "
+            f"{int(metrics.get('case_runs') or 0)} | "
+            f"{_markdown_float(metrics.get('pass_rate'))} | "
+            f"{ci_text} | "
+            f"${float(metrics.get('cost_usd') or 0):.6f} | "
+            f"{int(metrics.get('tokens') or 0)} | "
+            f"{_markdown_float(metrics.get('mean_duration_ms'))} | "
+            f"{int(metrics.get('p95_duration_ms') or 0)} |"
+        )
+    lines.extend(["", "## Comparisons", ""])
+    lines.append(
+        "| Comparison | Delta pp | Relative | Reliable | Candidate paired wins | Baseline paired wins | McNemar p | Cost delta | Duration delta ms |"
+    )
+    lines.append("|---|---:|---:|---|---:|---:|---:|---:|---:|")
+    for key, comparison in _dict(summary.get("comparisons")).items():
+        paired = _dict(comparison.get("paired"))
+        relative = comparison.get("relative_improvement_pct")
+        relative_text = "n/a" if relative is None else f"{float(relative):+.3f}%"
+        p_value = paired.get("mcnemar_exact_p_value")
+        lines.append(
+            "| "
+            f"`{key}` | "
+            f"{float(comparison.get('delta_pct_points') or 0):+.3f} | "
+            f"{relative_text} | "
+            f"{'yes' if comparison.get('reliable') else 'no'} | "
+            f"{int(paired.get('candidate_only_pass') or 0)} | "
+            f"{int(paired.get('baseline_only_pass') or 0)} | "
+            f"{'n/a' if p_value is None else f'{float(p_value):.6f}'} | "
+            f"${float(comparison.get('cost_usd_delta') or 0):+.6f} | "
+            f"{int(comparison.get('duration_ms_delta') or 0):+d} |"
+        )
+    clusters = _list(summary.get("failure_clusters"))
+    lines.extend(["", "## Failure Clusters", ""])
+    if clusters:
+        lines.append("| Mode | Dimension | Count | Reason | Example cases |")
+        lines.append("|---|---|---:|---|---|")
+        for cluster in clusters:
+            lines.append(
+                "| "
+                f"`{cluster.get('mode')}` | "
+                f"`{cluster.get('dimension')}` | "
+                f"{int(cluster.get('count') or 0)} | "
+                f"{_text(cluster.get('reason')).replace('|', '/')} | "
+                f"{', '.join(_list(cluster.get('cases')))} |"
+            )
+    else:
+        lines.append("No failures.")
+    lines.extend([
+        "",
+        "## Scope",
+        "",
+        "This report is generated from a corpus run artifact. Relative lift is only treated as reliable when the selected comparison meets the configured case-run floor.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def corpus_command(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo)
     corpus = load_corpus(repo, args.corpus)
@@ -1947,9 +2294,37 @@ def corpus_command(args: argparse.Namespace) -> int:
         raise ValueError(f"baseline mode must be selected: {baseline_mode}")
     reliability_min_cases = int(args.reliability_min_cases or corpus.get("reliability_min_cases") or 30)
     run_id = args.run_id or _run_id(_text(corpus.get("corpus")) or "corpus")
+    repeat = max(1, int(args.repeat or 1))
+    if args.dry_run:
+        payload = corpus_plan(
+            corpus,
+            modes,
+            baseline_mode=baseline_mode,
+            repeat=repeat,
+            reliability_min_cases=reliability_min_cases,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"legion-bench corpus plan: {payload['corpus']}")
+            print(f"  modes: {', '.join(mode_ids)}")
+            print(f"  cases: {payload['case_count']} x repeat {repeat}")
+            print(f"  total case-runs: {payload['total_case_runs']}")
+            for key, comparison in _dict(payload.get("comparisons")).items():
+                reliable = "reliable" if _dict(comparison).get("reliable") else "small-sample"
+                print(f"  {key}: {comparison.get('case_runs')} paired case-runs ({reliable})")
+        if args.require_reliable:
+            unreliable = [
+                key
+                for key, comparison in _dict(payload.get("comparisons")).items()
+                if not _dict(comparison).get("reliable")
+            ]
+            if unreliable:
+                print(f"legion-bench corpus: unreliable sample size for {', '.join(unreliable)}", file=sys.stderr)
+                return 1
+        return 0
     run_dir = os.path.join(os.path.abspath(os.path.expanduser(args.bench_dir)), "corpus", run_id)
     results: list[dict[str, Any]] = []
-    repeat = max(1, int(args.repeat or 1))
     for mode in modes:
         for attempt in range(1, repeat + 1):
             for case in _list(corpus.get("cases")):
@@ -1971,6 +2346,15 @@ def corpus_command(args: argparse.Namespace) -> int:
         reliability_min_cases=reliability_min_cases,
     )
     artifacts = write_corpus_artifacts(args.bench_dir, run_id, corpus, results, summary)
+    report_path = ""
+    if args.report_md:
+        report_path = os.path.abspath(os.path.expanduser(args.report_md))
+        report_dir = os.path.dirname(report_path)
+        if report_dir:
+            os.makedirs(report_dir, exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as handle:
+            handle.write(render_corpus_markdown(summary, artifacts))
+        artifacts["report_md"] = report_path
     payload = {**artifacts, "summary": summary}
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1986,11 +2370,16 @@ def corpus_command(args: argparse.Namespace) -> int:
             )
         for key, comparison in _dict(summary.get("comparisons")).items():
             reliable = "reliable" if comparison.get("reliable") else "small-sample"
+            paired = _dict(comparison.get("paired"))
             print(
                 f"  {key}: {float(comparison.get('delta_pct_points') or 0):+g} pp "
-                f"({reliable})"
+                f"({reliable}, paired wins "
+                f"{int(paired.get('candidate_only_pass') or 0)}-"
+                f"{int(paired.get('baseline_only_pass') or 0)})"
             )
         print(f"run: {artifacts['run_path']}")
+        if report_path:
+            print(f"report: {report_path}")
     if args.require_reliable:
         unreliable = [
             key
@@ -2164,6 +2553,8 @@ def main(argv: list[str] | None = None) -> int:
     corpus.add_argument("--reliability-min-cases", type=int, default=0)
     corpus.add_argument("--bench-dir", default=os.environ.get("LEGION_BENCH_DIR", DEFAULT_BENCH_ROOT))
     corpus.add_argument("--run-id", default="")
+    corpus.add_argument("--dry-run", action="store_true", help="validate corpus shape and selected modes without executing cases")
+    corpus.add_argument("--report-md", default="", help="write a Markdown corpus report to this path")
     corpus.add_argument("--strict", action="store_true")
     corpus.add_argument("--require-reliable", action="store_true")
     corpus.add_argument("--json", action="store_true")

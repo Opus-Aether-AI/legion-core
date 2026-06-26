@@ -26,6 +26,8 @@ legion-report                       # per-executor cost / success / latency
 legion-bench run --suite core --repo . --strict
 legion-bench stable --suite stable --repo . --repeat 3 --strict
 legion-bench corpus --corpus local-smoke --repo . --json
+legion-bench corpus --corpus heldout-oss-36 --repo . --dry-run --require-reliable --json
+legion-bench corpus --corpus heldout-oss-36 --repo . --require-reliable --report-md /tmp/heldout.md --json
 legion-bench compare --baseline runs/base/run.json --candidate runs/new/run.json
 legion-bench gate --baseline runs/base/run.json --candidate runs/new/run.json
 legion-report --by model --html > report.html

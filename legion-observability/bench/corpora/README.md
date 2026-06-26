@@ -7,6 +7,57 @@ Legion spans, and sample-size reliability.
 The packaged `local-smoke.json` corpus is only a runner smoke test. It is tiny
 and intentionally marked unreliable for performance claims.
 
+The packaged `heldout-oss-36.json` corpus is the first reliable held-out lane.
+It contains 36 Python micro-coding tasks and defaults to no-spend deterministic
+control modes:
+
+```bash
+legion-bench corpus \
+  --corpus heldout-oss-36 \
+  --repo . \
+  --dry-run \
+  --require-reliable \
+  --json
+
+legion-bench corpus \
+  --corpus heldout-oss-36 \
+  --repo . \
+  --require-reliable \
+  --strict \
+  --report-md /tmp/heldout-report.md \
+  --json
+```
+
+The default comparison is `scripted-baseline` versus `scripted-oracle`, so it
+proves corpus mechanics, validators, paired stats, failure clustering, and report
+generation without model spend. It is not a model-quality claim.
+
+For live runs, select live modes explicitly:
+
+```bash
+legion-bench corpus \
+  --corpus heldout-oss-36 \
+  --repo . \
+  --mode direct-codex \
+  --mode legion-delegate \
+  --baseline direct-codex \
+  --require-reliable \
+  --report-md /tmp/direct-codex-vs-legion.md \
+  --json
+```
+
+Optional live modes currently packaged:
+
+- `direct-codex`
+- `legion-delegate`
+- `direct-claude`
+- `cursor-agent`
+- `legion-cursor`
+
+Live modes require the corresponding CLI and auth on the machine running the
+bench. GitHub Actions also has a manual `legion-live-bench` workflow with an
+explicit `run_live=true` guard before any live modes run.
+
 ## Live Corpus Template
 
 Use 30+ held-out cases for a reliable comparison:

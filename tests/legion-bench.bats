@@ -63,9 +63,10 @@ setup() {
   jq -e '
     .ok == true
     and .metrics.iterations == 2
-    and .metrics.cases_per_iteration == 43
-    and .metrics.total_case_runs == 86
+    and .metrics.cases_per_iteration == 49
+    and .metrics.total_case_runs == 98
     and .metrics.flake_count == 0
+    and .dimensions["cli-contract"].pass_rate == 1
     and .dimensions.routing.pass_rate == 1
     and .dimensions.triggering.pass_rate == 1
     and .artifacts.stability_path

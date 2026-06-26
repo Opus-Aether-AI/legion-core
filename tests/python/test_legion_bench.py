@@ -150,6 +150,35 @@ def test_load_corpus_reads_packaged_local_smoke():
     assert len(corpus["cases"]) == 3
 
 
+def test_load_suite_extends_relative_to_absolute_suite_path(tmp_path):
+    repo = tmp_path / "target-repo"
+    repo.mkdir()
+    suites = tmp_path / "suites"
+    suites.mkdir()
+    (suites / "core.json").write_text(
+        json.dumps({
+            "schema": bench.SUITE_SCHEMA,
+            "suite": "core",
+            "cases": [{"id": "base", "type": "route", "archetype": "x"}],
+        }),
+        encoding="utf-8",
+    )
+    stable = suites / "stable.json"
+    stable.write_text(
+        json.dumps({
+            "schema": bench.SUITE_SCHEMA,
+            "suite": "stable",
+            "extends": ["core"],
+            "cases": [{"id": "extra", "type": "route", "archetype": "y"}],
+        }),
+        encoding="utf-8",
+    )
+
+    suite = bench.load_suite(str(repo), str(stable))
+
+    assert [case["id"] for case in suite["cases"]] == ["base", "extra"]
+
+
 def test_record_failed_outcomes_writes_benchmark_source(tmp_path):
     logs = tmp_path / "logs"
     run_path = tmp_path / "bench" / "run.json"

@@ -455,6 +455,153 @@
         }
       ],
       "required": true
+    },
+    {
+      "id": "task.bench-corpus-cli",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "The public bench CLI should run the packaged corpus runner and emit A/B lift metrics.",
+      "target_type": "plugin",
+      "target_name": "legion-observability",
+      "command": [
+        "bash",
+        "-lc",
+        "LEGION_BENCH_DIR={workspace}/bench LEGION_TELEMETRY_DIR={workspace}/spans {repo}/legion-observability/bin/legion-bench corpus --corpus local-smoke --repo {repo} --json > {workspace}/corpus.json && jq -r '.summary.comparisons[\"control-baseline..control-candidate\"].delta_pct_points, .summary.comparisons[\"control-baseline..control-candidate\"].reliable' {workspace}/corpus.json > {workspace}/corpus-check.txt"
+      ],
+      "validators": [
+        {
+          "type": "file_contains",
+          "path": "{workspace}/corpus-check.txt",
+          "text": "66.667"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/corpus-check.txt",
+          "text": "false"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "task.bench-corpus-packaged",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "The packaged local-smoke corpus should be present and loadable by name.",
+      "target_type": "plugin",
+      "target_name": "legion-observability",
+      "command": [
+        "bash",
+        "-lc",
+        "jq -r '.schema + \" \" + .corpus + \" \" + (.cases | length | tostring)' {repo}/legion-observability/bench/corpora/local-smoke.json > {workspace}/corpus-meta.txt"
+      ],
+      "validators": [
+        {
+          "type": "file_contains",
+          "path": "{workspace}/corpus-meta.txt",
+          "text": "legion.bench.corpus.v1 local-smoke 3"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "task.intake-cli-generic-worker-help",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "The public intake CLI should expose generic Legion worker options.",
+      "target_type": "plugin",
+      "target_name": "legion-router",
+      "command": [
+        "bash",
+        "-lc",
+        "{repo}/legion-router/bin/legion-intake 2> {workspace}/intake-help.txt"
+      ],
+      "expect_exit": 2,
+      "validators": [
+        {
+          "type": "file_contains",
+          "path": "{workspace}/intake-help.txt",
+          "text": "--worker delegate|cursor|custom"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/intake-help.txt",
+          "text": "--worker-bin CMD"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "task.package-bin-legion-intake",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "The npm package should ship legion-intake as a first-class bin.",
+      "target_type": "plugin",
+      "target_name": "legion-router",
+      "command": [
+        "bash",
+        "-lc",
+        "jq -r '.bin[\"legion-intake\"] // \"\"' {repo}/package.json > {workspace}/package-bin.txt"
+      ],
+      "validators": [
+        {
+          "type": "file_contains",
+          "path": "{workspace}/package-bin.txt",
+          "text": "legion-router/bin/legion-intake"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "task.router-plugin-intake-metadata",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "Router plugin metadata should advertise generic GitHub issue intake.",
+      "target_type": "plugin",
+      "target_name": "legion-router",
+      "command": [
+        "bash",
+        "-lc",
+        "jq -r '.version + \" \" + .description' {repo}/legion-router/.claude-plugin/plugin.json > {workspace}/router-plugin.txt"
+      ],
+      "validators": [
+        {
+          "type": "file_contains",
+          "path": "{workspace}/router-plugin.txt",
+          "text": "0.5.3"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/router-plugin.txt",
+          "text": "generic GitHub issue intake via `legion-intake`"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "task.marketplace-intake-metadata",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "Marketplace metadata should describe intake as delegate/cursor/custom worker generic.",
+      "target_type": "plugin",
+      "target_name": "legion-router",
+      "command": [
+        "bash",
+        "-lc",
+        "jq -r '.plugins[] | select(.name == \"legion-router\") | .version + \" \" + .description' {repo}/.claude-plugin/marketplace.json > {workspace}/marketplace-router.txt"
+      ],
+      "validators": [
+        {
+          "type": "file_contains",
+          "path": "{workspace}/marketplace-router.txt",
+          "text": "0.5.3"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/marketplace-router.txt",
+          "text": "delegate, cursor, or a compatible custom worker"
+        }
+      ],
+      "required": true
     }
   ]
 }

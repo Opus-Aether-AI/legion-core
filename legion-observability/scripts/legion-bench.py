@@ -246,6 +246,19 @@ def resolve_suite_path(repo: str, suite: str) -> str:
     raise FileNotFoundError(f"benchmark suite not found: {suite}")
 
 
+def resolve_suite_include_path(repo: str, include: str, parent_path: str) -> str:
+    if parent_path:
+        parent_dir = os.path.dirname(os.path.abspath(parent_path))
+        name = include[:-5] if include.endswith(".json") else include
+        for candidate in (
+            os.path.abspath(os.path.join(parent_dir, include)),
+            os.path.abspath(os.path.join(parent_dir, f"{name}.json")),
+        ):
+            if os.path.exists(candidate):
+                return candidate
+    return resolve_suite_path(repo, include)
+
+
 def resolve_corpus_path(repo: str, corpus: str) -> str:
     expanded = os.path.abspath(os.path.expanduser(corpus))
     if os.path.exists(expanded):
@@ -280,7 +293,8 @@ def load_suite(repo: str, suite: str, seen: set[str] | None = None) -> dict[str,
         include_name = _text(include)
         if not include_name:
             continue
-        cases.extend(_list(load_suite(repo, include_name, next_seen).get("cases")))
+        include_path = resolve_suite_include_path(repo, include_name, path)
+        cases.extend(_list(load_suite(repo, include_path, next_seen).get("cases")))
     cases.extend(_list(payload.get("cases")))
     if not isinstance(cases, list) or not cases:
         raise ValueError(f"{path} has no benchmark cases")

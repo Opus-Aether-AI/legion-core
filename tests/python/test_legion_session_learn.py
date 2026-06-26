@@ -78,6 +78,74 @@ def test_scan_jsonl_and_record_candidates(tmp_path):
     )
 
 
+def test_scan_codex_user_correction_feedback(tmp_path):
+    session = tmp_path / ".codex" / "sessions" / "2026" / "06" / "26" / "session.jsonl"
+    session.parent.mkdir(parents=True)
+    session.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "I should have linked the exact repo in the credits.",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": (
+                        "U should have linked https://github.com/svineet/harness-bench. "
+                        "Did we even refer to that Harness Bench paper?"
+                    ),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    now = time.time()
+    os.utime(session, (now, now))
+
+    result = lsl.scan(tmp_path, days=1, queries=["harness-bench"])
+    categories = {candidate["category"]: candidate for candidate in result["candidates"]}
+
+    assert "user-correction-feedback" in categories
+    correction = categories["user-correction-feedback"]
+    assert correction["entity"] == "plugin:legion-observability"
+    assert correction["evidence"][0]["role"] == "user"
+    assert "svineet/harness-bench" in correction["evidence"][0]["snippet"]
+
+
+def test_assistant_correction_words_do_not_trigger_user_feedback(tmp_path):
+    session = tmp_path / ".codex" / "sessions" / "2026" / "06" / "26" / "assistant.jsonl"
+    session.parent.mkdir(parents=True)
+    session.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "I should have linked the exact repo and used the wrong source.",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    now = time.time()
+    os.utime(session, (now, now))
+
+    result = lsl.scan(tmp_path, days=1)
+
+    assert "user-correction-feedback" not in {
+        candidate["category"] for candidate in result["candidates"]
+    }
+
+
 def test_oversized_jsonl_session_is_streamed_not_skipped(tmp_path):
     session = tmp_path / ".codex" / "sessions" / "2026" / "06" / "22" / "large.jsonl"
     session.parent.mkdir(parents=True)

@@ -156,6 +156,30 @@ RULES = [
             r"trusted origins",
         ],
     },
+    {
+        "category": "user-correction-feedback",
+        "entity": "plugin:legion-observability",
+        "severity": "medium",
+        "roles": ["user"],
+        "summary": (
+            "Treat explicit user corrections as self-learning feedback: record the "
+            "miss, verify the concrete source of truth, and turn repeated misses into "
+            "guardrails before similar docs/routing/orchestration work."
+        ),
+        "patterns": [
+            r"\b(you|u) should have\b",
+            r"\b(you|u) (missed|forgot|linked|credited|used) (the )?wrong\b",
+            r"\bwrong (repo|paper|link|credit|attribution|source)\b",
+            r"\bnot (the )?(right|correct) (repo|paper|link|credit|attribution|source)\b",
+            r"\bnot what i meant\b",
+            r"\bthat(?:'s| is) wrong\b",
+            r"\bdid we even refer to\b",
+            r"\bi thought\b.*\b(from|was|came from|based on)\b",
+            r"\bhow (the hell|did) .* happen(?:ed)?\b",
+            r"\bis .*learn(?:ing|in) from this\b",
+            r"\bthis (should|needs?) .* learn\b",
+        ],
+    },
 ]
 
 
@@ -218,9 +242,7 @@ def _iter_files(home: Path, days: int, max_file_mb: float) -> tuple[list[Path], 
     return sorted(out), skipped
 
 
-def _message_text(obj: dict[str, Any]) -> str:
-    message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-    content = message.get("content") if isinstance(message, dict) else None
+def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -234,12 +256,52 @@ def _message_text(obj: dict[str, Any]) -> str:
             else:
                 parts.append(str(item))
         return "\n".join(parts)
+    if isinstance(content, dict):
+        for key in ("message", "content", "text", "summary"):
+            value = content.get(key)
+            text = _content_text(value)
+            if text:
+                return text
+    return ""
+
+
+def _message_role(obj: dict[str, Any]) -> str:
+    message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+    if isinstance(message, dict) and isinstance(message.get("role"), str):
+        return str(message["role"]).lower()
+    if isinstance(obj.get("role"), str):
+        return str(obj["role"]).lower()
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+    payload_type = str(payload.get("type") or "").lower()
+    if payload_type == "user_message":
+        return "user"
+    if payload_type == "agent_message":
+        return "assistant"
+    if isinstance(payload.get("role"), str):
+        return str(payload["role"]).lower()
+    return ""
+
+
+def _message_text(obj: dict[str, Any]) -> str:
+    message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+    content = message.get("content") if isinstance(message, dict) else None
+    text = _content_text(content)
+    if text:
+        return text
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+    text = _content_text(payload)
+    if text:
+        return text
+    for key in ("content", "text", "summary", "message"):
+        text = _content_text(obj.get(key))
+        if text:
+            return text
     return str(obj.get("summary") or "")
 
 
-def _extract_blocks(path: Path) -> list[str]:
+def _extract_records(path: Path) -> list[dict[str, str]]:
     if path.suffix == ".jsonl":
-        blocks: list[str] = []
+        records: list[dict[str, str]] = []
         try:
             with path.open(encoding="utf-8", errors="ignore") as handle:
                 for line in handle:
@@ -250,10 +312,15 @@ def _extract_blocks(path: Path) -> list[str]:
                     if isinstance(payload, dict):
                         block = _message_text(payload)
                         if block:
-                            blocks.append(block[:MAX_BLOCK_CHARS])
+                            records.append(
+                                {
+                                    "text": block[:MAX_BLOCK_CHARS],
+                                    "role": _message_role(payload),
+                                }
+                            )
         except OSError:
             return []
-        return blocks
+        return records
 
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
@@ -266,9 +333,17 @@ def _extract_blocks(path: Path) -> list[str]:
             return []
         if isinstance(payload, dict):
             block = _message_text(payload) or json.dumps(payload, sort_keys=True)
-            return [block[:MAX_BLOCK_CHARS]]
+            return [{"text": block[:MAX_BLOCK_CHARS], "role": _message_role(payload)}]
         return []
-    return [part[:MAX_BLOCK_CHARS] for part in re.split(r"\n\s*\n", text) if part.strip()]
+    return [
+        {"text": part[:MAX_BLOCK_CHARS], "role": ""}
+        for part in re.split(r"\n\s*\n", text)
+        if part.strip()
+    ]
+
+
+def _extract_blocks(path: Path) -> list[str]:
+    return [record["text"] for record in _extract_records(path)]
 
 
 def _matches_query(block: str, source_path: Path, queries: list[str]) -> bool:
@@ -278,9 +353,12 @@ def _matches_query(block: str, source_path: Path, queries: list[str]) -> bool:
     return any(query.lower() in lower for query in queries)
 
 
-def classify_block(block: str) -> list[dict[str, Any]]:
+def classify_block(block: str, role: str = "") -> list[dict[str, Any]]:
     hits: list[dict[str, Any]] = []
     for rule in RULES:
+        roles = {str(item).lower() for item in rule.get("roles", [])}
+        if roles and role.lower() not in roles:
+            continue
         matched = [
             pat
             for pat in rule["patterns"]
@@ -303,10 +381,11 @@ def scan(
     grouped: dict[str, dict[str, Any]] = {}
     files, skipped = _iter_files(home, days, max_file_mb)
     for path in files:
-        for block in _extract_blocks(path):
+        for record in _extract_records(path):
+            block = record["text"]
             if not _matches_query(block, path, queries):
                 continue
-            for hit in classify_block(block):
+            for hit in classify_block(block, role=record.get("role", "")):
                 rule = hit["rule"]
                 category = str(rule["category"])
                 group = grouped.setdefault(
@@ -325,6 +404,7 @@ def scan(
                     group["evidence"].append(
                         {
                             "source_path": str(path),
+                            "role": record.get("role", ""),
                             "snippet": _short(block, 700),
                         }
                     )
@@ -366,7 +446,12 @@ def _outcomes_path(log_root: str) -> Path:
 def _outcome(candidate: dict[str, Any]) -> dict[str, Any]:
     target_type, target_name = str(candidate["entity"]).split(":", 1)
     evidence = "\n\n".join(
-        f"{item['source_path']}: {item['snippet']}" for item in candidate.get("evidence", [])
+        (
+            f"{item['source_path']} ({item['role']}): {item['snippet']}"
+            if item.get("role")
+            else f"{item['source_path']}: {item['snippet']}"
+        )
+        for item in candidate.get("evidence", [])
     )
     return {
         "schema": OUTCOME_SCHEMA,

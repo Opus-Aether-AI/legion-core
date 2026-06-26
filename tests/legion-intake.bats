@@ -67,9 +67,22 @@ write_mock_delegate() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'legion-delegate %s\n' "$*" >> "$MOCK_CALL_LOG"
+printf 'worker-env GH_TOKEN=%s GITHUB_TOKEN=%s CODEX_AUTH=%s OPENAI_API_KEY=%s ANTHROPIC_API_KEY=%s CURSOR_API_KEY=%s\n' \
+  "${GH_TOKEN+set}" "${GITHUB_TOKEN+set}" "${CODEX_AUTH+set}" "${OPENAI_API_KEY+set}" \
+  "${ANTHROPIC_API_KEY+set}" "${CURSOR_API_KEY+set}" >> "$MOCK_CALL_LOG"
 cat "$MOCK_DELEGATE_RESULT"
 EOF
   chmod +x "$CUSTOM_BIN/legion-delegate"
+}
+
+write_mock_cursor() {
+  cat > "$CUSTOM_BIN/legion-cursor" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'legion-cursor %s\n' "$*" >> "$MOCK_CALL_LOG"
+cat "$MOCK_DELEGATE_RESULT"
+EOF
+  chmod +x "$CUSTOM_BIN/legion-cursor"
 }
 
 make_patch() {
@@ -97,6 +110,24 @@ make_patch() {
   grep -Fq "assessment" "$MOCK_GH_COMMENTS"
 }
 
+@test "intake explore can use the cursor worker contract" {
+  write_mock_cursor
+  printf '{"title":"Bug title","body":"Bug body"}\n' > "$MOCK_GH_ISSUE_JSON"
+  printf 'cursor assessment\n' > "$TEST_TMPDIR/last-message.txt"
+  printf '{"status":"ok","last_message_path":"%s"}\n' "$TEST_TMPDIR/last-message.txt" > "$MOCK_DELEGATE_RESULT"
+
+  run bash -c "cd '$REPO_DIR' && env LEGION_CURSOR_BIN=legion-cursor bash '$INTAKE' explore --issue 8 --repo acme/widgets --worker cursor"
+
+  [ "$status" -eq 0 ]
+  assert_mock_called legion-cursor "--sandbox read-only --model cursor-auto"
+  grep -Fq "cursor assessment" "$MOCK_GH_COMMENTS"
+  if grep -F "legion-cursor " "$MOCK_CALL_LOG" | grep -q -- "--untrusted"; then
+    echo "cursor worker should not receive delegate-only --untrusted flag" >&2
+    cat "$MOCK_CALL_LOG" >&2
+    false
+  fi
+}
+
 @test "intake implement opens a PR when delegate returns a non-empty diff" {
   local patch; patch="$(make_patch "$REPO_DIR")"
   printf '{"title":"Fix bug","body":"Please patch it"}\n' > "$MOCK_GH_ISSUE_JSON"
@@ -114,6 +145,17 @@ make_patch() {
   [ "$(git -C "$REPO_DIR" show HEAD:demo.txt)" = "new" ]
   git -C "$REPO_DIR" ls-remote --exit-code --heads origin agent/issue-9-r123 >/dev/null
   [ ! -f "$MOCK_GH_COMMENTS" ]
+}
+
+@test "intake scrubs GitHub and provider secrets from the worker env" {
+  printf '{"title":"Bug title","body":"Bug body"}\n' > "$MOCK_GH_ISSUE_JSON"
+  printf 'assessment\n' > "$TEST_TMPDIR/last-message.txt"
+  printf '{"status":"ok","last_message_path":"%s"}\n' "$TEST_TMPDIR/last-message.txt" > "$MOCK_DELEGATE_RESULT"
+
+  run bash -c "cd '$REPO_DIR' && env GH_TOKEN=gh GITHUB_TOKEN=gh CODEX_AUTH=secret OPENAI_API_KEY=secret ANTHROPIC_API_KEY=secret CURSOR_API_KEY=secret LEGION_DELEGATE_BIN=legion-delegate bash '$INTAKE' explore --issue 10 --repo acme/widgets"
+
+  [ "$status" -eq 0 ]
+  grep -Fq "worker-env GH_TOKEN= GITHUB_TOKEN= CODEX_AUTH= OPENAI_API_KEY= ANTHROPIC_API_KEY= CURSOR_API_KEY=" "$MOCK_CALL_LOG"
 }
 
 @test "intake implement comments instead of opening a PR when the diff is empty" {

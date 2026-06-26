@@ -10,6 +10,7 @@ Legion's multi-model brain. Lets Opus orchestrate and **delegate scoped sub-task
 |---|---|---|
 | `legion-delegate` | `scripts/delegate.sh` | Delegate a task to a model agent via `codex exec` in an isolated git worktree; capture diff + last message + token usage; price it; emit a telemetry span; report usage to `/ingest`. Subcommands: `run`, `review`, `apply`, `cleanup`. |
 | `legion-cursor` | `scripts/legion-cursor.sh` | Delegate a task to Cursor Agent headless (`agent -p`) in an isolated worktree; capture diff + result + usage; emit a telemetry span with `executor=cursor`. |
+| `legion-intake` | `scripts/legion-intake.sh` | GitHub issue intake wrapper. Runs a compatible Legion worker (`delegate`, `cursor`, or `custom`) in explore or implement mode, comments assessment results, and opens review PRs for implementation diffs. |
 | `legion-router` | `scripts/router.sh` | Manage the loopback `:8082` Anthropic-compatible metering proxy as a launchd service: `install`/`uninstall`/`start`/`stop`/`restart`/`status`/`logs`/`errors`/`dev`. Endpoints: `/health`, `/stats`, `POST /ingest`. Keys optional (runs as a pure meter). |
 
 ## Running the meter
@@ -46,6 +47,15 @@ legion-delegate review --model gpt-5.5 --base main --repo .
 ```
 
 Requires: `codex` CLI for `legion-delegate`, Cursor CLI (`agent` or `cursor-agent`) for `legion-cursor`, plus `jq` and `git`. The proxy additionally needs `bun`.
+
+`legion-intake` is intentionally one level above the provider. By default it runs
+`legion-delegate` (`gpt-5.4`), but `--worker cursor` or
+`--worker custom --worker-bin ./path/to/runner` can swap in any runner that
+accepts `run --sandbox ... --task ... --repo ...` and returns the standard
+Legion JSON fields (`status`, `run_id`, `diff_path`, `last_message_path` or
+`last_message`). Provider secrets are scrubbed from the worker environment
+because GitHub issue text is untrusted; authenticate workers through local auth
+files or their own safe store.
 
 ## Container/VM sandboxing (optional)
 

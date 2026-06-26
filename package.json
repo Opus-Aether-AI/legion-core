@@ -32,6 +32,7 @@
     "legion-control": "legion-router/bin/legion-control",
     "legion-cursor": "legion-router/bin/legion-cursor",
     "legion-delegate": "legion-router/bin/legion-delegate",
+    "legion-intake": "legion-router/bin/legion-intake",
     "legion-optimize": "legion-router/bin/legion-optimize",
     "legion-route": "legion-router/bin/legion-route",
     "legion-router": "legion-router/bin/legion-router",

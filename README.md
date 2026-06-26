@@ -56,7 +56,7 @@ Copy [`.env.example`](.env.example) → `.env`. Runtime prerequisites: `gh` + `j
 
 ## AFK intake lane
 
-The GitHub intake edge lets humans or telemetry file an issue, then hand it to an AFK Codex worker by label. It is queue-based (`concurrency: agent-intake`), bounded, and `implement` always opens a PR for human review; it never auto-merges.
+The GitHub intake edge lets humans or telemetry file an issue, then hand it to an AFK Legion worker by label. It is queue-based (`concurrency: agent-intake`), bounded, and `implement` always opens a PR for human review; it never auto-merges.
 
 ```bash
 # One-time label setup
@@ -64,12 +64,13 @@ gh label create 'agent:explore' --color 1d76db --description 'Run read-only AFK 
 gh label create 'agent:implement' --color b60205 --description 'Run AFK implementation and open a PR'
 
 # One-time secret setup
+# Default worker is `delegate`, backed by Codex today.
 # Prefer CODEX_AUTH = contents of ~/.codex/auth.json from a machine with `codex login status`.
 gh secret set CODEX_AUTH < ~/.codex/auth.json
 # Fallback: you can set OPENAI_API_KEY instead and the workflow will log Codex in with it.
 ```
 
-After that, adding `agent:explore` to an issue posts a short assessment comment, and adding `agent:implement` runs the same intake prompt in write mode and opens a PR whose body includes `Closes #N`. You can also run the thin `agent-intake-trigger` workflow manually with an issue number and mode.
+After that, adding `agent:explore` to an issue posts a short assessment comment, and adding `agent:implement` runs the same intake prompt in write mode and opens a PR whose body includes `Closes #N`. You can also run the thin `agent-intake-trigger` workflow manually with an issue number, mode, worker (`delegate`, `cursor`, or `custom`), optional model override, and optional `worker_bin` for a repo-local compatible runner. `legion-intake` also accepts `--worker` / `--worker-bin` / `LEGION_INTAKE_WORKER_BIN` for any runner that follows the Legion JSON result contract.
 
 ## Quality
 

@@ -12,8 +12,8 @@
     {
       "name": "legion-router",
       "source": "./legion-router",
-      "description": "Legion's multi-model brain: delegate scoped tasks from Opus to external model agents (Codex / GPT-5.5 / GPT-5.4 and Cursor Agent) via `legion-delegate` and `legion-cursor`, bringing back verified, metered diffs. Runs agents in isolated git worktrees, captures diff + last message + token usage, prices via a shared cost table, emits legion.span.v1 telemetry, and reports GPT usage to the router /ingest sink so spend shows next to Claude. Ships the opt-in `legion-router` loopback :8082 Anthropic-compatible metering proxy, codex-json parser, and per-model cost lib.",
-      "version": "0.5.2",
+      "description": "Legion's multi-model brain: delegate scoped tasks from Opus to external model agents (Codex / GPT-5.5 / GPT-5.4 and Cursor Agent) via `legion-delegate` and `legion-cursor`, bringing back verified, metered diffs. Also ships generic GitHub issue intake via `legion-intake`, which can run delegate, cursor, or a compatible custom worker. Runs agents in isolated git worktrees, captures diff + last message + token usage, prices via a shared cost table, emits legion.span.v1 telemetry, and reports GPT usage to the router /ingest sink so spend shows next to Claude. Ships the opt-in `legion-router` loopback :8082 Anthropic-compatible metering proxy, codex-json parser, and per-model cost lib.",
+      "version": "0.5.3",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",

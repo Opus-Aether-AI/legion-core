@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.7.3...v0.8.0) (2026-06-26)
+
+
+### Added
+
+* **observability:** auto-record session feedback ([#44](https://github.com/Opus-Aether-AI/legion-core/issues/44)) ([759e054](https://github.com/Opus-Aether-AI/legion-core/commit/759e054c1819fe8967e43f0d09c16b019f54d1ad))
+
 ## [0.7.3](https://github.com/Opus-Aether-AI/legion-core/compare/v0.7.2...v0.7.3) (2026-06-24)
 
 

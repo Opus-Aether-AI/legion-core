@@ -12,7 +12,9 @@ sandbox_warn() {
 }
 
 sandbox_config_json() {
-  local main_repo_dir="$1" cfg="$main_repo_dir/.legion/sandbox.json" json
+  local main_repo_dir="$1"
+  local cfg="$main_repo_dir/.legion/sandbox.json"
+  local json
   if [[ ! -f "$cfg" ]]; then
     printf '{}'
     return 0
@@ -41,7 +43,7 @@ sandbox_valid_relative_path() {
   [[ "$path" != "." ]] || return 1
   [[ "$path" != /* ]] || return 1
   case "$path" in
-    ..|*../*|../*|*/..) return 1 ;;
+    ..|../*|*/../*|*/..) return 1 ;;
   esac
   return 0
 }

@@ -47,7 +47,9 @@ legion-trace emit --executor codex --model gpt-5.5 --status ok \
 
 ## Self-learning loop
 
-The loop follows the harness-bench/autoresearch shape:
+The loop follows the
+[Harness-Bench](https://arxiv.org/abs/2605.27922) /
+[autoresearch](https://github.com/karpathy/autoresearch) shape:
 observe -> analyze -> propose -> baseline -> isolate -> mutate -> score -> keep/discard.
 
 - **Observe:** read durable spans, review verdict artifacts, trigger eval misses, routing optimizer advice, and manual `legion-self-learn record` bug reports.

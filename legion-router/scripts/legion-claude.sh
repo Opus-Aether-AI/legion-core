@@ -5,11 +5,13 @@
 set -euo pipefail
 
 _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 # shellcheck source=lib/cost.sh
 source "$_self_dir/lib/cost.sh"
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
+LEGION_CLAUDE_TMPDIR=""
 
 die() { printf 'legion-claude: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -153,10 +155,11 @@ cmd_run() {
   RUN_ID="$(_run_id)"
 
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/legion-claude.${RUN_ID}.XXXXXX")"
+  LEGION_CLAUDE_TMPDIR="$tmpdir"
   out_file="$tmpdir/claude.out.json"
   err_file="$tmpdir/claude.err"
   artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" '{stdout:$stdout, stderr:$stderr}')"
-  trap "rm -rf '$tmpdir'" EXIT
+  trap 'rm -rf "$LEGION_CLAUDE_TMPDIR"' EXIT
 
   if has_low_claude_credit; then
     low_credit=1

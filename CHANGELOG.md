@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.9.0...v0.9.1) (2026-06-26)
+
+
+### Fixed
+
+* **release:** publish legion through opus aether scope ([#52](https://github.com/Opus-Aether-AI/legion-core/issues/52)) ([1d0c94d](https://github.com/Opus-Aether-AI/legion-core/commit/1d0c94df8dcf0f6c1f6cdbe552118f9dd5c5b3e6))
+
 ## [0.9.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.8.2...v0.9.0) (2026-06-26)
 
 

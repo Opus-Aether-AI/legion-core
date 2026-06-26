@@ -1,7 +1,7 @@
 {
   "name": "legion-observability",
-  "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, `legion-report` cost/success/latency, `legion-catalog` marketplace inventory, `legion-self-learn` daily failure mining + command/agent/skill improvement memory/proposals, `legion-trace`, `legion-otel-export`, and `legion-doctor` install verification.",
-  "version": "0.2.2",
+  "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, `legion-report` cost/success/latency, `legion-bench` offline harness benchmarks, `legion-catalog` marketplace inventory, `legion-self-learn` daily failure mining + command/agent/skill improvement memory/proposals, `legion-trace`, `legion-otel-export`, and `legion-doctor` install verification.",
+  "version": "0.2.3",
   "author": {
     "name": "legion-core"
   },
@@ -13,6 +13,7 @@
     "opentelemetry",
     "cost-tracking",
     "dashboard",
+    "benchmark",
     "doctor",
     "self-learning",
     "harness",

@@ -14,6 +14,7 @@
   "author": "Opus-Aether-AI",
   "bin": {
     "legion-activity": "legion-observability/bin/legion-activity",
+    "legion-bench": "legion-observability/bin/legion-bench",
     "legion-catalog": "legion-observability/bin/legion-catalog",
     "legion-console": "legion-observability/bin/legion-console",
     "legion-console-index": "legion-observability/bin/legion-console-index",

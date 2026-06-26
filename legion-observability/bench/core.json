@@ -1,0 +1,80 @@
+{
+  "schema": "legion.bench.suite.v1",
+  "suite": "core",
+  "description": "Offline deterministic Legion harness benchmark for routing, validation, and trigger regressions.",
+  "gate": {
+    "allow_neutral": true,
+    "max_false_success_delta": 0
+  },
+  "cases": [
+    {
+      "id": "eval.plugin.observability",
+      "type": "eval",
+      "summary": "Observability prompts should route to legion-observability.",
+      "scope": "plugin",
+      "prompt": "Show per-executor cost success latency spans and self-learning reports for Legion.",
+      "expect_type": "plugin",
+      "expect": "legion-observability",
+      "expect_not": "legion-router",
+      "required": true
+    },
+    {
+      "id": "eval.plugin.router",
+      "type": "eval",
+      "summary": "Delegation prompts should route to legion-router.",
+      "scope": "plugin",
+      "prompt": "Delegate this coding task to Codex in an isolated worktree and bring back a metered diff.",
+      "expect_type": "plugin",
+      "expect": "legion-router",
+      "expect_not": "legion-observability",
+      "required": true
+    },
+    {
+      "id": "route.frontend-review",
+      "type": "route",
+      "summary": "Frontend review should use the strong read-only Codex route.",
+      "archetype": "frontend-review",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "read-only",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.docs-edit",
+      "type": "route",
+      "summary": "Docs edits should use the GPT-5.4 workhorse route.",
+      "archetype": "docs-edit",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "doctor.marketplace-schema",
+      "type": "doctor",
+      "summary": "Marketplace schema must stay valid.",
+      "only": "marketplace-schema",
+      "required": true
+    },
+    {
+      "id": "doctor.telemetry-schema",
+      "type": "doctor",
+      "summary": "Telemetry span schema must stay present and valid.",
+      "only": "telemetry-schema",
+      "required": true
+    },
+    {
+      "id": "doctor.descriptions",
+      "type": "doctor",
+      "summary": "Skill descriptions must stay line-readable.",
+      "only": "descriptions",
+      "required": true
+    }
+  ]
+}

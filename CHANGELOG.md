@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.8.0...v0.8.1) (2026-06-26)
+
+
+### Documentation
+
+* **identity:** improve Legion Core banner ([#46](https://github.com/Opus-Aether-AI/legion-core/issues/46)) ([bdbe293](https://github.com/Opus-Aether-AI/legion-core/commit/bdbe293082c64fab07793a42b63fb2b02de02958))
+
 ## [0.8.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.7.3...v0.8.0) (2026-06-26)
 
 

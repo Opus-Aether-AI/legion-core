@@ -32,6 +32,7 @@ POSITIVE_QUALITY_METRICS = [
     "required_pass_rate",
     "eval_hit_at_1",
     "eval_hit_at_k",
+    "learning_pass_rate",
     "route_match_rate",
     "task_pass_rate",
     "validation_pass_rate",
@@ -43,6 +44,7 @@ NEGATIVE_QUALITY_METRICS = [
     "eval_miss",
     "eval_collision",
 ]
+RATE_METRICS = set(POSITIVE_QUALITY_METRICS)
 
 
 def _here() -> str:
@@ -104,6 +106,12 @@ def _num(value: Any) -> float:
     if isinstance(value, (int, float)) and value == value:
         return float(value)
     return 0.0
+
+
+def _relative_delta_pct(baseline: float, candidate: float) -> float | None:
+    if baseline <= 0:
+        return None
+    return round(((candidate - baseline) / baseline) * 100, 3)
 
 
 def _short(text: str, limit: int = 500) -> str:
@@ -604,10 +612,12 @@ def summarize_run(
     required = [result for result in results if result.get("required")]
     required_pass = sum(1 for result in required if result.get("status") == "pass")
     eval_results = [result for result in results if result.get("type") == "eval"]
+    learning_results = [result for result in results if result.get("type") == "learning"]
     route_results = [result for result in results if result.get("type") == "route"]
     doctor_results = [result for result in results if result.get("type") == "doctor"]
     task_results = [result for result in results if result.get("type") == "task"]
     eval_cases = len(eval_results)
+    learning_cases = len(learning_results)
     route_cases = len(route_results)
     doctor_cases = len(doctor_results)
     task_cases = len(task_results)
@@ -617,6 +627,7 @@ def summarize_run(
     eval_collision = sum(
         int(_dict(result.get("metrics")).get("eval_collision") or 0) for result in eval_results
     )
+    learning_pass = sum(1 for result in learning_results if result.get("status") == "pass")
     route_match = sum(1 for result in route_results if result.get("status") == "pass")
     validation_pass = sum(1 for result in doctor_results if result.get("status") == "pass")
     task_pass = sum(1 for result in task_results if result.get("status") == "pass")
@@ -637,6 +648,9 @@ def summarize_run(
         "eval_collision": eval_collision,
         "eval_hit_at_1": _rate(eval_top1, eval_cases),
         "eval_hit_at_k": _rate(eval_topk, eval_cases),
+        "learning_cases": learning_cases,
+        "learning_pass": learning_pass,
+        "learning_pass_rate": _rate(learning_pass, learning_cases),
         "route_cases": route_cases,
         "route_match": route_match,
         "route_match_rate": _rate(route_match, route_cases),
@@ -844,14 +858,22 @@ def _metric(summary: dict[str, Any], key: str) -> float:
 
 def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     keys = sorted(set(_dict(baseline.get("metrics"))) | set(_dict(candidate.get("metrics"))))
-    metrics = {
-        key: {
-            "baseline": _metric(baseline, key),
-            "candidate": _metric(candidate, key),
-            "delta": round(_metric(candidate, key) - _metric(baseline, key), 6),
+    metrics: dict[str, dict[str, Any]] = {}
+    for key in keys:
+        baseline_value = _metric(baseline, key)
+        candidate_value = _metric(candidate, key)
+        delta = round(candidate_value - baseline_value, 6)
+        payload: dict[str, Any] = {
+            "baseline": baseline_value,
+            "candidate": candidate_value,
+            "delta": delta,
         }
-        for key in keys
-    }
+        if key in RATE_METRICS:
+            payload["delta_pct_points"] = round(delta * 100, 3)
+            payload["relative_improvement_pct"] = _relative_delta_pct(baseline_value, candidate_value)
+        else:
+            payload["relative_change_pct"] = _relative_delta_pct(baseline_value, candidate_value)
+        metrics[key] = payload
     regressions: list[str] = []
     improvements: list[str] = []
     for key in POSITIVE_QUALITY_METRICS:
@@ -867,10 +889,19 @@ def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> di
         elif delta < -1e-9:
             improvements.append(key)
     status = "regressed" if regressions else ("improved" if improvements else "neutral")
+    score = metrics.get("score", {"baseline": 0.0, "candidate": 0.0, "delta": 0.0})
     return {
         "schema": COMPARE_SCHEMA,
         "generated_at": _iso_utc(),
         "status": status,
+        "headline": {
+            "metric": "score",
+            "baseline": score.get("baseline", 0.0),
+            "candidate": score.get("candidate", 0.0),
+            "delta": score.get("delta", 0.0),
+            "delta_pct_points": score.get("delta_pct_points", round(_num(score.get("delta")) * 100, 3)),
+            "relative_improvement_pct": score.get("relative_improvement_pct"),
+        },
         "baseline": {
             "run_id": baseline.get("run_id"),
             "suite": baseline.get("suite"),
@@ -913,6 +944,319 @@ def gate_decision(compare: dict[str, Any], gate: dict[str, Any] | None = None) -
         "failures": sorted(set(failures)),
         "compare": compare,
     }
+
+
+def _run_json_command(
+    argv: list[str],
+    *,
+    cwd: str,
+    env: dict[str, str],
+    timeout: int = 120,
+) -> dict[str, Any]:
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "ok": False,
+            "cmd": argv,
+            "returncode": None,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "stdout": "",
+            "stderr": "",
+            "json": None,
+            "error": str(exc),
+        }
+    try:
+        payload = json.loads(proc.stdout)
+    except ValueError:
+        payload = None
+    return {
+        "ok": proc.returncode == 0,
+        "cmd": argv,
+        "returncode": proc.returncode,
+        "duration_ms": int((time.monotonic() - start) * 1000),
+        "stdout": proc.stdout[-4000:],
+        "stderr": proc.stderr[-4000:],
+        "json": payload,
+    }
+
+
+def _learning_case_result(
+    case_id: str,
+    *,
+    ok: bool,
+    summary: str,
+    reason: str,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": CASE_RESULT_SCHEMA,
+        "id": case_id,
+        "type": "learning",
+        "required": True,
+        "status": "pass" if ok else "fail",
+        "ok": ok,
+        "started_at": _iso_utc(),
+        "duration_ms": int(details.get("duration_ms") or 0),
+        "target_type": "plugin",
+        "target_name": "legion-observability",
+        "summary": summary,
+        "reason": reason,
+        "false_success": False,
+        "metrics": {"learning_pass": 1 if ok else 0},
+        "details": details,
+    }
+
+
+def _write_learning_session(home: str, correction: str) -> str:
+    path = os.path.join(home, ".codex", "sessions", "legion", "session.jsonl")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {"payload": {"type": "user_message", "content": correction}}
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True))
+        handle.write("\n")
+    return path
+
+
+def _learning_probe_results(repo: str, home: str, logs: str, env: dict[str, str]) -> list[dict[str, Any]]:
+    session_learn = os.path.join(repo, "legion-observability", "bin", "legion-session-learn")
+    self_learn = os.path.join(repo, "legion-observability", "bin", "legion-self-learn")
+    scan = _run_json_command(
+        [
+            session_learn,
+            "--home",
+            home,
+            "--logs",
+            logs,
+            "--lookback-days",
+            "30",
+            "--json",
+        ],
+        cwd=repo,
+        env=env,
+    )
+    scan_ok = scan.get("ok") and _json_path(scan.get("json"), "candidates.0.category") == (
+        "user-correction-feedback"
+    )
+    outcomes = os.path.join(logs, "self-learn", "outcomes.jsonl")
+    outcome_ok = _validate_jsonl_contains(
+        outcomes,
+        {
+            "source": "session-learn",
+            "target_type": "plugin",
+            "target_name": "legion-observability",
+            "metadata": {"category": "user-correction-feedback"},
+        },
+    )
+    memory = os.path.join(logs, "self-learn", "harness-memory.json")
+    try:
+        memory_ok = _json_path(
+            _json_file(memory),
+            "entities.plugin:legion-observability.target_name",
+        ) == "legion-observability"
+    except ValueError:
+        memory_ok = False
+    hints = _run_json_command(
+        [
+            self_learn,
+            "hints",
+            "--logs",
+            logs,
+            "--entity",
+            "plugin:legion-observability",
+            "--json",
+        ],
+        cwd=repo,
+        env=env,
+    )
+    hints_ok = hints.get("ok") and _json_path(
+        hints.get("json"),
+        "entities.plugin:legion-observability.target_name",
+    ) == "legion-observability"
+    return [
+        _learning_case_result(
+            "learning.scan-user-correction",
+            ok=bool(scan_ok),
+            summary="Session scan should classify the correction.",
+            reason="classified user correction" if scan_ok else "missing user-correction-feedback candidate",
+            details=scan,
+        ),
+        _learning_case_result(
+            "learning.recorded-outcome",
+            ok=outcome_ok,
+            summary="Learning should record the correction as an outcome.",
+            reason="outcome recorded" if outcome_ok else "no recorded session-learn outcome",
+            details={"path": outcomes},
+        ),
+        _learning_case_result(
+            "learning.memory-entity",
+            ok=memory_ok,
+            summary="Self-learning should synthesize durable memory for the entity.",
+            reason="memory entity present" if memory_ok else "memory entity missing",
+            details={"path": memory},
+        ),
+        _learning_case_result(
+            "learning.hints-entity",
+            ok=bool(hints_ok),
+            summary="Hints should expose the learned correction guardrail.",
+            reason="hint entity present" if hints_ok else "hint entity missing",
+            details=hints,
+        ),
+    ]
+
+
+def learning_lift_payload(args: argparse.Namespace) -> dict[str, Any]:
+    repo = os.path.abspath(args.repo)
+    bench_dir = os.path.abspath(os.path.expanduser(args.bench_dir))
+    run_id = args.run_id or _run_id("learning-lift")
+    workspace = os.path.join(bench_dir, "runs", run_id, "learning-workspace")
+    home = os.path.join(workspace, "home")
+    logs = os.path.abspath(os.path.expanduser(args.logs)) if args.logs else os.path.join(workspace, "logs")
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(logs, exist_ok=True)
+    session_path = _write_learning_session(home, args.correction)
+    env = os.environ.copy()
+    env.update({
+        "HOME": home,
+        "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
+        "PYTHONUNBUFFERED": "1",
+    })
+    suite = {
+        "schema": SUITE_SCHEMA,
+        "suite": "learning-lift",
+        "description": "Synthetic before/after fixture for session self-learning lift.",
+        "gate": {"allow_neutral": False, "max_false_success_delta": 0},
+        "_path": "",
+    }
+    baseline_start = time.monotonic()
+    baseline_results = _learning_probe_results(repo, home, logs, env)
+    baseline_summary = summarize_run(
+        suite,
+        baseline_results,
+        run_id=f"{run_id}-baseline",
+        repo=repo,
+        duration_ms=int((time.monotonic() - baseline_start) * 1000),
+    )
+    baseline_artifacts = write_run_artifacts(
+        bench_dir,
+        f"{run_id}-baseline",
+        suite,
+        baseline_results,
+        baseline_summary,
+    )
+
+    session_learn = os.path.join(repo, "legion-observability", "bin", "legion-session-learn")
+    self_learn = os.path.join(repo, "legion-observability", "bin", "legion-self-learn")
+    train = [
+        _run_json_command(
+            [
+                session_learn,
+                "--home",
+                home,
+                "--logs",
+                logs,
+                "--lookback-days",
+                "30",
+                "--record",
+                "--json",
+            ],
+            cwd=repo,
+            env=env,
+        ),
+        _run_json_command(
+            [
+                self_learn,
+                "run",
+                "--repo",
+                repo,
+                "--logs",
+                logs,
+                "--apply-memory",
+                "--json",
+            ],
+            cwd=repo,
+            env=env,
+        ),
+    ]
+
+    candidate_start = time.monotonic()
+    candidate_results = _learning_probe_results(repo, home, logs, env)
+    candidate_summary = summarize_run(
+        suite,
+        candidate_results,
+        run_id=f"{run_id}-candidate",
+        repo=repo,
+        duration_ms=int((time.monotonic() - candidate_start) * 1000),
+    )
+    candidate_artifacts = write_run_artifacts(
+        bench_dir,
+        f"{run_id}-candidate",
+        suite,
+        candidate_results,
+        candidate_summary,
+    )
+    telemetry_dir = args.telemetry_dir or os.environ.get("LEGION_TELEMETRY_DIR") or os.path.join(
+        logs,
+        "spans",
+    )
+    span_path = emit_bench_span(candidate_summary, candidate_artifacts, telemetry_dir)
+    comparison = compare_summaries(baseline_summary, candidate_summary)
+    return {
+        "schema": "legion.bench.learning-lift.v1",
+        "run_id": run_id,
+        "workspace": workspace,
+        "home": home,
+        "logs": logs,
+        "session_path": session_path,
+        "baseline": {
+            "summary": baseline_summary,
+            "artifacts": baseline_artifacts,
+            "cases": baseline_results,
+        },
+        "train": train,
+        "candidate": {
+            "summary": candidate_summary,
+            "artifacts": candidate_artifacts,
+            "cases": candidate_results,
+        },
+        "comparison": comparison,
+        "span_path": span_path,
+    }
+
+
+def learning_lift_command(args: argparse.Namespace) -> int:
+    payload = learning_lift_payload(args)
+    comparison = _dict(payload.get("comparison"))
+    headline = _dict(comparison.get("headline"))
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        relative = headline.get("relative_improvement_pct")
+        relative_text = "n/a" if relative is None else f"{float(relative):+g}%"
+        print(
+            "legion-bench learning-lift: "
+            f"{float(headline.get('baseline') or 0):.3f} -> "
+            f"{float(headline.get('candidate') or 0):.3f} "
+            f"({float(headline.get('delta_pct_points') or 0):+g} pp, "
+            f"{relative_text} relative)"
+        )
+        print(f"baseline: {payload['baseline']['artifacts']['run_path']}")
+        print(f"candidate: {payload['candidate']['artifacts']['run_path']}")
+    if args.strict:
+        candidate_ok = bool(_dict(payload.get("candidate")).get("summary", {}).get("ok"))
+        improved = comparison.get("status") == "improved"
+        if not candidate_ok or not improved:
+            return 1
+    return 0
 
 
 def run_command(args: argparse.Namespace) -> int:
@@ -972,6 +1316,16 @@ def compare_command(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(f"legion-bench compare: {payload['status']}")
+        headline = _dict(payload.get("headline"))
+        relative = headline.get("relative_improvement_pct")
+        relative_text = "n/a" if relative is None else f"{float(relative):+g}%"
+        print(
+            "  score: "
+            f"{float(headline.get('baseline') or 0):.3f} -> "
+            f"{float(headline.get('candidate') or 0):.3f} "
+            f"({float(headline.get('delta_pct_points') or 0):+g} pp, "
+            f"{relative_text} relative)"
+        )
         for key in payload["quality_regressions"]:
             delta = payload["metrics"][key]["delta"]
             print(f"  regression {key}: {delta:+g}")
@@ -1021,6 +1375,19 @@ def main(argv: list[str] | None = None) -> int:
     gate.add_argument("--candidate", required=True)
     gate.add_argument("--json", action="store_true")
 
+    lift = sub.add_parser("learning-lift", help="run a synthetic before/after self-learning lift fixture")
+    lift.add_argument("--repo", default=default_repo())
+    lift.add_argument("--bench-dir", default=os.environ.get("LEGION_BENCH_DIR", DEFAULT_BENCH_ROOT))
+    lift.add_argument("--logs", default="", help="log root; default is an isolated run workspace")
+    lift.add_argument("--telemetry-dir", default="")
+    lift.add_argument("--run-id", default="")
+    lift.add_argument(
+        "--correction",
+        default="u should have linked the right harness bench repo, wrong attribution source",
+    )
+    lift.add_argument("--strict", action="store_true")
+    lift.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     try:
         if args.cmd == "run":
@@ -1029,6 +1396,8 @@ def main(argv: list[str] | None = None) -> int:
             return compare_command(args)
         if args.cmd == "gate":
             return gate_command(args)
+        if args.cmd == "learning-lift":
+            return learning_lift_command(args)
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         print(f"legion-bench: {exc}", file=sys.stderr)
         return 2

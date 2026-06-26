@@ -39,6 +39,21 @@ setup() {
   [[ "$output" == *"pass"* ]]
 }
 
+@test "legion-bench: learning-lift reports before/after percentage" {
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" learning-lift --repo "$ROOT" --json --strict
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .comparison.status == "improved"
+    and .baseline.summary.metrics.learning_pass == 1
+    and .candidate.summary.metrics.learning_pass == 4
+    and .comparison.headline.delta_pct_points == 75
+    and .comparison.headline.relative_improvement_pct == 300
+  ' <<<"$output" >/dev/null
+}
+
 @test "legion-bench: record-failures writes legion-bench outcomes" {
   suite="$BATS_TEST_TMPDIR/fail-suite.json"
   cat > "$suite" <<'JSON'

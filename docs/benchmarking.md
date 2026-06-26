@@ -52,6 +52,7 @@ Implemented CLI:
 legion-bench run --suite core --repo . --json
 legion-bench compare --baseline runs/base.json --candidate runs/candidate.json
 legion-bench gate --baseline runs/base.json --candidate runs/candidate.json
+legion-bench learning-lift --repo . --json
 ```
 
 `run` writes a durable benchmark artifact under
@@ -65,6 +66,19 @@ legion-bench gate --baseline runs/base.json --candidate runs/candidate.json
 - fixture-backed task command output and artifact validators
 - token/cost/latency fields, currently zero-cost/offline in v1
 - final status and failure reason
+
+`compare` reports Harness Bench-style lift fields for the headline score:
+
+- `delta_pct_points`: absolute score movement, e.g. `0.79 -> 0.93` is
+  `+14.0` percentage points.
+- `relative_improvement_pct`: relative lift, e.g. `(0.93 - 0.79) / 0.79`
+  is `+17.722%`.
+
+`learning-lift` is a deterministic smoke benchmark for the self-learning path.
+It writes one session correction fixture, scores the same probes before and
+after `legion-session-learn --record` plus `legion-self-learn run
+--apply-memory`, and then compares the two normal benchmark artifacts. This is
+useful for proving the measurement path; it is not a broad task-corpus result.
 
 The v1 suite files are JSON, not YAML, to keep package runtime dependencies to
 the Python standard library:
@@ -141,6 +155,7 @@ Current v1 scorecard:
 - `eval_hit_at_k`
 - `eval_miss`
 - `eval_collision`
+- `learning_pass_rate`
 - `route_match_rate`
 - `task_pass_rate`
 - `validation_pass_rate`
@@ -188,9 +203,11 @@ the existing `--apply-source` scorecard gate.
 4. Done: add `compare` and `gate` subcommands.
 5. Done: write failed required cases into self-learning outcomes with
    `--record-failures`.
-6. Next: add wider suites for orchestration, richer validation failure fixtures,
+6. Done: add `learning-lift` to report before/after self-learning percentage
+   lift on an isolated fixture.
+7. Next: add wider suites for orchestration, richer validation failure fixtures,
    and optional live model runs.
-7. Next: add CI optional workflow or manual `workflow_dispatch` for full
+8. Next: add CI optional workflow or manual `workflow_dispatch` for full
    benchmark runs.
 
 ## Non-goals

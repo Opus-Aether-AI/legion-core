@@ -1,3 +1,4 @@
+import argparse
 import importlib.util
 import json
 import os
@@ -84,6 +85,28 @@ def test_compare_and_gate_detect_quality_regression():
     assert "pass_rate" in comparison["quality_regressions"]
     assert "false_success" in comparison["quality_regressions"]
     assert decision["status"] == "fail"
+
+
+def test_compare_reports_headline_relative_lift():
+    baseline = {
+        "schema": bench.SUMMARY_SCHEMA,
+        "run_id": "base",
+        "suite": "core",
+        "metrics": {"score": 0.79, "pass_rate": 0.79, "required_fail": 0, "false_success": 0},
+    }
+    candidate = {
+        "schema": bench.SUMMARY_SCHEMA,
+        "run_id": "cand",
+        "suite": "core",
+        "metrics": {"score": 0.93, "pass_rate": 0.93, "required_fail": 0, "false_success": 0},
+    }
+
+    comparison = bench.compare_summaries(baseline, candidate)
+
+    assert comparison["status"] == "improved"
+    assert comparison["headline"]["delta_pct_points"] == 14.0
+    assert comparison["headline"]["relative_improvement_pct"] == 17.722
+    assert comparison["metrics"]["pass_rate"]["relative_improvement_pct"] == 17.722
 
 
 def test_gate_allows_neutral_candidate_by_default():
@@ -213,6 +236,29 @@ def test_task_case_validates_jsonl_contains(tmp_path):
     )
 
     assert result["ok"] is True
+
+
+def test_learning_lift_payload_scores_before_after_memory(tmp_path):
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    payload = bench.learning_lift_payload(
+        argparse.Namespace(
+            repo=repo,
+            bench_dir=str(tmp_path / "bench"),
+            logs="",
+            telemetry_dir=str(tmp_path / "spans"),
+            run_id="lift-test",
+            correction="u should have linked the right harness bench repo, wrong attribution source",
+        )
+    )
+
+    headline = payload["comparison"]["headline"]
+    assert payload["comparison"]["status"] == "improved"
+    assert payload["baseline"]["summary"]["metrics"]["learning_pass"] == 1
+    assert payload["candidate"]["summary"]["metrics"]["learning_pass"] == 4
+    assert headline["delta_pct_points"] == 75.0
+    assert headline["relative_improvement_pct"] == 300.0
+    assert os.path.exists(payload["baseline"]["artifacts"]["run_path"])
+    assert os.path.exists(payload["candidate"]["artifacts"]["run_path"])
 
 
 def test_write_run_artifacts_and_span(tmp_path):

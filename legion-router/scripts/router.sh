@@ -17,7 +17,6 @@ set -euo pipefail
 # credentials portably, and `logs`/`errors`/`dev` are portable.
 
 PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SCRIPT_PATH="$PLUGIN_DIR/scripts/router.ts"
 WRAPPER_PATH="$PLUGIN_DIR/scripts/router-wrapper.sh"
 LOG_DIR="${LEGION_LOG_DIR:-$HOME/.claude/logs/legion}"
 LOG_FILE="$LOG_DIR/router.log"
@@ -28,6 +27,7 @@ PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 
 BUN_PATH="${BUN_PATH:-$(command -v bun 2>/dev/null || echo "$HOME/.bun/bin/bun")}"
 ROUTER_PORT="${ROUTER_PORT:-8082}"
+# shellcheck disable=SC1091
 source "$PLUGIN_DIR/scripts/lib/router-secrets.sh"
 
 red()    { printf '\033[0;31m%s\033[0m\n' "$*"; }
@@ -196,8 +196,21 @@ cmd_status() {
   fi
 }
 
-cmd_logs()   { [[ -f "$LOG_FILE" ]] && tail -f "$LOG_FILE" || yellow "No log yet: $LOG_FILE"; }
-cmd_errors() { [[ -f "$ERR_FILE" ]] && tail -f "$ERR_FILE" || yellow "No error log yet: $ERR_FILE"; }
+cmd_logs() {
+  if [[ -f "$LOG_FILE" ]]; then
+    tail -f "$LOG_FILE"
+  else
+    yellow "No log yet: $LOG_FILE"
+  fi
+}
+
+cmd_errors() {
+  if [[ -f "$ERR_FILE" ]]; then
+    tail -f "$ERR_FILE"
+  else
+    yellow "No error log yet: $ERR_FILE"
+  fi
+}
 cmd_dev()    { echo "Running in foreground (Ctrl+C to stop)..."; exec /bin/bash "$WRAPPER_PATH"; }
 
 # Service-management commands need launchd → macOS-only. dev/logs/errors are

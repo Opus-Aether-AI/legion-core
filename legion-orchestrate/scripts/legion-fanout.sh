@@ -65,13 +65,13 @@ write_queued_record() {
 }
 MAXC="${LEGION_MAX_CONCURRENCY:-4}"
 
-slices_src="" ; repo="$PWD" ; keep="" ; apply=""
+slices_src="" ; repo="$PWD" ; apply=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slices) slices_src="$2"; shift 2 ;;
     --repo) repo="$2"; shift 2 ;;
     --max-concurrency) MAXC="$2"; shift 2 ;;
-    --keep) keep="1"; shift ;;
+    --keep) shift ;; # accepted for compatibility; delegated slices are always kept
     --apply) apply="1"; shift ;;
     -h|--help) echo "usage: legion-fanout --slices <file|-> [--repo DIR] [--max-concurrency N] [--keep] [--apply]"; exit 0 ;;
     *) echo "legion-fanout: unknown arg '$1'" >&2; exit 2 ;;

@@ -6,6 +6,7 @@
 set -euo pipefail
 
 _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 # shellcheck source=lib/cost.sh
 source "$_self_dir/lib/cost.sh"
 
@@ -229,11 +230,11 @@ EOF
 }
 
 main() {
-  local cmd="${1:-}"
-  case "$cmd" in
+  local subcmd="${1:-}"
+  case "$subcmd" in
     run) shift; cmd_run "$@" ;;
     ""|-h|--help|help) usage ;;
-    *) die "unknown command '$cmd'" ;;
+    *) die "unknown command '$subcmd'" ;;
   esac
 }
 

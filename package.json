@@ -49,6 +49,8 @@
     "identity/",
     "README.md",
     "LICENSE",
+    "SECURITY.md",
+    "CREDITS.md",
     "CHANGELOG.md",
     "!**/__pycache__/**",
     "!**/*.pyc"

@@ -1,7 +1,9 @@
 # Legion Self-Learning Harness
 
-Legion uses a local, conservative self-learning loop inspired by harness-bench's
-shape and Karpathy's `autoresearch` pattern:
+Legion uses a local, conservative self-learning loop inspired by
+[svineet/harness-bench](https://github.com/svineet/harness-bench)'s workbench
+loop and [Karpathy's `autoresearch`](https://github.com/karpathy/autoresearch)
+pattern:
 
 ```
 observe -> analyze -> propose -> baseline -> isolate -> mutate -> score -> keep/discard

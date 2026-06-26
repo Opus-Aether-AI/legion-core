@@ -80,6 +80,17 @@ bats tests/                                   # unit + component suite
 legion-observability/bin/legion-doctor        # install / schema / MCP / bridge health
 ```
 
+## Security
+
+Report suspected vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+
+## Credits
+
+legion-core is original integration code, built in conversation with a broader
+agent-harness ecosystem. See [CREDITS.md](CREDITS.md) for full attribution,
+including svineet/harness-bench, autoresearch, auto-harness, MCP, Codex,
+Claude Code, Cursor, and the local validation toolchain.
+
 ## License
 
 [Apache-2.0](LICENSE). This is the reusable, model-agnostic Legion engine.

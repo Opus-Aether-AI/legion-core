@@ -28,10 +28,13 @@
 set -euo pipefail
 
 _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 # shellcheck source=lib/codex-json.sh
 source "$_self_dir/lib/codex-json.sh"
+# shellcheck disable=SC1091
 # shellcheck source=lib/cost.sh
 source "$_self_dir/lib/cost.sh"
+# shellcheck disable=SC1091
 # shellcheck source=lib/sandbox-setup.sh
 source "$_self_dir/lib/sandbox-setup.sh"
 
@@ -405,9 +408,8 @@ cmd_run() {
   printf '%s\n' "$used_model" > "$art/model.txt"   # persisted so `resume` inherits it (M2)
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 
-  local thread_id last_msg usage cost
+  local thread_id usage cost
   thread_id="$(codex_thread_id "$art/stream.jsonl")"
-  if [[ -s "$art/last-message.txt" ]]; then last_msg="$(cat "$art/last-message.txt")"; else last_msg="$(codex_last_message "$art/stream.jsonl")"; fi
   usage="$(codex_usage "$art/stream.jsonl")"
   # Sandcastle runs codex inside the sandbox, so the local stream is empty — take
   # the token usage the wrapper summed from the run instead of reporting a false
@@ -683,13 +685,14 @@ cmd_cleanup() {
     fi
     note "✓ cleaned $n_wt worktree(s) + $n_br branch(es)$extra"
   elif [[ -n "$run" ]]; then
-    if [[ -d "$wtroot/$run" ]]; then
-      git -C "$repo" worktree remove --force "$wtroot/$run" >/dev/null 2>&1 || rm -rf "$wtroot/$run"
+    local run_wt="$wtroot/$run" run_art="$runsroot/$run"
+    if [[ -d "$run_wt" ]]; then
+      git -C "$repo" worktree remove --force "$run_wt" >/dev/null 2>&1 || rm -rf "${run_wt:?}"
       n_wt=1
     fi
     git -C "$repo" branch -D "legion/delegate-$run" >/dev/null 2>&1 && n_br=1 || true
     git -C "$repo" worktree prune >/dev/null 2>&1 || true
-    if [[ "$purge" -eq 1 && -d "$runsroot/$run" ]]; then rm -rf "$runsroot/$run"; extra=" + artifacts"; fi
+    if [[ "$purge" -eq 1 && -d "$run_art" ]]; then rm -rf "${run_art:?}"; extra=" + artifacts"; fi
     note "✓ cleaned run $run ($n_wt worktree, $n_br branch)$extra"
   else
     die "cleanup: --run RUN_ID | --all required (add --purge to also delete run artifacts)"

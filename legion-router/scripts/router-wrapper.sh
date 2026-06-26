@@ -7,6 +7,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUN_PATH="${BUN_PATH:-$(command -v bun 2>/dev/null || echo "$HOME/.bun/bin/bun")}"
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/router-secrets.sh"
 
 export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(legion_router_read_secret anthropic)}"

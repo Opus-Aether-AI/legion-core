@@ -1,31 +1,182 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-label="Legion — we are many; we move as one">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="legion-banner-title legion-banner-desc">
+  <title id="legion-banner-title">Legion Core</title>
+  <desc id="legion-banner-desc">Legion Core, a model-agnostic orchestration engine where many agents move as one.</desc>
   <defs>
-    <radialGradient id="bbg" cx="22%" cy="46%" r="95%"><stop offset="0%" stop-color="#100C18"/><stop offset="100%" stop-color="#050409"/></radialGradient>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#14131C"/><stop offset="100%" stop-color="#0B0A11"/></linearGradient>
-    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#474350"/><stop offset="100%" stop-color="#1A1922"/></linearGradient>
-    <linearGradient id="visor" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#100F16"/><stop offset="100%" stop-color="#06060C"/></linearGradient>
-    <radialGradient id="eye" cx="50%" cy="42%" r="62%"><stop offset="0%" stop-color="#FFF1CE"/><stop offset="55%" stop-color="#F6BB4E"/><stop offset="100%" stop-color="#D08A2C"/></radialGradient>
-    <radialGradient id="eyehalo" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#F6BB4E" stop-opacity="0.55"/><stop offset="100%" stop-color="#F6BB4E" stop-opacity="0"/></radialGradient>
-    <radialGradient id="presence" cx="50%" cy="46%" r="55%"><stop offset="0%" stop-color="#7E6CFF" stop-opacity="0.20"/><stop offset="100%" stop-color="#7E6CFF" stop-opacity="0"/></radialGradient>
-    <g id="bot">
-      <rect width="256" height="256" rx="58" fill="url(#tile)"/>
-      <circle cx="128" cy="134" r="96" fill="url(#presence)"/>
-      <line x1="128" y1="50" x2="128" y2="34" stroke="#6A6478" stroke-width="5" stroke-linecap="round"/><circle cx="128" cy="29" r="6" fill="url(#eye)"/>
-      <rect x="40" y="122" width="12" height="36" rx="6" fill="url(#body)"/><rect x="204" y="122" width="12" height="36" rx="6" fill="url(#body)"/>
-      <rect x="50" y="56" width="156" height="150" rx="54" fill="url(#body)"/><rect x="50" y="56" width="156" height="150" rx="54" fill="none" stroke="#000" stroke-opacity="0.4" stroke-width="1.5"/>
-      <path d="M76 86 Q128 65 180 86" fill="none" stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="9" stroke-linecap="round"/>
-      <rect x="72" y="106" width="112" height="54" rx="27" fill="url(#visor)"/><rect x="72" y="106" width="112" height="54" rx="27" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="1.4"/>
-      <path d="M86 118 Q128 110 170 118" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="5" stroke-linecap="round"/>
-      <circle cx="106" cy="133" r="17" fill="url(#eyehalo)"/><circle cx="150" cy="133" r="17" fill="url(#eyehalo)"/>
-      <circle cx="106" cy="133" r="9" fill="url(#eye)"/><circle cx="150" cy="133" r="9" fill="url(#eye)"/>
-      <circle cx="103" cy="130" r="2.6" fill="#FFFBF0"/><circle cx="147" cy="130" r="2.6" fill="#FFFBF0"/>
-    </g>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#111018"/>
+      <stop offset="44%" stop-color="#08070D"/>
+      <stop offset="100%" stop-color="#030307"/>
+    </linearGradient>
+    <radialGradient id="violet-bloom" cx="26%" cy="46%" r="42%">
+      <stop offset="0%" stop-color="#7E6CFF" stop-opacity="0.32"/>
+      <stop offset="52%" stop-color="#7E6CFF" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#7E6CFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="gold-bloom" cx="75%" cy="26%" r="48%">
+      <stop offset="0%" stop-color="#F6BB4E" stop-opacity="0.20"/>
+      <stop offset="62%" stop-color="#F6BB4E" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#F6BB4E" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="teal-bloom" cx="89%" cy="82%" r="34%">
+      <stop offset="0%" stop-color="#56D6C4" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#56D6C4" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#181721" stop-opacity="0.94"/>
+      <stop offset="100%" stop-color="#08070D" stop-opacity="0.98"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="90" y1="60" x2="332" y2="302" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F6BB4E"/>
+      <stop offset="45%" stop-color="#7E6CFF"/>
+      <stop offset="100%" stop-color="#56D6C4"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5D5866"/>
+      <stop offset="58%" stop-color="#2C2A36"/>
+      <stop offset="100%" stop-color="#171620"/>
+    </linearGradient>
+    <linearGradient id="visor" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#14131C"/>
+      <stop offset="100%" stop-color="#030309"/>
+    </linearGradient>
+    <radialGradient id="eye" cx="50%" cy="42%" r="62%">
+      <stop offset="0%" stop-color="#FFF6D8"/>
+      <stop offset="52%" stop-color="#F6BB4E"/>
+      <stop offset="100%" stop-color="#C87524"/>
+    </radialGradient>
+    <radialGradient id="eyehalo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#F6BB4E" stop-opacity="0.74"/>
+      <stop offset="100%" stop-color="#F6BB4E" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="42" height="42" patternUnits="userSpaceOnUse">
+      <path d="M42 0H0V42" fill="none" stroke="#FFFFFF" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="soft-shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.48"/>
+    </filter>
+    <clipPath id="frame-clip">
+      <rect width="1200" height="420" rx="34"/>
+    </clipPath>
   </defs>
-  <rect width="1200" height="340" rx="28" fill="url(#bbg)"/>
-  <use href="#bot" transform="translate(46,42) scale(0.96)"/>
-  <g font-family="'Helvetica Neue', Arial, sans-serif">
-    <text x="372" y="176" font-size="116" font-weight="800" letter-spacing="14" fill="#F0E8D6">LEGION</text>
-    <text x="376" y="222" font-size="29" font-weight="500" letter-spacing="6" fill="#B9A6F0">we are many; we move as one</text>
-    <text x="377" y="261" font-size="20" letter-spacing="1.5" fill="#7C7690">humans and models, marshalled by one will</text>
+
+  <g clip-path="url(#frame-clip)">
+    <rect width="1200" height="420" fill="url(#bg)"/>
+    <rect width="1200" height="420" fill="url(#grid)"/>
+    <rect width="1200" height="420" fill="url(#violet-bloom)"/>
+    <rect width="1200" height="420" fill="url(#gold-bloom)"/>
+    <rect width="1200" height="420" fill="url(#teal-bloom)"/>
+
+    <path d="M35 330C169 253 258 243 397 280C514 311 619 330 739 260C860 190 970 185 1164 235" fill="none" stroke="#7E6CFF" stroke-opacity="0.16" stroke-width="2"/>
+    <path d="M39 118C207 168 316 155 439 103C594 38 733 87 849 139C962 190 1063 186 1168 141" fill="none" stroke="#56D6C4" stroke-opacity="0.12" stroke-width="2"/>
+
+    <g opacity="0.86" stroke-linecap="round">
+      <path d="M219 198L355 121" stroke="#7E6CFF" stroke-opacity="0.36" stroke-width="1.5"/>
+      <path d="M219 198L353 198" stroke="#F6BB4E" stroke-opacity="0.38" stroke-width="1.5"/>
+      <path d="M219 198L354 277" stroke="#56D6C4" stroke-opacity="0.34" stroke-width="1.5"/>
+      <path d="M219 198L118 318" stroke="#7E6CFF" stroke-opacity="0.30" stroke-width="1.5"/>
+    </g>
+
+    <g filter="url(#soft-shadow)">
+      <rect x="58" y="54" width="324" height="312" rx="40" fill="url(#panel)" stroke="#FFFFFF" stroke-opacity="0.07"/>
+      <circle cx="220" cy="198" r="132" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="1"/>
+      <circle cx="220" cy="198" r="111" fill="none" stroke="url(#ring)" stroke-opacity="0.44" stroke-width="2.2" stroke-dasharray="2 15"/>
+      <path d="M119 198A101 101 0 0 1 322 198" fill="none" stroke="url(#ring)" stroke-width="5" stroke-linecap="round" opacity="0.76"/>
+      <path d="M135 274A101 101 0 0 0 303 274" fill="none" stroke="#56D6C4" stroke-width="3" stroke-linecap="round" opacity="0.44"/>
+
+      <g font-family="'SFMono-Regular', 'Menlo', 'Consolas', monospace" font-size="10" letter-spacing="1.4" fill="#DCD6C6">
+        <g transform="translate(332 105)">
+          <circle r="18" fill="#15131E" stroke="#7E6CFF" stroke-opacity="0.70"/>
+          <circle r="4" fill="#7E6CFF" filter="url(#glow)"/>
+          <text x="29" y="4" fill="#BDAEFF">CODEX</text>
+        </g>
+        <g transform="translate(354 198)">
+          <circle r="18" fill="#15131E" stroke="#F6BB4E" stroke-opacity="0.72"/>
+          <circle r="4" fill="#F6BB4E" filter="url(#glow)"/>
+          <text x="29" y="4" fill="#F0E8D6">CURSOR</text>
+        </g>
+        <g transform="translate(333 291)">
+          <circle r="18" fill="#15131E" stroke="#56D6C4" stroke-opacity="0.68"/>
+          <circle r="4" fill="#56D6C4" filter="url(#glow)"/>
+          <text x="29" y="4" fill="#AEEBE2">CLAUDE</text>
+        </g>
+        <g transform="translate(99 318)">
+          <circle r="18" fill="#15131E" stroke="#FFFFFF" stroke-opacity="0.28"/>
+          <circle r="4" fill="#DCD6C6" filter="url(#glow)"/>
+          <text x="-55" y="4" fill="#A9A4B6">HUMAN</text>
+        </g>
+      </g>
+
+      <g transform="translate(112 89)">
+        <rect x="0" y="0" width="216" height="216" rx="52" fill="#0E0D15" stroke="#FFFFFF" stroke-opacity="0.08"/>
+        <circle cx="108" cy="113" r="91" fill="#7E6CFF" opacity="0.12"/>
+        <circle cx="108" cy="116" r="69" fill="#F6BB4E" opacity="0.05"/>
+
+        <line x1="108" y1="47" x2="108" y2="30" stroke="#766F86" stroke-width="5" stroke-linecap="round"/>
+        <circle cx="108" cy="25" r="6.5" fill="url(#eye)" filter="url(#glow)"/>
+
+        <rect x="31" y="114" width="13" height="39" rx="6.5" fill="#302D3B"/>
+        <rect x="172" y="114" width="13" height="39" rx="6.5" fill="#302D3B"/>
+
+        <rect x="43" y="55" width="130" height="134" rx="48" fill="url(#body)"/>
+        <rect x="43" y="55" width="130" height="134" rx="48" fill="none" stroke="#000000" stroke-opacity="0.48" stroke-width="1.5"/>
+        <path d="M66 82Q108 65 150 82" fill="none" stroke="#FFFFFF" stroke-opacity="0.13" stroke-width="8" stroke-linecap="round"/>
+        <path d="M61 98C77 91 139 91 155 98" fill="none" stroke="#7E6CFF" stroke-opacity="0.12" stroke-width="3" stroke-linecap="round"/>
+
+        <rect x="60" y="103" width="96" height="52" rx="26" fill="url(#visor)"/>
+        <rect x="60" y="103" width="96" height="52" rx="26" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="1.4"/>
+        <path d="M72 115Q108 109 144 115" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="5" stroke-linecap="round"/>
+
+        <circle cx="89" cy="129" r="18" fill="url(#eyehalo)"/>
+        <circle cx="127" cy="129" r="18" fill="url(#eyehalo)"/>
+        <circle cx="89" cy="129" r="9.5" fill="url(#eye)"/>
+        <circle cx="127" cy="129" r="9.5" fill="url(#eye)"/>
+        <circle cx="86" cy="126" r="2.6" fill="#FFFBF0"/>
+        <circle cx="124" cy="126" r="2.6" fill="#FFFBF0"/>
+      </g>
+    </g>
+
+    <g transform="translate(442 87)" font-family="'Helvetica Neue', Arial, sans-serif">
+      <g transform="translate(0 0)">
+        <rect x="0" y="0" width="202" height="34" rx="17" fill="#F6BB4E" fill-opacity="0.10" stroke="#F6BB4E" stroke-opacity="0.32"/>
+        <circle cx="20" cy="17" r="4" fill="#F6BB4E" filter="url(#glow)"/>
+        <text x="36" y="22" font-size="13" font-weight="700" letter-spacing="2.8" fill="#F6D98C">CORE ENGINE</text>
+      </g>
+
+      <text x="-3" y="113" font-size="94" font-weight="900" letter-spacing="12" fill="#F0E8D6">LEGION</text>
+      <text x="4" y="159" font-size="31" font-weight="800" letter-spacing="6" fill="#B9A6F0">we are many; we move as one</text>
+      <text x="6" y="197" font-size="20" font-weight="500" letter-spacing="1.2" fill="#A9A4B6">model-agnostic orchestration for agents that ship</text>
+
+      <g transform="translate(6 231)" font-family="'SFMono-Regular', 'Menlo', 'Consolas', monospace" font-size="12" font-weight="700" letter-spacing="1.5">
+        <rect x="0" y="0" width="136" height="31" rx="15.5" fill="#15131E" stroke="#FFFFFF" stroke-opacity="0.08"/>
+        <text x="17" y="20" fill="#F0E8D6">DELEGATE</text>
+        <rect x="153" y="0" width="103" height="31" rx="15.5" fill="#15131E" stroke="#FFFFFF" stroke-opacity="0.08"/>
+        <text x="171" y="20" fill="#B9A6F0">METER</text>
+        <rect x="273" y="0" width="99" height="31" rx="15.5" fill="#15131E" stroke="#FFFFFF" stroke-opacity="0.08"/>
+        <text x="292" y="20" fill="#AEEBE2">LEARN</text>
+        <rect x="389" y="0" width="89" height="31" rx="15.5" fill="#15131E" stroke="#FFFFFF" stroke-opacity="0.08"/>
+        <text x="410" y="20" fill="#F6D98C">HEAL</text>
+      </g>
+    </g>
+
+    <g transform="translate(1021 292)" opacity="0.84">
+      <rect x="0" y="0" width="118" height="54" rx="18" fill="#101018" stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <g transform="translate(18 14)" fill="none" stroke-linecap="round" stroke-width="3">
+        <path d="M0 23V11" stroke="#7E6CFF"/>
+        <path d="M13 23V5" stroke="#F6BB4E"/>
+        <path d="M26 23V15" stroke="#56D6C4"/>
+        <path d="M39 23V8" stroke="#F0E8D6"/>
+      </g>
+      <text x="70" y="22" font-family="'SFMono-Regular', 'Menlo', 'Consolas', monospace" font-size="9" letter-spacing="1.2" fill="#A9A4B6">SPAN</text>
+      <text x="70" y="36" font-family="'SFMono-Regular', 'Menlo', 'Consolas', monospace" font-size="9" letter-spacing="1.2" fill="#A9A4B6">TRACE</text>
+    </g>
+
+    <rect x="1" y="1" width="1198" height="418" rx="33" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>
   </g>
 </svg>

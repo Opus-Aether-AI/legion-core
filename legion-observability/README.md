@@ -49,7 +49,6 @@ legion-trace emit --executor codex --model gpt-5.5 --status ok \
 
 The loop follows the
 [svineet/harness-bench](https://github.com/svineet/harness-bench) /
-[Harness-Bench](https://arxiv.org/abs/2605.27922) /
 [autoresearch](https://github.com/karpathy/autoresearch) shape:
 observe -> analyze -> propose -> baseline -> isolate -> mutate -> score -> keep/discard.
 

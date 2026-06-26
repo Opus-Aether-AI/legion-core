@@ -13,10 +13,6 @@ original to legion-core.
 - [svineet/harness-bench](https://github.com/svineet/harness-bench) shaped the
   workbench framing for creating, observing, analyzing, and auto-improving agent
   harnesses.
-- [Harness-Bench](https://arxiv.org/abs/2605.27922) and
-  [Qihoo360/harness-bench](https://github.com/Qihoo360/harness-bench) helped
-  sharpen Legion's model-plus-harness framing: evaluate the model, execution
-  layer, sandbox, trace, usage, and validator together.
 - [nyosegawa/harness-bench](https://github.com/nyosegawa/harness-bench)
   influenced the practical CLI-agent benchmarking mindset for Codex,
   Claude Code, and Cursor Agent debugging runs.

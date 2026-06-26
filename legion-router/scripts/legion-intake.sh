@@ -10,7 +10,6 @@ while [ -L "$src" ]; do
 done
 _self_dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
 
-DELEGATE="${LEGION_DELEGATE_BIN:-$_self_dir/delegate.sh}"
 GH="${GH_BIN:-gh}"
 
 die() { printf 'legion-intake: %s\n' "$*" >&2; exit 2; }
@@ -18,7 +17,9 @@ note() { printf '%s\n' "$*" >&2; }
 
 usage() {
   cat >&2 <<'EOF'
-usage: legion-intake {explore|implement} --issue N --repo OWNER/REPO [--archetype A] [--model M]
+usage: legion-intake {explore|implement} --issue N --repo OWNER/REPO
+                    [--archetype A] [--model M]
+                    [--worker delegate|cursor|custom] [--worker-bin CMD]
 EOF
   exit 2
 }
@@ -44,14 +45,66 @@ base_branch() {
   printf '%s' "$branch"
 }
 
+resolve_worker() {
+  local requested="$1" explicit_bin="$2"
+  worker="$requested"
+  [[ -n "$worker" ]] || worker="${LEGION_INTAKE_WORKER:-delegate}"
+  worker_bin="$explicit_bin"
+
+  case "$worker" in
+    delegate)
+      worker_bin="${worker_bin:-${LEGION_INTAKE_WORKER_BIN:-${LEGION_DELEGATE_BIN:-$_self_dir/delegate.sh}}}"
+      default_model=""
+      untrusted_flag="--untrusted"
+      ;;
+    cursor)
+      worker_bin="${worker_bin:-${LEGION_INTAKE_WORKER_BIN:-${LEGION_CURSOR_BIN:-$_self_dir/legion-cursor.sh}}}"
+      default_model="cursor-auto"
+      untrusted_flag=""
+      ;;
+    custom)
+      worker_bin="${worker_bin:-${LEGION_INTAKE_WORKER_BIN:-}}"
+      default_model=""
+      untrusted_flag=""
+      [[ -n "$worker_bin" ]] || die "--worker custom requires --worker-bin or LEGION_INTAKE_WORKER_BIN"
+      ;;
+    *)
+      # Treat any other worker value as a command path/name with the standard
+      # Legion runner contract: `run --sandbox ... --task ... --repo ...`.
+      worker_bin="${worker_bin:-${LEGION_INTAKE_WORKER_BIN:-$worker}}"
+      worker="custom"
+      default_model=""
+      untrusted_flag=""
+      ;;
+  esac
+
+  if [[ "$worker_bin" != */* ]]; then
+    worker_bin="$(command -v "$worker_bin" 2>/dev/null || true)"
+  fi
+  [[ -x "$worker_bin" ]] || die "Legion intake worker not found at $worker_bin"
+}
+
+run_worker() {
+  local sandbox="$1" task_text="$2"
+  local -a argv
+  argv=(run --sandbox "$sandbox")
+  [[ -n "$archetype" ]] && argv+=(--archetype "$archetype")
+  [[ -n "$model" ]] && argv+=(--model "$model")
+  argv+=(--task "$task_text" --repo "$PWD")
+  [[ -n "$untrusted_flag" ]] && argv+=("$untrusted_flag")
+  agent "${argv[@]}"
+}
+
 mode="${1:-}"; [[ -n "$mode" ]] || usage; shift || true
-issue=""; repo=""; model=""; archetype=""
+issue=""; repo=""; model=""; archetype=""; requested_worker=""; requested_worker_bin=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --issue) issue="$2"; shift 2 ;;
     --repo) repo="$2"; shift 2 ;;
     --archetype) archetype="$2"; shift 2 ;;
     --model) model="$2"; shift 2 ;;
+    --worker|--executor) requested_worker="$2"; shift 2 ;;
+    --worker-bin|--executor-bin) requested_worker_bin="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -60,10 +113,8 @@ done
 [[ -n "$repo" ]] || die "--repo OWNER/REPO required"
 command -v "$GH" >/dev/null 2>&1 || die "gh required. Install gh and run: gh auth login"
 command -v jq >/dev/null 2>&1 || die "jq required"
-if [[ "$DELEGATE" != */* ]]; then
-  DELEGATE="$(command -v "$DELEGATE" 2>/dev/null || true)"
-fi
-[[ -x "$DELEGATE" ]] || die "legion-delegate not found at $DELEGATE"
+resolve_worker "$requested_worker" "$requested_worker_bin"
+model="${model:-${LEGION_INTAKE_MODEL:-$default_model}}"
 "$GH" auth status >/dev/null 2>&1 || die "gh not authenticated. Run: gh auth login"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "run from a checked-out git repo"
 
@@ -72,7 +123,7 @@ title="$(jq -r '.title' <<<"$issue_json")"
 body="$(jq -r '.body // ""' <<<"$issue_json")"
 prompt="$(jq -rn --arg n "$issue" --arg t "$title" --arg b "$body" '
   "GitHub issue #\($n)\n\nTitle: \($t)\n\nBody:\n\($b)"')"
-model="${model:-${LEGION_INTAKE_MODEL:-}}"
+model="${model:-${LEGION_INTAKE_MODEL:-$default_model}}"
 archetype="${archetype:-${LEGION_INTAKE_ARCHETYPE:-}}"
 if [[ -z "$model" && -z "$archetype" ]]; then
   case "$mode" in
@@ -85,50 +136,40 @@ tag="🤖 legion-intake $mode"
 
 # The agent is prompted with USER-CONTROLLED issue text, so a prompt injection
 # could try to read tokens from the environment and echo them into its output
-# (which we post back to the issue/PR). Run the delegated agent with the GitHub +
-# provider secrets SCRUBBED from its environment — the workflow writes codex auth
-# to ~/.codex/auth.json, so codex still authenticates without these env vars,
-# while `gh` posting below keeps GH_TOKEN in this parent shell.
+# (which we post back to the issue/PR). Run the worker with GitHub + common
+# provider secrets scrubbed from its environment. Workers should authenticate via
+# their own local store or a mounted auth file, while `gh` posting below keeps
+# GH_TOKEN in this parent shell.
 agent() {
   env \
-    -u GH_TOKEN \
-    -u GITHUB_TOKEN \
-    -u LEGION_INTAKE_AUTH_JSON \
-    -u CODEX_AUTH \
-    -u OPENAI_API_KEY \
-    -u ANTHROPIC_API_KEY \
-    "$DELEGATE" "$@"
+    -u GH_TOKEN -u GITHUB_TOKEN \
+    -u LEGION_INTAKE_AUTH_JSON -u CODEX_AUTH -u OPENAI_API_KEY \
+    -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+    -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN \
+    "$worker_bin" "$@"
 }
 
 if [[ "$mode" == "explore" ]]; then
   task="$task"$'\n\n'"Return: a short assessment — root cause if visible, the files involved, and whether this is safe to auto-implement (yes/no) with one-line reasoning."
-  run_args=(run --sandbox read-only)
-  [[ -n "$archetype" ]] && run_args+=(--archetype "$archetype")
-  [[ -n "$model" ]] && run_args+=(--model "$model")
-  run_args+=(--task "$task" --repo "$PWD" --untrusted)
   set +e
-  result="$(agent "${run_args[@]}")"
+  result="$(run_worker read-only "$task")"
   rc=$?
   set -e
   summary="$(last_message "$result")"
-  [[ "$rc" -eq 0 ]] || summary="${summary:-delegate failed}"
+  [[ "$rc" -eq 0 ]] || summary="${summary:-worker failed}"
   comment_issue "$issue" "$repo" "$tag" "$summary"
   exit 0
 fi
 
-run_args=(run --sandbox workspace-write)
-[[ -n "$archetype" ]] && run_args+=(--archetype "$archetype")
-[[ -n "$model" ]] && run_args+=(--model "$model")
-run_args+=(--task "$task" --repo "$PWD" --untrusted)
 set +e
-result="$(agent "${run_args[@]}")"
+result="$(run_worker workspace-write "$task")"
 rc=$?
 set -e
 status="$(jq -r '.status // "failed"' <<<"$result" 2>/dev/null || echo failed)"
 diff="$(jq -r '.diff_path // empty' <<<"$result" 2>/dev/null || true)"
 summary="$(last_message "$result")"
 if [[ "$rc" -ne 0 || "$status" != "ok" || -z "$diff" || ! -s "$diff" ]]; then
-  why="delegate status=$status"
+  why="worker status=$status"
   [[ -n "$diff" && ! -s "$diff" ]] && why="no changes produced"
   comment_issue "$issue" "$repo" "$tag" "${why}${summary:+$'\n\n'"$summary"}"
   exit 0

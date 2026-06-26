@@ -16,12 +16,27 @@ on:
         options:
           - explore
           - implement
-      archetype:
-        description: Optional Legion routing archetype override.
+      worker:
+        description: Legion worker to run behind the intake contract.
+        required: false
+        type: choice
+        default: delegate
+        options:
+          - delegate
+          - cursor
+          - custom
+      model:
+        description: Optional worker model override; normally leave empty and let the archetype route.
         required: false
         type: string
-      model:
-        description: Optional model override; normally leave empty and let the archetype route.
+        default: ''
+      worker_bin:
+        description: Optional worker binary/path for custom compatible runners.
+        required: false
+        type: string
+        default: ''
+      archetype:
+        description: Optional Legion routing archetype override.
         required: false
         type: string
 
@@ -43,6 +58,8 @@ jobs:
     with:
       issue_number: ${{ github.event_name == 'workflow_dispatch' && inputs.issue_number || github.event.issue.number }}
       mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.label.name == 'agent:implement' && 'implement' || 'explore') }}
+      worker: ${{ github.event_name == 'workflow_dispatch' && inputs.worker || 'delegate' }}
       archetype: ${{ github.event_name == 'workflow_dispatch' && inputs.archetype || '' }}
       model: ${{ github.event_name == 'workflow_dispatch' && inputs.model || '' }}
+      worker_bin: ${{ github.event_name == 'workflow_dispatch' && inputs.worker_bin || '' }}
     secrets: inherit

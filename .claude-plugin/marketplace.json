@@ -12,8 +12,8 @@
     {
       "name": "legion-router",
       "source": "./legion-router",
-      "description": "Legion's multi-model brain: delegate scoped tasks from Opus to external model agents (Codex / GPT-5.5 / GPT-5.4 and Cursor Agent) via `legion-delegate` and `legion-cursor`, bringing back verified, metered diffs. Runs agents in isolated git worktrees, captures diff + last message + token usage, prices via a shared cost table, emits legion.span.v1 telemetry, and reports GPT usage to the router /ingest sink so spend shows next to Claude. Ships the opt-in `legion-router` loopback :8082 Anthropic-compatible metering proxy, codex-json parser, and per-model cost lib.",
-      "version": "0.5.2",
+      "description": "Legion's multi-model brain: delegate scoped tasks from Opus to external model agents (Codex / GPT-5.5 / GPT-5.4 and Cursor Agent) via `legion-delegate` and `legion-cursor`, bringing back verified, metered diffs. Also ships generic GitHub issue intake via `legion-intake`, which can run delegate, cursor, or a compatible custom worker. Runs agents in isolated git worktrees, captures diff + last message + token usage, prices via a shared cost table, emits legion.span.v1 telemetry, and reports GPT usage to the router /ingest sink so spend shows next to Claude. Ships the opt-in `legion-router` loopback :8082 Anthropic-compatible metering proxy, codex-json parser, and per-model cost lib.",
+      "version": "0.5.3",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",
@@ -36,8 +36,8 @@
     {
       "name": "legion-observability",
       "source": "./legion-observability",
-      "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-catalog marketplace inventory, legion-self-learn daily failure mining + command/agent/skill improvement memory/proposals, legion-trace, legion-otel-export, and legion-doctor install verification.",
-      "version": "0.2.2",
+      "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic core/stable harness benchmarks plus A/B corpus runs with repeated-run flake detection, legion-catalog marketplace inventory, legion-self-learn daily failure mining + command/agent/skill improvement memory/proposals, legion-trace, legion-otel-export, and legion-doctor install verification.",
+      "version": "0.2.3",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -45,6 +45,7 @@
         "opentelemetry",
         "cost-tracking",
         "dashboard",
+        "benchmark",
         "doctor",
         "self-learning",
         "harness",

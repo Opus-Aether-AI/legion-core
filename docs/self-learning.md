@@ -35,6 +35,7 @@ Legion implements that protocol locally:
 - Review verdict artifacts referenced by spans
 - `legion-eval` trigger misses/collisions
 - `legion-optimize` accepted routing advice
+- `legion-bench --record-failures` benchmark misses
 - Session feedback mined by `legion-session-learn --record`, including explicit
   user corrections from Claude/Codex/Cursor logs
 - Manual bug records from:
@@ -66,6 +67,7 @@ Otherwise Legion falls back to catalog token matching and manual records.
 The installed `legion-core-refresh` cron runs:
 
 ```bash
+legion-session-learn --record
 legion-self-learn run --repo ~/.agents/sources/legion-core --apply-memory --quiet
 ```
 
@@ -146,7 +148,7 @@ Two mutation families are supported today:
 
 ## Remaining Extensions
 
-- Add a Harness Bench-style Legion benchmark workbench; see
+- Expand the Harness Bench-style workbench beyond the offline `core` suite; see
   [benchmarking.md](benchmarking.md).
 - Add hook and MCP-specific eval datasets once there are enough stable examples.
 - Expand source mutators beyond markdown guardrails and marketplace descriptions

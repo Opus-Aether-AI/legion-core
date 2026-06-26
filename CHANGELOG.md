@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.8.2...v0.9.0) (2026-06-26)
+
+
+### Added
+
+* **observability:** add legion-bench workbench and stable gates ([#47](https://github.com/Opus-Aether-AI/legion-core/issues/47)) ([5b2c7c3](https://github.com/Opus-Aether-AI/legion-core/commit/5b2c7c324957a55e695d3936f5d71a035aadfe97))
+
 ## [0.8.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.8.1...v0.8.2) (2026-06-26)
 
 

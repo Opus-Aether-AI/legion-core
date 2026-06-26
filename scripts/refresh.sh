@@ -71,7 +71,18 @@ if [ -x "$DOCTOR" ]; then
         printf 'legion refresh: legion-doctor found issues (recorded for self-learning)\n' >&2
 fi
 
-# 4) Daily self-learning loop. Memory/proposals are safe to apply automatically;
+# 4) Session feedback mining. This turns recent user corrections/review gotchas
+# from Claude/Codex/Cursor logs into self-learning outcomes before synthesis.
+SESSION_LEARN="${LEGION_SESSION_LEARN_BIN:-$SOURCE_CLONE/legion-observability/bin/legion-session-learn}"
+if [ "${LEGION_SESSION_LEARN:-1}" = "1" ] && [ -x "$SESSION_LEARN" ]; then
+    if ! "$SESSION_LEARN" --lookback-days "${LEGION_SESSION_LEARN_DAYS:-3}" \
+        --max-file-mb "${LEGION_SESSION_LEARN_MAX_FILE_MB:-8}" --record >/dev/null 2>&1; then
+        printf 'legion refresh: session learning scan failed (self-learning still running)\n' >&2
+        record_refresh_failure "Daily session learning scan failed." "legion-session-learn --record returned nonzero"
+    fi
+fi
+
+# 5) Daily self-learning loop. Memory/proposals are safe to apply automatically;
 # source mutations remain opt-in via `legion-self-learn run --apply-source`.
 SELF_LEARN="$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
 if [ -x "$SELF_LEARN" ]; then
@@ -81,7 +92,7 @@ if [ -x "$SELF_LEARN" ]; then
     fi
 fi
 
-# 5) Auto-heal (OPT-IN: export LEGION_HEAL=1). Delegates a fix for each doctor
+# 6) Auto-heal (OPT-IN: export LEGION_HEAL=1). Delegates a fix for each doctor
 # finding to codex in an isolated worktree, gates it (doctor + bats + cross-model
 # review), and opens a PR — never auto-merged. Off by default so the daily refresh
 # stays read-only unless you opt in. Bounded by LEGION_HEAL_MAX (default 3).

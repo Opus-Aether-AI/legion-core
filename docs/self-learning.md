@@ -35,6 +35,8 @@ Legion implements that protocol locally:
 - Review verdict artifacts referenced by spans
 - `legion-eval` trigger misses/collisions
 - `legion-optimize` accepted routing advice
+- Session feedback mined by `legion-session-learn --record`, including explicit
+  user corrections from Claude/Codex/Cursor logs
 - Manual bug records from:
 
 ```bash
@@ -144,6 +146,8 @@ Two mutation families are supported today:
 
 ## Remaining Extensions
 
+- Add a Harness Bench-style Legion benchmark workbench; see
+  [benchmarking.md](benchmarking.md).
 - Add hook and MCP-specific eval datasets once there are enough stable examples.
 - Expand source mutators beyond markdown guardrails and marketplace descriptions
   only when each mutator has a scorecard that can prove improvement.

@@ -108,6 +108,36 @@ SH
     grep -qF "self-learn run --repo $SOURCE_CLONE --apply-memory --quiet" "$MOCK_CALL_LOG"
 }
 
+@test "refresh.sh records session feedback before self-learning" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-session-learn" <<'SH'
+#!/usr/bin/env bash
+printf 'session-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-self-learn" <<'SH'
+#!/usr/bin/env bash
+printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x \
+        "$SOURCE_CLONE/legion-observability/bin/legion-session-learn" \
+        "$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add learning bins"
+    )
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    grep -qF "session-learn --lookback-days 3 --max-file-mb 8 --record" "$MOCK_CALL_LOG"
+    grep -qF "self-learn run --repo $SOURCE_CLONE --apply-memory --quiet" "$MOCK_CALL_LOG"
+
+    session_line="$(grep -nF "session-learn --lookback-days" "$MOCK_CALL_LOG" | cut -d: -f1)"
+    self_line="$(grep -nF "self-learn run --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"
+    [ "$session_line" -lt "$self_line" ]
+}
+
 @test "refresh.sh records self-learning failures" {
     make_source_clone marketplace-minimal.json
     mkdir -p "$SOURCE_CLONE/legion-observability/bin"

@@ -16,6 +16,14 @@ on:
         options:
           - explore
           - implement
+      archetype:
+        description: Optional Legion routing archetype override.
+        required: false
+        type: string
+      model:
+        description: Optional model override; normally leave empty and let the archetype route.
+        required: false
+        type: string
 
 permissions:
   issues: write
@@ -35,4 +43,6 @@ jobs:
     with:
       issue_number: ${{ github.event_name == 'workflow_dispatch' && inputs.issue_number || github.event.issue.number }}
       mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.label.name == 'agent:implement' && 'implement' || 'explore') }}
+      archetype: ${{ github.event_name == 'workflow_dispatch' && inputs.archetype || '' }}
+      model: ${{ github.event_name == 'workflow_dispatch' && inputs.model || '' }}
     secrets: inherit

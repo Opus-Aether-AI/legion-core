@@ -108,19 +108,23 @@ jobs:
         # legion-intake.sh scrubs GH_TOKEN from the agent subprocess.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LEGION_INTAKE_ARCHETYPE: ${{ inputs.archetype || vars.LEGION_INTAKE_ARCHETYPE }}
+          LEGION_INTAKE_INPUT_ARCHETYPE: ${{ inputs.archetype }}
+          LEGION_INTAKE_DEFAULT_ARCHETYPE: ${{ vars.LEGION_INTAKE_ARCHETYPE }}
           LEGION_INTAKE_EXPLORE_ARCHETYPE: ${{ vars.LEGION_INTAKE_EXPLORE_ARCHETYPE }}
           LEGION_INTAKE_IMPLEMENT_ARCHETYPE: ${{ vars.LEGION_INTAKE_IMPLEMENT_ARCHETYPE }}
-          LEGION_INTAKE_MODEL: ${{ inputs.model || vars.LEGION_INTAKE_MODEL }}
+          LEGION_INTAKE_INPUT_MODEL: ${{ inputs.model }}
+          LEGION_INTAKE_DEFAULT_MODEL: ${{ vars.LEGION_INTAKE_MODEL }}
         run: |
           set -euo pipefail
+          archetype="${LEGION_INTAKE_INPUT_ARCHETYPE:-${LEGION_INTAKE_DEFAULT_ARCHETYPE:-}}"
+          model="${LEGION_INTAKE_INPUT_MODEL:-${LEGION_INTAKE_DEFAULT_MODEL:-}}"
           args=("${{ inputs.mode }}" \
             --issue "${{ inputs.issue_number }}" \
             --repo "${{ github.repository }}")
-          if [[ -n "${LEGION_INTAKE_ARCHETYPE:-}" ]]; then
-            args+=(--archetype "$LEGION_INTAKE_ARCHETYPE")
+          if [[ -n "$archetype" ]]; then
+            args+=(--archetype "$archetype")
           fi
-          if [[ -n "${LEGION_INTAKE_MODEL:-}" ]]; then
-            args+=(--model "$LEGION_INTAKE_MODEL")
+          if [[ -n "$model" ]]; then
+            args+=(--model "$model")
           fi
           bash legion-router/scripts/legion-intake.sh "${args[@]}"

@@ -111,9 +111,11 @@ See `legion-observability/bench/corpora/README.md` for a direct-Codex versus
 - `relative_improvement_pct`: relative lift, e.g. `(0.93 - 0.79) / 0.79`
   is `+17.722%`.
 
-See [PR #47 real benchmark results](benchmarks/pr-47-real-bench.md) for a
-base-vs-candidate run that moved the stable suite from `43/49` to `49/49`
-passing, a `+12.245` percentage-point score change.
+See [PR #47 feature-contract benchmark results](benchmarks/pr-47-real-bench.md)
+for a base-vs-candidate run that moved the stable suite from `43/49` to
+`49/49` passing, a `+12.245` percentage-point score change. That result proves
+the benchmark workbench and PR contracts; it is not a broad live-agent
+performance claim.
 
 `learning-lift` is a deterministic smoke benchmark for the self-learning path.
 It writes one session correction fixture, scores the same probes before and

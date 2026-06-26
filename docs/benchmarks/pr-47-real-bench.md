@@ -1,11 +1,14 @@
-# PR #47 Real Benchmark Results
+# PR #47 Feature-Contract Benchmark Results
 
 Generated: 2026-06-26T22:02Z
 
 This run compares the current PR benchmark suite against the current
-`origin/main` checkout, not a hand-picked fixture. The same 49-case `stable`
-suite was run against both repos through `legion-bench run`, then compared with
-`legion-bench compare`.
+`origin/main` checkout, not a hand-picked fixture. It is a feature-contract
+benchmark: the suite verifies that the benchmark workbench, corpus runner, and
+generic intake lane exist and keep working across real Legion CLIs and metadata.
+
+The same 49-case `stable` suite was run against both repos through
+`legion-bench run`, then compared with `legion-bench compare`.
 
 The candidate commit below is the benchmark-affecting code commit. Later
 docs-only commits in this PR do not change the suite, runner, or measured
@@ -71,11 +74,12 @@ Artifacts from the run:
 
 ## Scope
 
-This is a real PR-vs-main feature-contract benchmark. It runs the actual
-Legion CLIs and metadata checks that this PR adds, using the branch suite
-against both the base and candidate repos.
+This is the right benchmark for deciding whether to merge this PR: it proves the
+new benchmark infrastructure and generic intake contracts pass deterministically
+and regress on `origin/main` where those contracts do not exist.
 
-It is not yet the larger live LLM benchmark comparing direct Codex, direct
-Claude Code, Cursor, and Legion orchestration on a 30+ case corpus. That is the
-next benchmark layer now that the deterministic scorecard and corpus runner are
-in place.
+It should not be read as a broad claim that Legion is 13.953% better on live
+agent work. The larger held-out benchmark comparing direct Codex, direct Claude
+Code, Cursor, and Legion orchestration on a 30+ case live corpus is the next
+benchmark layer now that the deterministic scorecard and corpus runner are in
+place.

@@ -40,10 +40,6 @@ jobs:
     # checkout / setup / backend install never see them. The agent itself runs with
     # secrets scrubbed from its env inside legion-intake.sh — the issue body is
     # untrusted, so a prompt injection must not be able to read a token.
-    env:
-      # Current legion-delegate backend uses Codex auth on disk. Keep the path
-      # backend-specific while exposing the lane itself as Legion intake.
-      CODEX_HOME: ${{ runner.temp }}/legion-intake-agent-home
     steps:
       # Maintainer setup:
       # 1. Create labels `agent:explore` and `agent:implement`.
@@ -88,6 +84,9 @@ jobs:
       - if: steps.auth.outputs.configured == 'true'
         name: Configure Legion intake executor auth
         env:
+          # Current legion-delegate backend uses Codex auth on disk. Keep the path
+          # backend-specific while exposing the lane itself as Legion intake.
+          CODEX_HOME: ${{ runner.temp }}/legion-intake-agent-home
           LEGION_INTAKE_AUTH_JSON: ${{ secrets.LEGION_INTAKE_AUTH_JSON }}
           CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -107,6 +106,7 @@ jobs:
         # Only GH_TOKEN (for posting/PR) — the executor reads auth from its home.
         # legion-intake.sh scrubs GH_TOKEN from the agent subprocess.
         env:
+          CODEX_HOME: ${{ runner.temp }}/legion-intake-agent-home
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LEGION_INTAKE_INPUT_ARCHETYPE: ${{ inputs.archetype }}
           LEGION_INTAKE_DEFAULT_ARCHETYPE: ${{ vars.LEGION_INTAKE_ARCHETYPE }}

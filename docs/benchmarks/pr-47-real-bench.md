@@ -1,6 +1,6 @@
 # PR #47 Real Benchmark Results
 
-Generated: 2026-06-26T21:54Z
+Generated: 2026-06-26T22:02Z
 
 This run compares the current PR benchmark suite against the current
 `origin/main` checkout, not a hand-picked fixture. The same 49-case `stable`
@@ -15,7 +15,7 @@ behavior.
 
 | Metric | `origin/main` | PR candidate | Delta |
 |---|---:|---:|---:|
-| Benchmark-affecting commit | `3ce4eee` | `e4ca175` | |
+| Benchmark-affecting commit | `3ce4eee` | `2e3bba9` | |
 | Score | `0.877551` | `1.000000` | `+12.245` pp |
 | Relative score lift | | | `+13.953%` |
 | Passes | `43/49` | `49/49` | `+6` |
@@ -40,7 +40,7 @@ The six baseline failures are the new PR feature contracts:
 git fetch origin main
 git worktree add --detach /tmp/legion-core-origin-main-bench origin/main
 
-OUT=/tmp/legion-pr47-real-bench-e4ca175
+OUT=/tmp/legion-pr47-real-bench-2e3bba9
 SUITE="$PWD/legion-observability/bench/stable.json"
 
 LEGION_BENCH_DIR="$OUT/baseline" \
@@ -65,9 +65,9 @@ legion-observability/bin/legion-bench compare \
 
 Artifacts from the run:
 
-- `/tmp/legion-pr47-real-bench-e4ca175/baseline/runs/20260626T215412Z-stable-59f1ab72/summary.json`
-- `/tmp/legion-pr47-real-bench-e4ca175/candidate/runs/20260626T215413Z-stable-442c1c70/summary.json`
-- `/tmp/legion-pr47-real-bench-e4ca175/compare.json`
+- `/tmp/legion-pr47-real-bench-2e3bba9/baseline/runs/20260626T220252Z-stable-34dacf87/summary.json`
+- `/tmp/legion-pr47-real-bench-2e3bba9/candidate/runs/20260626T220253Z-stable-d890b85e/summary.json`
+- `/tmp/legion-pr47-real-bench-2e3bba9/compare.json`
 
 ## Scope
 

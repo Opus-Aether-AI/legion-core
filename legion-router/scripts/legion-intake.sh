@@ -18,7 +18,8 @@ note() { printf '%s\n' "$*" >&2; }
 usage() {
   cat >&2 <<'EOF'
 usage: legion-intake {explore|implement} --issue N --repo OWNER/REPO
-                    [--worker delegate|cursor|custom] [--worker-bin CMD] [--model M]
+                    [--archetype A] [--model M]
+                    [--worker delegate|cursor|custom] [--worker-bin CMD]
 EOF
   exit 2
 }
@@ -53,7 +54,7 @@ resolve_worker() {
   case "$worker" in
     delegate)
       worker_bin="${worker_bin:-${LEGION_INTAKE_WORKER_BIN:-${LEGION_DELEGATE_BIN:-$_self_dir/delegate.sh}}}"
-      default_model="gpt-5.4"
+      default_model=""
       untrusted_flag="--untrusted"
       ;;
     cursor)
@@ -87,6 +88,7 @@ run_worker() {
   local sandbox="$1" task_text="$2"
   local -a argv
   argv=(run --sandbox "$sandbox")
+  [[ -n "$archetype" ]] && argv+=(--archetype "$archetype")
   [[ -n "$model" ]] && argv+=(--model "$model")
   argv+=(--task "$task_text" --repo "$PWD")
   [[ -n "$untrusted_flag" ]] && argv+=("$untrusted_flag")
@@ -94,11 +96,12 @@ run_worker() {
 }
 
 mode="${1:-}"; [[ -n "$mode" ]] || usage; shift || true
-issue=""; repo=""; model=""; requested_worker=""; requested_worker_bin=""
+issue=""; repo=""; model=""; archetype=""; requested_worker=""; requested_worker_bin=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --issue) issue="$2"; shift 2 ;;
     --repo) repo="$2"; shift 2 ;;
+    --archetype) archetype="$2"; shift 2 ;;
     --model) model="$2"; shift 2 ;;
     --worker|--executor) requested_worker="$2"; shift 2 ;;
     --worker-bin|--executor-bin) requested_worker_bin="$2"; shift 2 ;;
@@ -120,7 +123,14 @@ title="$(jq -r '.title' <<<"$issue_json")"
 body="$(jq -r '.body // ""' <<<"$issue_json")"
 prompt="$(jq -rn --arg n "$issue" --arg t "$title" --arg b "$body" '
   "GitHub issue #\($n)\n\nTitle: \($t)\n\nBody:\n\($b)"')"
-model="${model:-gpt-5.4}"
+model="${model:-${LEGION_INTAKE_MODEL:-$default_model}}"
+archetype="${archetype:-${LEGION_INTAKE_ARCHETYPE:-}}"
+if [[ -z "$model" && -z "$archetype" ]]; then
+  case "$mode" in
+    explore) archetype="${LEGION_INTAKE_EXPLORE_ARCHETYPE:-second-opinion-review}" ;;
+    implement) archetype="${LEGION_INTAKE_IMPLEMENT_ARCHETYPE:-implement-feature}" ;;
+  esac
+fi
 task="$prompt"
 tag="🤖 legion-intake $mode"
 
@@ -133,7 +143,7 @@ tag="🤖 legion-intake $mode"
 agent() {
   env \
     -u GH_TOKEN -u GITHUB_TOKEN \
-    -u CODEX_AUTH -u OPENAI_API_KEY \
+    -u LEGION_INTAKE_AUTH_JSON -u CODEX_AUTH -u OPENAI_API_KEY \
     -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
     -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN \
     "$worker_bin" "$@"
@@ -146,7 +156,7 @@ if [[ "$mode" == "explore" ]]; then
   rc=$?
   set -e
   summary="$(last_message "$result")"
-  [[ "$rc" -eq 0 ]] || summary="${summary:-delegate failed}"
+  [[ "$rc" -eq 0 ]] || summary="${summary:-worker failed}"
   comment_issue "$issue" "$repo" "$tag" "$summary"
   exit 0
 fi
@@ -159,7 +169,7 @@ status="$(jq -r '.status // "failed"' <<<"$result" 2>/dev/null || echo failed)"
 diff="$(jq -r '.diff_path // empty' <<<"$result" 2>/dev/null || true)"
 summary="$(last_message "$result")"
 if [[ "$rc" -ne 0 || "$status" != "ok" || -z "$diff" || ! -s "$diff" ]]; then
-  why="delegate status=$status"
+  why="worker status=$status"
   [[ -n "$diff" && ! -s "$diff" ]] && why="no changes produced"
   comment_issue "$issue" "$repo" "$tag" "${why}${summary:+$'\n\n'"$summary"}"
   exit 0

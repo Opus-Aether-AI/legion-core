@@ -16,8 +16,13 @@ on:
         required: false
         default: delegate
         type: string
+      archetype:
+        description: Optional Legion routing archetype override.
+        required: false
+        type: string
+        default: ''
       model:
-        description: Optional worker model override.
+        description: Optional worker model override; normally leave empty and let the archetype route.
         required: false
         default: ''
         type: string
@@ -42,20 +47,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Secrets are scoped to the specific steps that need them (NOT job-level), so
-    # checkout / setup never see them. The worker itself runs with
+    # checkout / setup / backend install never see them. The worker itself runs with
     # secrets scrubbed from its env inside legion-intake.sh — the issue body is
     # untrusted, so a prompt injection must not be able to read a token.
     env:
-      CODEX_HOME: ${{ runner.temp }}/codex-home
+      CODEX_HOME: ${{ runner.temp }}/legion-intake-agent-home
       LEGION_INTAKE_WORKER: ${{ inputs.worker }}
-      LEGION_INTAKE_MODEL: ${{ inputs.model }}
       LEGION_INTAKE_WORKER_BIN_INPUT: ${{ inputs.worker_bin }}
+      LEGION_INTAKE_INPUT_ARCHETYPE: ${{ inputs.archetype }}
+      LEGION_INTAKE_DEFAULT_ARCHETYPE: ${{ vars.LEGION_INTAKE_ARCHETYPE }}
+      LEGION_INTAKE_EXPLORE_ARCHETYPE: ${{ vars.LEGION_INTAKE_EXPLORE_ARCHETYPE }}
+      LEGION_INTAKE_IMPLEMENT_ARCHETYPE: ${{ vars.LEGION_INTAKE_IMPLEMENT_ARCHETYPE }}
+      LEGION_INTAKE_INPUT_MODEL: ${{ inputs.model }}
+      LEGION_INTAKE_DEFAULT_MODEL: ${{ vars.LEGION_INTAKE_MODEL }}
     steps:
       # Maintainer setup:
       # 1. Create labels `agent:explore` and `agent:implement`.
-      # 2. Default worker is `delegate`, which is backed by Codex today. Prefer
-      #    CODEX_AUTH = contents of ~/.codex/auth.json from a machine where
-      #    `codex login status` is healthy. As a fallback, set OPENAI_API_KEY.
+      # 2. Prefer LEGION_INTAKE_AUTH_JSON = current backend auth JSON. For the
+      #    default delegate backend, CODEX_AUTH is still accepted as a compatibility
+      #    alias. As a fallback, set OPENAI_API_KEY instead.
       # 3. Non-default workers must provide their own runner/auth setup without
       #    exposing provider secrets to the worker environment.
       # 4. If required auth is missing we comment on the issue and exit 0 by design.
@@ -63,18 +73,19 @@ jobs:
         id: auth
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LEGION_INTAKE_AUTH_JSON: ${{ secrets.LEGION_INTAKE_AUTH_JSON }}
           CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           case "${LEGION_INTAKE_WORKER:-delegate}" in
             delegate)
-              if [[ -n "${CODEX_AUTH:-}" || -n "${OPENAI_API_KEY:-}" ]]; then
+              if [[ -n "${LEGION_INTAKE_AUTH_JSON:-}" || -n "${CODEX_AUTH:-}" || -n "${OPENAI_API_KEY:-}" ]]; then
                 echo "configured=true" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               gh issue comment "${{ inputs.issue_number }}" --repo "${{ github.repository }}" \
-                --body "intake lane not configured for delegate worker: set CODEX_AUTH or OPENAI_API_KEY, or choose another Legion worker"
+                --body "intake lane not configured for delegate worker: set LEGION_INTAKE_AUTH_JSON, CODEX_AUTH, or OPENAI_API_KEY, or choose another Legion worker"
               echo "configured=false" >> "$GITHUB_OUTPUT"
               ;;
             cursor|custom|*)
@@ -97,19 +108,25 @@ jobs:
           node-version: 20
 
       - if: steps.auth.outputs.configured == 'true'
-        name: Install default delegate runtime
+        name: Install Legion intake executor backend
         run: |
           set -euo pipefail
           if [[ "${LEGION_INTAKE_WORKER:-delegate}" != "delegate" ]]; then
             echo "Skipping Codex install for Legion worker: ${LEGION_INTAKE_WORKER}"
             exit 0
           fi
+          # Current legion-delegate backend shells out to Codex for GPT executors.
+          # Keep this backend detail here instead of naming the whole lane after it.
           npm install -g @openai/codex
           codex --version
 
       - if: steps.auth.outputs.configured == 'true'
-        name: Configure default delegate auth
+        name: Configure Legion intake executor auth
         env:
+          # Current legion-delegate backend uses Codex auth on disk. Keep the path
+          # backend-specific while exposing the lane itself as Legion intake.
+          CODEX_HOME: ${{ runner.temp }}/legion-intake-agent-home
+          LEGION_INTAKE_AUTH_JSON: ${{ secrets.LEGION_INTAKE_AUTH_JSON }}
           CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -119,8 +136,9 @@ jobs:
             exit 0
           fi
           mkdir -p "$CODEX_HOME"
-          if [[ -n "${CODEX_AUTH:-}" ]]; then
-            printf '%s' "$CODEX_AUTH" > "$CODEX_HOME/auth.json"
+          auth_json="${LEGION_INTAKE_AUTH_JSON:-${CODEX_AUTH:-}}"
+          if [[ -n "$auth_json" ]]; then
+            printf '%s' "$auth_json" > "$CODEX_HOME/auth.json"
           else
             printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key >/dev/null
           fi
@@ -135,14 +153,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          archetype="${LEGION_INTAKE_INPUT_ARCHETYPE:-${LEGION_INTAKE_DEFAULT_ARCHETYPE:-}}"
+          model="${LEGION_INTAKE_INPUT_MODEL:-${LEGION_INTAKE_DEFAULT_MODEL:-}}"
           args=(
             "${{ inputs.mode }}"
             --issue "${{ inputs.issue_number }}"
             --repo "${{ github.repository }}"
             --worker "${LEGION_INTAKE_WORKER:-delegate}"
           )
-          if [[ -n "${LEGION_INTAKE_MODEL:-}" ]]; then
-            args+=(--model "$LEGION_INTAKE_MODEL")
+          if [[ -n "$archetype" ]]; then
+            args+=(--archetype "$archetype")
+          fi
+          if [[ -n "$model" ]]; then
+            args+=(--model "$model")
           fi
           if [[ -n "${LEGION_INTAKE_WORKER_BIN_INPUT:-}" ]]; then
             args+=(--worker-bin "$LEGION_INTAKE_WORKER_BIN_INPUT")

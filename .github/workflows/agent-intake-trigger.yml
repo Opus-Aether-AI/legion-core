@@ -26,7 +26,7 @@ on:
           - cursor
           - custom
       model:
-        description: Optional worker model override.
+        description: Optional worker model override; normally leave empty and let the archetype route.
         required: false
         type: string
         default: ''
@@ -35,6 +35,10 @@ on:
         required: false
         type: string
         default: ''
+      archetype:
+        description: Optional Legion routing archetype override.
+        required: false
+        type: string
 
 permissions:
   issues: write
@@ -55,6 +59,7 @@ jobs:
       issue_number: ${{ github.event_name == 'workflow_dispatch' && inputs.issue_number || github.event.issue.number }}
       mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.label.name == 'agent:implement' && 'implement' || 'explore') }}
       worker: ${{ github.event_name == 'workflow_dispatch' && inputs.worker || 'delegate' }}
+      archetype: ${{ github.event_name == 'workflow_dispatch' && inputs.archetype || '' }}
       model: ${{ github.event_name == 'workflow_dispatch' && inputs.model || '' }}
       worker_bin: ${{ github.event_name == 'workflow_dispatch' && inputs.worker_bin || '' }}
     secrets: inherit

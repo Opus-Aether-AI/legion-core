@@ -103,7 +103,7 @@ make_patch() {
   [ "$status" -eq 0 ]
   assert_mock_called gh "issue view 7 --repo acme/widgets --json title,body"
   assert_mock_called gh "issue comment 7 --repo acme/widgets --body-file -"
-  assert_mock_called legion-delegate "--sandbox read-only --model gpt-5.4"
+  assert_mock_called legion-delegate "--sandbox read-only --archetype second-opinion-review"
   grep -Fq -- "--untrusted" "$MOCK_CALL_LOG"
   grep -Fq "Title: Bug title" "$MOCK_CALL_LOG"
   grep -Fq "🤖 legion-intake explore" "$MOCK_GH_COMMENTS"
@@ -139,7 +139,7 @@ make_patch() {
   [ "$status" -eq 0 ]
   # Branch is suffixed with the delegate run id so reruns don't collide.
   assert_mock_called gh "pr create --repo acme/widgets --base main --head agent/issue-9-r123 --title Fix bug"
-  assert_mock_called legion-delegate "--sandbox workspace-write --model gpt-5.4"
+  assert_mock_called legion-delegate "--sandbox workspace-write --archetype implement-feature"
   grep -Fq -- "--untrusted" "$MOCK_CALL_LOG"
   [ "$(git -C "$REPO_DIR" branch --show-current)" = "agent/issue-9-r123" ]
   [ "$(git -C "$REPO_DIR" show HEAD:demo.txt)" = "new" ]
@@ -174,6 +174,22 @@ make_patch() {
   grep -Fq "no changes" "$MOCK_GH_COMMENTS"
   if grep -Fq "gh pr create" "$MOCK_CALL_LOG"; then
     echo "unexpected pr create call" >&2
+    cat "$MOCK_CALL_LOG" >&2
+    false
+  fi
+}
+
+@test "intake accepts an explicit model override" {
+  printf '{"title":"Bug title","body":"Bug body"}\n' > "$MOCK_GH_ISSUE_JSON"
+  printf 'assessment\n' > "$TEST_TMPDIR/last-message.txt"
+  printf '{"status":"ok","last_message_path":"%s"}\n' "$TEST_TMPDIR/last-message.txt" > "$MOCK_DELEGATE_RESULT"
+
+  run bash -c "cd '$REPO_DIR' && env LEGION_DELEGATE_BIN=legion-delegate bash '$INTAKE' explore --issue 7 --repo acme/widgets --model gpt-5.5"
+
+  [ "$status" -eq 0 ]
+  assert_mock_called legion-delegate "--sandbox read-only --model gpt-5.5"
+  if grep -Fq -- "--archetype" "$MOCK_CALL_LOG"; then
+    echo "unexpected archetype when explicit model was passed" >&2
     cat "$MOCK_CALL_LOG" >&2
     false
   fi

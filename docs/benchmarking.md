@@ -5,9 +5,10 @@ just felt. The goal is to run the same task suite before and after a routing,
 skill, orchestration, or self-learning change and keep only changes that improve
 the scorecard without hiding cost or latency regressions.
 
-`legion-bench` now implements the first offline slice of that workbench. It is
-deliberately deterministic: no live model calls, no hosted service, and no LLM
-judge in v1.
+`legion-bench` now implements the first deterministic slice of that workbench:
+offline scorecards plus fixture-backed task runs. There are no mandatory live
+model calls, hosted service, or LLM judge in v1, but task cases run real Legion
+CLIs against temporary workspaces and validate their artifacts.
 
 ## Goals
 
@@ -25,7 +26,7 @@ Start with small deterministic fixtures before adding live model runs:
 
 | Suite | What it measures | Example cases |
 |---|---|---|
-| `core` | Did baseline trigger, route, and validation contracts hold? | observability/router triggers, frontend-review/docs-edit routing, marketplace/schema checks |
+| `core` | Did baseline trigger, route, validation, and self-improvement contracts hold? | observability/router triggers, frontend-review/docs-edit routing, marketplace/schema checks, session correction learning, self-learning memory |
 | `skill-routing` | Did the right skill/plugin trigger? | docs edit, auth bug, OSS readiness, benchmark planning |
 | `orchestration` | Did Legion choose self/delegate/review/fanout correctly? | small fix, risky refactor, broad docs sweep |
 | `validation` | Did it run the right gates and reject bad output? | missing test, shellcheck warning, invalid skill frontmatter |
@@ -61,6 +62,7 @@ legion-bench gate --baseline runs/base.json --candidate runs/candidate.json
 - selected skills/entities for eval cases
 - selected executor/model/sandbox/effort for route cases
 - doctor validation commands and output
+- fixture-backed task command output and artifact validators
 - token/cost/latency fields, currently zero-cost/offline in v1
 - final status and failure reason
 
@@ -97,6 +99,32 @@ the Python standard library:
       "type": "doctor",
       "only": "telemetry-schema",
       "required": true
+    },
+    {
+      "id": "task.session-correction-learning",
+      "type": "task",
+      "files": {
+        "home/.codex/sessions/legion/session.jsonl": "{\"payload\":{\"type\":\"user_message\",\"content\":\"wrong attribution source\"}}\n"
+      },
+      "command": [
+        "{repo}/legion-observability/bin/legion-session-learn",
+        "--home",
+        "{home}",
+        "--logs",
+        "{logs}",
+        "--record",
+        "--json"
+      ],
+      "validators": [
+        {
+          "type": "jsonl_contains",
+          "path": "{logs}/self-learn/outcomes.jsonl",
+          "match": {
+            "source": "session-learn"
+          }
+        }
+      ],
+      "required": true
     }
   ]
 }
@@ -114,6 +142,7 @@ Current v1 scorecard:
 - `eval_miss`
 - `eval_collision`
 - `route_match_rate`
+- `task_pass_rate`
 - `validation_pass_rate`
 - `false_success`
 - `cost_usd`
@@ -153,14 +182,14 @@ the existing `--apply-source` scorecard gate.
 ## Implementation Slices
 
 1. Done: add a `legion-bench` CLI with fixture loading and JSON output.
-2. Done: add `legion-observability/bench/core.json` for trigger, route, and
-   validation checks.
+2. Done: add `legion-observability/bench/core.json` for trigger, route,
+   validation, and self-improvement task checks.
 3. Done: reuse `legion-eval`, `legion-route`, `legion-doctor`, and spans.
 4. Done: add `compare` and `gate` subcommands.
 5. Done: write failed required cases into self-learning outcomes with
    `--record-failures`.
-6. Next: add wider suites for orchestration, validation failure fixtures,
-   feedback learning, and optional live model runs.
+6. Next: add wider suites for orchestration, richer validation failure fixtures,
+   and optional live model runs.
 7. Next: add CI optional workflow or manual `workflow_dispatch` for full
    benchmark runs.
 

@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -32,6 +33,7 @@ POSITIVE_QUALITY_METRICS = [
     "eval_hit_at_1",
     "eval_hit_at_k",
     "route_match_rate",
+    "task_pass_rate",
     "validation_pass_rate",
 ]
 NEGATIVE_QUALITY_METRICS = [
@@ -134,6 +136,76 @@ def _json_file(path: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"expected JSON object in {path}")
     return data
+
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def _json_path(payload: Any, path: str) -> Any:
+    current = payload
+    for part in path.split("."):
+        if isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return None
+        elif isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
+
+
+def _contains_expected(payload: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        if not isinstance(payload, dict):
+            return False
+        return all(key in payload and _contains_expected(payload[key], value) for key, value in expected.items())
+    if isinstance(expected, list):
+        if not isinstance(payload, list) or len(payload) < len(expected):
+            return False
+        return all(_contains_expected(item, expected[index]) for index, item in enumerate(payload[: len(expected)]))
+    return payload == expected
+
+
+def _render(value: Any, context: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        out = value
+        for key, replacement in context.items():
+            out = out.replace("{" + key + "}", replacement)
+        return out
+    if isinstance(value, list):
+        return [_render(item, context) for item in value]
+    if isinstance(value, dict):
+        return {key: _render(item, context) for key, item in value.items()}
+    return value
+
+
+def _safe_child(root: str, rel: str) -> str:
+    if os.path.isabs(rel):
+        raise ValueError(f"absolute fixture paths are not allowed: {rel}")
+    path = os.path.abspath(os.path.join(root, rel))
+    if os.path.commonpath([os.path.abspath(root), path]) != os.path.abspath(root):
+        raise ValueError(f"fixture path escapes workspace: {rel}")
+    return path
+
+
+def _write_fixture_files(workspace: str, files: dict[str, Any], context: dict[str, str]) -> None:
+    for rel, raw_content in sorted(files.items()):
+        path = _safe_child(workspace, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        content = _render(raw_content, context)
+        if isinstance(content, (dict, list)):
+            text = json.dumps(content, indent=2, sort_keys=True) + "\n"
+        else:
+            text = str(content)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
 
 
 def _git_commit(repo: str) -> str:
@@ -308,7 +380,167 @@ def run_doctor_case(case: dict[str, Any], repo: str) -> dict[str, Any]:
         }
 
 
-def run_case(case: dict[str, Any], repo: str) -> dict[str, Any]:
+def _validator_result(kind: str, ok: bool, detail: str = "") -> dict[str, Any]:
+    return {"type": kind, "ok": ok, "detail": detail}
+
+
+def _validate_jsonl_contains(path: str, expected: dict[str, Any]) -> bool:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    payload = json.loads(line)
+                except ValueError:
+                    continue
+                if _contains_expected(payload, expected):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def run_task_validators(
+    validators: list[Any],
+    *,
+    context: dict[str, str],
+    stdout: str,
+    stderr: str,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for raw_validator in validators:
+        validator = _dict(raw_validator)
+        kind = _text(validator.get("type"))
+        if kind == "stdout_contains":
+            needle = _text(_render(validator.get("text"), context))
+            results.append(_validator_result(kind, needle in stdout, needle))
+        elif kind == "stderr_contains":
+            needle = _text(_render(validator.get("text"), context))
+            results.append(_validator_result(kind, needle in stderr, needle))
+        elif kind == "file_exists":
+            path = _text(_render(validator.get("path"), context))
+            results.append(_validator_result(kind, os.path.exists(path), path))
+        elif kind == "file_contains":
+            path = _text(_render(validator.get("path"), context))
+            needle = _text(_render(validator.get("text"), context))
+            results.append(_validator_result(kind, needle in _read_text(path), f"{path}: {needle}"))
+        elif kind == "json_file_field_equals":
+            path = _text(_render(validator.get("path"), context))
+            field = _text(validator.get("field"))
+            try:
+                got = _json_path(_json_file(path), field)
+            except ValueError:
+                got = None
+            expected = _render(validator.get("equals"), context)
+            results.append(_validator_result(kind, got == expected, f"{path}:{field}"))
+        elif kind == "stdout_json_field_equals":
+            field = _text(validator.get("field"))
+            try:
+                got = _json_path(json.loads(stdout), field)
+            except ValueError:
+                got = None
+            expected = _render(validator.get("equals"), context)
+            results.append(_validator_result(kind, got == expected, field))
+        elif kind == "jsonl_contains":
+            path = _text(_render(validator.get("path"), context))
+            expected = _dict(_render(validator.get("match"), context))
+            results.append(_validator_result(kind, _validate_jsonl_contains(path, expected), path))
+        else:
+            results.append(_validator_result(kind or "unknown", False, "unknown validator"))
+    return results
+
+
+def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, Any]:
+    case_id = _text(case.get("id")) or _stable_id([case])
+    safe_case_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in case_id)
+    workspace = os.path.join(run_dir, "workspaces", safe_case_id)
+    home = os.path.join(workspace, "home")
+    logs = os.path.join(workspace, "logs")
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(logs, exist_ok=True)
+    context = {
+        "repo": os.path.abspath(repo),
+        "workspace": workspace,
+        "home": home,
+        "logs": logs,
+        "case_id": case_id,
+        "run_dir": run_dir,
+    }
+    _write_fixture_files(workspace, _dict(case.get("files")), context)
+
+    command = _render(case.get("command"), context)
+    if isinstance(command, str):
+        argv = shlex.split(command)
+    elif isinstance(command, list) and all(isinstance(item, str) for item in command):
+        argv = command
+    else:
+        raise ValueError("task case requires command as a string or string list")
+
+    env = os.environ.copy()
+    env.update({
+        "HOME": home,
+        "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
+        "PYTHONUNBUFFERED": "1",
+    })
+    env.update({key: str(value) for key, value in _dict(_render(case.get("env"), context)).items()})
+    cwd = _text(_render(case.get("cwd") or "{workspace}", context))
+    timeout = int(case.get("timeout") or 120)
+    expected_exit = int(case.get("expect_exit") or 0)
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+        duration_ms = int((time.monotonic() - start) * 1000)
+        validator_results = run_task_validators(
+            _list(case.get("validators")),
+            context=context,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+        exit_ok = proc.returncode == expected_exit
+        validators_ok = all(result.get("ok") for result in validator_results)
+        ok = exit_ok and validators_ok
+        return {
+            "ok": ok,
+            "reason": "task command and validators passed" if ok else (
+                f"exit={proc.returncode} expected={expected_exit}; "
+                f"validators={sum(1 for item in validator_results if item.get('ok'))}/{len(validator_results)}"
+            ),
+            "false_success": False,
+            "metrics": {
+                "task_pass": 1 if ok else 0,
+                "validation_pass": 1 if ok else 0,
+            },
+            "details": {
+                "cmd": argv,
+                "cwd": cwd,
+                "workspace": workspace,
+                "logs": logs,
+                "returncode": proc.returncode,
+                "expected_exit": expected_exit,
+                "duration_ms": duration_ms,
+                "validators": validator_results,
+                "stdout": proc.stdout[-4000:],
+                "stderr": proc.stderr[-4000:],
+            },
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "reason": f"task timed out after {timeout}s",
+            "false_success": False,
+            "metrics": {"task_pass": 0, "validation_pass": 0},
+            "details": {"cmd": argv, "cwd": cwd, "workspace": workspace, "error": str(exc)},
+        }
+
+
+def run_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, Any]:
     started_at = _iso_utc()
     start = time.monotonic()
     case_id = _text(case.get("id"))
@@ -322,6 +554,8 @@ def run_case(case: dict[str, Any], repo: str) -> dict[str, Any]:
             payload = run_route_case(case, repo)
         elif case_type == "doctor":
             payload = run_doctor_case(case, repo)
+        elif case_type == "task":
+            payload = run_task_case(case, repo, run_dir)
         else:
             raise ValueError(f"unknown benchmark case type: {case_type}")
     except Exception as exc:
@@ -372,9 +606,11 @@ def summarize_run(
     eval_results = [result for result in results if result.get("type") == "eval"]
     route_results = [result for result in results if result.get("type") == "route"]
     doctor_results = [result for result in results if result.get("type") == "doctor"]
+    task_results = [result for result in results if result.get("type") == "task"]
     eval_cases = len(eval_results)
     route_cases = len(route_results)
     doctor_cases = len(doctor_results)
+    task_cases = len(task_results)
     eval_top1 = sum(int(_dict(result.get("metrics")).get("eval_in_top1") or 0) for result in eval_results)
     eval_topk = sum(int(_dict(result.get("metrics")).get("eval_in_topk") or 0) for result in eval_results)
     eval_miss = sum(int(_dict(result.get("metrics")).get("eval_miss") or 0) for result in eval_results)
@@ -383,6 +619,7 @@ def summarize_run(
     )
     route_match = sum(1 for result in route_results if result.get("status") == "pass")
     validation_pass = sum(1 for result in doctor_results if result.get("status") == "pass")
+    task_pass = sum(1 for result in task_results if result.get("status") == "pass")
     false_success = sum(1 for result in results if result.get("false_success"))
     metrics = {
         "cases": cases,
@@ -403,6 +640,9 @@ def summarize_run(
         "route_cases": route_cases,
         "route_match": route_match,
         "route_match_rate": _rate(route_match, route_cases),
+        "task_cases": task_cases,
+        "task_pass": task_pass,
+        "task_pass_rate": _rate(task_pass, task_cases),
         "validation_cases": doctor_cases,
         "validation_pass": validation_pass,
         "validation_pass_rate": _rate(validation_pass, doctor_cases),
@@ -680,8 +920,9 @@ def run_command(args: argparse.Namespace) -> int:
     suite = load_suite(repo, args.suite)
     suite_name = _text(suite.get("suite")) or "suite"
     run_id = args.run_id or _run_id(suite_name)
+    run_dir = os.path.join(os.path.abspath(os.path.expanduser(args.bench_dir)), "runs", run_id)
     start = time.monotonic()
-    results = [run_case(case, repo) for case in _list(suite.get("cases"))]
+    results = [run_case(case, repo, run_dir) for case in _list(suite.get("cases"))]
     duration_ms = int((time.monotonic() - start) * 1000)
     summary = summarize_run(suite, results, run_id=run_id, repo=repo, duration_ms=duration_ms)
     artifacts = write_run_artifacts(args.bench_dir, run_id, suite, results, summary)

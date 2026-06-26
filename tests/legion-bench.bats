@@ -17,7 +17,7 @@ setup() {
   [ -f "$run_path" ]
   [ -f "$summary_path" ]
   [ -f "$span_path" ]
-  jq -e '.summary.metrics.cases == 7 and .summary.metrics.required_fail == 0' <<<"$output" >/dev/null
+  jq -e '.summary.metrics.cases == 10 and .summary.metrics.required_fail == 0 and .summary.metrics.task_cases == 3' <<<"$output" >/dev/null
   jq -e 'select(.executor == "legion-bench" and .model == "offline")' "$span_path" >/dev/null
   run "$ROOT/legion-observability/bin/legion-trace" validate "$span_path"
   [ "$status" -eq 0 ]

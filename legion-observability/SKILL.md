@@ -13,7 +13,7 @@ Every Legion executor (claude/opus/sonnet/haiku, gpt-5.x via codex, Cursor Agent
 | Bin | What it does |
 |---|---|
 | `legion-report [--by executor\|model\|status] [--html]` | Per-group **cost / success-rate / p50-p95 latency** table (TUI or static HTML). The dashboard. |
-| `legion-bench run --suite core --repo . [--strict]` | Run the offline Legion harness benchmark: deterministic trigger eval, routing policy, and doctor cases. Writes artifacts under `$LEGION_BENCH_DIR` or `~/.claude/logs/legion/bench`, emits a `legion-bench` span, and can record failed required cases with `--record-failures`. |
+| `legion-bench run --suite core --repo . [--strict]` | Run the Legion harness benchmark: deterministic trigger eval, routing policy, doctor checks, and fixture-backed task cases for session learning / self-learning memory. Writes artifacts under `$LEGION_BENCH_DIR` or `~/.claude/logs/legion/bench`, emits a `legion-bench` span, and can record failed required cases with `--record-failures`. |
 | `legion-bench compare\|gate --baseline A --candidate B` | Compare two benchmark run artifacts and gate regressions in pass rate, required cases, trigger misses/collisions, and false success. |
 | `legion-trace emit --executor X --model Y --status ok [...]` | Append a validated span (the one emitter the runners/orchestrators use). |
 | `legion-trace validate <file\|->` | Assert every line is a valid `legion.span.v1` (exit 1 if not). |

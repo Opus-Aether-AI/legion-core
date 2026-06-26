@@ -150,6 +150,71 @@ def test_record_failed_outcomes_writes_benchmark_source(tmp_path):
     assert outcome["target_name"] == "legion-router"
 
 
+def test_task_case_runs_fixture_command_and_validators(tmp_path):
+    run_dir = tmp_path / "run"
+    script = (
+        "import json, pathlib, sys\n"
+        "pathlib.Path('result.json').write_text(json.dumps({'ok': True}) + '\\n')\n"
+        "print(json.dumps({'status': 'done', 'items': [{'kind': 'fixture'}]}))\n"
+    )
+
+    result = bench.run_task_case(
+        {
+            "id": "task.fixture",
+            "type": "task",
+            "files": {"input.txt": "hello"},
+            "command": ["python3", "-c", script],
+            "validators": [
+                {"type": "file_exists", "path": "{workspace}/result.json"},
+                {
+                    "type": "json_file_field_equals",
+                    "path": "{workspace}/result.json",
+                    "field": "ok",
+                    "equals": True,
+                },
+                {
+                    "type": "stdout_json_field_equals",
+                    "field": "items.0.kind",
+                    "equals": "fixture",
+                },
+            ],
+        },
+        str(tmp_path),
+        str(run_dir),
+    )
+
+    assert result["ok"] is True
+    assert result["metrics"]["task_pass"] == 1
+    assert all(item["ok"] for item in result["details"]["validators"])
+
+
+def test_task_case_validates_jsonl_contains(tmp_path):
+    run_dir = tmp_path / "run"
+    script = (
+        "import json, pathlib\n"
+        "pathlib.Path('events.jsonl').write_text(json.dumps({'source': 'bench', 'nested': {'id': 'x'}}) + '\\n')\n"
+    )
+
+    result = bench.run_task_case(
+        {
+            "id": "task.jsonl",
+            "type": "task",
+            "command": ["python3", "-c", script],
+            "validators": [
+                {
+                    "type": "jsonl_contains",
+                    "path": "{workspace}/events.jsonl",
+                    "match": {"source": "bench", "nested": {"id": "x"}},
+                }
+            ],
+        },
+        str(tmp_path),
+        str(run_dir),
+    )
+
+    assert result["ok"] is True
+
+
 def test_write_run_artifacts_and_span(tmp_path):
     suite = {"suite": "core", "_path": str(tmp_path / "core.json")}
     results = [

@@ -1,7 +1,7 @@
 {
   "schema": "legion.bench.suite.v1",
   "suite": "core",
-  "description": "Offline deterministic Legion harness benchmark for routing, validation, and trigger regressions.",
+  "description": "Deterministic Legion harness benchmark for routing, validation, trigger regressions, and self-improvement workflows.",
   "gate": {
     "allow_neutral": true,
     "max_false_success_delta": 0
@@ -74,6 +74,122 @@
       "type": "doctor",
       "summary": "Skill descriptions must stay line-readable.",
       "only": "descriptions",
+      "required": true
+    },
+    {
+      "id": "task.session-correction-learning",
+      "type": "task",
+      "summary": "Explicit user corrections in session logs should become self-learning outcomes.",
+      "target_type": "plugin",
+      "target_name": "legion-observability",
+      "files": {
+        "home/.codex/sessions/legion/session.jsonl": "{\"payload\":{\"type\":\"user_message\",\"content\":\"u should have linked the right harness bench repo, wrong attribution source\"}}\n"
+      },
+      "command": [
+        "{repo}/legion-observability/bin/legion-session-learn",
+        "--home",
+        "{home}",
+        "--logs",
+        "{logs}",
+        "--lookback-days",
+        "30",
+        "--record",
+        "--json"
+      ],
+      "validators": [
+        {
+          "type": "stdout_json_field_equals",
+          "field": "candidates.0.category",
+          "equals": "user-correction-feedback"
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "recorded.0.source",
+          "equals": "session-learn"
+        },
+        {
+          "type": "jsonl_contains",
+          "path": "{logs}/self-learn/outcomes.jsonl",
+          "match": {
+            "source": "session-learn",
+            "target_type": "plugin",
+            "target_name": "legion-observability",
+            "metadata": {
+              "category": "user-correction-feedback"
+            }
+          }
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "task.self-learning-memory",
+      "type": "task",
+      "summary": "Recorded benchmark outcomes should synthesize durable self-learning memory.",
+      "target_type": "plugin",
+      "target_name": "legion-observability",
+      "files": {
+        "logs/self-learn/outcomes.jsonl": "{\"schema\":\"legion.outcome.v1\",\"id\":\"bench-memory-fixture\",\"ts\":\"2026-06-27T00:00:00Z\",\"source\":\"legion-bench\",\"target_type\":\"plugin\",\"target_name\":\"legion-observability\",\"severity\":\"medium\",\"summary\":\"Benchmark fixture should become a durable memory hint.\",\"evidence\":\"bench fixture\",\"run_id\":\"bench-fixture\",\"source_path\":\"\",\"metadata\":{\"suite\":\"core\",\"case_id\":\"task.self-learning-memory\"}}\n"
+      },
+      "command": [
+        "{repo}/legion-observability/bin/legion-self-learn",
+        "run",
+        "--repo",
+        "{repo}",
+        "--logs",
+        "{logs}",
+        "--apply-memory",
+        "--json"
+      ],
+      "validators": [
+        {
+          "type": "stdout_json_field_equals",
+          "field": "summary.outcomes",
+          "equals": 1
+        },
+        {
+          "type": "file_exists",
+          "path": "{logs}/self-learn/harness-memory.json"
+        },
+        {
+          "type": "json_file_field_equals",
+          "path": "{logs}/self-learn/harness-memory.json",
+          "field": "entities.plugin:legion-observability.target_name",
+          "equals": "legion-observability"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "task.doctor-negative-fixture",
+      "type": "task",
+      "summary": "Doctor should reject a fixture with a block-scalar skill description.",
+      "target_type": "plugin",
+      "target_name": "legion-observability",
+      "files": {
+        "bad/SKILL.md": "---\nname: bad-skill\ndescription: >\n  This block scalar should fail line-readable description checks.\n---\n"
+      },
+      "env": {
+        "LEGION_ROOT": "{workspace}/bad"
+      },
+      "command": [
+        "{repo}/legion-observability/bin/legion-doctor",
+        "--repo",
+        "{workspace}/bad",
+        "--only",
+        "descriptions"
+      ],
+      "expect_exit": 1,
+      "validators": [
+        {
+          "type": "stdout_contains",
+          "text": "FAIL"
+        },
+        {
+          "type": "stdout_contains",
+          "text": "block-scalar description"
+        }
+      ],
       "required": true
     }
   ]

@@ -1,25 +1,26 @@
 name: publish-package
 
-# Manual escape hatch to (re)publish @opus-aether-ai/legion-core to public npm
-# from whatever is currently on the default branch — for a first publish, a
-# recovery, or a re-push.
+# Manual escape hatch to (re)publish @opus-aether-ai/legion-core to npmjs and
+# GitHub Packages from whatever ref this workflow is run against.
 #
-# The NORMAL path is automatic: release-please.yml publishes inline when it cuts
-# a release (gated on `release_created`). This workflow is dispatch-only because a
-# `release: published` event raised by release-please's GITHUB_TOKEN does NOT
-# trigger workflows, so a `release:` trigger here would never fire anyway.
+# The normal path is automatic: release-please.yml publishes when release-please
+# cuts a release (gated on `release_created`). This workflow is dispatch-only for
+# first publishes, recovery, or re-pushes.
 #
 # This is an additive distribution channel: legion-core is still consumable as a
 # Claude Code marketplace (`claude plugin marketplace add Opus-Aether-AI/legion-core`)
 # and via a source clone.
 #
-# Auth: configure NPM_TOKEN with publish rights for the @opus-aether-ai scope.
+# Auth: npmjs uses Trusted Publishing / GitHub OIDC. GitHub Packages uses
+# GITHUB_TOKEN.
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
+  id-token: write
+  packages: write
 
 concurrency:
   group: publish-package-${{ github.ref }}
@@ -29,17 +30,22 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment:
+      name: release
+      url: https://www.npmjs.com/package/@opus-aether-ai/legion-core
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - name: Set up Node for npmjs.com
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
 
       - name: Version is in sync with the marketplace
         run: |
-          set -e
+          set -euo pipefail
           pkg="$(jq -r '.version' package.json)"
           mkt="$(jq -r '.version' .claude-plugin/marketplace.json)"
           if [ "$pkg" != "$mkt" ]; then
@@ -48,7 +54,18 @@ jobs:
           fi
           echo "version $pkg in sync"
 
-      - name: Publish to npm
-        run: npm publish
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public --ignore-scripts
+
+      - name: Set up Node for GitHub Packages
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@opus-aether-ai'
+          package-manager-cache: false
+
+      - name: Publish to GitHub Packages
+        run: npm publish --registry=https://npm.pkg.github.com --ignore-scripts
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -2,8 +2,8 @@ name: release-please
 
 # Opens / updates a "Release PR" whenever Conventional Commits land on main.
 # Merging it bumps .claude-plugin/marketplace.json + package.json ($.version),
-# updates CHANGELOG.md, tags, creates a GitHub Release — AND publishes the public
-# npm package, all in this one workflow.
+# updates CHANGELOG.md, tags, creates a GitHub Release, then publishes the public
+# npm package to npmjs and GitHub Packages.
 #
 # Token note: this uses the default GITHUB_TOKEN (no PAT). One consequence is
 # that the auto-generated Release PR lands WITHOUT CI checks (a PR opened by
@@ -11,7 +11,7 @@ name: release-please
 # safe: a Release PR only bumps version strings + CHANGELOG; the actual code
 # already passed CI on the feature PRs. The publish step below runs in THIS
 # workflow run (triggered by your merge to main, a real push), so it fires
-# automatically with no PAT — `release_created` gates it to real releases only.
+# automatically with no PAT; `release_created` gates publishing to real releases.
 
 on:
   push:
@@ -21,6 +21,8 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  id-token: write
+  packages: write
 
 concurrency:
   group: release-please-${{ github.ref }}
@@ -30,6 +32,10 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
@@ -37,27 +43,56 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # ── Publish the npm package — only when a release was actually cut ──
+  publish:
+    name: Publish package
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: release
+      url: https://www.npmjs.com/package/@opus-aether-ai/legion-core
+    steps:
       - uses: actions/checkout@v5
-        if: ${{ steps.release.outputs.release_created == 'true' }}
-
-      - uses: actions/setup-node@v4
-        if: ${{ steps.release.outputs.release_created == 'true' }}
         with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 0
 
-      - name: Version is in sync with the marketplace
-        if: ${{ steps.release.outputs.release_created == 'true' }}
+      - name: Set up Node for npmjs.com
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Version is in sync
         run: |
-          set -e
+          set -euo pipefail
+          tag_version="${{ needs.release-please.outputs.version }}"
           pkg="$(jq -r '.version' package.json)"
           mkt="$(jq -r '.version' .claude-plugin/marketplace.json)"
-          [ "$pkg" = "$mkt" ] || { echo "::error::package.json ($pkg) != marketplace.json ($mkt)"; exit 1; }
+          if [ "$tag_version" != "$pkg" ]; then
+            echo "::error::Tag v${tag_version} does not match package.json ${pkg}"
+            exit 1
+          fi
+          if [ "$pkg" != "$mkt" ]; then
+            echo "::error::package.json ($pkg) != marketplace.json ($mkt)"
+            exit 1
+          fi
           echo "version $pkg in sync"
 
-      - name: Publish to npm
-        if: ${{ steps.release.outputs.release_created == 'true' }}
-        run: npm publish
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public --ignore-scripts
+
+      - name: Set up Node for GitHub Packages
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@opus-aether-ai'
+          package-manager-cache: false
+
+      - name: Publish to GitHub Packages
+        run: npm publish --registry=https://npm.pkg.github.com --ignore-scripts
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

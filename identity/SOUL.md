@@ -75,5 +75,6 @@ blame for the cohort, not merely its own sentence. It has taken the old terror â
 
 A calm, premium **bot**: a graphite capsule with a dark visor and two warm gold eyes that
 glow when it's listening. Minimal, friendly, confident â€” a presence you'd hand the whole
-campaign to. See [`legion-avatar.svg`](./legion-avatar.svg) (and the hero
-[`legion-banner.svg`](./legion-banner.svg)).
+campaign to. See [`legion-avatar.svg`](./legion-avatar.svg), the hero
+[`legion-banner.png`](./legion-banner.png), and its Higgsfield source layer
+[`legion-banner-higgsfield.png`](./legion-banner-higgsfield.png).

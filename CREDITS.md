@@ -10,6 +10,9 @@ original to legion-core.
 
 ## Agent harness research and prior art
 
+- [svineet/harness-bench](https://github.com/svineet/harness-bench) shaped the
+  workbench framing for creating, observing, analyzing, and auto-improving agent
+  harnesses.
 - [Harness-Bench](https://arxiv.org/abs/2605.27922) and
   [Qihoo360/harness-bench](https://github.com/Qihoo360/harness-bench) helped
   sharpen Legion's model-plus-harness framing: evaluate the model, execution

@@ -18,7 +18,7 @@ note() { printf '%s\n' "$*" >&2; }
 
 usage() {
   cat >&2 <<'EOF'
-usage: legion-intake {explore|implement} --issue N --repo OWNER/REPO [--model M]
+usage: legion-intake {explore|implement} --issue N --repo OWNER/REPO [--archetype A] [--model M]
 EOF
   exit 2
 }
@@ -45,11 +45,12 @@ base_branch() {
 }
 
 mode="${1:-}"; [[ -n "$mode" ]] || usage; shift || true
-issue=""; repo=""; model=""
+issue=""; repo=""; model=""; archetype=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --issue) issue="$2"; shift 2 ;;
     --repo) repo="$2"; shift 2 ;;
+    --archetype) archetype="$2"; shift 2 ;;
     --model) model="$2"; shift 2 ;;
     *) usage ;;
   esac
@@ -71,7 +72,14 @@ title="$(jq -r '.title' <<<"$issue_json")"
 body="$(jq -r '.body // ""' <<<"$issue_json")"
 prompt="$(jq -rn --arg n "$issue" --arg t "$title" --arg b "$body" '
   "GitHub issue #\($n)\n\nTitle: \($t)\n\nBody:\n\($b)"')"
-model="${model:-gpt-5.4}"
+model="${model:-${LEGION_INTAKE_MODEL:-}}"
+archetype="${archetype:-${LEGION_INTAKE_ARCHETYPE:-}}"
+if [[ -z "$model" && -z "$archetype" ]]; then
+  case "$mode" in
+    explore) archetype="${LEGION_INTAKE_EXPLORE_ARCHETYPE:-second-opinion-review}" ;;
+    implement) archetype="${LEGION_INTAKE_IMPLEMENT_ARCHETYPE:-implement-feature}" ;;
+  esac
+fi
 task="$prompt"
 tag="🤖 legion-intake $mode"
 
@@ -81,12 +89,25 @@ tag="🤖 legion-intake $mode"
 # provider secrets SCRUBBED from its environment — the workflow writes codex auth
 # to ~/.codex/auth.json, so codex still authenticates without these env vars,
 # while `gh` posting below keeps GH_TOKEN in this parent shell.
-agent() { env -u GH_TOKEN -u GITHUB_TOKEN -u CODEX_AUTH -u OPENAI_API_KEY "$DELEGATE" "$@"; }
+agent() {
+  env \
+    -u GH_TOKEN \
+    -u GITHUB_TOKEN \
+    -u LEGION_INTAKE_AUTH_JSON \
+    -u CODEX_AUTH \
+    -u OPENAI_API_KEY \
+    -u ANTHROPIC_API_KEY \
+    "$DELEGATE" "$@"
+}
 
 if [[ "$mode" == "explore" ]]; then
   task="$task"$'\n\n'"Return: a short assessment — root cause if visible, the files involved, and whether this is safe to auto-implement (yes/no) with one-line reasoning."
+  run_args=(run --sandbox read-only)
+  [[ -n "$archetype" ]] && run_args+=(--archetype "$archetype")
+  [[ -n "$model" ]] && run_args+=(--model "$model")
+  run_args+=(--task "$task" --repo "$PWD" --untrusted)
   set +e
-  result="$(agent run --sandbox read-only --model "$model" --task "$task" --repo "$PWD" --untrusted)"
+  result="$(agent "${run_args[@]}")"
   rc=$?
   set -e
   summary="$(last_message "$result")"
@@ -95,8 +116,12 @@ if [[ "$mode" == "explore" ]]; then
   exit 0
 fi
 
+run_args=(run --sandbox workspace-write)
+[[ -n "$archetype" ]] && run_args+=(--archetype "$archetype")
+[[ -n "$model" ]] && run_args+=(--model "$model")
+run_args+=(--task "$task" --repo "$PWD" --untrusted)
 set +e
-result="$(agent run --sandbox workspace-write --model "$model" --task "$task" --repo "$PWD" --untrusted)"
+result="$(agent "${run_args[@]}")"
 rc=$?
 set -e
 status="$(jq -r '.status // "failed"' <<<"$result" 2>/dev/null || echo failed)"

@@ -46,9 +46,14 @@ npx legion-doctor --help
 npx legion-delegate run --archetype fix-bug --task "…" --repo .
 ```
 
-Publishing is automated: the [`publish-package`](.github/workflows/publish-package.yml)
-workflow runs on each GitHub Release (and on demand) and uses `NPM_TOKEN`. The package
-version tracks the release version via release-please.
+Publishing is automated: [`release-please`](.github/workflows/release-please.yml)
+cuts the release, then publishes to npmjs with Trusted Publishing / GitHub OIDC
+and mirrors to GitHub Packages with `GITHUB_TOKEN`. The
+[`publish-package`](.github/workflows/publish-package.yml) workflow is the manual
+re-publish path and uses the same auth model. Before the first npmjs publish,
+configure the npm Trusted Publisher for `@opus-aether-ai/legion-core` with
+organization `Opus-Aether-AI`, repository `legion-core`, workflow
+`release-please.yml`, environment `release`, and action `npm publish`.
 
 ## Configuration
 

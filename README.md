@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="identity/legion-banner.svg" alt="Legion Core — we are many; we move as one" width="720">
+  <img src="./identity/legion-banner.png" alt="" width="720">
 </div>
 
 > **legion-core** — the model-agnostic orchestration engine behind Legion. The base layer you build your own agents on.

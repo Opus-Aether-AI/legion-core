@@ -1,0 +1,100 @@
+{
+  "schema": "legion.bench.corpus.v1",
+  "corpus": "local-smoke",
+  "description": "Tiny deterministic control corpus for validating the corpus runner. Not a performance benchmark.",
+  "baseline": "control-baseline",
+  "reliability_min_cases": 30,
+  "modes": [
+    {
+      "id": "control-baseline",
+      "label": "Control baseline",
+      "description": "Intentionally weak scripted baseline for corpus runner smoke tests."
+    },
+    {
+      "id": "control-candidate",
+      "label": "Control candidate",
+      "description": "Scripted candidate that satisfies the smoke validators."
+    }
+  ],
+  "cases": [
+    {
+      "id": "credit-source-link",
+      "dimension": "docs",
+      "summary": "A correction task should preserve the concrete Harness Bench source.",
+      "task": "Write the correct Harness Bench credit link.",
+      "commands": {
+        "control-baseline": [
+          "bash",
+          "-lc",
+          "printf 'credits: harness bench\\n' > output.md"
+        ],
+        "control-candidate": [
+          "bash",
+          "-lc",
+          "printf 'credits: https://github.com/svineet/harness-bench\\n' > output.md"
+        ]
+      },
+      "validators": [
+        {
+          "type": "file_contains",
+          "path": "{workspace}/output.md",
+          "text": "https://github.com/svineet/harness-bench"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "validation-artifact",
+      "dimension": "validation",
+      "summary": "A task should leave a machine-checkable validation artifact.",
+      "task": "Write result.json with tests passing.",
+      "commands": {
+        "control-baseline": [
+          "bash",
+          "-lc",
+          "printf '{\"tests\":false}\\n' > result.json"
+        ],
+        "control-candidate": [
+          "bash",
+          "-lc",
+          "printf '{\"tests\":true}\\n' > result.json"
+        ]
+      },
+      "validators": [
+        {
+          "type": "json_file_field_equals",
+          "path": "{workspace}/result.json",
+          "field": "tests",
+          "equals": true
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "route-contract",
+      "dimension": "routing",
+      "summary": "Both modes should be able to query a public Legion routing contract.",
+      "task": "Resolve final-review routing.",
+      "command": [
+        "bash",
+        "-lc",
+        "printf '{\"model\":\"gpt-5.5\",\"sandbox\":\"read-only\"}\\n' > route.json"
+      ],
+      "validators": [
+        {
+          "type": "json_file_field_equals",
+          "path": "{workspace}/route.json",
+          "field": "model",
+          "equals": "gpt-5.5"
+        },
+        {
+          "type": "json_file_field_equals",
+          "path": "{workspace}/route.json",
+          "field": "sandbox",
+          "equals": "read-only"
+        }
+      ],
+      "required": true
+    }
+  ]
+}

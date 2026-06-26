@@ -17,6 +17,7 @@ from typing import Any
 
 
 SUITE_SCHEMA = "legion.bench.suite.v1"
+CORPUS_SCHEMA = "legion.bench.corpus.v1"
 CASE_RESULT_SCHEMA = "legion.bench.case-result.v1"
 RUN_SCHEMA = "legion.bench.run.v1"
 SUMMARY_SCHEMA = "legion.bench.summary.v1"
@@ -245,6 +246,25 @@ def resolve_suite_path(repo: str, suite: str) -> str:
     raise FileNotFoundError(f"benchmark suite not found: {suite}")
 
 
+def resolve_corpus_path(repo: str, corpus: str) -> str:
+    expanded = os.path.abspath(os.path.expanduser(corpus))
+    if os.path.exists(expanded):
+        return expanded
+    if os.path.sep in corpus or corpus.endswith(".json"):
+        candidate = os.path.abspath(os.path.join(os.getcwd(), corpus))
+        if os.path.exists(candidate):
+            return candidate
+    name = corpus[:-5] if corpus.endswith(".json") else corpus
+    for rel in (
+        os.path.join("legion-observability", "bench", "corpora", f"{name}.json"),
+        os.path.join("legion-observability", "bench", f"{name}.json"),
+    ):
+        candidate = os.path.join(repo, rel)
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    raise FileNotFoundError(f"benchmark corpus not found: {corpus}")
+
+
 def load_suite(repo: str, suite: str, seen: set[str] | None = None) -> dict[str, Any]:
     path = resolve_suite_path(repo, suite)
     seen = seen or set()
@@ -265,6 +285,29 @@ def load_suite(repo: str, suite: str, seen: set[str] | None = None) -> dict[str,
     if not isinstance(cases, list) or not cases:
         raise ValueError(f"{path} has no benchmark cases")
     payload["cases"] = cases
+    payload["_path"] = path
+    return payload
+
+
+def load_corpus(repo: str, corpus: str) -> dict[str, Any]:
+    path = resolve_corpus_path(repo, corpus)
+    payload = _json_file(path)
+    if payload.get("schema") != CORPUS_SCHEMA:
+        raise ValueError(f"{path} is not a {CORPUS_SCHEMA} corpus")
+    modes = _list(payload.get("modes"))
+    cases = _list(payload.get("cases"))
+    if not modes:
+        raise ValueError(f"{path} has no benchmark modes")
+    if not cases:
+        raise ValueError(f"{path} has no benchmark cases")
+    seen_modes: set[str] = set()
+    for mode in modes:
+        mode_id = _text(_dict(mode).get("id"))
+        if not mode_id:
+            raise ValueError(f"{path} has a mode without id")
+        if mode_id in seen_modes:
+            raise ValueError(f"{path} has duplicate mode id: {mode_id}")
+        seen_modes.add(mode_id)
     payload["_path"] = path
     return payload
 
@@ -469,6 +512,112 @@ def run_task_validators(
     return results
 
 
+def _command_argv(command: Any, context: dict[str, str]) -> list[str]:
+    rendered = _render(command, context)
+    if isinstance(rendered, str):
+        return shlex.split(rendered)
+    if isinstance(rendered, list) and all(isinstance(item, str) for item in rendered):
+        return rendered
+    raise ValueError("command must be a string or string list")
+
+
+def _run_process_command(
+    command: Any,
+    *,
+    context: dict[str, str],
+    cwd: str,
+    env: dict[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    argv = _command_argv(command, context)
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+        return {
+            "cmd": argv,
+            "cwd": cwd,
+            "returncode": proc.returncode,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "cmd": argv,
+            "cwd": cwd,
+            "returncode": None,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+            "timed_out": True,
+            "error": str(exc),
+        }
+    except OSError as exc:
+        return {
+            "cmd": argv,
+            "cwd": cwd,
+            "returncode": None,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "stdout": "",
+            "stderr": "",
+            "error": str(exc),
+        }
+
+
+def _span_token_total(tokens: Any) -> int:
+    if isinstance(tokens, bool):
+        return 0
+    if isinstance(tokens, (int, float)):
+        return max(0, int(tokens))
+    if not isinstance(tokens, dict):
+        return 0
+    for key in ("total_tokens", "tokens", "total"):
+        value = tokens.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return max(0, int(value))
+    total = 0
+    for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+        value = tokens.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total += max(0, int(value))
+    return total
+
+
+def _span_totals(logs: str) -> dict[str, Any]:
+    spans_dir = os.path.join(logs, "spans")
+    totals = {"span_count": 0, "cost_usd": 0.0, "span_duration_ms": 0, "tokens": 0}
+    if not os.path.isdir(spans_dir):
+        return totals
+    for name in sorted(os.listdir(spans_dir)):
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(spans_dir, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        span = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(span, dict):
+                        continue
+                    totals["span_count"] += 1
+                    totals["cost_usd"] = round(float(totals["cost_usd"]) + _num(span.get("cost_usd")), 6)
+                    totals["span_duration_ms"] += int(_num(span.get("duration_ms")))
+                    totals["tokens"] += _span_token_total(span.get("tokens"))
+        except OSError:
+            continue
+    return totals
+
+
 def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, Any]:
     case_id = _text(case.get("id")) or _stable_id([case])
     safe_case_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in case_id)
@@ -487,13 +636,7 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
     }
     _write_fixture_files(workspace, _dict(case.get("files")), context)
 
-    command = _render(case.get("command"), context)
-    if isinstance(command, str):
-        argv = shlex.split(command)
-    elif isinstance(command, list) and all(isinstance(item, str) for item in command):
-        argv = command
-    else:
-        raise ValueError("task case requires command as a string or string list")
+    argv = _command_argv(case.get("command"), context)
 
     env = os.environ.copy()
     env.update({
@@ -1445,6 +1588,409 @@ def write_stability_artifact(bench_dir: str, run_id: str, payload: dict[str, Any
     return {"stability_path": path, "latest_stability_path": latest_path}
 
 
+def _command_sequence(value: Any) -> list[Any]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, list):
+        if all(isinstance(item, str) for item in value):
+            return [value]
+        return value
+    return [value]
+
+
+def _mode_by_id(corpus: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        _text(_dict(mode).get("id")): _dict(mode)
+        for mode in _list(corpus.get("modes"))
+        if _text(_dict(mode).get("id"))
+    }
+
+
+def _selected_corpus_modes(corpus: dict[str, Any], requested: list[str]) -> list[dict[str, Any]]:
+    modes = _mode_by_id(corpus)
+    if not requested:
+        return [modes[_text(_dict(mode).get("id"))] for mode in _list(corpus.get("modes"))]
+    missing = [mode_id for mode_id in requested if mode_id not in modes]
+    if missing:
+        raise ValueError(f"unknown corpus mode(s): {', '.join(missing)}")
+    return [modes[mode_id] for mode_id in requested]
+
+
+def _case_mode_command(case: dict[str, Any], mode: dict[str, Any]) -> Any:
+    mode_id = _text(mode.get("id"))
+    commands = _dict(case.get("commands"))
+    if mode_id in commands:
+        return commands[mode_id]
+    if case.get("command"):
+        return case.get("command")
+    if mode.get("command"):
+        return mode.get("command")
+    raise ValueError(f"case {case.get('id')} has no command for mode {mode_id}")
+
+
+def _case_mode_expected_exit(case: dict[str, Any], mode: dict[str, Any]) -> int:
+    mode_id = _text(mode.get("id"))
+    by_mode = _dict(case.get("expect_exit_by_mode"))
+    if mode_id in by_mode:
+        return int(by_mode[mode_id])
+    if case.get("expect_exit") is not None:
+        return int(case.get("expect_exit"))
+    if mode.get("expect_exit") is not None:
+        return int(mode.get("expect_exit"))
+    return 0
+
+
+def _case_mode_validators(case: dict[str, Any], mode: dict[str, Any]) -> list[Any]:
+    mode_id = _text(mode.get("id"))
+    validators = []
+    validators.extend(_list(case.get("validators")))
+    validators.extend(_list(_dict(case.get("validators_by_mode")).get(mode_id)))
+    validators.extend(_list(mode.get("validators")))
+    return validators
+
+
+def run_corpus_case_mode(
+    case: dict[str, Any],
+    mode: dict[str, Any],
+    *,
+    repo: str,
+    run_dir: str,
+    repeat_index: int,
+) -> dict[str, Any]:
+    case_id = _text(case.get("id")) or _stable_id([case])
+    mode_id = _text(mode.get("id"))
+    safe_case_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in case_id)
+    safe_mode_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in mode_id)
+    workspace = os.path.join(run_dir, "corpus-workspaces", safe_mode_id, f"attempt-{repeat_index:02d}", safe_case_id)
+    home = os.path.join(workspace, "home")
+    logs = os.path.join(workspace, "logs")
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(logs, exist_ok=True)
+    task = _text(case.get("task")) or _text(case.get("prompt")) or _text(case.get("summary"))
+    task_file = os.path.join(workspace, "task.txt")
+    context = {
+        "repo": os.path.abspath(repo),
+        "workspace": workspace,
+        "home": home,
+        "logs": logs,
+        "case_id": case_id,
+        "mode_id": mode_id,
+        "run_dir": run_dir,
+        "task": task,
+        "task_file": task_file,
+        "attempt": str(repeat_index),
+    }
+    _write_fixture_files(workspace, _dict(case.get("files")), context)
+    with open(task_file, "w", encoding="utf-8") as handle:
+        handle.write(task)
+        handle.write("\n")
+
+    env = os.environ.copy()
+    env.update({
+        "HOME": home,
+        "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
+        "PYTHONUNBUFFERED": "1",
+    })
+    env.update({key: str(value) for key, value in _dict(_render(mode.get("env"), context)).items()})
+    env.update({key: str(value) for key, value in _dict(_render(case.get("env"), context)).items()})
+    cwd = _text(_render(case.get("cwd") or mode.get("cwd") or "{workspace}", context))
+    timeout = int(case.get("timeout") or mode.get("timeout") or 300)
+    setup_results = []
+    for command in _command_sequence(mode.get("setup")) + _command_sequence(case.get("setup")):
+        result = _run_process_command(command, context=context, cwd=cwd, env=env, timeout=timeout)
+        setup_results.append(result)
+        if result.get("returncode") != 0:
+            spans = _span_totals(logs)
+            return {
+                "schema": "legion.bench.corpus-case-result.v1",
+                "id": case_id,
+                "mode": mode_id,
+                "attempt": repeat_index,
+                "status": "fail",
+                "ok": False,
+                "required": bool(case.get("required", True)),
+                "dimension": _text(case.get("dimension")) or "corpus",
+                "summary": _text(case.get("summary")),
+                "reason": f"setup exited {result.get('returncode')}",
+                "metrics": {
+                    "duration_ms": int(result.get("duration_ms") or 0),
+                    **spans,
+                },
+                "details": {
+                    "workspace": workspace,
+                    "logs": logs,
+                    "task_file": task_file,
+                    "setup": setup_results,
+                    "stdout": _short(_text(result.get("stdout")), 4000),
+                    "stderr": _short(_text(result.get("stderr")), 4000),
+                },
+            }
+
+    command_result = _run_process_command(
+        _case_mode_command(case, mode),
+        context=context,
+        cwd=cwd,
+        env=env,
+        timeout=timeout,
+    )
+    expected_exit = _case_mode_expected_exit(case, mode)
+    validator_results = run_task_validators(
+        _case_mode_validators(case, mode),
+        context=context,
+        stdout=_text(command_result.get("stdout")),
+        stderr=_text(command_result.get("stderr")),
+    )
+    exit_ok = command_result.get("returncode") == expected_exit
+    validators_ok = all(result.get("ok") for result in validator_results)
+    ok = exit_ok and validators_ok
+    spans = _span_totals(logs)
+    duration_ms = int(command_result.get("duration_ms") or 0) + sum(
+        int(result.get("duration_ms") or 0) for result in setup_results
+    )
+    return {
+        "schema": "legion.bench.corpus-case-result.v1",
+        "id": case_id,
+        "mode": mode_id,
+        "attempt": repeat_index,
+        "status": "pass" if ok else "fail",
+        "ok": ok,
+        "required": bool(case.get("required", True)),
+        "dimension": _text(case.get("dimension")) or "corpus",
+        "summary": _text(case.get("summary")),
+        "reason": "case passed" if ok else (
+            f"exit={command_result.get('returncode')} expected={expected_exit}; "
+            f"validators={sum(1 for item in validator_results if item.get('ok'))}/{len(validator_results)}"
+        ),
+        "metrics": {
+            "duration_ms": duration_ms,
+            **spans,
+        },
+        "details": {
+            "workspace": workspace,
+            "logs": logs,
+            "task": task,
+            "task_file": task_file,
+            "setup": setup_results,
+            "cmd": command_result.get("cmd"),
+            "cwd": cwd,
+            "returncode": command_result.get("returncode"),
+            "expected_exit": expected_exit,
+            "validators": validator_results,
+            "stdout": _short(_text(command_result.get("stdout")), 4000),
+            "stderr": _short(_text(command_result.get("stderr")), 4000),
+        },
+    }
+
+
+def _summarize_corpus_mode(results: list[dict[str, Any]]) -> dict[str, Any]:
+    case_runs = len(results)
+    passed = sum(1 for result in results if result.get("status") == "pass")
+    required = [result for result in results if result.get("required")]
+    required_pass = sum(1 for result in required if result.get("status") == "pass")
+    dimensions: dict[str, dict[str, Any]] = {}
+    for result in results:
+        dimension = _text(result.get("dimension")) or "corpus"
+        entry = dimensions.setdefault(dimension, {"case_runs": 0, "pass": 0, "fail": 0})
+        entry["case_runs"] += 1
+        if result.get("status") == "pass":
+            entry["pass"] += 1
+        else:
+            entry["fail"] += 1
+    for entry in dimensions.values():
+        entry["pass_rate"] = _rate(int(entry["pass"]), int(entry["case_runs"]))
+    metrics = {
+        "case_runs": case_runs,
+        "pass": passed,
+        "fail": case_runs - passed,
+        "pass_rate": _rate(passed, case_runs),
+        "required_case_runs": len(required),
+        "required_pass": required_pass,
+        "required_fail": len(required) - required_pass,
+        "required_pass_rate": _rate(required_pass, len(required)),
+        "duration_ms": sum(int(_dict(result.get("metrics")).get("duration_ms") or 0) for result in results),
+        "cost_usd": round(sum(float(_dict(result.get("metrics")).get("cost_usd") or 0.0) for result in results), 6),
+        "tokens": sum(int(_dict(result.get("metrics")).get("tokens") or 0) for result in results),
+        "span_count": sum(int(_dict(result.get("metrics")).get("span_count") or 0) for result in results),
+    }
+    return {"metrics": metrics, "dimensions": dict(sorted(dimensions.items()))}
+
+
+def summarize_corpus_run(
+    corpus: dict[str, Any],
+    results: list[dict[str, Any]],
+    *,
+    run_id: str,
+    repo: str,
+    baseline_mode: str,
+    reliability_min_cases: int,
+) -> dict[str, Any]:
+    by_mode: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        by_mode.setdefault(_text(result.get("mode")), []).append(result)
+    modes = {mode_id: _summarize_corpus_mode(items) for mode_id, items in sorted(by_mode.items())}
+    comparisons: dict[str, dict[str, Any]] = {}
+    baseline = _dict(_dict(modes.get(baseline_mode)).get("metrics"))
+    for mode_id, summary in modes.items():
+        if mode_id == baseline_mode:
+            continue
+        candidate = _dict(summary.get("metrics"))
+        baseline_rate = _num(baseline.get("pass_rate"))
+        candidate_rate = _num(candidate.get("pass_rate"))
+        case_runs = min(int(baseline.get("case_runs") or 0), int(candidate.get("case_runs") or 0))
+        delta = round(candidate_rate - baseline_rate, 6)
+        comparisons[f"{baseline_mode}..{mode_id}"] = {
+            "baseline": baseline_mode,
+            "candidate": mode_id,
+            "metric": "pass_rate",
+            "baseline_pass_rate": baseline_rate,
+            "candidate_pass_rate": candidate_rate,
+            "delta": delta,
+            "delta_pct_points": round(delta * 100, 3),
+            "relative_improvement_pct": _relative_delta_pct(baseline_rate, candidate_rate),
+            "case_runs": case_runs,
+            "reliable": case_runs >= reliability_min_cases,
+            "reliability_min_cases": reliability_min_cases,
+        }
+    return {
+        "schema": "legion.bench.corpus-summary.v1",
+        "generated_at": _iso_utc(),
+        "run_id": run_id,
+        "corpus": corpus.get("corpus"),
+        "repo": os.path.abspath(repo),
+        "commit": _git_commit(repo),
+        "baseline_mode": baseline_mode,
+        "reliability_min_cases": reliability_min_cases,
+        "ok": all(_dict(summary.get("metrics")).get("required_fail") == 0 for summary in modes.values()),
+        "modes": modes,
+        "comparisons": comparisons,
+    }
+
+
+def write_corpus_artifacts(
+    bench_dir: str,
+    run_id: str,
+    corpus: dict[str, Any],
+    results: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> dict[str, str]:
+    root = os.path.abspath(os.path.expanduser(bench_dir))
+    run_dir = os.path.join(root, "corpus", run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    cases_path = os.path.join(run_dir, "cases.jsonl")
+    summary_path = os.path.join(run_dir, "summary.json")
+    run_path = os.path.join(run_dir, "run.json")
+    latest_path = os.path.join(root, "corpus", "latest.json")
+    with open(cases_path, "w", encoding="utf-8") as handle:
+        for result in results:
+            handle.write(json.dumps(result, sort_keys=True, ensure_ascii=False))
+            handle.write("\n")
+    _write_json(summary_path, summary)
+    _write_json(
+        run_path,
+        {
+            "schema": "legion.bench.corpus-run.v1",
+            "run_id": run_id,
+            "generated_at": summary.get("generated_at"),
+            "corpus": corpus.get("corpus"),
+            "corpus_path": corpus.get("_path"),
+            "summary": summary,
+            "cases": results,
+            "artifacts": {
+                "run": run_path,
+                "summary": summary_path,
+                "cases": cases_path,
+            },
+        },
+    )
+    _write_json(
+        latest_path,
+        {
+            "schema": "legion.bench.corpus-latest.v1",
+            "run_id": run_id,
+            "corpus": corpus.get("corpus"),
+            "run_path": run_path,
+            "summary_path": summary_path,
+            "cases_path": cases_path,
+            "generated_at": summary.get("generated_at"),
+        },
+    )
+    return {
+        "run_dir": run_dir,
+        "run_path": run_path,
+        "summary_path": summary_path,
+        "cases_path": cases_path,
+        "latest_path": latest_path,
+    }
+
+
+def corpus_command(args: argparse.Namespace) -> int:
+    repo = os.path.abspath(args.repo)
+    corpus = load_corpus(repo, args.corpus)
+    modes = _selected_corpus_modes(corpus, args.mode or [])
+    mode_ids = [_text(mode.get("id")) for mode in modes]
+    baseline_mode = args.baseline or _text(corpus.get("baseline")) or mode_ids[0]
+    if baseline_mode not in mode_ids:
+        raise ValueError(f"baseline mode must be selected: {baseline_mode}")
+    reliability_min_cases = int(args.reliability_min_cases or corpus.get("reliability_min_cases") or 30)
+    run_id = args.run_id or _run_id(_text(corpus.get("corpus")) or "corpus")
+    run_dir = os.path.join(os.path.abspath(os.path.expanduser(args.bench_dir)), "corpus", run_id)
+    results: list[dict[str, Any]] = []
+    repeat = max(1, int(args.repeat or 1))
+    for mode in modes:
+        for attempt in range(1, repeat + 1):
+            for case in _list(corpus.get("cases")):
+                results.append(
+                    run_corpus_case_mode(
+                        _dict(case),
+                        mode,
+                        repo=repo,
+                        run_dir=run_dir,
+                        repeat_index=attempt,
+                    )
+                )
+    summary = summarize_corpus_run(
+        corpus,
+        results,
+        run_id=run_id,
+        repo=repo,
+        baseline_mode=baseline_mode,
+        reliability_min_cases=reliability_min_cases,
+    )
+    artifacts = write_corpus_artifacts(args.bench_dir, run_id, corpus, results, summary)
+    payload = {**artifacts, "summary": summary}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"legion-bench corpus: {corpus.get('corpus')} ({len(mode_ids)} modes)")
+        for mode_id, mode_summary in _dict(summary.get("modes")).items():
+            metrics = _dict(_dict(mode_summary).get("metrics"))
+            print(
+                f"  {mode_id}: {int(metrics.get('pass') or 0)}/{int(metrics.get('case_runs') or 0)} "
+                f"pass_rate={float(metrics.get('pass_rate') or 0):.3f} "
+                f"cost=${float(metrics.get('cost_usd') or 0):.6f} "
+                f"tokens={int(metrics.get('tokens') or 0)}"
+            )
+        for key, comparison in _dict(summary.get("comparisons")).items():
+            reliable = "reliable" if comparison.get("reliable") else "small-sample"
+            print(
+                f"  {key}: {float(comparison.get('delta_pct_points') or 0):+g} pp "
+                f"({reliable})"
+            )
+        print(f"run: {artifacts['run_path']}")
+    if args.require_reliable:
+        unreliable = [
+            key
+            for key, comparison in _dict(summary.get("comparisons")).items()
+            if not _dict(comparison).get("reliable")
+        ]
+        if unreliable:
+            print(f"legion-bench corpus: unreliable sample size for {', '.join(unreliable)}", file=sys.stderr)
+            return 1
+    if args.strict and not summary.get("ok"):
+        return 1
+    return 0
+
+
 def run_command(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo)
     suite = load_suite(repo, args.suite)
@@ -1595,6 +2141,19 @@ def main(argv: list[str] | None = None) -> int:
     stable.add_argument("--strict", action="store_true")
     stable.add_argument("--json", action="store_true")
 
+    corpus = sub.add_parser("corpus", help="run an A/B task corpus across harness modes")
+    corpus.add_argument("--repo", default=default_repo())
+    corpus.add_argument("--corpus", default="local-smoke")
+    corpus.add_argument("--mode", action="append", default=[], help="mode id to run; repeat to select multiple")
+    corpus.add_argument("--baseline", default="", help="baseline mode id for lift comparisons")
+    corpus.add_argument("--repeat", type=int, default=1)
+    corpus.add_argument("--reliability-min-cases", type=int, default=0)
+    corpus.add_argument("--bench-dir", default=os.environ.get("LEGION_BENCH_DIR", DEFAULT_BENCH_ROOT))
+    corpus.add_argument("--run-id", default="")
+    corpus.add_argument("--strict", action="store_true")
+    corpus.add_argument("--require-reliable", action="store_true")
+    corpus.add_argument("--json", action="store_true")
+
     comp = sub.add_parser("compare", help="compare two benchmark run artifacts")
     comp.add_argument("--baseline", required=True)
     comp.add_argument("--candidate", required=True)
@@ -1624,6 +2183,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_command(args)
         if args.cmd == "stable":
             return stable_command(args)
+        if args.cmd == "corpus":
+            return corpus_command(args)
         if args.cmd == "compare":
             return compare_command(args)
         if args.cmd == "gate":

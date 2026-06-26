@@ -54,6 +54,7 @@ Implemented CLI:
 legion-bench run --suite core --repo . --json
 legion-bench run --suite stable --repo . --json --strict
 legion-bench stable --suite stable --repo . --repeat 3 --strict
+legion-bench corpus --corpus local-smoke --repo . --json
 legion-bench compare --baseline runs/base.json --candidate runs/candidate.json
 legion-bench gate --baseline runs/base.json --candidate runs/candidate.json
 legion-bench learning-lift --repo . --json
@@ -79,6 +80,29 @@ legion-bench learning-lift --repo . --json
 - per-dimension pass rates
 - flake cases, defined as the same case producing inconsistent statuses
 - the run artifact path for every iteration
+
+`corpus` is the live A/B layer. A corpus defines cases, validators, and harness
+modes, then runs every selected mode on the same cases:
+
+```bash
+legion-bench corpus \
+  --corpus ./bench/corpora/my-live-corpus.json \
+  --mode direct-codex \
+  --mode legion-delegate \
+  --baseline direct-codex \
+  --require-reliable \
+  --json
+```
+
+Each mode can be any command: direct Codex, direct Claude Code, Cursor Agent,
+`legion-delegate`, `legion-orchestrate`, an Aider runner, or a SWE-bench wrapper.
+The runner writes per-case workspaces and artifacts under
+`~/.claude/logs/legion/bench/corpus/`, captures stdout/stderr, validates files or
+JSON/JSONL, and aggregates pass rate, duration, cost, tokens, and span count.
+Relative lift is only marked reliable once the comparison has at least
+`reliability_min_cases` case-runs, default `30`.
+See `legion-observability/bench/corpora/README.md` for a direct-Codex versus
+`legion-delegate` live corpus template.
 
 `compare` reports Harness Bench-style lift fields for the headline score:
 
@@ -195,6 +219,16 @@ Current stable rollup metrics:
 - `flake_count`
 - `required_fail_total`
 
+Current corpus metrics:
+
+- per-mode `case_runs`, `pass`, `fail`, `pass_rate`
+- per-mode `required_fail`
+- per-mode `duration_ms`, `cost_usd`, `tokens`, `span_count`
+- per-dimension pass rates
+- baseline-vs-candidate `delta_pct_points`
+- baseline-vs-candidate `relative_improvement_pct`
+- reliability flag based on sample size
+
 Future live suites should add `orchestration_match`, validator-specific
 pass/fail labels, and real cost/token/latency from delegated runs. Live suites
 should follow the OSS pattern:
@@ -245,9 +279,11 @@ the existing `--apply-source` scorecard gate.
    lift on an isolated fixture.
 7. Done: add `stable.json` plus `legion-bench stable` for repeated-run
    deterministic gating and flake detection.
-8. Next: add optional live corpus adapters for SWE-bench Lite/Verified,
+8. Done: add `legion-bench corpus`, a generic A/B corpus runner for real
+   direct-harness vs Legion measurements with sample-size reliability flags.
+9. Next: add packaged optional adapters for SWE-bench Lite/Verified,
    Aider Polyglot-style exercises, and Legion-specific fixture repos.
-9. Next: add CI optional workflow or manual `workflow_dispatch` for full
+10. Next: add CI optional workflow or manual `workflow_dispatch` for full
    benchmark runs.
 
 ## Non-goals

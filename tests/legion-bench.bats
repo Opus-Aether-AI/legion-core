@@ -72,6 +72,23 @@ setup() {
   ' <<<"$output" >/dev/null
 }
 
+@test "legion-bench: corpus reports A/B mode numbers" {
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" corpus --corpus local-smoke --repo "$ROOT" --json
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .summary.corpus == "local-smoke"
+    and .summary.modes["control-baseline"].metrics.pass == 1
+    and .summary.modes["control-candidate"].metrics.pass == 3
+    and .summary.comparisons["control-baseline..control-candidate"].delta_pct_points == 66.667
+    and .summary.comparisons["control-baseline..control-candidate"].reliable == false
+    and .run_path
+    and .cases_path
+  ' <<<"$output" >/dev/null
+}
+
 @test "legion-bench: record-failures writes legion-bench outcomes" {
   suite="$BATS_TEST_TMPDIR/fail-suite.json"
   cat > "$suite" <<'JSON'

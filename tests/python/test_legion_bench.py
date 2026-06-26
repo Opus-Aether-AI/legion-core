@@ -141,6 +141,15 @@ def test_load_suite_extends_core_cases():
     assert len(suite["cases"]) >= 43
 
 
+def test_load_corpus_reads_packaged_local_smoke():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    corpus = bench.load_corpus(repo, "local-smoke")
+
+    assert corpus["corpus"] == "local-smoke"
+    assert len(corpus["modes"]) == 2
+    assert len(corpus["cases"]) == 3
+
+
 def test_record_failed_outcomes_writes_benchmark_source(tmp_path):
     logs = tmp_path / "logs"
     run_path = tmp_path / "bench" / "run.json"
@@ -313,6 +322,42 @@ def test_stability_rollup_detects_flakes():
     assert rollup["metrics"]["flake_count"] == 1
     assert rollup["metrics"]["min_score"] == 0.0
     assert rollup["flake_cases"][0]["id"] == "case"
+
+
+def test_corpus_runner_reports_mode_lift_and_reliability(tmp_path):
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    corpus = bench.load_corpus(repo, "local-smoke")
+    modes = bench._selected_corpus_modes(corpus, [])
+    run_dir = tmp_path / "corpus-run"
+    results = []
+    for mode in modes:
+        for case in corpus["cases"]:
+            results.append(
+                bench.run_corpus_case_mode(
+                    case,
+                    mode,
+                    repo=repo,
+                    run_dir=str(run_dir),
+                    repeat_index=1,
+                )
+            )
+
+    summary = bench.summarize_corpus_run(
+        corpus,
+        results,
+        run_id="corpus-1",
+        repo=repo,
+        baseline_mode="control-baseline",
+        reliability_min_cases=30,
+    )
+
+    baseline = summary["modes"]["control-baseline"]["metrics"]
+    candidate = summary["modes"]["control-candidate"]["metrics"]
+    comparison = summary["comparisons"]["control-baseline..control-candidate"]
+    assert baseline["pass"] == 1
+    assert candidate["pass"] == 3
+    assert comparison["delta_pct_points"] == 66.667
+    assert comparison["reliable"] is False
 
 
 def test_write_run_artifacts_and_span(tmp_path):

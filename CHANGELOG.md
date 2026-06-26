@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.8.1...v0.8.2) (2026-06-26)
+
+
+### Fixed
+
+* **intake:** make AFK lane Legion-generic ([#49](https://github.com/Opus-Aether-AI/legion-core/issues/49)) ([29fa9fe](https://github.com/Opus-Aether-AI/legion-core/commit/29fa9fe548bc09705ebce7b8698423fd6aabe3b0))
+
 ## [0.8.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.8.0...v0.8.1) (2026-06-26)
 
 

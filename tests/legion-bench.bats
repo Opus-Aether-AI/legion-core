@@ -49,8 +49,26 @@ setup() {
     .comparison.status == "improved"
     and .baseline.summary.metrics.learning_pass == 1
     and .candidate.summary.metrics.learning_pass == 4
-    and .comparison.headline.delta_pct_points == 75
-    and .comparison.headline.relative_improvement_pct == 300
+    and .learning_lift.delta_pct_points == 75
+    and .learning_lift.relative_lift_reliable == false
+  ' <<<"$output" >/dev/null
+}
+
+@test "legion-bench: stable suite reports repeatable rollup" {
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" stable --suite stable --repo "$ROOT" --repeat 2 --json --strict
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .ok == true
+    and .metrics.iterations == 2
+    and .metrics.cases_per_iteration == 43
+    and .metrics.total_case_runs == 86
+    and .metrics.flake_count == 0
+    and .dimensions.routing.pass_rate == 1
+    and .dimensions.triggering.pass_rate == 1
+    and .artifacts.stability_path
   ' <<<"$output" >/dev/null
 }
 

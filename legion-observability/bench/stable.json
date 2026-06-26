@@ -1,0 +1,460 @@
+{
+  "schema": "legion.bench.suite.v1",
+  "suite": "stable",
+  "description": "Comprehensive deterministic Legion benchmark for stable PR and release gating. Extends core with full routing policy coverage, plugin/entity trigger checks, doctor checks, and CLI artifact contracts.",
+  "extends": [
+    "core"
+  ],
+  "gate": {
+    "allow_neutral": true,
+    "max_false_success_delta": 0
+  },
+  "cases": [
+    {
+      "id": "eval.plugin.setup",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Install/update prompts should route to legion-setup.",
+      "scope": "plugin",
+      "prompt": "Install Legion into Claude Code, Codex, and Cursor, wire the marketplace, and set up daily refresh.",
+      "expect_type": "plugin",
+      "expect": "legion-setup",
+      "expect_not": "legion-router",
+      "required": true
+    },
+    {
+      "id": "eval.plugin.orchestrate",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Parallel multi-model delivery prompts should route to legion-orchestrate.",
+      "scope": "plugin",
+      "prompt": "Orchestrate this feature with Legion: decompose, fan out implementation slices, cross-model verify, and synthesize.",
+      "expect_type": "plugin",
+      "expect": "legion-orchestrate",
+      "expect_not": "legion-observability",
+      "required": true
+    },
+    {
+      "id": "eval.plugin.codex-mode",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Codex-primary routing prompts should route to legion-codex-mode.",
+      "scope": "plugin",
+      "prompt": "I am running Legion under Codex CLI and need to know when to call Claude for deep architecture or final review.",
+      "expect_type": "plugin",
+      "expect": "legion-codex-mode",
+      "expect_not": "legion-router",
+      "required": true
+    },
+    {
+      "id": "eval.entity.skill-observability",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Entity trigger should find the observability skill.",
+      "scope": "entity",
+      "prompt": "Did this harness change improve? Show bench results, doctor status, telemetry spans, and self-learning hints.",
+      "expect_type": "skill",
+      "expect": "legion-observability",
+      "required": true
+    },
+    {
+      "id": "eval.entity.skill-router",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Entity trigger should find the router skill.",
+      "scope": "entity",
+      "prompt": "Delegate a scoped coding task to Codex or Cursor in an isolated worktree and return a metered diff.",
+      "expect_type": "skill",
+      "expect": "legion-router",
+      "required": true
+    },
+    {
+      "id": "eval.entity.skill-orchestrate",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Entity trigger should find the orchestrator skill.",
+      "scope": "entity",
+      "prompt": "Fan out implementation slices across models in parallel, then cross-model verify and integrate the result.",
+      "expect_type": "skill",
+      "expect": "legion-orchestrate",
+      "required": true
+    },
+    {
+      "id": "eval.entity.skill-setup",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Entity trigger should find the setup skill.",
+      "scope": "entity",
+      "prompt": "Set up Legion on a new machine, install marketplace plugins, shared CLIs, Codex bridge, Cursor bridge, and refresh cron.",
+      "expect_type": "skill",
+      "expect": "legion-setup",
+      "required": true
+    },
+    {
+      "id": "eval.entity.skill-codex-mode",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Entity trigger should find the Codex-mode skill.",
+      "scope": "entity",
+      "prompt": "Under Codex CLI decide when GPT should call Claude for architecture, frontend polish, final review, or a tie break.",
+      "expect_type": "skill",
+      "expect": "legion-codex-mode",
+      "required": true
+    },
+    {
+      "id": "route.orchestrate",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "High-level orchestration stays on Opus.",
+      "archetype": "orchestrate",
+      "expect": {
+        "executor": "self",
+        "model": "opus",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.architecture-decision",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Architecture decisions stay on Opus.",
+      "archetype": "architecture-decision",
+      "expect": {
+        "executor": "self",
+        "model": "opus",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.deep-reasoning",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Deep reasoning stays on Opus.",
+      "archetype": "deep-reasoning",
+      "expect": {
+        "executor": "self",
+        "model": "opus",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.implement-feature",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Feature implementation uses GPT-5.4 workspace write.",
+      "archetype": "implement-feature",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.frontend-implement",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Frontend structure stays on Opus.",
+      "archetype": "frontend-implement",
+      "expect": {
+        "executor": "self",
+        "model": "opus",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.frontend-polish",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Frontend polish uses GPT-5.5 workspace write.",
+      "archetype": "frontend-polish",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.write-tests",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Test writing uses GPT-5.4 workspace write.",
+      "archetype": "write-tests",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.fix-bug",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Scoped bug fixes use GPT-5.4 workspace write.",
+      "archetype": "fix-bug",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.refactor-module",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Module refactors use GPT-5.4 workspace write.",
+      "archetype": "refactor-module",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.bulk-mechanical-edit",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Bulk mechanical edits use GPT-5.4 workspace write.",
+      "archetype": "bulk-mechanical-edit",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.parallel-codegen",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Parallel codegen uses GPT-5.4 workspace write.",
+      "archetype": "parallel-codegen",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.cheap-bulk",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Cheap bulk work uses GPT-5.4 workspace write.",
+      "archetype": "cheap-bulk",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.boilerplate",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Boilerplate uses GPT-5.4 workspace write.",
+      "archetype": "boilerplate",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.migration",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Migrations use GPT-5.4 workspace write.",
+      "archetype": "migration",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.4",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.final-review",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Final review uses GPT-5.5 read-only.",
+      "archetype": "final-review",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "read-only",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.second-opinion-review",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Second opinion review uses GPT-5.5 read-only.",
+      "archetype": "second-opinion-review",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "read-only",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.cross-model-tiebreak",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Cross-model tiebreak uses GPT-5.5 read-only.",
+      "archetype": "cross-model-tiebreak",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "read-only",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.security-review",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Security review uses GPT-5.5 read-only.",
+      "archetype": "security-review",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "read-only",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.hard-bug",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Hard bugs use GPT-5.5 workspace write.",
+      "archetype": "hard-bug",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "route.perf-optimization",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "Performance optimization uses GPT-5.5 workspace write.",
+      "archetype": "perf-optimization",
+      "expect": {
+        "executor": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "workspace-write",
+        "reasoning_effort": "xhigh"
+      },
+      "required": true
+    },
+    {
+      "id": "doctor.plugins",
+      "type": "doctor",
+      "dimension": "validation",
+      "summary": "Plugin descriptors must stay loadable.",
+      "only": "plugins",
+      "required": true
+    },
+    {
+      "id": "doctor.frontmatter",
+      "type": "doctor",
+      "dimension": "validation",
+      "summary": "Skill frontmatter must stay valid.",
+      "only": "frontmatter",
+      "required": true
+    },
+    {
+      "id": "doctor.costs",
+      "type": "doctor",
+      "dimension": "validation",
+      "summary": "Cost table must stay parseable.",
+      "only": "costs",
+      "required": true
+    },
+    {
+      "id": "task.route-cli-final-review",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "The public route CLI should resolve final-review as GPT-5.5 read-only.",
+      "target_type": "plugin",
+      "target_name": "legion-router",
+      "command": [
+        "{repo}/legion-router/bin/legion-route",
+        "final-review"
+      ],
+      "validators": [
+        {
+          "type": "stdout_json_field_equals",
+          "field": "executor",
+          "equals": "codex"
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "model",
+          "equals": "gpt-5.5"
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "sandbox",
+          "equals": "read-only"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "task.trace-emit-validate",
+      "type": "task",
+      "dimension": "cli-contract",
+      "summary": "Trace emit output should validate against the span schema.",
+      "target_type": "plugin",
+      "target_name": "legion-observability",
+      "command": [
+        "bash",
+        "-lc",
+        "{repo}/legion-observability/bin/legion-trace emit --executor codex --model gpt-5.4 --status ok --task bench-fixture > {workspace}/span.jsonl && {repo}/legion-observability/bin/legion-trace validate {workspace}/span.jsonl"
+      ],
+      "validators": [
+        {
+          "type": "file_exists",
+          "path": "{workspace}/span.jsonl"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/span.jsonl",
+          "text": "\"schema\":\"legion.span.v1\""
+        }
+      ],
+      "required": true
+    }
+  ]
+}

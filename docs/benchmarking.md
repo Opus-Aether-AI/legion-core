@@ -5,10 +5,11 @@ just felt. The goal is to run the same task suite before and after a routing,
 skill, orchestration, or self-learning change and keep only changes that improve
 the scorecard without hiding cost or latency regressions.
 
-`legion-bench` now implements the first deterministic slice of that workbench:
-offline scorecards plus fixture-backed task runs. There are no mandatory live
-model calls, hosted service, or LLM judge in v1, but task cases run real Legion
-CLIs against temporary workspaces and validate their artifacts.
+`legion-bench` now implements two deterministic lanes: a fast `core` smoke suite
+and a broader `stable` suite for PR/release confidence. There are no mandatory
+live model calls, hosted service, Docker images, or LLM judge in the default
+lanes, but task cases run real Legion CLIs against temporary workspaces and
+validate their artifacts.
 
 ## Goals
 
@@ -27,6 +28,7 @@ Start with small deterministic fixtures before adding live model runs:
 | Suite | What it measures | Example cases |
 |---|---|---|
 | `core` | Did baseline trigger, route, validation, and self-improvement contracts hold? | observability/router triggers, frontend-review/docs-edit routing, marketplace/schema checks, session correction learning, self-learning memory |
+| `stable` | Did the full deterministic harness contract stay stable across repeated runs? | `core` plus every routing archetype, all Legion plugin/skill triggers, extra doctor checks, trace/route CLI contracts |
 | `skill-routing` | Did the right skill/plugin trigger? | docs edit, auth bug, OSS readiness, benchmark planning |
 | `orchestration` | Did Legion choose self/delegate/review/fanout correctly? | small fix, risky refactor, broad docs sweep |
 | `validation` | Did it run the right gates and reject bad output? | missing test, shellcheck warning, invalid skill frontmatter |
@@ -50,6 +52,8 @@ Implemented CLI:
 
 ```bash
 legion-bench run --suite core --repo . --json
+legion-bench run --suite stable --repo . --json --strict
+legion-bench stable --suite stable --repo . --repeat 3 --strict
 legion-bench compare --baseline runs/base.json --candidate runs/candidate.json
 legion-bench gate --baseline runs/base.json --candidate runs/candidate.json
 legion-bench learning-lift --repo . --json
@@ -67,6 +71,15 @@ legion-bench learning-lift --repo . --json
 - token/cost/latency fields, currently zero-cost/offline in v1
 - final status and failure reason
 
+`stable` runs the same suite multiple times and writes
+`~/.claude/logs/legion/bench/stability/<run-id>.json` with:
+
+- iterations and case-runs
+- min/mean/max score and pass rate
+- per-dimension pass rates
+- flake cases, defined as the same case producing inconsistent statuses
+- the run artifact path for every iteration
+
 `compare` reports Harness Bench-style lift fields for the headline score:
 
 - `delta_pct_points`: absolute score movement, e.g. `0.79 -> 0.93` is
@@ -79,6 +92,9 @@ It writes one session correction fixture, scores the same probes before and
 after `legion-session-learn --record` plus `legion-self-learn run
 --apply-memory`, and then compares the two normal benchmark artifacts. This is
 useful for proving the measurement path; it is not a broad task-corpus result.
+For the small fixture, use the percentage-point delta as the headline. Relative
+lift is denominator-sensitive and is marked unreliable until the corpus has at
+least 30 cases.
 
 The v1 suite files are JSON, not YAML, to keep package runtime dependencies to
 the Python standard library:
@@ -163,9 +179,31 @@ Current v1 scorecard:
 - `cost_usd`
 - `duration_ms`
 - `tokens`
+- `dimensions`
+
+Current stable rollup metrics:
+
+- `iterations`
+- `cases_per_iteration`
+- `total_case_runs`
+- `min_score`
+- `mean_score`
+- `max_score`
+- `min_pass_rate`
+- `mean_pass_rate`
+- `max_pass_rate`
+- `flake_count`
+- `required_fail_total`
 
 Future live suites should add `orchestration_match`, validator-specific
-pass/fail labels, and real cost/token/latency from delegated runs.
+pass/fail labels, and real cost/token/latency from delegated runs. Live suites
+should follow the OSS pattern:
+
+- Harness Bench: criterion-level before/after scoring and trace-backed
+  improvement loops.
+- SWE-bench: reproducible repo/task artifacts and isolated evaluation.
+- Aider benchmark: durable run records with pass rates, commit hash, settings,
+  cost/time, and malformed-output counters.
 
 Gate rule:
 
@@ -205,9 +243,11 @@ the existing `--apply-source` scorecard gate.
    `--record-failures`.
 6. Done: add `learning-lift` to report before/after self-learning percentage
    lift on an isolated fixture.
-7. Next: add wider suites for orchestration, richer validation failure fixtures,
-   and optional live model runs.
-8. Next: add CI optional workflow or manual `workflow_dispatch` for full
+7. Done: add `stable.json` plus `legion-bench stable` for repeated-run
+   deterministic gating and flake detection.
+8. Next: add optional live corpus adapters for SWE-bench Lite/Verified,
+   Aider Polyglot-style exercises, and Legion-specific fixture repos.
+9. Next: add CI optional workflow or manual `workflow_dispatch` for full
    benchmark runs.
 
 ## Non-goals
@@ -216,3 +256,9 @@ the existing `--apply-source` scorecard gate.
 - Do not make live model runs mandatory for every PR.
 - Do not auto-merge source mutations from benchmark results.
 - Do not hide cost regressions behind aggregate pass rates.
+
+## References
+
+- [svineet/harness-bench](https://github.com/svineet/harness-bench) — criterion-level harness workbench with observe/analyze/improve loops.
+- [SWE-bench](https://github.com/swe-bench/SWE-bench) — reproducible repository-level coding issue evaluation; useful model for future live corpus adapters.
+- [Aider benchmark harness](https://github.com/Aider-AI/aider/blob/main/benchmark/README.md) — durable benchmark run records with pass rates, commit/settings, cost, time, and malformed-output counters.

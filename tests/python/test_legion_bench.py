@@ -131,6 +131,16 @@ def test_gate_allows_neutral_candidate_by_default():
     assert decision["status"] == "pass"
 
 
+def test_load_suite_extends_core_cases():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    suite = bench.load_suite(repo, "stable")
+    ids = {case["id"] for case in suite["cases"]}
+
+    assert "eval.plugin.observability" in ids
+    assert "route.perf-optimization" in ids
+    assert len(suite["cases"]) >= 43
+
+
 def test_record_failed_outcomes_writes_benchmark_source(tmp_path):
     logs = tmp_path / "logs"
     run_path = tmp_path / "bench" / "run.json"
@@ -251,14 +261,58 @@ def test_learning_lift_payload_scores_before_after_memory(tmp_path):
         )
     )
 
-    headline = payload["comparison"]["headline"]
+    lift = payload["learning_lift"]
     assert payload["comparison"]["status"] == "improved"
     assert payload["baseline"]["summary"]["metrics"]["learning_pass"] == 1
     assert payload["candidate"]["summary"]["metrics"]["learning_pass"] == 4
-    assert headline["delta_pct_points"] == 75.0
-    assert headline["relative_improvement_pct"] == 300.0
+    assert lift["delta_pct_points"] == 75.0
+    assert lift["relative_lift_reliable"] is False
+    assert lift["headline_metric"] == "delta_pct_points"
     assert os.path.exists(payload["baseline"]["artifacts"]["run_path"])
     assert os.path.exists(payload["candidate"]["artifacts"]["run_path"])
+
+
+def test_stability_rollup_detects_flakes():
+    suite = {"suite": "stable"}
+    pass_result = {
+        "id": "case",
+        "dimension": "routing",
+        "status": "pass",
+        "required": True,
+    }
+    fail_result = {
+        "id": "case",
+        "dimension": "routing",
+        "status": "fail",
+        "required": True,
+    }
+    iterations = [
+        {
+            "summary": {
+                "run_id": "iter-1",
+                "metrics": {"score": 1.0, "pass_rate": 1.0, "cases": 1, "required_fail": 0},
+                "dimensions": {"routing": {"cases": 1, "pass": 1, "fail": 0, "required_fail": 0}},
+            },
+            "results": [pass_result],
+            "artifacts": {"run_path": "run-1", "summary_path": "summary-1"},
+        },
+        {
+            "summary": {
+                "run_id": "iter-2",
+                "metrics": {"score": 0.0, "pass_rate": 0.0, "cases": 1, "required_fail": 1},
+                "dimensions": {"routing": {"cases": 1, "pass": 0, "fail": 1, "required_fail": 1}},
+            },
+            "results": [fail_result],
+            "artifacts": {"run_path": "run-2", "summary_path": "summary-2"},
+        },
+    ]
+
+    rollup = bench.stability_rollup(suite, iterations, run_id="stable-1", repo=".")
+
+    assert rollup["ok"] is False
+    assert rollup["metrics"]["flake_count"] == 1
+    assert rollup["metrics"]["min_score"] == 0.0
+    assert rollup["flake_cases"][0]["id"] == "case"
 
 
 def test_write_run_artifacts_and_span(tmp_path):

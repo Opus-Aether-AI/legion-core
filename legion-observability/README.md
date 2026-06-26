@@ -9,7 +9,7 @@ See everything Legion's multi-model runs do — per-executor **cost, success rat
 | Bin | Script | What it does |
 |---|---|---|
 | `legion-report` | `scripts/legion-report.sh` (+ `legion-aggregate.py`, `legion-render.py`) | Cost / success-rate / p50-p95 latency, grouped by executor/model/status, as a TUI table or `--html`. |
-| `legion-bench` | `scripts/legion-bench.py` | Harness Bench-style scorecards for Legion harness changes: deterministic eval, route, doctor, fixture-backed task cases, compare/gate commands with relative lift, `learning-lift`, spans, and optional self-learning outcomes. |
+| `legion-bench` | `scripts/legion-bench.py` | Harness Bench-style scorecards for Legion harness changes: deterministic `core`/`stable` suites, repeated-run flake detection, eval/route/doctor/fixture task cases, compare/gate commands, `learning-lift`, spans, and optional self-learning outcomes. |
 | `legion-trace` | `scripts/legion-telemetry.sh` | `emit` a validated span; `validate` a span file/stream. |
 | `legion-otel-export` | `scripts/legion-otel-export.py` | Map `legion.span.v1` → OTLP/HTTP; POST to `$OTEL_EXPORTER_OTLP_ENDPOINT` (no-op until set; `--dry-run` to preview). |
 | `legion-doctor` | `scripts/legion-doctor.sh` | CI-usable verifier; exits nonzero on any hard-check failure. |
@@ -24,6 +24,7 @@ See everything Legion's multi-model runs do — per-executor **cost, success rat
 legion-doctor                       # is the install wired correctly?
 legion-report                       # per-executor cost / success / latency
 legion-bench run --suite core --repo . --strict
+legion-bench stable --suite stable --repo . --repeat 3 --strict
 legion-bench compare --baseline runs/base/run.json --candidate runs/new/run.json
 legion-bench gate --baseline runs/base/run.json --candidate runs/new/run.json
 legion-report --by model --html > report.html

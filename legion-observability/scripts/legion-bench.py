@@ -245,14 +245,26 @@ def resolve_suite_path(repo: str, suite: str) -> str:
     raise FileNotFoundError(f"benchmark suite not found: {suite}")
 
 
-def load_suite(repo: str, suite: str) -> dict[str, Any]:
+def load_suite(repo: str, suite: str, seen: set[str] | None = None) -> dict[str, Any]:
     path = resolve_suite_path(repo, suite)
+    seen = seen or set()
+    if path in seen:
+        raise ValueError(f"benchmark suite include cycle: {path}")
+    next_seen = set(seen)
+    next_seen.add(path)
     payload = _json_file(path)
     if payload.get("schema") != SUITE_SCHEMA:
         raise ValueError(f"{path} is not a {SUITE_SCHEMA} suite")
-    cases = payload.get("cases")
+    cases: list[Any] = []
+    for include in _list(payload.get("extends")):
+        include_name = _text(include)
+        if not include_name:
+            continue
+        cases.extend(_list(load_suite(repo, include_name, next_seen).get("cases")))
+    cases.extend(_list(payload.get("cases")))
     if not isinstance(cases, list) or not cases:
         raise ValueError(f"{path} has no benchmark cases")
+    payload["cases"] = cases
     payload["_path"] = path
     return payload
 
@@ -588,6 +600,7 @@ def run_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, Any]:
         "target_type": target_type,
         "target_name": target_name,
         "summary": _text(case.get("summary")) or _text(case.get("why")),
+        "dimension": _text(case.get("dimension")) or case_type or "uncategorized",
         "reason": _short(_text(payload.get("reason")), 500),
         "false_success": bool(payload.get("false_success")),
         "metrics": _dict(payload.get("metrics")),
@@ -597,6 +610,38 @@ def run_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, Any]:
 
 def _rate(numer: int, denom: int) -> float:
     return round(numer / denom, 6) if denom else 0.0
+
+
+def summarize_dimensions(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for result in results:
+        dimension = _text(result.get("dimension")) or _text(result.get("type")) or "uncategorized"
+        entry = out.setdefault(
+            dimension,
+            {
+                "cases": 0,
+                "pass": 0,
+                "fail": 0,
+                "required_cases": 0,
+                "required_pass": 0,
+                "required_fail": 0,
+            },
+        )
+        entry["cases"] += 1
+        if result.get("status") == "pass":
+            entry["pass"] += 1
+        else:
+            entry["fail"] += 1
+        if result.get("required"):
+            entry["required_cases"] += 1
+            if result.get("status") == "pass":
+                entry["required_pass"] += 1
+            else:
+                entry["required_fail"] += 1
+    for entry in out.values():
+        entry["pass_rate"] = _rate(int(entry["pass"]), int(entry["cases"]))
+        entry["required_pass_rate"] = _rate(int(entry["required_pass"]), int(entry["required_cases"]))
+    return dict(sorted(out.items()))
 
 
 def summarize_run(
@@ -675,6 +720,7 @@ def summarize_run(
         "ok": metrics["required_fail"] == 0,
         "gate": _dict(suite.get("gate")),
         "metrics": metrics,
+        "dimensions": summarize_dimensions(results),
     }
 
 
@@ -1210,6 +1256,24 @@ def learning_lift_payload(args: argparse.Namespace) -> dict[str, Any]:
     )
     span_path = emit_bench_span(candidate_summary, candidate_artifacts, telemetry_dir)
     comparison = compare_summaries(baseline_summary, candidate_summary)
+    baseline_metrics = _dict(baseline_summary.get("metrics"))
+    candidate_metrics = _dict(candidate_summary.get("metrics"))
+    cases = int(candidate_metrics.get("learning_cases") or 0)
+    lift = {
+        "headline_metric": "delta_pct_points",
+        "baseline_pass": int(baseline_metrics.get("learning_pass") or 0),
+        "candidate_pass": int(candidate_metrics.get("learning_pass") or 0),
+        "cases": cases,
+        "baseline_score": baseline_metrics.get("score", 0.0),
+        "candidate_score": candidate_metrics.get("score", 0.0),
+        "delta_pct_points": _dict(comparison.get("headline")).get("delta_pct_points"),
+        "relative_improvement_pct": _dict(comparison.get("headline")).get("relative_improvement_pct"),
+        "relative_lift_reliable": cases >= 30,
+        "note": (
+            "Use percentage-point lift as the headline for this small deterministic fixture; "
+            "relative lift is denominator-sensitive until the corpus has at least 30 cases."
+        ),
+    }
     return {
         "schema": "legion.bench.learning-lift.v1",
         "run_id": run_id,
@@ -1229,6 +1293,7 @@ def learning_lift_payload(args: argparse.Namespace) -> dict[str, Any]:
             "cases": candidate_results,
         },
         "comparison": comparison,
+        "learning_lift": lift,
         "span_path": span_path,
     }
 
@@ -1240,15 +1305,15 @@ def learning_lift_command(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        relative = headline.get("relative_improvement_pct")
-        relative_text = "n/a" if relative is None else f"{float(relative):+g}%"
+        lift = _dict(payload.get("learning_lift"))
         print(
             "legion-bench learning-lift: "
-            f"{float(headline.get('baseline') or 0):.3f} -> "
-            f"{float(headline.get('candidate') or 0):.3f} "
-            f"({float(headline.get('delta_pct_points') or 0):+g} pp, "
-            f"{relative_text} relative)"
+            f"{int(lift.get('baseline_pass') or 0)}/{int(lift.get('cases') or 0)} -> "
+            f"{int(lift.get('candidate_pass') or 0)}/{int(lift.get('cases') or 0)} "
+            f"({float(lift.get('delta_pct_points') or 0):+g} pp)"
         )
+        if not lift.get("relative_lift_reliable"):
+            print("relative lift: suppressed for small synthetic fixture")
         print(f"baseline: {payload['baseline']['artifacts']['run_path']}")
         print(f"candidate: {payload['candidate']['artifacts']['run_path']}")
     if args.strict:
@@ -1259,17 +1324,136 @@ def learning_lift_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_suite_artifacts(
+    *,
+    repo: str,
+    suite: dict[str, Any],
+    bench_dir: str,
+    run_id: str,
+) -> dict[str, Any]:
+    run_dir = os.path.join(os.path.abspath(os.path.expanduser(bench_dir)), "runs", run_id)
+    start = time.monotonic()
+    results = [run_case(case, repo, run_dir) for case in _list(suite.get("cases"))]
+    duration_ms = int((time.monotonic() - start) * 1000)
+    summary = summarize_run(suite, results, run_id=run_id, repo=repo, duration_ms=duration_ms)
+    artifacts = write_run_artifacts(bench_dir, run_id, suite, results, summary)
+    return {"results": results, "summary": summary, "artifacts": artifacts}
+
+
+def stability_rollup(
+    suite: dict[str, Any],
+    iterations: list[dict[str, Any]],
+    *,
+    run_id: str,
+    repo: str,
+) -> dict[str, Any]:
+    summaries = [_dict(item.get("summary")) for item in iterations]
+    scores = [_metric(summary, "score") for summary in summaries]
+    pass_rates = [_metric(summary, "pass_rate") for summary in summaries]
+    required_fails = [_metric(summary, "required_fail") for summary in summaries]
+    case_statuses: dict[str, list[str]] = {}
+    case_dimensions: dict[str, str] = {}
+    for item in iterations:
+        for result in _list(item.get("results")):
+            case_id = _text(result.get("id"))
+            if not case_id:
+                continue
+            case_statuses.setdefault(case_id, []).append(_text(result.get("status")) or "unknown")
+            case_dimensions.setdefault(case_id, _text(result.get("dimension")) or "uncategorized")
+    flake_cases = [
+        {
+            "id": case_id,
+            "dimension": case_dimensions.get(case_id, "uncategorized"),
+            "statuses": statuses,
+        }
+        for case_id, statuses in sorted(case_statuses.items())
+        if len(set(statuses)) > 1
+    ]
+    dimensions: dict[str, dict[str, Any]] = {}
+    for item in iterations:
+        for dimension, summary in _dict(_dict(item.get("summary")).get("dimensions")).items():
+            entry = dimensions.setdefault(
+                dimension,
+                {
+                    "case_runs": 0,
+                    "pass": 0,
+                    "fail": 0,
+                    "required_fail": 0,
+                },
+            )
+            dim = _dict(summary)
+            entry["case_runs"] += int(dim.get("cases") or 0)
+            entry["pass"] += int(dim.get("pass") or 0)
+            entry["fail"] += int(dim.get("fail") or 0)
+            entry["required_fail"] += int(dim.get("required_fail") or 0)
+    for entry in dimensions.values():
+        entry["pass_rate"] = _rate(int(entry["pass"]), int(entry["case_runs"]))
+    metrics = {
+        "iterations": len(iterations),
+        "cases_per_iteration": int(_metric(summaries[0], "cases")) if summaries else 0,
+        "total_case_runs": sum(int(_metric(summary, "cases")) for summary in summaries),
+        "mean_score": round(sum(scores) / len(scores), 6) if scores else 0.0,
+        "min_score": min(scores) if scores else 0.0,
+        "max_score": max(scores) if scores else 0.0,
+        "mean_pass_rate": round(sum(pass_rates) / len(pass_rates), 6) if pass_rates else 0.0,
+        "min_pass_rate": min(pass_rates) if pass_rates else 0.0,
+        "max_pass_rate": max(pass_rates) if pass_rates else 0.0,
+        "required_fail_total": int(sum(required_fails)),
+        "flake_count": len(flake_cases),
+    }
+    stable_pass = metrics["required_fail_total"] == 0 and metrics["flake_count"] == 0
+    return {
+        "schema": "legion.bench.stability.v1",
+        "generated_at": _iso_utc(),
+        "run_id": run_id,
+        "suite": suite.get("suite"),
+        "repo": os.path.abspath(repo),
+        "commit": _git_commit(repo),
+        "ok": stable_pass,
+        "metrics": metrics,
+        "dimensions": dict(sorted(dimensions.items())),
+        "flake_cases": flake_cases,
+        "iterations": [
+            {
+                "run_id": _dict(item.get("summary")).get("run_id"),
+                "summary_path": _dict(item.get("artifacts")).get("summary_path"),
+                "run_path": _dict(item.get("artifacts")).get("run_path"),
+                "score": _metric(_dict(item.get("summary")), "score"),
+                "pass_rate": _metric(_dict(item.get("summary")), "pass_rate"),
+                "required_fail": _metric(_dict(item.get("summary")), "required_fail"),
+            }
+            for item in iterations
+        ],
+    }
+
+
+def write_stability_artifact(bench_dir: str, run_id: str, payload: dict[str, Any]) -> dict[str, str]:
+    root = os.path.abspath(os.path.expanduser(bench_dir))
+    path = os.path.join(root, "stability", f"{run_id}.json")
+    latest_path = os.path.join(root, "stability", "latest.json")
+    _write_json(path, payload)
+    _write_json(
+        latest_path,
+        {
+            "schema": "legion.bench.stability-latest.v1",
+            "run_id": run_id,
+            "suite": payload.get("suite"),
+            "path": path,
+            "generated_at": payload.get("generated_at"),
+        },
+    )
+    return {"stability_path": path, "latest_stability_path": latest_path}
+
+
 def run_command(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo)
     suite = load_suite(repo, args.suite)
     suite_name = _text(suite.get("suite")) or "suite"
     run_id = args.run_id or _run_id(suite_name)
-    run_dir = os.path.join(os.path.abspath(os.path.expanduser(args.bench_dir)), "runs", run_id)
-    start = time.monotonic()
-    results = [run_case(case, repo, run_dir) for case in _list(suite.get("cases"))]
-    duration_ms = int((time.monotonic() - start) * 1000)
-    summary = summarize_run(suite, results, run_id=run_id, repo=repo, duration_ms=duration_ms)
-    artifacts = write_run_artifacts(args.bench_dir, run_id, suite, results, summary)
+    run_payload = _run_suite_artifacts(repo=repo, suite=suite, bench_dir=args.bench_dir, run_id=run_id)
+    results = _list(run_payload.get("results"))
+    summary = _dict(run_payload.get("summary"))
+    artifacts = _dict(run_payload.get("artifacts"))
     telemetry_dir = args.telemetry_dir or os.environ.get("LEGION_TELEMETRY_DIR") or os.path.join(
         os.path.expanduser(args.logs), "spans"
     )
@@ -1304,6 +1488,43 @@ def run_command(args: argparse.Namespace) -> int:
         if recorded:
             print(f"recorded outcomes: {len(recorded)}")
     if args.strict and not summary.get("ok"):
+        return 1
+    return 0
+
+
+def stable_command(args: argparse.Namespace) -> int:
+    repo = os.path.abspath(args.repo)
+    suite = load_suite(repo, args.suite)
+    suite_name = _text(suite.get("suite")) or "suite"
+    run_id = args.run_id or _run_id(f"{suite_name}-stable")
+    iterations = []
+    repeat = max(1, int(args.repeat or 1))
+    for index in range(repeat):
+        iteration_id = f"{run_id}-iter-{index + 1:02d}"
+        iterations.append(
+            _run_suite_artifacts(
+                repo=repo,
+                suite=suite,
+                bench_dir=args.bench_dir,
+                run_id=iteration_id,
+            )
+        )
+    payload = stability_rollup(suite, iterations, run_id=run_id, repo=repo)
+    artifacts = write_stability_artifact(args.bench_dir, run_id, payload)
+    payload["artifacts"] = artifacts
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        metrics = _dict(payload.get("metrics"))
+        print(
+            "legion-bench stable: "
+            f"{suite_name} {metrics.get('iterations')}x"
+            f"{metrics.get('cases_per_iteration')} cases, "
+            f"min_score={float(metrics.get('min_score') or 0):.3f}, "
+            f"flakes={metrics.get('flake_count')}"
+        )
+        print(f"stability: {artifacts['stability_path']}")
+    if args.strict and not payload.get("ok"):
         return 1
     return 0
 
@@ -1365,6 +1586,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--json", action="store_true")
     run.add_argument("--quiet", action="store_true")
 
+    stable = sub.add_parser("stable", help="run a suite repeatedly and report stability/flake metrics")
+    stable.add_argument("--repo", default=default_repo())
+    stable.add_argument("--suite", default="stable")
+    stable.add_argument("--repeat", type=int, default=3)
+    stable.add_argument("--bench-dir", default=os.environ.get("LEGION_BENCH_DIR", DEFAULT_BENCH_ROOT))
+    stable.add_argument("--run-id", default="")
+    stable.add_argument("--strict", action="store_true")
+    stable.add_argument("--json", action="store_true")
+
     comp = sub.add_parser("compare", help="compare two benchmark run artifacts")
     comp.add_argument("--baseline", required=True)
     comp.add_argument("--candidate", required=True)
@@ -1392,6 +1622,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "run":
             return run_command(args)
+        if args.cmd == "stable":
+            return stable_command(args)
         if args.cmd == "compare":
             return compare_command(args)
         if args.cmd == "gate":

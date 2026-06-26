@@ -10,6 +10,7 @@
     {
       "id": "eval.plugin.observability",
       "type": "eval",
+      "dimension": "triggering",
       "summary": "Observability prompts should route to legion-observability.",
       "scope": "plugin",
       "prompt": "Show per-executor cost success latency spans and self-learning reports for Legion.",
@@ -21,6 +22,7 @@
     {
       "id": "eval.plugin.router",
       "type": "eval",
+      "dimension": "triggering",
       "summary": "Delegation prompts should route to legion-router.",
       "scope": "plugin",
       "prompt": "Delegate this coding task to Codex in an isolated worktree and bring back a metered diff.",
@@ -32,6 +34,7 @@
     {
       "id": "route.frontend-review",
       "type": "route",
+      "dimension": "routing",
       "summary": "Frontend review should use the strong read-only Codex route.",
       "archetype": "frontend-review",
       "expect": {
@@ -45,6 +48,7 @@
     {
       "id": "route.docs-edit",
       "type": "route",
+      "dimension": "routing",
       "summary": "Docs edits should use the GPT-5.4 workhorse route.",
       "archetype": "docs-edit",
       "expect": {
@@ -58,6 +62,7 @@
     {
       "id": "doctor.marketplace-schema",
       "type": "doctor",
+      "dimension": "validation",
       "summary": "Marketplace schema must stay valid.",
       "only": "marketplace-schema",
       "required": true
@@ -65,6 +70,7 @@
     {
       "id": "doctor.telemetry-schema",
       "type": "doctor",
+      "dimension": "validation",
       "summary": "Telemetry span schema must stay present and valid.",
       "only": "telemetry-schema",
       "required": true
@@ -72,6 +78,7 @@
     {
       "id": "doctor.descriptions",
       "type": "doctor",
+      "dimension": "validation",
       "summary": "Skill descriptions must stay line-readable.",
       "only": "descriptions",
       "required": true
@@ -79,6 +86,7 @@
     {
       "id": "task.session-correction-learning",
       "type": "task",
+      "dimension": "self-learning",
       "summary": "Explicit user corrections in session logs should become self-learning outcomes.",
       "target_type": "plugin",
       "target_name": "legion-observability",
@@ -125,6 +133,7 @@
     {
       "id": "task.self-learning-memory",
       "type": "task",
+      "dimension": "self-learning",
       "summary": "Recorded benchmark outcomes should synthesize durable self-learning memory.",
       "target_type": "plugin",
       "target_name": "legion-observability",
@@ -163,6 +172,7 @@
     {
       "id": "task.doctor-negative-fixture",
       "type": "task",
+      "dimension": "validation",
       "summary": "Doctor should reject a fixture with a block-scalar skill description.",
       "target_type": "plugin",
       "target_name": "legion-observability",

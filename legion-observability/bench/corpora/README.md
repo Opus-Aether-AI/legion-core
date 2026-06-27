@@ -55,8 +55,11 @@ Optional live modes currently packaged:
 - `legion-cursor`
 
 Live modes require the corresponding CLI and auth on the machine running the
-bench. GitHub Actions also has a manual `legion-live-bench` workflow with an
-explicit `run_live=true` guard before any live modes run.
+bench. The adapters restore the real user `HOME` for the live CLI process so
+Codex, Claude, and Cursor can read their normal auth state while the editable
+task workspace remains isolated. GitHub Actions also has a manual
+`legion-live-bench` workflow with an explicit `run_live=true` guard before any
+live modes run.
 
 ## Live Corpus Template
 

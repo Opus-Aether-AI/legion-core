@@ -1861,12 +1861,14 @@ def run_corpus_case_mode(
     _write_json(case_file, _dict(_render(case, context)))
 
     env = os.environ.copy()
+    real_home = env.get("HOME", "")
     env.update({
         "HOME": home,
         "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
         "LEGION_BENCH_REPO": os.path.abspath(repo),
         "LEGION_BENCH_WORKSPACE": workspace,
         "LEGION_BENCH_HOME": home,
+        "LEGION_BENCH_REAL_HOME": real_home,
         "LEGION_BENCH_LOGS": logs,
         "LEGION_BENCH_CASE_ID": case_id,
         "LEGION_BENCH_MODE_ID": mode_id,

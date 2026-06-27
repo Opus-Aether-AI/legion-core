@@ -322,6 +322,56 @@ def test_task_case_validates_command_validator(tmp_path):
     assert result["details"]["validators"][0]["type"] == "command"
 
 
+def test_corpus_case_exports_real_home_for_live_adapters(tmp_path):
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    result = bench.run_corpus_case_mode(
+        {
+            "id": "env-export",
+            "type": "task",
+            "task": "Record benchmark environment.",
+            "command": [
+                "python3",
+                "-c",
+                (
+                    "import json, os, pathlib; "
+                    "pathlib.Path('env.json').write_text(json.dumps({"
+                    "'home': os.environ.get('HOME'), "
+                    "'bench_home': os.environ.get('LEGION_BENCH_HOME'), "
+                    "'real_home': os.environ.get('LEGION_BENCH_REAL_HOME')"
+                    "}), encoding='utf-8')"
+                ),
+            ],
+            "validators": [
+                {
+                    "type": "json_file_field_equals",
+                    "path": "{workspace}/env.json",
+                    "field": "real_home",
+                    "equals": os.environ["HOME"],
+                }
+            ],
+        },
+        {"id": "env-mode"},
+        repo=repo,
+        run_dir=str(tmp_path / "run"),
+        repeat_index=1,
+    )
+
+    env_path = (
+        tmp_path
+        / "run"
+        / "corpus-workspaces"
+        / "env-mode"
+        / "attempt-01"
+        / "env-export"
+        / "env.json"
+    )
+    env = json.loads(env_path.read_text(encoding="utf-8"))
+    assert result["status"] == "pass"
+    assert env["home"] == env["bench_home"]
+    assert env["real_home"] == os.environ["HOME"]
+    assert env["home"] != env["real_home"]
+
+
 def test_learning_lift_payload_scores_before_after_memory(tmp_path):
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
     payload = bench.learning_lift_payload(

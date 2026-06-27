@@ -1,17 +1,14 @@
 name: release-please
 
-# Opens / updates a "Release PR" whenever Conventional Commits land on main.
-# Merging it bumps .claude-plugin/marketplace.json + package.json ($.version),
-# updates CHANGELOG.md, tags, creates a GitHub Release, then publishes the public
-# npm package to npmjs and GitHub Packages.
+# Single-workflow release pipeline, matching @opus-aether-ai/pine-transpiler:
+#  1. release-please opens or updates a Release PR on pushes to main.
+#  2. The Release PR is flagged for GitHub-native auto-merge.
+#  3. When that Release PR lands, release-please creates the tag + Release and
+#     this same workflow publishes @opus-aether-ai/legion-core to npmjs and
+#     GitHub Packages.
 #
-# Token note: this uses the default GITHUB_TOKEN (no PAT). One consequence is
-# that the auto-generated Release PR lands WITHOUT CI checks (a PR opened by
-# GITHUB_TOKEN can't trigger workflows) — merge it with admin bypass. That's
-# safe: a Release PR only bumps version strings + CHANGELOG; the actual code
-# already passed CI on the feature PRs. The publish step below runs in THIS
-# workflow run (triggered by your merge to main, a real push), so it fires
-# automatically with no PAT; `release_created` gates publishing to real releases.
+# The publish step lives in this workflow because GitHub does not trigger
+# downstream workflows from tags/releases created by the default GITHUB_TOKEN.
 
 on:
   push:
@@ -42,6 +39,15 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      - name: Enable auto-merge on Release PR
+        if: ${{ steps.release.outputs.pr }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Enabling auto-merge on Release PR #${PR_NUMBER}"
+          gh pr merge "${PR_NUMBER}" --repo "${REPO}" --auto --squash
 
   publish:
     name: Publish package
@@ -64,6 +70,8 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+      - name: Use latest npm
+        run: npm install -g npm@latest
 
       - name: Version is in sync
         run: |
@@ -82,7 +90,7 @@ jobs:
           echo "version $pkg in sync"
 
       - name: Publish to npm with provenance
-        run: npm publish --provenance --access public --ignore-scripts
+        run: npm publish --provenance --access public --ignore-scripts --tag latest
 
       - name: Set up Node for GitHub Packages
         uses: actions/setup-node@v5

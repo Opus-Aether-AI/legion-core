@@ -2,6 +2,9 @@
   <img src="./identity/legion-banner.png" alt="" width="720">
 </div>
 
+[![npm version](https://img.shields.io/npm/v/@opus-aether-ai/legion-core.svg)](https://www.npmjs.com/package/@opus-aether-ai/legion-core)
+[![npm downloads](https://img.shields.io/npm/dm/@opus-aether-ai/legion-core.svg)](https://www.npmjs.com/package/@opus-aether-ai/legion-core)
+
 > **legion-core** — the model-agnostic orchestration engine behind Legion. The base layer you build your own agents on.
 
 One will commands a host of agents — **GPT-5.x via Codex**, **Cursor**, **Claude** (and humans). legion-core gives you the parts that aren't domain-specific: scoped multi-model **delegation**, **telemetry**, a **health check**, **self-learning**, and **auto-healing** — so a new agent project starts from a working spine instead of a blank page.
@@ -38,22 +41,34 @@ versioned copy of the engine (bins + scripts + plugins) instead of cloning. This
 additive — the marketplace / source-clone paths still work.
 
 ```bash
-# Install it.
+# Add it to a project.
 npm install @opus-aether-ai/legion-core            # or: bun add / pnpm add
 
 # The engine CLIs are now on your project's bin path.
 npx legion-doctor --help
 npx legion-delegate run --archetype fix-bug --task "…" --repo .
+
+# Or run a CLI without adding it to package.json.
+npx --package @opus-aether-ai/legion-core legion-doctor --help
 ```
+
+Package links:
+
+- npmjs: <https://www.npmjs.com/package/@opus-aether-ai/legion-core>
+- GitHub Packages mirror: <https://github.com/orgs/Opus-Aether-AI/packages/npm/package/legion-core>
+- dist-tags: `npm view @opus-aether-ai/legion-core dist-tags`
 
 Publishing is automated: [`release-please`](.github/workflows/release-please.yml)
 cuts the release, then publishes to npmjs with Trusted Publishing / GitHub OIDC
-and mirrors to GitHub Packages with `GITHUB_TOKEN`. The
-[`publish-package`](.github/workflows/publish-package.yml) workflow is the manual
-re-publish path and uses the same auth model. Before the first npmjs publish,
-configure the npm Trusted Publisher for `@opus-aether-ai/legion-core` with
-organization `Opus-Aether-AI`, repository `legion-core`, workflow
-`release-please.yml`, environment `release`, and action `npm publish`.
+and mirrors to GitHub Packages with `GITHUB_TOKEN`. Stable releases publish to
+the npmjs `latest` dist-tag. The first package is live; before the next
+automated publish, configure the npm Trusted Publisher for
+`@opus-aether-ai/legion-core` at
+<https://www.npmjs.com/package/@opus-aether-ai/legion-core/access> with
+organization `Opus-Aether-AI`, repository `legion-core`, workflow filename
+`release-please.yml`, environment `release`, and allowed action `npm publish`.
+Each npm package supports one Trusted Publisher, so keep `release-please.yml` as
+the canonical npmjs publisher.
 
 ## Configuration
 

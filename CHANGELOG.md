@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.9.1...v0.9.2) (2026-06-27)
+
+
+### Documentation
+
+* **readme:** fix header badge row and shorten install one-liner ([#57](https://github.com/Opus-Aether-AI/legion-core/issues/57)) ([0b6a8e9](https://github.com/Opus-Aether-AI/legion-core/commit/0b6a8e9850c9b2c058ad32f0f36e60ca71105761))
+
 ## [0.9.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.9.0...v0.9.1) (2026-06-26)
 
 

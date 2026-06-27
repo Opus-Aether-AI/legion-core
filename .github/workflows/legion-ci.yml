@@ -38,8 +38,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Install jq
-        run: sudo apt-get update -qq && sudo apt-get install -y jq
+      - name: Install jq + pytest
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y jq
+          python3 -m pip install --quiet pytest   # aider-polyglot-python validators run pytest
       - name: Harness intelligence scorecard (routing/orchestration/validation)
         run: |
           legion-observability/bin/legion-bench stable \
@@ -54,6 +56,12 @@ jobs:
         run: |
           legion-observability/bin/legion-bench corpus \
             --corpus heldout-oss-hard --repo . \
+            --mode scripted-baseline --mode scripted-oracle \
+            --baseline scripted-baseline --strict --require-reliable --json > /dev/null
+      - name: Corpus integrity control — aider-polyglot-python (external)
+        run: |
+          legion-observability/bin/legion-bench corpus \
+            --corpus aider-polyglot-python --repo . \
             --mode scripted-baseline --mode scripted-oracle \
             --baseline scripted-baseline --strict --require-reliable --json > /dev/null
 

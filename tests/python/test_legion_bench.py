@@ -231,6 +231,56 @@ def test_record_failed_outcomes_writes_benchmark_source(tmp_path):
     assert outcome["target_name"] == "legion-router"
 
 
+def test_record_failed_corpus_outcomes_attributes_to_mode(tmp_path):
+    logs = tmp_path / "logs"
+    run_path = tmp_path / "bench" / "run.json"
+    run_path.parent.mkdir()
+    run_path.write_text("{}", encoding="utf-8")
+    results = [
+        {
+            "id": "py-parse-bool",
+            "mode": "legion-delegate",
+            "required": True,
+            "status": "fail",
+            "dimension": "parsing",
+            "attempt": 2,
+            "reason": "exit=1 expected=0; validators=0/1",
+        },
+        {
+            "id": "py-add",
+            "mode": "legion-delegate",
+            "required": True,
+            "status": "pass",
+            "dimension": "implementation",
+            "reason": "case passed",
+        },
+    ]
+
+    recorded = bench.record_failed_corpus_outcomes(
+        results,
+        log_root=str(logs),
+        run_path=str(run_path),
+        run_id="corpus-1",
+        corpus_name="heldout-oss-36",
+    )
+    recorded_again = bench.record_failed_corpus_outcomes(
+        results,
+        log_root=str(logs),
+        run_path=str(run_path),
+        run_id="corpus-2",
+        corpus_name="heldout-oss-36",
+    )
+
+    assert len(recorded) == 1
+    assert recorded_again == []
+    outcome = json.loads((logs / "self-learn" / "outcomes.jsonl").read_text(encoding="utf-8"))
+    assert outcome["source"] == "legion-bench"
+    assert outcome["target_type"] == "command"
+    assert outcome["target_name"] == "legion-delegate"
+    assert outcome["metadata"]["corpus"] == "heldout-oss-36"
+    assert outcome["metadata"]["mode"] == "legion-delegate"
+
+
 def test_task_case_runs_fixture_command_and_validators(tmp_path):
     run_dir = tmp_path / "run"
     script = (

@@ -1072,6 +1072,69 @@ def record_failed_outcomes(
     return recorded
 
 
+def record_failed_corpus_outcomes(
+    results: list[dict[str, Any]],
+    *,
+    log_root: str,
+    run_path: str,
+    run_id: str,
+    corpus_name: str,
+) -> list[dict[str, Any]]:
+    """Record failed required corpus case-runs as self-learning outcomes.
+
+    A corpus failure is attributed to the harness MODE that produced it (e.g.
+    legion-delegate / legion-cursor / direct-codex), so legion-self-learn can
+    target the right entity. This closes the benchmarking.md learning-feedback
+    loop for the live corpus path, mirroring record_failed_outcomes for suites.
+    """
+    path = _outcomes_path(log_root)
+    existing = _existing_outcome_ids(path)
+    recorded: list[dict[str, Any]] = []
+    for result in results:
+        if result.get("status") == "pass" or not result.get("required"):
+            continue
+        mode = _text(result.get("mode")) or "unknown-mode"
+        case_id = _text(result.get("id"))
+        dimension = _text(result.get("dimension")) or "corpus"
+        is_harness_mode = mode.startswith(("legion-", "direct-", "cursor-"))
+        target_type = "command" if is_harness_mode else "plugin"
+        target_name = mode if is_harness_mode else "legion-observability"
+        summary = _short(
+            f"Corpus {corpus_name}: mode {mode} failed {case_id} ({dimension}): {result.get('reason')}",
+            500,
+        )
+        outcome_id = _stable_id(
+            ["legion-bench-corpus", target_type, target_name, corpus_name, mode, case_id, summary]
+        )
+        if outcome_id in existing:
+            continue
+        outcome = {
+            "schema": OUTCOME_SCHEMA,
+            "id": outcome_id,
+            "ts": _iso_utc(),
+            "source": "legion-bench",
+            "target_type": target_type,
+            "target_name": target_name,
+            "severity": "medium",
+            "summary": summary,
+            "evidence": _short(f"{run_path}#{mode}/{case_id}: {result.get('reason')}", 1200),
+            "run_id": run_id,
+            "source_path": run_path,
+            "metadata": {
+                "corpus": corpus_name,
+                "mode": mode,
+                "case_id": case_id,
+                "dimension": dimension,
+                "attempt": result.get("attempt"),
+                "status": result.get("status"),
+            },
+        }
+        _append_jsonl(path, outcome)
+        existing.add(outcome_id)
+        recorded.append(outcome)
+    return recorded
+
+
 def load_run_or_summary(path: str) -> dict[str, Any]:
     payload = _json_file(os.path.abspath(os.path.expanduser(path)))
     schema = payload.get("schema")
@@ -2348,6 +2411,16 @@ def corpus_command(args: argparse.Namespace) -> int:
         reliability_min_cases=reliability_min_cases,
     )
     artifacts = write_corpus_artifacts(args.bench_dir, run_id, corpus, results, summary)
+    recorded_outcomes: list[dict[str, Any]] = []
+    if getattr(args, "record_failures", False):
+        recorded_outcomes = record_failed_corpus_outcomes(
+            results,
+            log_root=args.logs,
+            run_path=artifacts["run_path"],
+            run_id=run_id,
+            corpus_name=_text(corpus.get("corpus")) or args.corpus,
+        )
+        artifacts["recorded_outcomes"] = len(recorded_outcomes)
     report_path = ""
     if args.report_md:
         report_path = os.path.abspath(os.path.expanduser(args.report_md))
@@ -2382,6 +2455,8 @@ def corpus_command(args: argparse.Namespace) -> int:
         print(f"run: {artifacts['run_path']}")
         if report_path:
             print(f"report: {report_path}")
+        if recorded_outcomes:
+            print(f"recorded outcomes: {len(recorded_outcomes)}")
     if args.require_reliable:
         unreliable = [
             key
@@ -2554,6 +2629,8 @@ def main(argv: list[str] | None = None) -> int:
     corpus.add_argument("--repeat", type=int, default=1)
     corpus.add_argument("--reliability-min-cases", type=int, default=0)
     corpus.add_argument("--bench-dir", default=os.environ.get("LEGION_BENCH_DIR", DEFAULT_BENCH_ROOT))
+    corpus.add_argument("--logs", default=DEFAULT_LOG_ROOT)
+    corpus.add_argument("--record-failures", action="store_true", help="record failed required case-runs as legion-self-learn outcomes, attributed to the failing mode")
     corpus.add_argument("--run-id", default="")
     corpus.add_argument("--dry-run", action="store_true", help="validate corpus shape and selected modes without executing cases")
     corpus.add_argument("--report-md", default="", help="write a Markdown corpus report to this path")

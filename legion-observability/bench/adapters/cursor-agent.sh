@@ -26,9 +26,13 @@ start_ms="$(bench_now_ms)"
 set +e
 cursor-agent "${args[@]}" "$task" | tee "$tmp"
 rc=${PIPESTATUS[0]}
-set -e
+# Stay under `set +e` for span post-processing (see direct-codex.sh).
 end_ms="$(bench_now_ms)"
 dur=$(( end_ms - start_ms ))
+
+# Label the span with the model cursor-agent actually reports when available.
+actual_model="$(jq -r '.model // .metadata.model // empty' "$tmp" 2>/dev/null || true)"
+[[ -n "$actual_model" && "$actual_model" != "null" ]] && model="$actual_model"
 
 # cursor-agent reports usage with camelCase keys (inputTokens/outputTokens/
 # cacheReadTokens/cacheWriteTokens). Normalize to the canonical snake_case

@@ -12,12 +12,11 @@ if [[ -n "${LEGION_BENCH_REAL_HOME:-}" ]]; then
   export HOME="$LEGION_BENCH_REAL_HOME"
 fi
 
-args=(exec --json -s workspace-write -C "$workspace" --skip-git-repo-check -)
-if [[ -n "${CODEX_MODEL:-}" ]]; then
-  args=(exec --json -m "$CODEX_MODEL" -s workspace-write -C "$workspace" --skip-git-repo-check -)
-fi
-
+# Pin the model so the priced/labeled model matches the one Codex actually runs
+# (otherwise cost is computed for gpt-5.4 while the CLI may use a different default).
 model="${CODEX_MODEL:-gpt-5.4}"
+args=(exec --json -m "$model" -s workspace-write -C "$workspace" --skip-git-repo-check -)
+
 tmp="$(mktemp "${TMPDIR:-/tmp}/direct-codex.XXXXXX")"
 trap 'rm -f "'"$tmp"'"' EXIT
 
@@ -25,7 +24,9 @@ start_ms="$(bench_now_ms)"
 set +e
 codex "${args[@]}" < "$task_file" | tee "$tmp"
 rc=${PIPESTATUS[0]}
-set -e
+# Stay under `set +e` for span post-processing: a missing/failing jq must not
+# abort the adapter or replace the CLI's real exit code. The script ends with
+# an explicit `exit "$rc"`, and every parse below is guarded.
 end_ms="$(bench_now_ms)"
 dur=$(( end_ms - start_ms ))
 

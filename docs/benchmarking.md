@@ -21,8 +21,12 @@ validate their artifacts.
 `heldout-oss-36` is a **correctness-parity floor** — saturated micro-functions where
 every model scores ~100%, so a harness can only match-or-lose; useful as a
 no-regression smoke and a real-cost reference. `heldout-oss-hard` is the
-**discriminating tier** — multi-file / longer-horizon / rich-edge-case tasks where
-single-shot attempts miss, so pass rates and the cost to reach them separate.
+**discriminating tier** — multi-file / longer-horizon / rich-edge-case tasks. In
+the live run it still saturated on pass rate (frontier single-shot models solve
+self-contained Python), so today it discriminates on **cost and latency at equal
+quality**, not correctness — e.g. delegate-to-gpt-5.4 matching Claude at ~1/4 the
+cost. See [`benchmarks/heldout-oss-hard-live.md`](benchmarks/heldout-oss-hard-live.md).
+Pushing pass rates off 100% needs a harder, repo-scale tier (next slice).
 
 > **Cursor needs a short workspace path.** `cursor-agent --trust` fails on very long
 > / deeply nested paths (`Failed to trust workspace … check permissions`), silently

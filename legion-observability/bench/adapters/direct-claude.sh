@@ -27,9 +27,14 @@ start_ms="$(bench_now_ms)"
 set +e
 claude "${args[@]}" "$task" | tee "$tmp"
 rc=${PIPESTATUS[0]}
-set -e
+# Stay under `set +e` for span post-processing (see direct-codex.sh).
 end_ms="$(bench_now_ms)"
 dur=$(( end_ms - start_ms ))
+
+# Label the span with the model Claude actually reports when available, so the
+# attribution is truthful even if the CLI default differs from CLAUDE_MODEL.
+actual_model="$(jq -r '.model // .modelName // empty' "$tmp" 2>/dev/null || true)"
+[[ -n "$actual_model" && "$actual_model" != "null" ]] && model="$actual_model"
 
 usage="$(jq -c '.usage // {}' "$tmp" 2>/dev/null || printf '{}')"
 if jq -e '.total_cost_usd | numbers' "$tmp" >/dev/null 2>&1; then

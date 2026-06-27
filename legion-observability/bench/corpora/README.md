@@ -7,6 +7,30 @@ Legion spans, and sample-size reliability.
 The packaged `local-smoke.json` corpus is only a runner smoke test. It is tiny
 and intentionally marked unreliable for performance claims.
 
+## Two corpus layers
+
+The packaged live corpora are deliberately split into two layers, because they
+measure different things:
+
+- **`heldout-oss-36.json` — correctness-parity floor.** 36 Python micro-coding
+  tasks (single 5-line functions). Every frontier model saturates this at ~100%,
+  so it does **not** discriminate between harnesses; it only proves a harness does
+  not *regress* raw model correctness, and it is the cheapest live smoke test.
+- **`heldout-oss-hard.json` — discriminating tier.** 19 harder, held-out
+  pure-Python tasks: multi-file (e.g. `account.py` + `bank.py`), longer-horizon
+  (mini-parsers, state machines, topological sort), constrained bug-fixes, and
+  rich multi-assertion edge cases. These are authored so a sloppy single-shot
+  attempt fails at least one assertion, so pass rates land below 100% and
+  harness differences (and the cost to achieve them) are visible. Validators are
+  the oracle; `answer_files` pass and stubs fail (proven by the scripted-oracle /
+  scripted-baseline control).
+
+> **Cursor modes need a short workspace path.** `cursor-agent --trust` fails on
+> very long / deeply-nested workspace paths (`Failed to trust workspace … check
+> permissions`), which silently zeroes the `cursor-agent` and `legion-cursor`
+> modes. Run the live bench with a short `LEGION_BENCH_DIR` (e.g. under `/tmp`);
+> the CI workflow already uses the short `$RUNNER_TEMP`.
+
 The packaged `heldout-oss-36.json` corpus is the first reliable held-out lane.
 It contains 36 Python micro-coding tasks and defaults to no-spend deterministic
 control modes:

@@ -27,6 +27,36 @@ jobs:
       - name: Run legion-doctor (hard checks gate; codex/router/registry warn only)
         run: bash legion-observability/scripts/legion-doctor.sh
 
+  # No-spend benchmark gate. Runs the deterministic "harness intelligence"
+  # scorecard (skill routing / orchestration routing / validation via the stable
+  # suite) plus the corpus integrity controls (scripted-oracle must pass every
+  # case, scripted-baseline must fail every case). All of this is deterministic
+  # and needs no model spend or CLI auth, so it gates every PR. Live model
+  # comparisons stay in the manual bench-live.yml workflow behind run_live=true.
+  bench:
+    name: bench-no-spend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install jq
+        run: sudo apt-get update -qq && sudo apt-get install -y jq
+      - name: Harness intelligence scorecard (routing/orchestration/validation)
+        run: |
+          legion-observability/bin/legion-bench stable \
+            --suite stable --repo . --repeat 3 --strict --json > /dev/null
+      - name: Corpus integrity control — heldout-oss-36 (parity floor)
+        run: |
+          legion-observability/bin/legion-bench corpus \
+            --corpus heldout-oss-36 --repo . \
+            --mode scripted-baseline --mode scripted-oracle \
+            --baseline scripted-baseline --strict --require-reliable --json > /dev/null
+      - name: Corpus integrity control — heldout-oss-hard (discriminating tier)
+        run: |
+          legion-observability/bin/legion-bench corpus \
+            --corpus heldout-oss-hard --repo . \
+            --mode scripted-baseline --mode scripted-oracle \
+            --baseline scripted-baseline --strict --require-reliable --json > /dev/null
+
   # Secret scan. We run the gitleaks binary directly (not the action) to avoid the
   # org-license requirement gitleaks-action imposes. Scans the working tree; the
   # allowlist in .gitleaks.toml exempts test fixtures/mocks/examples.

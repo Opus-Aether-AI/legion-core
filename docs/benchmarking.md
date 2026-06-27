@@ -11,6 +11,24 @@ live model calls, hosted service, Docker images, or LLM judge in the default
 lanes, but task cases run real Legion CLIs against temporary workspaces and
 validate their artifacts.
 
+## The benchmark is two layers
+
+| Layer | Measures | Spend | Gate |
+|---|---|---|---|
+| **Harness intelligence** (`stable` suite: `eval.*` / `route.*` / `doctor.*`) | skill routing, orchestration routing (26 archetypes), validation gates | none — deterministic | **CI-blocking every PR** (`legion-ci.yml` → `bench-no-spend`): 100% required-pass, 0 flakes |
+| **Live coding** (`corpus`: `heldout-oss-36` + `heldout-oss-hard`) | end-to-end task success + **real cost/tokens** per harness mode | real | manual `bench-live.yml` (`run_live=true`); informational, regression-visibility gate below |
+
+`heldout-oss-36` is a **correctness-parity floor** — saturated micro-functions where
+every model scores ~100%, so a harness can only match-or-lose; useful as a
+no-regression smoke and a real-cost reference. `heldout-oss-hard` is the
+**discriminating tier** — multi-file / longer-horizon / rich-edge-case tasks where
+single-shot attempts miss, so pass rates and the cost to reach them separate.
+
+> **Cursor needs a short workspace path.** `cursor-agent --trust` fails on very long
+> / deeply nested paths (`Failed to trust workspace … check permissions`), silently
+> zeroing the `cursor-agent` and `legion-cursor` modes. Run the live bench with a
+> short `LEGION_BENCH_DIR` (e.g. under `/tmp`); CI uses the short `$RUNNER_TEMP`.
+
 ## Goals
 
 - Benchmark Legion as a harness layer over Codex, Claude Code, Cursor, and future
@@ -71,7 +89,9 @@ legion-bench learning-lift --repo . --json
 - selected executor/model/sandbox/effort for route cases
 - doctor validation commands and output
 - fixture-backed task command output and artifact validators
-- token/cost/latency fields, currently zero-cost/offline in v1
+- token/cost/latency fields (zero for the offline deterministic suites; the live
+  corpus adapters emit real `legion.span.v1` cost/tokens — direct Codex/Claude/Cursor
+  included, not just the Legion wrappers)
 - final status and failure reason
 
 `stable` runs the same suite multiple times and writes
@@ -104,13 +124,15 @@ JSON/JSONL, and aggregates pass rate, duration, cost, tokens, and span count.
 Relative lift is only marked reliable once the comparison has at least
 `reliability_min_cases` case-runs, default `30`.
 
-`heldout-oss-36` is the first packaged reliable corpus. Its default modes are
-`scripted-baseline` and `scripted-oracle`, so it can run in CI without model
-spend while proving validators, paired stats, failure clustering, reliability,
-and report rendering. Live agent modes (`direct-codex`, `legion-delegate`,
-`direct-claude`, `cursor-agent`, `legion-cursor`) are selected explicitly.
-See `legion-observability/bench/corpora/README.md` for direct-Codex versus
-Legion commands and auth requirements.
+`heldout-oss-36` (36 micro tasks, parity floor) and `heldout-oss-hard` (19
+multi-file / longer-horizon tasks, discriminating tier) are the two packaged
+reliable corpora. Both default to `scripted-baseline` and `scripted-oracle`, so
+they run in CI without model spend while proving validators, paired stats,
+failure clustering, reliability, and report rendering. Live agent modes
+(`direct-codex`, `legion-delegate`, `direct-claude`, `cursor-agent`,
+`legion-cursor`) are selected explicitly. See
+`legion-observability/bench/corpora/README.md` for direct-Codex versus Legion
+commands and auth requirements.
 
 `compare` reports Harness Bench-style lift fields for the headline score:
 
@@ -260,18 +282,28 @@ should follow the OSS pattern:
 
 Gate rule:
 
-- candidate must not reduce pass rate;
-- candidate must not increase false success;
-- candidate must improve at least one targeted metric, or stay neutral with an
-  explicit reason;
-- cost/latency regressions must be visible even when quality improves.
+- **No-spend layer (CI-blocking):** the `stable` harness-intelligence suite must
+  stay 100% required-pass with 0 flakes, and both corpus controls must keep
+  `scripted-oracle` at 100% and `scripted-baseline` at 0%. Enforced by the
+  `bench-no-spend` job in `legion-ci.yml` on every PR.
+- **Live layer (informational, regression-visible):** candidate must not reduce
+  pass rate; must not increase false success; must improve at least one targeted
+  metric or stay neutral with an explicit reason; and cost/latency regressions
+  must be visible even when quality improves. Cost is now a real measurement on
+  every mode (direct adapters emit spans), so `legion-bench gate
+  --max-cost-delta` can fail a candidate that buys equal quality at higher cost —
+  the cost axis is no longer hidden behind `$0` direct-adapter columns.
 
 ## Learning Loop
 
-Benchmark misses can become normal self-learning input:
+Benchmark misses — from the deterministic suites or the live corpus — can become
+normal self-learning input:
 
 ```bash
 legion-bench run --suite core --repo . --record-failures
+legion-bench corpus --corpus heldout-oss-hard --repo . \
+  --mode direct-codex --mode legion-delegate --baseline direct-codex \
+  --record-failures
 ```
 
 Then:
@@ -282,8 +314,11 @@ legion-self-learn run --repo . --apply-memory --quiet
 
 `--record-failures` writes failed required cases as `legion.outcome.v1` rows with
 `source: legion-bench` under `~/.claude/logs/legion/self-learn/outcomes.jsonl`.
-Those outcomes remain memory/proposal input only. Source mutation stays behind
-the existing `--apply-source` scorecard gate.
+For the corpus path the outcome is **attributed to the failing harness mode**
+(`target_type: command`, `target_name: legion-delegate`/`legion-cursor`/`direct-*`),
+so a harness regression lands on the right entity. Those outcomes remain
+memory/proposal input only. Source mutation stays behind the existing
+`--apply-source` scorecard gate.
 
 ## Implementation Slices
 
@@ -307,7 +342,16 @@ the existing `--apply-source` scorecard gate.
    dry-run planning, and Markdown report output.
 11. Done: add a manual `legion-live-bench` workflow with an explicit live-spend
    guard before model-backed modes run.
-12. Next: add packaged optional adapters for SWE-bench Lite/Verified and Aider
+12. Done: emit real `legion.span.v1` cost/tokens from the direct adapters
+   (`direct-codex`/`direct-claude`/`cursor-agent`), so the live cost-routing
+   comparison is real instead of `$0` for direct modes.
+13. Done: add `heldout-oss-hard`, a 19-case discriminating tier (multi-file /
+   longer-horizon), so the live lane can show harness lift, not only parity.
+14. Done: wire `legion-bench corpus --record-failures` so live corpus misses feed
+   self-learning, attributed to the failing harness mode.
+15. Done: gate every PR on the no-spend benchmark (`bench-no-spend` in
+   `legion-ci.yml`): intelligence suite + both corpus integrity controls.
+16. Next: add packaged optional adapters for SWE-bench Lite/Verified and Aider
    Polyglot-style exercises.
 
 ## Non-goals

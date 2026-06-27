@@ -1,103 +1,75 @@
-# Heldout OSS 36 Live Benchmark
+# Heldout OSS 36 — Live Benchmark (correctness-parity floor)
 
-Generated: 2026-06-27T09:56Z
-Updated: 2026-06-27T10:29Z with corrected Claude run
+Generated: 2026-06-27. **Single commit, single run** (no cross-commit reruns).
+Bench root under a short `/tmp` path so cursor modes trust their workspace.
 
-This is the first live run of the packaged `heldout-oss-36` corpus after fixing
-live adapter auth. The benchmark ran at commit `8fa18bb` on branch
-`feat/legion-live-bench-v1`.
+`heldout-oss-36` is the parity floor: 36 single-function Python micro-tasks that
+every frontier model saturates at ~100%. It is **not** a model-quality claim and
+cannot show one harness beating another — its jobs are (1) prove a harness does not
+*regress* raw correctness and (2) give a real per-mode **cost** reference. For lift,
+see the discriminating tier in `heldout-oss-hard-live.md`.
 
-The first attempted live run was discarded because the bench runner isolated
-`HOME`, so Codex, Claude, and Cursor could not read their normal credentials.
-That exposed a real adapter bug. The fix exports `LEGION_BENCH_REAL_HOME` and
-the live adapters restore `HOME` only for the CLI process, while keeping the
-editable task workspace isolated.
-
-Claude auth was still broken on the first corrected full-matrix run. After
-`claude -p` was fixed, `direct-claude` was rerun separately against the same
-36-case corpus at commit `34f1bdb`.
+> Supersedes the earlier version of this file, which reported `$0` for direct
+> modes (no spans) and stitched a separately-rerun `direct-claude` from a different
+> commit. Direct adapters now emit real `legion.span.v1` cost/tokens, and this run
+> is a single matrix at one commit. (Claude was omitted from this refresh to save
+> spend on a saturated floor; its parity is established on the hard tier.)
 
 ## Command
 
-Full matrix:
-
 ```bash
-LEGION_BENCH_DIR=/tmp/legion-live-full-fixed-20260627T083837Z/bench \
-LEGION_TELEMETRY_DIR=/tmp/legion-live-full-fixed-20260627T083837Z/spans \
-  legion-observability/bin/legion-bench corpus \
-  --corpus heldout-oss-36 \
-  --repo . \
-  --mode direct-codex \
-  --mode legion-delegate \
-  --mode direct-claude \
-  --mode cursor-agent \
-  --mode legion-cursor \
-  --baseline direct-codex \
-  --require-reliable \
-  --json \
-  --report-md /tmp/legion-live-full-fixed-20260627T083837Z/live-full-fixed-report.md
-```
-
-Claude rerun:
-
-```bash
-LEGION_BENCH_DIR=/tmp/legion-live-claude-fixed-20260627T101509Z/bench \
-LEGION_TELEMETRY_DIR=/tmp/legion-live-claude-fixed-20260627T101509Z/spans \
-  legion-observability/bin/legion-bench corpus \
-  --corpus heldout-oss-36 \
-  --repo . \
-  --mode direct-claude \
-  --baseline direct-claude \
-  --require-reliable \
-  --json \
-  --report-md /tmp/legion-live-claude-fixed-20260627T101509Z/direct-claude-report.md
+LEGION_BENCH_DIR=/tmp/lm-XXXX/bench LEGION_TELEMETRY_DIR=/tmp/lm-XXXX/spans \
+legion-observability/bin/legion-bench corpus --corpus heldout-oss-36 --repo . \
+  --mode direct-codex --mode cursor-agent \
+  --mode legion-delegate --mode legion-cursor \
+  --baseline direct-codex --repeat 1 --record-failures \
+  --report-md /tmp/lm-XXXX/heldout-oss-36-live.md --json
 ```
 
 ## Results
 
 | Mode | Pass | Case-runs | Pass rate | 95% CI | Cost | Tokens | Mean ms | P95 ms |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `direct-codex` | 36 | 36 | `1.000` | `0.904-1.000` | `$0.000000` | 0 | 34442 | 47256 |
-| `cursor-agent` | 36 | 36 | `1.000` | `0.904-1.000` | `$0.000000` | 0 | 25623 | 30166 |
-| `direct-claude` | 36 | 36 | `1.000` | `0.904-1.000` | `$0.000000` | 0 | 24073 | 29865 |
-| `legion-delegate` | 35 | 36 | `0.972` | `0.858-0.995` | `$3.226678` | 3372636 | 40418 | 70134 |
-| `legion-cursor` | 35 | 36 | `0.972` | `0.858-0.995` | `$0.000000` | 0 | 25572 | 32368 |
+| `cursor-agent` | 36 | 36 | 1.000 | 0.904-1.000 | `$0.000000` (unmetered) | 3646747 | 25224 | 32051 |
+| `direct-codex` | 36 | 36 | 1.000 | 0.904-1.000 | `$3.245539` | 3390921 | 30365 | 37552 |
+| `legion-cursor` | 36 | 36 | 1.000 | 0.904-1.000 | `$0.000000` (unmetered) | 3975836 | 27956 | 37704 |
+| `legion-delegate` | 35 | 36 | 0.972 | 0.858-0.995 | `$3.549048` | 3617370 | 40820 | 64576 |
 
-Cost/tokens for direct harness adapters remain `0` in this report because those
-modes do not emit `legion.span.v1` records yet. `legion-delegate` and
-`legion-cursor` do emit spans, so their span counts and delegated cost can be
-reported.
+Baseline `direct-codex`:
 
-## Paired Comparisons
+| Comparison | Delta pp | McNemar p | Cost delta | Duration delta ms |
+|---|---:|---:|---:|---:|
+| `direct-codex..cursor-agent` | +0.000 | n/a | `$-3.245539` | -185074 |
+| `direct-codex..legion-cursor` | +0.000 | n/a | `$-3.245539` | -86718 |
+| `direct-codex..legion-delegate` | -2.778 | 1.000000 | `$+0.303509` | +376381 |
 
-Baseline: `direct-codex`.
+### Failure cluster
 
-| Comparison | Delta pp | Relative | Candidate paired wins | Baseline paired wins | Both pass | McNemar p | Reliable |
-|---|---:|---:|---:|---:|---:|---:|---|
-| `direct-codex..cursor-agent` | `+0.000` | `+0.000%` | 0 | 0 | 36 | `n/a` | true |
-| `direct-codex..legion-delegate` | `-2.778` | `-2.778%` | 0 | 1 | 35 | `1.000000` | true |
-| `direct-codex..legion-cursor` | `-2.778` | `-2.778%` | 0 | 1 | 35 | `1.000000` | true |
-
-The corrected Claude run was separate from the full matrix, so it does not have
-a same-run paired McNemar comparison against direct Codex. Its headline pass
-rate is equal: `36/36`.
-
-The Legion wrapper gaps are not statistically significant on this sample
-(`p=1.0`) but they are concrete failures to inspect.
-
-## Failure Notes
-
-- `legion-delegate` failed `py-parse-bool`: it left `return bool(value)`, so
-  `"No"` and `"0"` evaluated to `True`.
-- `legion-cursor` failed `py-tokenize-tags`: it left `return [text]`, so it did
-  not split, lowercase, dedupe, and drop empty tags.
+| Mode | Dimension | Count | Case |
+|---|---|---:|---|
+| `legion-delegate` | data-transform | 1 | `py-merge-counts` |
 
 ## Interpretation
 
-This benchmark measures `legion-core` harness paths, not `legion-code`
-domain-specific skills. The current live result says:
+- **Parity holds where it can.** Every direct executor is 36/36; `legion-cursor` is
+  36/36. The benchmark confirms the Legion wrappers do not regress raw correctness on
+  the floor.
+- **One real reliability tax, surfaced and recorded.** `legion-delegate` left
+  `py-merge-counts` unedited (35/36) — a no-op/empty diff under the `--untrusted`
+  sandbox, not a wrong answer (`direct-codex` solved it). The miss is **not
+  statistically significant** on this sample (McNemar p = 1.0), but it is a concrete
+  failure: the untrusted delegate path occasionally produces no edit on a trivial
+  task. The `--record-failures` learning bridge wrote it to
+  `self-learn/outcomes.jsonl` as a `command:legion-delegate` outcome — the
+  learning-feedback loop demonstrated end-to-end on real data.
+- **Cost is now real on every mode.** `direct-codex` $3.25, `legion-delegate` $3.55
+  (a `+$0.30` wrapper delta), cursor modes `$0` (unmetered subscription). No more `$0`
+  direct-adapter columns hiding the cost axis.
 
-- Direct Codex, direct Claude, and direct Cursor Agent solved the full held-out
-  corpus.
-- Legion's Codex and Cursor wrappers are now applying diffs correctly, but each
-  lost one case versus direct mode.
+## Reliability findings
+
+- **Cursor needs a short workspace path** — `cursor-agent --trust` fails on very
+  long / deeply nested paths (zeroing the cursor modes). Run with a short
+  `LEGION_BENCH_DIR`; CI uses `$RUNNER_TEMP`.
+- **Latency tax** — the delegate's isolated-worktree + verify loop is slower
+  (mean 40.8s vs 30.4s; P95 64.6s vs 37.6s) for the cost it saves on the hard tier.

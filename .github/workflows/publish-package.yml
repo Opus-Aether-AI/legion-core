@@ -5,14 +5,15 @@ name: publish-package
 #
 # The normal path is automatic: release-please.yml publishes when release-please
 # cuts a release (gated on `release_created`). This workflow is dispatch-only for
-# first publishes, recovery, or re-pushes.
+# dry-runs, recovery, or re-pushes.
 #
 # This is an additive distribution channel: legion-core is still consumable as a
 # Claude Code marketplace (`claude plugin marketplace add Opus-Aether-AI/legion-core`)
 # and via a source clone.
 #
 # Auth: npmjs uses Trusted Publishing / GitHub OIDC. GitHub Packages uses
-# GITHUB_TOKEN.
+# GITHUB_TOKEN. Keep release-please.yml as the normal npmjs Trusted Publisher;
+# real npm publishes from this workflow are only for recovery cases.
 
 on:
   workflow_dispatch:
@@ -42,6 +43,8 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+      - name: Use latest npm
+        run: npm install -g npm@latest
 
       - name: Version is in sync with the marketplace
         run: |
@@ -55,7 +58,7 @@ jobs:
           echo "version $pkg in sync"
 
       - name: Publish to npm with provenance
-        run: npm publish --provenance --access public --ignore-scripts
+        run: npm publish --provenance --access public --ignore-scripts --tag latest
 
       - name: Set up Node for GitHub Packages
         uses: actions/setup-node@v5

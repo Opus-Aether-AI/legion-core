@@ -33,7 +33,16 @@ measure different things:
   solutions) are used only for the no-spend control, never shown to live modes.
   Regenerate the corpus by re-running the importer against a checkout. Only the
   Python subset is packaged (C++/Go/Rust/Java/JS need extra toolchains / per-case
-  installs).
+  installs). Because the validators run `pytest` (Python-version-sensitive), CI
+  checks this corpus **structurally** (schema + every case maps `answer_files`
+  onto a real solution file + a pytest validator + pinned `source.commit`); run
+  the full scripted-oracle/baseline control locally on the importer's Python:
+
+  ```bash
+  legion-bench corpus --corpus aider-polyglot-python --repo . \
+    --mode scripted-baseline --mode scripted-oracle \
+    --baseline scripted-baseline --strict --require-reliable
+  ```
 
 > **Cursor modes need a short workspace path.** `cursor-agent --trust` fails on
 > very long / deeply-nested workspace paths (`Failed to trust workspace … check

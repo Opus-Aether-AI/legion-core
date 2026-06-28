@@ -23,6 +23,17 @@ original to legion-core.
   adjacent prior art for mining failures, optimizing an agent harness, and
   gating changes against regressions.
 
+## Benchmark corpora
+
+- [Aider-AI/polyglot-benchmark](https://github.com/Aider-AI/polyglot-benchmark)
+  (MIT; Exercism content) is imported as the external `aider-polyglot-python`
+  corpus by `legion-observability/bench/tools/import-aider-polyglot.py`, pinned
+  to commit `7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f`. The corpus is a
+  deterministic transform (regenerate by re-running the importer); reference
+  solutions become `answer_files` only for the no-spend scripted-oracle control.
+- [SWE-bench](https://github.com/swe-bench/SWE-bench) is the model for the planned
+  repository-level live adapter (per-instance Docker harness).
+
 ## Protocols, runtimes, and interfaces
 
 - [Model Context Protocol](https://modelcontextprotocol.io/) makes the portable

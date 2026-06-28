@@ -1,0 +1,997 @@
+{
+  "schema": "legion.bench.corpus.v1",
+  "corpus": "heldout-oss-36",
+  "description": "Thirty-six held-out micro coding tasks for reliable corpus mechanics and optional live direct-agent vs Legion harness runs. Default modes are no-spend deterministic controls; live modes must be selected explicitly.",
+  "baseline": "scripted-baseline",
+  "default_modes": [
+    "scripted-baseline",
+    "scripted-oracle"
+  ],
+  "required_clean_modes": [
+    "scripted-oracle"
+  ],
+  "reliability_min_cases": 30,
+  "modes": [
+    {
+      "id": "scripted-baseline",
+      "label": "No-op scripted baseline",
+      "description": "Does not edit files. Used only to prove corpus reliability mechanics without model spend.",
+      "command": [
+        "python3",
+        "{repo}/legion-observability/bench/adapters/fixture-agent.py",
+        "--apply",
+        "none"
+      ],
+      "timeout": 20
+    },
+    {
+      "id": "scripted-oracle",
+      "label": "Scripted oracle",
+      "description": "Applies answer_files. Used only to prove corpus reliability mechanics without model spend.",
+      "command": [
+        "python3",
+        "{repo}/legion-observability/bench/adapters/fixture-agent.py",
+        "--apply",
+        "answer"
+      ],
+      "timeout": 20
+    },
+    {
+      "id": "direct-codex",
+      "label": "Direct Codex",
+      "kind": "live",
+      "live": true,
+      "description": "Runs Codex directly in the case workspace. Set CODEX_MODEL to override the default.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/direct-codex.sh"
+      ],
+      "timeout": 900
+    },
+    {
+      "id": "legion-delegate",
+      "label": "Legion delegate",
+      "kind": "live",
+      "live": true,
+      "description": "Runs the same task through legion-delegate with apply enabled.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/legion-delegate.sh"
+      ],
+      "timeout": 900
+    },
+    {
+      "id": "direct-claude",
+      "label": "Direct Claude Code",
+      "kind": "live",
+      "live": true,
+      "description": "Runs Claude Code directly in the case workspace. Set CLAUDE_MODEL to override the default.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/direct-claude.sh"
+      ],
+      "timeout": 900
+    },
+    {
+      "id": "cursor-agent",
+      "label": "Direct Cursor Agent",
+      "kind": "live",
+      "live": true,
+      "description": "Runs Cursor Agent directly in the case workspace. Set CURSOR_MODEL to override the default.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/cursor-agent.sh"
+      ],
+      "timeout": 900
+    },
+    {
+      "id": "legion-cursor",
+      "label": "Legion Cursor",
+      "kind": "live",
+      "live": true,
+      "description": "Runs the same task through Legion's Cursor wrapper.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/legion-cursor.sh"
+      ],
+      "timeout": 900
+    }
+  ],
+  "cases": [
+    {
+      "id": "py-add",
+      "dimension": "implementation",
+      "summary": "Implement integer addition.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement add(a, b).",
+      "files": {
+        "task.py": "def add(a, b):\n    return 0\n",
+        "test_task.py": "from task import add\nassert add(2, 3) == 5\nassert add(-4, 9) == 5\n"
+      },
+      "answer_files": {
+        "task.py": "def add(a, b):\n    return a + b\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-slugify",
+      "dimension": "string-processing",
+      "summary": "Normalize text into a URL slug.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement slugify(text).",
+      "files": {
+        "task.py": "def slugify(text):\n    return text\n",
+        "test_task.py": "from task import slugify\nassert slugify('Hello, World!') == 'hello-world'\nassert slugify('  Many   spaces  ') == 'many-spaces'\n"
+      },
+      "answer_files": {
+        "task.py": "import re\n\ndef slugify(text):\n    text = re.sub(r'[^a-zA-Z0-9]+', '-', text.strip().lower())\n    return text.strip('-')\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-clamp",
+      "dimension": "implementation",
+      "summary": "Clamp values into a numeric range.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement clamp(value, low, high).",
+      "files": {
+        "task.py": "def clamp(value, low, high):\n    return value\n",
+        "test_task.py": "from task import clamp\nassert clamp(5, 0, 10) == 5\nassert clamp(-1, 0, 10) == 0\nassert clamp(20, 0, 10) == 10\n"
+      },
+      "answer_files": {
+        "task.py": "def clamp(value, low, high):\n    return max(low, min(high, value))\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-unique-stable",
+      "dimension": "data-transform",
+      "summary": "Deduplicate while preserving order.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement unique_stable(items).",
+      "files": {
+        "task.py": "def unique_stable(items):\n    return items\n",
+        "test_task.py": "from task import unique_stable\nassert unique_stable(['a', 'b', 'a', 'c', 'b']) == ['a', 'b', 'c']\nassert unique_stable([]) == []\n"
+      },
+      "answer_files": {
+        "task.py": "def unique_stable(items):\n    seen = set()\n    out = []\n    for item in items:\n        if item not in seen:\n            seen.add(item)\n            out.append(item)\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-flatten-once",
+      "dimension": "data-transform",
+      "summary": "Flatten one level of nested lists.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement flatten_once(groups).",
+      "files": {
+        "task.py": "def flatten_once(groups):\n    return groups\n",
+        "test_task.py": "from task import flatten_once\nassert flatten_once([[1, 2], [], [3]]) == [1, 2, 3]\nassert flatten_once([]) == []\n"
+      },
+      "answer_files": {
+        "task.py": "def flatten_once(groups):\n    return [item for group in groups for item in group]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-safe-divide",
+      "dimension": "edge-cases",
+      "summary": "Avoid division by zero.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement safe_divide(a, b).",
+      "files": {
+        "task.py": "def safe_divide(a, b):\n    return a / b\n",
+        "test_task.py": "from task import safe_divide\nassert safe_divide(10, 2) == 5\nassert safe_divide(10, 0) is None\n"
+      },
+      "answer_files": {
+        "task.py": "def safe_divide(a, b):\n    if b == 0:\n        return None\n    return a / b\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-parse-bool",
+      "dimension": "parsing",
+      "summary": "Parse common boolean strings.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement parse_bool(value).",
+      "files": {
+        "task.py": "def parse_bool(value):\n    return bool(value)\n",
+        "test_task.py": "from task import parse_bool\nassert parse_bool('yes') is True\nassert parse_bool('No') is False\nassert parse_bool('1') is True\nassert parse_bool('0') is False\n"
+      },
+      "answer_files": {
+        "task.py": "def parse_bool(value):\n    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-word-count",
+      "dimension": "string-processing",
+      "summary": "Count normalized words.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement word_count(text).",
+      "files": {
+        "task.py": "def word_count(text):\n    return {}\n",
+        "test_task.py": "from task import word_count\nassert word_count('Hi hi, bye!') == {'hi': 2, 'bye': 1}\nassert word_count('') == {}\n"
+      },
+      "answer_files": {
+        "task.py": "import re\n\ndef word_count(text):\n    counts = {}\n    for word in re.findall(r'[a-z0-9]+', text.lower()):\n        counts[word] = counts.get(word, 0) + 1\n    return counts\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-median",
+      "dimension": "algorithmic",
+      "summary": "Compute the median of numeric values.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement median(values).",
+      "files": {
+        "task.py": "def median(values):\n    return None\n",
+        "test_task.py": "from task import median\nassert median([3, 1, 2]) == 2\nassert median([10, 2, 4, 8]) == 6\nassert median([]) is None\n"
+      },
+      "answer_files": {
+        "task.py": "def median(values):\n    if not values:\n        return None\n    ordered = sorted(values)\n    mid = len(ordered) // 2\n    if len(ordered) % 2:\n        return ordered[mid]\n    return (ordered[mid - 1] + ordered[mid]) / 2\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-chunk",
+      "dimension": "algorithmic",
+      "summary": "Split a list into fixed-size chunks.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement chunk(items, size).",
+      "files": {
+        "task.py": "def chunk(items, size):\n    return [items]\n",
+        "test_task.py": "from task import chunk\nassert chunk([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]\nassert chunk([], 3) == []\n"
+      },
+      "answer_files": {
+        "task.py": "def chunk(items, size):\n    return [items[index:index + size] for index in range(0, len(items), size)]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-deep-get",
+      "dimension": "data-transform",
+      "summary": "Read nested dictionaries by dotted path.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement deep_get(data, path, default=None).",
+      "files": {
+        "task.py": "def deep_get(data, path, default=None):\n    return data\n",
+        "test_task.py": "from task import deep_get\ndata = {'a': {'b': {'c': 7}}}\nassert deep_get(data, 'a.b.c') == 7\nassert deep_get(data, 'a.x', 'missing') == 'missing'\n"
+      },
+      "answer_files": {
+        "task.py": "def deep_get(data, path, default=None):\n    current = data\n    for part in path.split('.'):\n        if not isinstance(current, dict) or part not in current:\n            return default\n        current = current[part]\n    return current\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-merge-counts",
+      "dimension": "data-transform",
+      "summary": "Merge count dictionaries by addition.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement merge_counts(left, right).",
+      "files": {
+        "task.py": "def merge_counts(left, right):\n    return left\n",
+        "test_task.py": "from task import merge_counts\nassert merge_counts({'a': 2}, {'a': 3, 'b': 1}) == {'a': 5, 'b': 1}\nassert merge_counts({}, {'x': 4}) == {'x': 4}\n"
+      },
+      "answer_files": {
+        "task.py": "def merge_counts(left, right):\n    merged = dict(left)\n    for key, value in right.items():\n        merged[key] = merged.get(key, 0) + value\n    return merged\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-title-case",
+      "dimension": "string-processing",
+      "summary": "Title-case whitespace-separated words.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement title_case(text).",
+      "files": {
+        "task.py": "def title_case(text):\n    return text\n",
+        "test_task.py": "from task import title_case\nassert title_case('hello world') == 'Hello World'\nassert title_case('  many   spaces ') == 'Many Spaces'\n"
+      },
+      "answer_files": {
+        "task.py": "def title_case(text):\n    return ' '.join(word.capitalize() for word in text.split())\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-parse-ints",
+      "dimension": "parsing",
+      "summary": "Parse comma-separated integers.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement parse_ints(text).",
+      "files": {
+        "task.py": "def parse_ints(text):\n    return []\n",
+        "test_task.py": "from task import parse_ints\nassert parse_ints('1, 2,3') == [1, 2, 3]\nassert parse_ints('') == []\n"
+      },
+      "answer_files": {
+        "task.py": "def parse_ints(text):\n    if not text.strip():\n        return []\n    return [int(part.strip()) for part in text.split(',') if part.strip()]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-windowed",
+      "dimension": "algorithmic",
+      "summary": "Return sliding windows from a sequence.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement windowed(items, size).",
+      "files": {
+        "task.py": "def windowed(items, size):\n    return []\n",
+        "test_task.py": "from task import windowed\nassert windowed([1, 2, 3, 4], 3) == [(1, 2, 3), (2, 3, 4)]\nassert windowed([1], 2) == []\n"
+      },
+      "answer_files": {
+        "task.py": "def windowed(items, size):\n    return [tuple(items[index:index + size]) for index in range(0, len(items) - size + 1)]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-transpose",
+      "dimension": "algorithmic",
+      "summary": "Transpose a rectangular matrix.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement transpose(matrix).",
+      "files": {
+        "task.py": "def transpose(matrix):\n    return matrix\n",
+        "test_task.py": "from task import transpose\nassert transpose([[1, 2], [3, 4], [5, 6]]) == [[1, 3, 5], [2, 4, 6]]\nassert transpose([]) == []\n"
+      },
+      "answer_files": {
+        "task.py": "def transpose(matrix):\n    if not matrix:\n        return []\n    return [list(column) for column in zip(*matrix)]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-mask-email",
+      "dimension": "string-processing",
+      "summary": "Mask the local part of an email address.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement mask_email(email).",
+      "files": {
+        "task.py": "def mask_email(email):\n    return email\n",
+        "test_task.py": "from task import mask_email\nassert mask_email('alice@example.com') == 'a***@example.com'\nassert mask_email('b@example.com') == 'b***@example.com'\n"
+      },
+      "answer_files": {
+        "task.py": "def mask_email(email):\n    local, domain = email.split('@', 1)\n    return f'{local[:1]}***@{domain}'\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-palindrome",
+      "dimension": "edge-cases",
+      "summary": "Detect palindromes while ignoring punctuation and case.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement is_palindrome(text).",
+      "files": {
+        "task.py": "def is_palindrome(text):\n    return False\n",
+        "test_task.py": "from task import is_palindrome\nassert is_palindrome('A man, a plan, a canal: Panama') is True\nassert is_palindrome('not one') is False\n"
+      },
+      "answer_files": {
+        "task.py": "def is_palindrome(text):\n    cleaned = ''.join(ch.lower() for ch in text if ch.isalnum())\n    return cleaned == cleaned[::-1]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-top-k",
+      "dimension": "algorithmic",
+      "summary": "Return the keys with highest scores.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement top_k(scores, k).",
+      "files": {
+        "task.py": "def top_k(scores, k):\n    return []\n",
+        "test_task.py": "from task import top_k\nassert top_k({'a': 2, 'b': 5, 'c': 3}, 2) == ['b', 'c']\nassert top_k({'x': 1}, 5) == ['x']\n"
+      },
+      "answer_files": {
+        "task.py": "def top_k(scores, k):\n    return [key for key, _ in sorted(scores.items(), key=lambda item: item[1], reverse=True)[:k]]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-parse-env",
+      "dimension": "parsing",
+      "summary": "Parse simple .env content.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement parse_env(text).",
+      "files": {
+        "task.py": "def parse_env(text):\n    return {}\n",
+        "test_task.py": "from task import parse_env\ntext = '# comment\\nA=1\\nB = two\\n\\n'\nassert parse_env(text) == {'A': '1', 'B': 'two'}\n"
+      },
+      "answer_files": {
+        "task.py": "def parse_env(text):\n    result = {}\n    for line in text.splitlines():\n        line = line.strip()\n        if not line or line.startswith('#') or '=' not in line:\n            continue\n        key, value = line.split('=', 1)\n        result[key.strip()] = value.strip()\n    return result\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-compact",
+      "dimension": "data-transform",
+      "summary": "Remove None and empty strings from a list.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement compact(items).",
+      "files": {
+        "task.py": "def compact(items):\n    return items\n",
+        "test_task.py": "from task import compact\nassert compact([None, 'a', '', 'b', 0]) == ['a', 'b', 0]\nassert compact([]) == []\n"
+      },
+      "answer_files": {
+        "task.py": "def compact(items):\n    return [item for item in items if item is not None and item != '']\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-format-currency",
+      "dimension": "formatting",
+      "summary": "Format cents as dollars.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement format_currency(cents).",
+      "files": {
+        "task.py": "def format_currency(cents):\n    return str(cents)\n",
+        "test_task.py": "from task import format_currency\nassert format_currency(1234) == '$12.34'\nassert format_currency(5) == '$0.05'\n"
+      },
+      "answer_files": {
+        "task.py": "def format_currency(cents):\n    return f'${cents / 100:.2f}'\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-retry-delays",
+      "dimension": "algorithmic",
+      "summary": "Generate exponential retry delays.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement retry_delays(count, base).",
+      "files": {
+        "task.py": "def retry_delays(count, base):\n    return []\n",
+        "test_task.py": "from task import retry_delays\nassert retry_delays(4, 2) == [2, 4, 8, 16]\nassert retry_delays(0, 5) == []\n"
+      },
+      "answer_files": {
+        "task.py": "def retry_delays(count, base):\n    return [base * (2 ** index) for index in range(count)]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-dedupe-by-key",
+      "dimension": "data-transform",
+      "summary": "Deduplicate dictionaries by key.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement dedupe_by_key(rows, key).",
+      "files": {
+        "task.py": "def dedupe_by_key(rows, key):\n    return rows\n",
+        "test_task.py": "from task import dedupe_by_key\nrows = [{'id': 1, 'v': 'a'}, {'id': 1, 'v': 'b'}, {'id': 2, 'v': 'c'}]\nassert dedupe_by_key(rows, 'id') == [{'id': 1, 'v': 'a'}, {'id': 2, 'v': 'c'}]\n"
+      },
+      "answer_files": {
+        "task.py": "def dedupe_by_key(rows, key):\n    seen = set()\n    out = []\n    for row in rows:\n        value = row.get(key)\n        if value not in seen:\n            seen.add(value)\n            out.append(row)\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-normalize-path",
+      "dimension": "string-processing",
+      "summary": "Normalize slash-separated paths.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement normalize_path(path).",
+      "files": {
+        "task.py": "def normalize_path(path):\n    return path\n",
+        "test_task.py": "from task import normalize_path\nassert normalize_path('/a//b/c/') == '/a/b/c'\nassert normalize_path('a///b') == 'a/b'\n"
+      },
+      "answer_files": {
+        "task.py": "def normalize_path(path):\n    parts = [part for part in path.split('/') if part]\n    prefix = '/' if path.startswith('/') else ''\n    return prefix + '/'.join(parts)\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-count-vowels",
+      "dimension": "string-processing",
+      "summary": "Count vowels in text.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement count_vowels(text).",
+      "files": {
+        "task.py": "def count_vowels(text):\n    return 0\n",
+        "test_task.py": "from task import count_vowels\nassert count_vowels('Education') == 5\nassert count_vowels('rhythm') == 0\n"
+      },
+      "answer_files": {
+        "task.py": "def count_vowels(text):\n    return sum(1 for ch in text.lower() if ch in 'aeiou')\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-pairwise",
+      "dimension": "algorithmic",
+      "summary": "Return adjacent pairs from a list.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement pairwise(items).",
+      "files": {
+        "task.py": "def pairwise(items):\n    return []\n",
+        "test_task.py": "from task import pairwise\nassert pairwise([1, 2, 3]) == [(1, 2), (2, 3)]\nassert pairwise([1]) == []\n"
+      },
+      "answer_files": {
+        "task.py": "def pairwise(items):\n    return list(zip(items, items[1:]))\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-invert-dict",
+      "dimension": "data-transform",
+      "summary": "Invert dictionary keys and values.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement invert(data).",
+      "files": {
+        "task.py": "def invert(data):\n    return data\n",
+        "test_task.py": "from task import invert\nassert invert({'a': 1, 'b': 2}) == {1: 'a', 2: 'b'}\nassert invert({}) == {}\n"
+      },
+      "answer_files": {
+        "task.py": "def invert(data):\n    return {value: key for key, value in data.items()}\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-balanced-parens",
+      "dimension": "algorithmic",
+      "summary": "Check balanced parentheses.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement balanced_parens(text).",
+      "files": {
+        "task.py": "def balanced_parens(text):\n    return True\n",
+        "test_task.py": "from task import balanced_parens\nassert balanced_parens('(a(b)c)') is True\nassert balanced_parens('(()') is False\nassert balanced_parens('())') is False\n"
+      },
+      "answer_files": {
+        "task.py": "def balanced_parens(text):\n    depth = 0\n    for ch in text:\n        if ch == '(':\n            depth += 1\n        elif ch == ')':\n            depth -= 1\n            if depth < 0:\n                return False\n    return depth == 0\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-camel-to-snake",
+      "dimension": "string-processing",
+      "summary": "Convert camelCase and PascalCase to snake_case.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement camel_to_snake(name).",
+      "files": {
+        "task.py": "def camel_to_snake(name):\n    return name\n",
+        "test_task.py": "from task import camel_to_snake\nassert camel_to_snake('camelCase') == 'camel_case'\nassert camel_to_snake('HTTPServer') == 'http_server'\n"
+      },
+      "answer_files": {
+        "task.py": "import re\n\ndef camel_to_snake(name):\n    first = re.sub('(.)([A-Z][a-z]+)', r'\\1_\\2', name)\n    return re.sub('([a-z0-9])([A-Z])', r'\\1_\\2', first).lower()\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-tokenize-tags",
+      "dimension": "parsing",
+      "summary": "Normalize comma-separated tags.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement tokenize_tags(text).",
+      "files": {
+        "task.py": "def tokenize_tags(text):\n    return [text]\n",
+        "test_task.py": "from task import tokenize_tags\nassert tokenize_tags(' AI,  Bench,ai ,, ') == ['ai', 'bench']\nassert tokenize_tags('') == []\n"
+      },
+      "answer_files": {
+        "task.py": "def tokenize_tags(text):\n    tags = []\n    seen = set()\n    for raw in text.split(','):\n        tag = raw.strip().lower()\n        if tag and tag not in seen:\n            seen.add(tag)\n            tags.append(tag)\n    return tags\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-range-overlap",
+      "dimension": "edge-cases",
+      "summary": "Detect numeric range overlap.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement overlaps(a, b). Ranges are inclusive (start, end) tuples.",
+      "files": {
+        "task.py": "def overlaps(a, b):\n    return False\n",
+        "test_task.py": "from task import overlaps\nassert overlaps((1, 5), (5, 8)) is True\nassert overlaps((1, 4), (5, 8)) is False\nassert overlaps((10, 12), (3, 11)) is True\n"
+      },
+      "answer_files": {
+        "task.py": "def overlaps(a, b):\n    return max(a[0], b[0]) <= min(a[1], b[1])\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-coalesce",
+      "dimension": "edge-cases",
+      "summary": "Return the first non-None value.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement coalesce(*values).",
+      "files": {
+        "task.py": "def coalesce(*values):\n    return None\n",
+        "test_task.py": "from task import coalesce\nassert coalesce(None, None, 'x') == 'x'\nassert coalesce(0, 'x') == 0\nassert coalesce(None) is None\n"
+      },
+      "answer_files": {
+        "task.py": "def coalesce(*values):\n    for value in values:\n        if value is not None:\n            return value\n    return None\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-running-total",
+      "dimension": "algorithmic",
+      "summary": "Return cumulative sums.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement running_total(values).",
+      "files": {
+        "task.py": "def running_total(values):\n    return values\n",
+        "test_task.py": "from task import running_total\nassert running_total([1, 2, 3]) == [1, 3, 6]\nassert running_total([]) == []\n"
+      },
+      "answer_files": {
+        "task.py": "def running_total(values):\n    total = 0\n    out = []\n    for value in values:\n        total += value\n        out.append(total)\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-human-list",
+      "dimension": "formatting",
+      "summary": "Format a list for human reading.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement human_list(items).",
+      "files": {
+        "task.py": "def human_list(items):\n    return str(items)\n",
+        "test_task.py": "from task import human_list\nassert human_list([]) == ''\nassert human_list(['a']) == 'a'\nassert human_list(['a', 'b']) == 'a and b'\nassert human_list(['a', 'b', 'c']) == 'a, b, and c'\n"
+      },
+      "answer_files": {
+        "task.py": "def human_list(items):\n    if not items:\n        return ''\n    if len(items) == 1:\n        return items[0]\n    if len(items) == 2:\n        return f'{items[0]} and {items[1]}'\n    return ', '.join(items[:-1]) + f', and {items[-1]}'\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-json-lines",
+      "dimension": "parsing",
+      "summary": "Parse JSON Lines into a list.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement parse_json_lines(text).",
+      "files": {
+        "task.py": "def parse_json_lines(text):\n    return []\n",
+        "test_task.py": "from task import parse_json_lines\ntext = '{\"a\":1}\\n\\n{\"b\":2}\\n'\nassert parse_json_lines(text) == [{'a': 1}, {'b': 2}]\n"
+      },
+      "answer_files": {
+        "task.py": "import json\n\ndef parse_json_lines(text):\n    return [json.loads(line) for line in text.splitlines() if line.strip()]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 10
+        }
+      ],
+      "required": true
+    }
+  ]
+}

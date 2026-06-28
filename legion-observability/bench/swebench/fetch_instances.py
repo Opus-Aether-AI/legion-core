@@ -33,7 +33,7 @@ KEYS = (
 
 def _page(offset: int, length: int = 100) -> list[dict]:
     url = f"{API}?dataset={DATASET.replace('/', '%2F')}&config=default&split=test&offset={offset}&length={length}"
-    with urllib.request.urlopen(url) as handle:
+    with urllib.request.urlopen(url, timeout=30) as handle:
         return [row["row"] for row in json.load(handle)["rows"]]
 
 
@@ -67,6 +67,13 @@ def main() -> int:
         if args.limit and len(out) >= args.limit:
             break
 
+    if not out:
+        print(
+            "error: no instances matched (check --repo / --instance, or the dataset is unreachable); "
+            "refusing to write an empty manifest",
+            file=sys.stderr,
+        )
+        return 1
     manifest = {"schema": "legion.swebench.manifest.v1", "dataset": DATASET, "instances": out}
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)

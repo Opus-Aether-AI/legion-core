@@ -22,7 +22,11 @@ for i in $(seq 0 $(( count - 1 ))); do
   inst="$(jq -r ".instances[$i].instance_id" "$manifest")"
   repo="$(jq -r ".instances[$i].repo" "$manifest")"
   base="$(jq -r ".instances[$i].base_commit" "$manifest")"
-  dir="$workdir/$inst"
+  # Sanitize the instance id to a safe basename before it touches a path used
+  # with rm -rf (a '../' in a manifest must not escape the workdir).
+  safe="$(printf '%s' "$inst" | tr -cd 'A-Za-z0-9._-')"
+  [ -n "$safe" ] || safe="instance-$i"
+  dir="$workdir/$safe"
   rm -rf "$dir" 2>/dev/null || true
   mkdir -p "$dir"
   (

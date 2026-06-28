@@ -62,6 +62,18 @@ Baseline `direct-codex`:
   reasoning) vs cursor ~42s and claude ~51s — the correctness/cost win comes with a
   latency cost. Its one miss (`poly-py-pov`) was a timeout (exit=None).
 
+## Integrity note (answer-leak fix)
+
+This run was recorded **before** a fix to the corpus runner: it previously wrote
+`case.json` (which contains `answer_files`) into the agent workspace, so a live
+mode *could* have read the reference solution. Two things make this run safe to
+report: (1) the runner now writes the case to a `case-data/` directory **outside**
+the agent workspace, so live modes can no longer see it (scripted modes read it
+via `LEGION_BENCH_CASE_FILE`); and (2) for this run, all **34/34** of
+`direct-claude`'s produced solutions **differ** from the reference `answer_files`
+(0 copies) — the models solved (or failed) independently, consistent with the
+non-saturated 79–100% spread. Future runs use the fixed runner.
+
 ## Caveats (read before quoting)
 
 - **`--repeat 1`** — single sample per mode; the per-mode CIs are wide

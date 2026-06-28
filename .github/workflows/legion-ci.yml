@@ -46,24 +46,33 @@ jobs:
         run: |
           legion-observability/bin/legion-bench stable \
             --suite stable --repo . --repeat 3 --strict --json > /dev/null
+      # Each control asserts BOTH directions of corpus integrity: scripted-oracle
+      # passes every case (--strict + required_clean_modes) AND scripted-baseline
+      # fails every case (the jq guard — a stub that accidentally passes fails CI).
       - name: Corpus integrity control — heldout-oss-36 (parity floor)
         run: |
           legion-observability/bin/legion-bench corpus \
             --corpus heldout-oss-36 --repo . \
             --mode scripted-baseline --mode scripted-oracle \
-            --baseline scripted-baseline --strict --require-reliable --json > /dev/null
+            --baseline scripted-baseline --strict --require-reliable --json \
+          | jq -e '.summary.modes["scripted-oracle"].metrics.pass_rate == 1
+                   and .summary.modes["scripted-baseline"].metrics.pass == 0' > /dev/null
       - name: Corpus integrity control — heldout-oss-hard (discriminating tier)
         run: |
           legion-observability/bin/legion-bench corpus \
             --corpus heldout-oss-hard --repo . \
             --mode scripted-baseline --mode scripted-oracle \
-            --baseline scripted-baseline --strict --require-reliable --json > /dev/null
+            --baseline scripted-baseline --strict --require-reliable --json \
+          | jq -e '.summary.modes["scripted-oracle"].metrics.pass_rate == 1
+                   and .summary.modes["scripted-baseline"].metrics.pass == 0' > /dev/null
       - name: Corpus integrity control — aider-polyglot-python (external)
         run: |
           legion-observability/bin/legion-bench corpus \
             --corpus aider-polyglot-python --repo . \
             --mode scripted-baseline --mode scripted-oracle \
-            --baseline scripted-baseline --strict --require-reliable --json > /dev/null
+            --baseline scripted-baseline --strict --require-reliable --json \
+          | jq -e '.summary.modes["scripted-oracle"].metrics.pass_rate == 1
+                   and .summary.modes["scripted-baseline"].metrics.pass == 0' > /dev/null
 
   # Secret scan. We run the gitleaks binary directly (not the action) to avoid the
   # org-license requirement gitleaks-action imposes. Scans the working tree; the

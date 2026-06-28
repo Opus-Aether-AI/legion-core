@@ -1903,7 +1903,12 @@ def run_corpus_case_mode(
     os.makedirs(logs, exist_ok=True)
     task = _text(case.get("task")) or _text(case.get("prompt")) or _text(case.get("summary"))
     task_file = os.path.join(workspace, "task.txt")
-    case_file = os.path.join(workspace, "case.json")
+    # The rendered case carries answer_files. Keep it OUT of the agent workspace
+    # so live modes cannot read the reference solution from case.json; the
+    # scripted fixture-agent reads it via LEGION_BENCH_CASE_FILE (set below).
+    case_dir = os.path.join(run_dir, "case-data", safe_mode_id, f"attempt-{repeat_index:02d}")
+    os.makedirs(case_dir, exist_ok=True)
+    case_file = os.path.join(case_dir, f"{safe_case_id}.json")
     context = {
         "repo": os.path.abspath(repo),
         "workspace": workspace,

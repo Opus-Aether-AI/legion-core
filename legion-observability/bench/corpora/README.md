@@ -38,8 +38,10 @@ measure different things:
 > **Cursor modes need a short workspace path.** `cursor-agent --trust` fails on
 > very long / deeply-nested workspace paths (`Failed to trust workspace … check
 > permissions`), which silently zeroes the `cursor-agent` and `legion-cursor`
-> modes. Run the live bench with a short `LEGION_BENCH_DIR` (e.g. under `/tmp`);
-> the CI workflow already uses the short `$RUNNER_TEMP`.
+> modes. Run the live bench with a short `LEGION_BENCH_DIR` (e.g. under `/tmp`).
+> This only affects the live cursor modes; the no-spend CI gate
+> (`legion-ci.yml`) runs scripted modes only, so path length is irrelevant there,
+> and the manual live workflow (`bench-live.yml`) uses the short `$RUNNER_TEMP`.
 
 The packaged `heldout-oss-36.json` corpus is the first reliable held-out lane.
 It contains 36 Python micro-coding tasks and defaults to no-spend deterministic

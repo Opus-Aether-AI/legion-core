@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.9.2...v0.10.0) (2026-07-02)
+
+
+### Added
+
+* **observability:** add heldout live bench lane ([#54](https://github.com/Opus-Aether-AI/legion-core/issues/54)) ([d92a2b0](https://github.com/Opus-Aether-AI/legion-core/commit/d92a2b0fc45fe119b6758a9468721cf7a9ec8dc1))
+
 ## [0.9.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.9.1...v0.9.2) (2026-06-27)
 
 

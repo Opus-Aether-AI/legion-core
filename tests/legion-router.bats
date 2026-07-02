@@ -348,8 +348,8 @@ make_test_repo() {
   local repo; repo="$(make_test_repo arch1)"
   run "$DELEGATE" run --archetype bulk-mechanical-edit --task "x" --repo "$repo" --quiet
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.model == "gpt-5.4"'
-  assert_mock_called codex "exec --json -m gpt-5.4 -s workspace-write"
+  echo "$output" | jq -e '.model == "gpt-5.5"'
+  assert_mock_called codex "exec --json -m gpt-5.5 -s workspace-write"
   assert_mock_called codex "model_reasoning_effort=xhigh"
 }
 
@@ -395,18 +395,18 @@ make_test_repo() {
   [[ "$output" == *"--keep"* ]]
 }
 
-@test "delegate run: falls back to the next model on a quota/rate-limit error" {
+@test "delegate run: archetype quota failure does not downgrade off gpt-5.5" {
   local repo; repo="$(make_test_repo fb1)"
-  MOCK_CODEX_QUOTA_FAIL=gpt-5.4 run "$DELEGATE" run --archetype bulk-mechanical-edit --task x --repo "$repo" --quiet
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.status == "ok" and .model == "gpt-5.5"'
+  MOCK_CODEX_QUOTA_FAIL=gpt-5.5 run "$DELEGATE" run --archetype bulk-mechanical-edit --task x --repo "$repo" --quiet
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.status == "failed" and .model == "gpt-5.5"'
 }
 
 @test "delegate run: a non-quota failure does NOT burn the fallback chain" {
   local repo; repo="$(make_test_repo fb2)"
   MOCK_CODEX_FAIL=1 run "$DELEGATE" run --archetype bulk-mechanical-edit --task x --repo "$repo" --quiet
   [ "$status" -eq 1 ]
-  echo "$output" | jq -e '.status == "failed" and .model == "gpt-5.4"'
+  echo "$output" | jq -e '.status == "failed" and .model == "gpt-5.5"'
 }
 
 @test "delegate run: LEGION_LOW_CREDIT=codex refuses to delegate to a depleted provider" {

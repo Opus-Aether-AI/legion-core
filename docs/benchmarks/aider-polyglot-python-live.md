@@ -21,8 +21,11 @@ legion-observability/bin/legion-bench corpus --corpus aider-polyglot-python --re
   --report-md /tmp/polylive-XXXX/aider-polyglot-python-live.md --json
 ```
 
-Models used (CLI defaults, as labeled on the spans): codex `gpt-5.4`, claude
-`claude-sonnet-4-6`, cursor `cursor-auto`; `legion-delegate` routes to `gpt-5.4`.
+Models used for this historical pre-pin run (as labeled on the spans): codex
+`gpt-5.4`, an older Sonnet baseline, the old Cursor default, and
+`legion-delegate` on the then-current `gpt-5.4` route. Current runs pin direct
+Codex and Legion Codex routing to `gpt-5.5`, direct Claude to `opus`, and Cursor
+to `composer-2.5`; explicit Sonnet runs should use `claude-sonnet-5`.
 
 ## Results
 
@@ -46,19 +49,19 @@ Baseline `direct-codex`:
 ## Interpretation — the benchmark finally separates harnesses
 
 - **A statistically significant correctness gap appears.** `direct-codex`
-  (gpt-5.4) beats `direct-claude` (Sonnet 4.6) 33/34 vs 27/34 — 6 paired losses to
+  (gpt-5.4) beats the older direct-Claude Sonnet baseline 33/34 vs 27/34 — 6 paired losses to
   0, **McNemar p = 0.031** — *and* Claude costs ~3× more ($16.73 vs $5.94). On this
   external tier the benchmark produces a real, significant signal, which neither
   saturated hand-authored tier could.
 - **Cursor leads at zero metered cost.** `cursor-agent` and `legion-cursor` both
   solved all 34 (100%) on a Cursor subscription ($0). The Legion wrapper neither
   helped nor hurt cursor's correctness here.
-- **The Legion delegate roughly tracks the model it routes to.** `legion-delegate`
+- **The Legion delegate roughly tracked its historical route.** `legion-delegate`
   (32/34) sits just under `direct-codex` (33/34) at near-identical cost (`+$0.48`) —
   the two delegate misses (`poly-py-list-ops`, `poly-py-zebra-puzzle`) exited 0 but
   failed the tests (wrong solution, not an apply bug). Recorded by `--record-failures`
   as `command:legion-delegate` outcomes.
-- **Codex is the slowest.** `direct-codex` mean 105s / P95 163s (gpt-5.4 at xhigh
+- **Codex was the slowest in this run.** `direct-codex` mean 105s / P95 163s (gpt-5.4 at xhigh
   reasoning) vs cursor ~42s and claude ~51s — the correctness/cost win comes with a
   latency cost. Its one miss (`poly-py-pov`) was a timeout (exit=None).
 
@@ -80,9 +83,10 @@ non-saturated 79–100% spread. Future runs use the fixed runner.
   (e.g. claude 0.63–0.90). The codex-vs-claude gap is significant even at n=34, but
   the smaller deltas (cursor/delegate ±2.9pp, p=1.0) are noise. Re-run with
   `--repeat 3+` to tighten.
-- **Default models** — each mode used its CLI default (Claude = Sonnet 4.6, not
-  Opus). This measures the harness *as configured*; pinning a stronger model
-  (`CLAUDE_MODEL=…`) would change the numbers. The spans label the actual model.
+- **Default models** — this historical run used the old CLI defaults, not the new
+  best-model pins. Current direct-Claude runs default to `opus`; if you need a
+  Sonnet-only baseline, use `CLAUDE_MODEL=claude-sonnet-5`. The spans label the
+  actual model.
 - **Python-only / 34 cases** — only the Python subset of Polyglot is packaged;
   JS/Go/Rust/Java/C++ need extra toolchains. SWE-bench-style repo-level difficulty
   is the next adapter (`legion-observability/bench/swebench/`).

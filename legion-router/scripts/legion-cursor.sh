@@ -122,7 +122,7 @@ actual_model_from_output() {
 }
 
 cmd_run() {
-  local task="" model="cursor-auto" repo="$PWD" base="HEAD" sandbox="workspace-write"
+  local task="" model="${LEGION_CURSOR_MODEL:-${CURSOR_MODEL:-composer-2.5}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 agent_bin="" start_ms=0 end_ms=0 dur=0 rc=0
 
@@ -167,7 +167,7 @@ cmd_run() {
   else
     cmd+=(--force)
   fi
-  [[ -n "$model" && "$model" != "cursor-auto" ]] && cmd+=(--model "$model")
+  [[ -n "$model" ]] && cmd+=(--model "$model")
   cmd+=("$task")
 
   note "-> ${cmd[*]}"

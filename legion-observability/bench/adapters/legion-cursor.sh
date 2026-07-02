@@ -16,8 +16,11 @@ if [[ ! -d "$workspace/.git" ]]; then
   git -C "$workspace" -c user.email=bench@example.com -c user.name=bench commit -qm init
 fi
 
+model="${CURSOR_MODEL:-${LEGION_CURSOR_MODEL:-composer-2.5}}"
+
 "$repo/legion-router/bin/legion-cursor" run \
   --archetype "${LEGION_BENCH_ARCHETYPE:-implement-feature}" \
+  --model "$model" \
   --sandbox workspace-write \
   --repo "$workspace" \
   --apply \

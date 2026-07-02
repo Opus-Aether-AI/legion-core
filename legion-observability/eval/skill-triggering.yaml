@@ -8,7 +8,7 @@
 #   expect_not  — (optional) plugin that must NOT win (anti-trigger)
 #   why         — note for humans
 cases:
-  - prompt: "Delegate this scoped task to gpt-5.4 via codex and bring back a metered diff"
+  - prompt: "Delegate this scoped task to gpt-5.5 via codex and bring back a metered diff"
     expect: legion-router
     why: delegate + codex + metered diff is the router's core
 

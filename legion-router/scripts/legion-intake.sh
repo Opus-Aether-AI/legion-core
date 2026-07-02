@@ -59,7 +59,7 @@ resolve_worker() {
       ;;
     cursor)
       worker_bin="${worker_bin:-${LEGION_INTAKE_WORKER_BIN:-${LEGION_CURSOR_BIN:-$_self_dir/legion-cursor.sh}}}"
-      default_model="cursor-auto"
+      default_model="${LEGION_CURSOR_MODEL:-${CURSOR_MODEL:-composer-2.5}}"
       untrusted_flag=""
       ;;
     custom)

@@ -119,7 +119,7 @@ make_patch() {
   run bash -c "cd '$REPO_DIR' && env LEGION_CURSOR_BIN=legion-cursor bash '$INTAKE' explore --issue 8 --repo acme/widgets --worker cursor"
 
   [ "$status" -eq 0 ]
-  assert_mock_called legion-cursor "--sandbox read-only --model cursor-auto"
+  assert_mock_called legion-cursor "--sandbox read-only --model composer-2.5"
   grep -Fq "cursor assessment" "$MOCK_GH_COMMENTS"
   if grep -F "legion-cursor " "$MOCK_CALL_LOG" | grep -q -- "--untrusted"; then
     echo "cursor worker should not receive delegate-only --untrusted flag" >&2

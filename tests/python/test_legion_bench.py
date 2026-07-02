@@ -160,6 +160,17 @@ def test_load_corpus_reads_packaged_heldout_default_modes():
     assert [mode["id"] for mode in modes] == ["scripted-baseline", "scripted-oracle"]
 
 
+def test_packaged_live_corpora_default_to_no_spend_controls():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+
+    for corpus_name in ("heldout-oss-hard", "aider-polyglot-python"):
+        corpus = bench.load_corpus(repo, corpus_name)
+        modes = bench._selected_corpus_modes(corpus, [])
+
+        assert [mode["id"] for mode in modes] == ["scripted-baseline", "scripted-oracle"]
+        assert not any(mode.get("live") for mode in modes)
+
+
 def test_load_suite_extends_relative_to_absolute_suite_path(tmp_path):
     repo = tmp_path / "target-repo"
     repo.mkdir()
@@ -422,6 +433,73 @@ def test_corpus_case_exports_real_home_for_live_adapters(tmp_path):
     assert env["home"] != env["real_home"]
 
 
+def test_corpus_case_marks_provider_usage_limit_as_blocked(tmp_path):
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+
+    result = bench.run_corpus_case_mode(
+        {
+            "id": "quota-case",
+            "type": "task",
+            "task": "This model call should be treated as provider-blocked.",
+            "command": [
+                "python3",
+                "-c",
+                (
+                    "print(\"You've hit your usage limit. try again at 8:46 PM.\"); "
+                    "raise SystemExit(1)"
+                ),
+            ],
+            "validators": [
+                {
+                    "type": "command",
+                    "command": ["python3", "-c", "raise SystemExit(99)"],
+                }
+            ],
+        },
+        {"id": "live-mode"},
+        repo=repo,
+        run_dir=str(tmp_path / "run"),
+        repeat_index=1,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "provider_usage_limit"
+    assert result["details"]["provider_blocked"] is True
+    assert result["details"]["validators"] == []
+
+
+def test_span_totals_roll_up_by_model(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    (spans / "2026-06-27.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "schema": "legion.span.v1",
+                "model": "composer-2.5",
+                "cost_usd": 0,
+                "duration_ms": 10,
+                "tokens": {"input_tokens": 100, "output_tokens": 20},
+            }),
+            json.dumps({
+                "schema": "legion.span.v1",
+                "model": "gpt-5.5",
+                "cost_usd": 0.5,
+                "duration_ms": 30,
+                "tokens": {"total_tokens": 90},
+            }),
+        ])
+        + "\n",
+        encoding="utf-8",
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+
+    assert totals["span_count"] == 2
+    assert totals["tokens"] == 210
+    assert totals["models"]["composer-2.5"]["tokens"] == 120
+    assert totals["models"]["gpt-5.5"]["cost_usd"] == 0.5
+
+
 def test_learning_lift_payload_scores_before_after_memory(tmp_path):
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
     payload = bench.learning_lift_payload(
@@ -635,11 +713,21 @@ def test_render_corpus_markdown_includes_paired_table():
             "base": {
                 "metrics": {
                     "pass": 1,
+                    "blocked": 1,
                     "case_runs": 2,
                     "pass_rate": 0.5,
                     "pass_rate_ci95": {"low": 0.1, "high": 0.9},
                     "cost_usd": 0,
                     "tokens": 0,
+                    "span_count": 1,
+                    "models": {
+                        "gpt-5.5": {
+                            "span_count": 1,
+                            "cost_usd": 0,
+                            "tokens": 0,
+                            "span_duration_ms": 10,
+                        }
+                    },
                     "mean_duration_ms": 10,
                     "p95_duration_ms": 12,
                 }
@@ -647,11 +735,21 @@ def test_render_corpus_markdown_includes_paired_table():
             "cand": {
                 "metrics": {
                     "pass": 2,
+                    "blocked": 0,
                     "case_runs": 2,
                     "pass_rate": 1,
                     "pass_rate_ci95": {"low": 0.2, "high": 1},
                     "cost_usd": 0,
                     "tokens": 0,
+                    "span_count": 1,
+                    "models": {
+                        "composer-2.5": {
+                            "span_count": 1,
+                            "cost_usd": 0,
+                            "tokens": 0,
+                            "span_duration_ms": 11,
+                        }
+                    },
                     "mean_duration_ms": 11,
                     "p95_duration_ms": 13,
                 }
@@ -677,6 +775,9 @@ def test_render_corpus_markdown_includes_paired_table():
     markdown = bench.render_corpus_markdown(summary, {"run_path": "/tmp/run.json"})
 
     assert "Mode Results" in markdown
+    assert "| Mode | Pass | Blocked | Case-runs |" in markdown
+    assert "Model Metering" in markdown
+    assert "`composer-2.5`" in markdown
     assert "Candidate paired wins" in markdown
     assert "`base..cand`" in markdown
 

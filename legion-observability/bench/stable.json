@@ -144,11 +144,11 @@
       "id": "route.implement-feature",
       "type": "route",
       "dimension": "routing",
-      "summary": "Feature implementation uses GPT-5.4 workspace write.",
+      "summary": "Feature implementation uses GPT-5.5 workspace write.",
       "archetype": "implement-feature",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -185,11 +185,11 @@
       "id": "route.write-tests",
       "type": "route",
       "dimension": "routing",
-      "summary": "Test writing uses GPT-5.4 workspace write.",
+      "summary": "Test writing uses GPT-5.5 workspace write.",
       "archetype": "write-tests",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -199,11 +199,11 @@
       "id": "route.fix-bug",
       "type": "route",
       "dimension": "routing",
-      "summary": "Scoped bug fixes use GPT-5.4 workspace write.",
+      "summary": "Scoped bug fixes use GPT-5.5 workspace write.",
       "archetype": "fix-bug",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -213,11 +213,11 @@
       "id": "route.refactor-module",
       "type": "route",
       "dimension": "routing",
-      "summary": "Module refactors use GPT-5.4 workspace write.",
+      "summary": "Module refactors use GPT-5.5 workspace write.",
       "archetype": "refactor-module",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -227,11 +227,11 @@
       "id": "route.bulk-mechanical-edit",
       "type": "route",
       "dimension": "routing",
-      "summary": "Bulk mechanical edits use GPT-5.4 workspace write.",
+      "summary": "Bulk mechanical edits use GPT-5.5 workspace write.",
       "archetype": "bulk-mechanical-edit",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -241,11 +241,11 @@
       "id": "route.parallel-codegen",
       "type": "route",
       "dimension": "routing",
-      "summary": "Parallel codegen uses GPT-5.4 workspace write.",
+      "summary": "Parallel codegen uses GPT-5.5 workspace write.",
       "archetype": "parallel-codegen",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -255,11 +255,11 @@
       "id": "route.cheap-bulk",
       "type": "route",
       "dimension": "routing",
-      "summary": "Cheap bulk work uses GPT-5.4 workspace write.",
+      "summary": "Cheap bulk work uses GPT-5.5 workspace write.",
       "archetype": "cheap-bulk",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -269,11 +269,11 @@
       "id": "route.boilerplate",
       "type": "route",
       "dimension": "routing",
-      "summary": "Boilerplate uses GPT-5.4 workspace write.",
+      "summary": "Boilerplate uses GPT-5.5 workspace write.",
       "archetype": "boilerplate",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -283,11 +283,11 @@
       "id": "route.migration",
       "type": "route",
       "dimension": "routing",
-      "summary": "Migrations use GPT-5.4 workspace write.",
+      "summary": "Migrations use GPT-5.5 workspace write.",
       "archetype": "migration",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -441,7 +441,7 @@
       "command": [
         "bash",
         "-lc",
-        "{repo}/legion-observability/bin/legion-trace emit --executor codex --model gpt-5.4 --status ok --task bench-fixture > {workspace}/span.jsonl && {repo}/legion-observability/bin/legion-trace validate {workspace}/span.jsonl"
+        "{repo}/legion-observability/bin/legion-trace emit --executor codex --model gpt-5.5 --status ok --task bench-fixture > {workspace}/span.jsonl && {repo}/legion-observability/bin/legion-trace validate {workspace}/span.jsonl"
       ],
       "validators": [
         {

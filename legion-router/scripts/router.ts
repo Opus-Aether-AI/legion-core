@@ -531,8 +531,8 @@ async function parseRequest(req: Request): Promise<ParsedRequest> {
 				const lowerModel = model.toLowerCase();
 				// Only downgrade if the model is an expensive tier (opus/sonnet)
 				if (lowerModel.includes("opus") || lowerModel.includes("sonnet")) {
-					// Use a known-good haiku id (regex-substituting the tier token mangles ids,
-					// e.g. claude-opus-4-8 -> claude-haiku-4-8 which doesn't exist).
+					// Use a known-good haiku id; regex-substituting tier tokens can mangle
+					// provider-specific model aliases into names that do not exist.
 					const haiku = _optionalEnv("AUTO_TIER_HAIKU_MODEL", "claude-haiku-4-5");
 					log("info", "Auto-tier: downgraded for small request", { from: model, to: haiku, bodyLen: body.length });
 					model = haiku;

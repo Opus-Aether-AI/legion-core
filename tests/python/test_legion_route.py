@@ -14,7 +14,7 @@ TABLE = os.path.join(HERE, "..", "..", "legion-router", "config", "routing.toml"
 def test_resolve_known_archetype():
     r = lr.resolve(lr.load_table(TABLE), "bulk-mechanical-edit")
     assert r["executor"] == "codex"
-    assert r["model"] == "gpt-5.4"
+    assert r["model"] == "gpt-5.5"
     assert r["sandbox"] == "workspace-write"
     assert r["reasoning_effort"] == "xhigh"
     assert r["resolved"] is True
@@ -39,7 +39,7 @@ def test_second_opinion_is_gpt55_readonly_high():
 
 
 def test_frontend_implement_stays_on_opus_not_bulk_coder():
-    # frontend = taste, not throughput -> Opus, never the gpt-5.4 workhorse.
+    # frontend = taste, not throughput -> Opus handles the design judgement.
     r = lr.resolve(lr.load_table(TABLE), "frontend-implement")
     assert r["executor"] == "self" and r["model"] == "opus"
 
@@ -48,7 +48,7 @@ def test_frontend_polish_and_review_use_gpt55_not_54():
     table = lr.load_table(TABLE)
     polish = lr.resolve(table, "frontend-polish")
     review = lr.resolve(table, "frontend-review")
-    assert polish["model"] == "gpt-5.5"            # the strong one, not 5.4 bulk
+    assert polish["model"] == "gpt-5.5"
     assert review["model"] == "gpt-5.5"
     assert review["sandbox"] == "read-only"        # verify by screenshot, no edits
 

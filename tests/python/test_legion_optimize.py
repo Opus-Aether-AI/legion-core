@@ -202,7 +202,7 @@ def test_optimize_does_not_accept_cross_executor_as_model_only_change():
                 "schema": "legion.span.v1",
                 "executor": "cursor",
                 "archetype": "implement-feature",
-                "model": "cursor-auto",
+                "model": "composer-2.5",
                 "status": "ok",
                 "cost_usd": 0.1,
                 "duration_ms": 100,
@@ -216,6 +216,6 @@ def test_optimize_does_not_accept_cross_executor_as_model_only_change():
     assert proposal["current_executor"] == "codex"
     assert proposal["current_model"] == "gpt-5.4"
     assert proposal["proposed_executor"] == "cursor"
-    assert proposal["proposed_model"] == "cursor-auto"
+    assert proposal["proposed_model"] == "composer-2.5"
     assert proposal["decision"] == "hold"
     assert proposal["reason"] == "executor_switch_unsupported"

@@ -1,20 +1,19 @@
 # Legion routing policy — balance work by model strength.
 #
 #   Opus     orchestrates: plan, decompose, decide, verify, integrate (NOT the bulk coder)
-#   GPT-5.4  the workhorse: MOST coding — implement, tests, refactors, bulk edits
-#   GPT-5.5  the strong one: final review + hard/critical/risky work + cross-model verification
+#   GPT-5.5  the Codex workhorse: implementation, tests, refactors, reviews, hard work
 #
-# Goal: codex (5.4 + 5.5) does >= [targets].codex_share of delegatable work, measured and
+# Goal: codex (GPT-5.5) does >= [targets].codex_share of delegatable work, measured and
 # self-corrected by `legion-share`. Resolved by `legion-route <archetype>`, consumed by
 # `legion-delegate --archetype`. This is the single place model selection lives.
 #
 #   executor          self (Opus inline) | codex (delegate to a GPT model)
-#   model             gpt-5.4 | gpt-5.5 | opus
+#   model             gpt-5.5 | opus
 #   sandbox           read-only | workspace-write
 #   reasoning_effort  low | medium | high | xhigh
 #   fallback          models to try on quota/rate-limit before failing
 #
-# EFFORT POLICY: codex (GPT-5.4/5.5) ALWAYS runs at xhigh — quality over speed; on a
+# EFFORT POLICY: codex (GPT-5.5) ALWAYS runs at xhigh — quality over speed; on a
 # ChatGPT subscription the marginal cost is flat, so there's no reason to skimp. Opus
 # orchestrates at xhigh minimum (dynamic higher if a task needs it). Every archetype
 # below is xhigh; legion-delegate also defaults effort to xhigh when none is given.
@@ -48,18 +47,18 @@ model = "opus"
 reasoning_effort = "xhigh"
 note = "High-judgement reasoning — keep on Opus, do NOT delegate."
 
-# ── GPT-5.4 — the workhorse: MOST coding ─────────────────────────────
+# ── GPT-5.5 — Codex implementation/review path ───────────────────────
 [archetypes.implement-feature]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
+fallback = []
 note = "A fully-specced feature slice — the default home for real coding."
 
 # ── Frontend: correctness is VISUAL, so it routes by TASTE, not bulk coding ──
 # A rendered UI can't be verified from a diff (the reviewer can't see the pixels),
-# so frontend leans on Opus's judgement + GPT-5.5 — NOT the gpt-5.4 workhorse — and
+# so frontend leans on Opus's judgement + GPT-5.5 and
 # is verified by SCREENSHOT (browser-patterns visual-regression), not diff-reading.
 # Pairs with the `impeccable` skill (shape -> craft -> polish). See
 # docs/frontend-workflow.md.
@@ -67,7 +66,7 @@ note = "A fully-specced feature slice — the default home for real coding."
 executor = "self"
 model = "opus"
 reasoning_effort = "xhigh"
-note = "Layout / component structure / design intent stays on Opus (impeccable shape->craft). Not gpt-5.4 bulk — frontend quality is taste, not throughput."
+note = "Layout / component structure / design intent stays on Opus (impeccable shape->craft). Frontend quality is taste, not throughput."
 
 [archetypes.frontend-polish]
 executor = "codex"
@@ -86,77 +85,77 @@ note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by readin
 
 [archetypes.write-tests]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
+fallback = []
 note = "Author unit/integration tests for a described surface."
 
 [archetypes.fix-bug]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
+fallback = []
 note = "A reproducible, well-scoped bug fix (deep/tricky ones -> hard-bug on 5.5)."
 
 [archetypes.refactor-module]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
+fallback = []
 note = "Restructure a module/file with characterization intact."
 
 [archetypes.bulk-mechanical-edit]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
+fallback = []
 note = "Wide, low-judgement edits across many files."
 
 [archetypes.parallel-codegen]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
+fallback = []
 note = "Independent, fully-specified modules generated while Opus coordinates."
 
 [archetypes.cheap-bulk]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
-note = "Throughput over depth — lowest cost, xhigh effort."
+fallback = []
+note = "Throughput-oriented work still uses the best Codex model, at xhigh effort."
 
 [archetypes.docs-edit]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
+fallback = []
 note = "Docs / comments / changelog edits."
 
 [archetypes.boilerplate]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
+fallback = []
 note = "Scaffolding, config, repetitive plumbing."
 
 [archetypes.migration]
 executor = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.5"]
+fallback = []
 note = "Codemod / dependency / API migration across the codebase."
 
-# ── GPT-5.5 — the strong one: final review + hard/critical work ──────
+# ── GPT-5.5 review + hard/critical work ──────────────────────────────
 [archetypes.final-review]
 executor = "codex"
 model = "gpt-5.5"
@@ -190,7 +189,7 @@ executor = "codex"
 model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.4"]
+fallback = []
 note = "A deep/tricky bug needing the strongest model."
 
 [archetypes.perf-optimization]
@@ -198,5 +197,5 @@ executor = "codex"
 model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = ["gpt-5.4"]
+fallback = []
 note = "Latency/throughput optimization with measured tradeoffs."

@@ -78,5 +78,5 @@ make_test_repo() {
     run bash -c "printf 'stdin task' | '$LEGION_CLAUDE' run --repo '$repo' --quiet"
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
-    assert_mock_called claude "output-format json --model claude-opus-4-8"
+    assert_mock_called claude "output-format json --model opus"
 }

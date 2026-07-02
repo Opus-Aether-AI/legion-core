@@ -131,3 +131,4 @@ Claude Code, Cursor, and the local validation toolchain.
 ## License
 
 [Apache-2.0](LICENSE). This is the reusable, model-agnostic Legion engine.
+Enterprise support and pilots: see [ENTERPRISE.md](./ENTERPRISE.md).

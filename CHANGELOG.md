@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.10.1...v0.10.2) (2026-07-02)
+
+
+### Fixed
+
+* **observability:** pin best-model live metering ([#62](https://github.com/Opus-Aether-AI/legion-core/issues/62)) ([c84daba](https://github.com/Opus-Aether-AI/legion-core/commit/c84daba0588b52dc12abb2d63506dd2d31d75fd1))
+
 ## [0.10.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.10.0...v0.10.1) (2026-07-02)
 
 

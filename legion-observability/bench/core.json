@@ -49,11 +49,11 @@
       "id": "route.docs-edit",
       "type": "route",
       "dimension": "routing",
-      "summary": "Docs edits should use the GPT-5.4 workhorse route.",
+      "summary": "Docs edits should use the GPT-5.5 workhorse route.",
       "archetype": "docs-edit",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },

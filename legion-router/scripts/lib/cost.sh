@@ -5,9 +5,9 @@
 # sink, and opus-agent-infra's cost-summary.sh. Source it, or run it as a CLI.
 #
 #   source cost.sh
-#   cost_for_model "claude-opus-4-8" 1000000 500000 0 0   # -> 52.5
+#   cost_for_model "opus" 1000000 500000 0 0              # -> 17.5
 #
-#   cost.sh claude-sonnet-4-6 1000000 1000000              # -> 18
+#   cost.sh claude-sonnet-5 1000000 1000000                # -> 12
 #
 # Price table resolution order:
 #   1. $LEGION_COSTS_FILE (if set)

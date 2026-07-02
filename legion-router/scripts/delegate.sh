@@ -587,7 +587,7 @@ cmd_resume() {
   [[ -n "$thread_id" ]] || die "resume: no codex thread id recorded for run '$run'"
   # Inherit the original run's model (persisted by `run`) so resume doesn't silently drift (M2).
   [[ -n "$model" ]] || model="$(cat "$art/model.txt" 2>/dev/null || true)"
-  [[ -n "$model" ]] || model="gpt-5.4"
+  [[ -n "$model" ]] || model="gpt-5.5"
   [[ -n "$effort" ]] || effort="xhigh"   # codex always at xhigh unless overridden
 
   RUN_ID="$run"

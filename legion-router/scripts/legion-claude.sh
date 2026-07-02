@@ -132,7 +132,7 @@ run_fallback() {
 }
 
 cmd_run() {
-  local task="" model="claude-opus-4-8" repo="$PWD" fallback_model="gpt-5.5"
+  local task="" model="opus" repo="$PWD" fallback_model="gpt-5.5"
   local allow_fallback=1 tmpdir="" out_file="" err_file="" artifacts="{}"
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
@@ -238,9 +238,9 @@ usage() {
 legion-claude — delegate a scoped task to Claude headless, with fallback to Codex.
 
 Usage:
-  legion-claude run --task "TASK" [--model claude-opus-4-8] [--repo DIR]
+  legion-claude run --task "TASK" [--model opus] [--repo DIR]
                     [--quiet] [--no-fallback] [--fallback-model gpt-5.5]
-  legion-claude run [--model claude-opus-4-8] [--repo DIR] [--quiet]
+  legion-claude run [--model opus] [--repo DIR] [--quiet]
                     [--no-fallback] [--fallback-model gpt-5.5] < task.txt
 EOF
 }

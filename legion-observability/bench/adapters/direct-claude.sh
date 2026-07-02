@@ -12,12 +12,8 @@ if [[ -n "${LEGION_BENCH_REAL_HOME:-}" ]]; then
   export HOME="$LEGION_BENCH_REAL_HOME"
 fi
 
-args=(-p --permission-mode acceptEdits --output-format json --no-session-persistence)
-if [[ -n "${CLAUDE_MODEL:-}" ]]; then
-  args+=(--model "$CLAUDE_MODEL")
-fi
-
-model="${CLAUDE_MODEL:-claude-sonnet-4-6}"
+model="${CLAUDE_MODEL:-opus}"
+args=(-p --permission-mode acceptEdits --output-format json --no-session-persistence --model "$model")
 task="$(<"$task_file")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/direct-claude.XXXXXX")"
 trap 'rm -f "'"$tmp"'"' EXIT

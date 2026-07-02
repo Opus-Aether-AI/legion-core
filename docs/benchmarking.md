@@ -16,7 +16,7 @@ validate their artifacts.
 | Layer | Measures | Spend | Gate |
 |---|---|---|---|
 | **Harness intelligence** (`stable` suite: `eval.*` / `route.*` / `doctor.*`) | skill routing, orchestration routing (26 archetypes), validation gates | none — deterministic | **CI-blocking every PR** (`legion-ci.yml` → `bench-no-spend`): 100% required-pass, 0 flakes |
-| **Live coding** (`corpus`: `heldout-oss-36`, `heldout-oss-hard`, `aider-polyglot-python`) | end-to-end task success + **real cost/tokens** per harness mode | real | manual `bench-live.yml` (`run_live=true`); informational, regression-visibility gate below |
+| **Live coding** (`corpus`: `heldout-oss-36`, `heldout-oss-hard`, `aider-polyglot-python`) | end-to-end task success + **real cost/tokens/model rollups** per harness mode | real | manual `bench-live.yml` (`run_live=true`); informational, regression-visibility gate below |
 
 `heldout-oss-36` is a **correctness-parity floor** — saturated micro-functions where
 every model scores ~100%, so a harness can only match-or-lose; useful as a
@@ -24,7 +24,8 @@ no-regression smoke and a real-cost reference. `heldout-oss-hard` is the
 **discriminating tier** — multi-file / longer-horizon / rich-edge-case tasks. In
 the live run it still saturated on pass rate (frontier single-shot models solve
 self-contained Python), so it discriminates on **cost and latency at equal
-quality** — e.g. delegate-to-gpt-5.4 matching Claude at ~1/4 the cost. See
+quality** — e.g. whether Legion routing changes cost and latency without
+regressing success. See
 [`benchmarks/heldout-oss-hard-live.md`](benchmarks/heldout-oss-hard-live.md).
 
 For pass-rate discrimination there is now an **external** corpus,
@@ -39,6 +40,13 @@ the next adapter.
 > / deeply nested paths (`Failed to trust workspace … check permissions`), silently
 > zeroing the `cursor-agent` and `legion-cursor` modes. Run the live bench with a
 > short `LEGION_BENCH_DIR` (e.g. under `/tmp`); CI uses the short `$RUNNER_TEMP`.
+
+> **Direct baselines use best-in-family models.** Direct Codex defaults to
+> `CODEX_MODEL=gpt-5.5`, direct Claude defaults to `CLAUDE_MODEL=opus`, and
+> Cursor-backed modes default to `CURSOR_MODEL=composer-2.5` /
+> `LEGION_CURSOR_MODEL=composer-2.5`. Span telemetry (`legion.span.v1`) records
+> the chosen model and usage counts; Cursor USD cost stays `$0` unless Cursor returns a per-call
+> charge because Composer is subscription-priced here.
 
 ## Goals
 
@@ -100,9 +108,9 @@ legion-bench learning-lift --repo . --json
 - selected executor/model/sandbox/effort for route cases
 - doctor validation commands and output
 - fixture-backed task command output and artifact validators
-- token/cost/latency fields (zero for the offline deterministic suites; the live
-  corpus adapters emit real `legion.span.v1` cost/tokens — direct Codex/Claude/Cursor
-  included, not just the Legion wrappers)
+- token/cost/latency/model fields (zero for the offline deterministic suites; the
+  live corpus adapters emit `legion.span.v1` cost/tokens/model rollups — direct
+  Codex/Claude/Cursor included, not just the Legion wrappers)
 - final status and failure reason
 
 `stable` runs the same suite multiple times and writes
@@ -131,7 +139,8 @@ Each mode can be any command: direct Codex, direct Claude Code, Cursor Agent,
 `legion-delegate`, `legion-orchestrate`, an Aider runner, or a SWE-bench wrapper.
 The runner writes per-case workspaces and artifacts under
 `~/.claude/logs/legion/bench/corpus/`, captures stdout/stderr, validates files or
-JSON/JSONL, and aggregates pass rate, duration, cost, tokens, and span count.
+JSON/JSONL, and aggregates pass rate, duration, cost, tokens, span count, and
+per-model span rollups.
 Relative lift is only marked reliable once the comparison has at least
 `reliability_min_cases` case-runs, default `30`.
 

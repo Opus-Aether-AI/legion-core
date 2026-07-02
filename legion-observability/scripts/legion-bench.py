@@ -615,6 +615,28 @@ def _run_process_command(
         }
 
 
+_PROVIDER_BLOCK_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("provider_usage_limit", ("usage limit", "hit your usage limit", "try again at")),
+    ("provider_session_limit", ("session limit", "hit your session limit")),
+    ("provider_quota", ("quota", "insufficient_quota", "credits")),
+    ("provider_rate_limit", ("rate limit", "rate-limit", "rate_limit", "too many requests")),
+)
+
+
+def _provider_block_reason(result: dict[str, Any]) -> str:
+    haystack = " ".join(
+        _text(result.get(key))
+        for key in ("stdout", "stderr", "error")
+        if result.get(key) is not None
+    ).lower()
+    if not haystack:
+        return ""
+    for reason, needles in _PROVIDER_BLOCK_PATTERNS:
+        if any(needle in haystack for needle in needles):
+            return reason
+    return ""
+
+
 def _span_token_total(tokens: Any) -> int:
     if isinstance(tokens, bool):
         return 0
@@ -636,7 +658,13 @@ def _span_token_total(tokens: Any) -> int:
 
 def _span_totals(logs: str) -> dict[str, Any]:
     spans_dir = os.path.join(logs, "spans")
-    totals = {"span_count": 0, "cost_usd": 0.0, "span_duration_ms": 0, "tokens": 0}
+    totals: dict[str, Any] = {
+        "span_count": 0,
+        "cost_usd": 0.0,
+        "span_duration_ms": 0,
+        "tokens": 0,
+        "models": {},
+    }
     if not os.path.isdir(spans_dir):
         return totals
     for name in sorted(os.listdir(spans_dir)):
@@ -652,12 +680,25 @@ def _span_totals(logs: str) -> dict[str, Any]:
                         continue
                     if not isinstance(span, dict):
                         continue
+                    span_cost = _num(span.get("cost_usd"))
+                    span_duration = int(_num(span.get("duration_ms")))
+                    span_tokens = _span_token_total(span.get("tokens"))
+                    model = _text(span.get("model")) or "unknown"
                     totals["span_count"] += 1
-                    totals["cost_usd"] = round(float(totals["cost_usd"]) + _num(span.get("cost_usd")), 6)
-                    totals["span_duration_ms"] += int(_num(span.get("duration_ms")))
-                    totals["tokens"] += _span_token_total(span.get("tokens"))
+                    totals["cost_usd"] = round(float(totals["cost_usd"]) + span_cost, 6)
+                    totals["span_duration_ms"] += span_duration
+                    totals["tokens"] += span_tokens
+                    model_totals = totals["models"].setdefault(
+                        model,
+                        {"span_count": 0, "cost_usd": 0.0, "span_duration_ms": 0, "tokens": 0},
+                    )
+                    model_totals["span_count"] += 1
+                    model_totals["cost_usd"] = round(float(model_totals["cost_usd"]) + span_cost, 6)
+                    model_totals["span_duration_ms"] += span_duration
+                    model_totals["tokens"] += span_tokens
         except OSError:
             continue
+    totals["models"] = dict(sorted(totals["models"].items()))
     return totals
 
 
@@ -1987,6 +2028,45 @@ def run_corpus_case_mode(
         env=env,
         timeout=timeout,
     )
+    provider_block_reason = _provider_block_reason(command_result)
+    if provider_block_reason:
+        spans = _span_totals(logs)
+        duration_ms = int(command_result.get("duration_ms") or 0) + sum(
+            int(result.get("duration_ms") or 0) for result in setup_results
+        )
+        return {
+            "schema": "legion.bench.corpus-case-result.v1",
+            "id": case_id,
+            "mode": mode_id,
+            "attempt": repeat_index,
+            "status": "blocked",
+            "ok": False,
+            "required": bool(case.get("required", True)),
+            "dimension": _text(case.get("dimension")) or "corpus",
+            "summary": _text(case.get("summary")),
+            "reason": provider_block_reason,
+            "metrics": {
+                "duration_ms": duration_ms,
+                **spans,
+            },
+            "details": {
+                "workspace": workspace,
+                "logs": logs,
+                "task": task,
+                "task_file": task_file,
+                "case_file": case_file,
+                "setup": setup_results,
+                "cmd": command_result.get("cmd"),
+                "cwd": cwd,
+                "returncode": command_result.get("returncode"),
+                "expected_exit": _case_mode_expected_exit(case, mode),
+                "validators": [],
+                "provider_blocked": True,
+                "provider_block_reason": provider_block_reason,
+                "stdout": _short(_text(command_result.get("stdout")), 4000),
+                "stderr": _short(_text(command_result.get("stderr")), 4000),
+            },
+        }
     expected_exit = _case_mode_expected_exit(case, mode)
     validator_results = run_task_validators(
         _case_mode_validators(case, mode),
@@ -2041,29 +2121,52 @@ def run_corpus_case_mode(
 def _summarize_corpus_mode(results: list[dict[str, Any]]) -> dict[str, Any]:
     case_runs = len(results)
     passed = sum(1 for result in results if result.get("status") == "pass")
+    blocked = sum(1 for result in results if result.get("status") == "blocked")
     required = [result for result in results if result.get("required")]
     required_pass = sum(1 for result in required if result.get("status") == "pass")
+    required_blocked = sum(1 for result in required if result.get("status") == "blocked")
     durations = [int(_dict(result.get("metrics")).get("duration_ms") or 0) for result in results]
     dimensions: dict[str, dict[str, Any]] = {}
+    models: dict[str, dict[str, Any]] = {}
     for result in results:
+        result_metrics = _dict(result.get("metrics"))
         dimension = _text(result.get("dimension")) or "corpus"
-        entry = dimensions.setdefault(dimension, {"case_runs": 0, "pass": 0, "fail": 0})
+        entry = dimensions.setdefault(dimension, {"case_runs": 0, "pass": 0, "fail": 0, "blocked": 0})
         entry["case_runs"] += 1
         if result.get("status") == "pass":
             entry["pass"] += 1
+        elif result.get("status") == "blocked":
+            entry["blocked"] += 1
+            entry["fail"] += 1
         else:
             entry["fail"] += 1
+        for model, model_metrics_raw in _dict(result_metrics.get("models")).items():
+            model_name = _text(model) or "unknown"
+            model_metrics = _dict(model_metrics_raw)
+            model_entry = models.setdefault(
+                model_name,
+                {"span_count": 0, "cost_usd": 0.0, "span_duration_ms": 0, "tokens": 0},
+            )
+            model_entry["span_count"] += int(model_metrics.get("span_count") or 0)
+            model_entry["cost_usd"] = round(
+                float(model_entry["cost_usd"]) + _num(model_metrics.get("cost_usd")),
+                6,
+            )
+            model_entry["span_duration_ms"] += int(_num(model_metrics.get("span_duration_ms")))
+            model_entry["tokens"] += int(_num(model_metrics.get("tokens")))
     for entry in dimensions.values():
         entry["pass_rate"] = _rate(int(entry["pass"]), int(entry["case_runs"]))
     metrics = {
         "case_runs": case_runs,
         "pass": passed,
         "fail": case_runs - passed,
+        "blocked": blocked,
         "pass_rate": _rate(passed, case_runs),
         "pass_rate_ci95": _wilson_interval(passed, case_runs),
         "required_case_runs": len(required),
         "required_pass": required_pass,
         "required_fail": len(required) - required_pass,
+        "required_blocked": required_blocked,
         "required_pass_rate": _rate(required_pass, len(required)),
         "required_pass_rate_ci95": _wilson_interval(required_pass, len(required)),
         "duration_ms": sum(int(_dict(result.get("metrics")).get("duration_ms") or 0) for result in results),
@@ -2072,6 +2175,7 @@ def _summarize_corpus_mode(results: list[dict[str, Any]]) -> dict[str, Any]:
         "cost_usd": round(sum(float(_dict(result.get("metrics")).get("cost_usd") or 0.0) for result in results), 6),
         "tokens": sum(int(_dict(result.get("metrics")).get("tokens") or 0) for result in results),
         "span_count": sum(int(_dict(result.get("metrics")).get("span_count") or 0) for result in results),
+        "models": dict(sorted(models.items())),
     }
     return {"metrics": metrics, "dimensions": dict(sorted(dimensions.items()))}
 
@@ -2287,8 +2391,8 @@ def render_corpus_markdown(summary: dict[str, Any], artifacts: dict[str, str]) -
         "",
         "## Mode Results",
         "",
-        "| Mode | Pass | Case-runs | Pass rate | 95% CI | Cost | Tokens | Mean ms | P95 ms |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Mode | Pass | Blocked | Case-runs | Pass rate | 95% CI | Cost | Tokens | Spans | Mean ms | P95 ms |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for mode_id, mode_summary in _dict(summary.get("modes")).items():
         metrics = _dict(_dict(mode_summary).get("metrics"))
@@ -2298,14 +2402,37 @@ def render_corpus_markdown(summary: dict[str, Any], artifacts: dict[str, str]) -
             "| "
             f"`{mode_id}` | "
             f"{int(metrics.get('pass') or 0)} | "
+            f"{int(metrics.get('blocked') or 0)} | "
             f"{int(metrics.get('case_runs') or 0)} | "
             f"{_markdown_float(metrics.get('pass_rate'))} | "
             f"{ci_text} | "
             f"${float(metrics.get('cost_usd') or 0):.6f} | "
             f"{int(metrics.get('tokens') or 0)} | "
+            f"{int(metrics.get('span_count') or 0)} | "
             f"{_markdown_float(metrics.get('mean_duration_ms'))} | "
             f"{int(metrics.get('p95_duration_ms') or 0)} |"
         )
+    lines.extend(["", "## Model Metering", ""])
+    model_rows = []
+    for mode_id, mode_summary in _dict(summary.get("modes")).items():
+        metrics = _dict(_dict(mode_summary).get("metrics"))
+        for model, model_metrics in _dict(metrics.get("models")).items():
+            model_rows.append((mode_id, _text(model) or "unknown", _dict(model_metrics)))
+    if model_rows:
+        lines.append("| Mode | Model | Spans | Cost | Tokens | Span ms |")
+        lines.append("|---|---|---:|---:|---:|---:|")
+        for mode_id, model, model_metrics in model_rows:
+            lines.append(
+                "| "
+                f"`{mode_id}` | "
+                f"`{model}` | "
+                f"{int(model_metrics.get('span_count') or 0)} | "
+                f"${float(model_metrics.get('cost_usd') or 0):.6f} | "
+                f"{int(model_metrics.get('tokens') or 0)} | "
+                f"{int(model_metrics.get('span_duration_ms') or 0)} |"
+            )
+    else:
+        lines.append("_No model spans recorded._")
     lines.extend(["", "## Comparisons", ""])
     lines.append(
         "| Comparison | Delta pp | Relative | Reliable | Candidate paired wins | Baseline paired wins | McNemar p | Cost delta | Duration delta ms |"

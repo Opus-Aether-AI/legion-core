@@ -57,7 +57,7 @@ SH
   run "$FANOUT" --slices "$BATS_TEST_TMPDIR/s.jsonl" --repo "$REPO" --max-concurrency 2
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.slices == 3 and .ok == 2 and .inline == 1 and .failed == 0'
-  echo "$output" | jq -e '.by_model["gpt-5.4"] == 2'
+  echo "$output" | jq -e '.by_model["gpt-5.5"] == 2'
   echo "$output" | jq -e '[.results[] | select(.status=="inline") | .archetype] == ["deep-reasoning"]'
 }
 

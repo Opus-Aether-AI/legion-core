@@ -12,12 +12,8 @@ if [[ -n "${LEGION_BENCH_REAL_HOME:-}" ]]; then
   export HOME="$LEGION_BENCH_REAL_HOME"
 fi
 
-args=(--print --output-format json --force --trust --workspace "$workspace")
-if [[ -n "${CURSOR_MODEL:-}" ]]; then
-  args+=(--model "$CURSOR_MODEL")
-fi
-
-model="${CURSOR_MODEL:-cursor-auto}"
+model="${CURSOR_MODEL:-${LEGION_CURSOR_MODEL:-composer-2.5}}"
+args=(--print --output-format json --force --trust --workspace "$workspace" --model "$model")
 task="$(<"$task_file")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/cursor-agent.XXXXXX")"
 trap 'rm -f "'"$tmp"'"' EXIT

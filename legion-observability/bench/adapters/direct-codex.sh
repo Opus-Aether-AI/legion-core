@@ -12,9 +12,9 @@ if [[ -n "${LEGION_BENCH_REAL_HOME:-}" ]]; then
   export HOME="$LEGION_BENCH_REAL_HOME"
 fi
 
-# Pin the model so the priced/labeled model matches the one Codex actually runs
-# (otherwise cost is computed for gpt-5.4 while the CLI may use a different default).
-model="${CODEX_MODEL:-gpt-5.4}"
+# Pin the strongest Codex benchmark baseline so the priced/labeled model matches
+# the one the CLI actually runs. Set CODEX_MODEL for controlled comparisons.
+model="${CODEX_MODEL:-gpt-5.5}"
 args=(exec --json -m "$model" -s workspace-write -C "$workspace" --skip-git-repo-check -)
 
 tmp="$(mktemp "${TMPDIR:-/tmp}/direct-codex.XXXXXX")"

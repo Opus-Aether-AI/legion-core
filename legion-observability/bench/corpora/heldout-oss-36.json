@@ -41,7 +41,7 @@
       "label": "Direct Codex",
       "kind": "live",
       "live": true,
-      "description": "Runs Codex directly in the case workspace. Set CODEX_MODEL to override the default.",
+      "description": "Runs Codex directly in the case workspace. Defaults to gpt-5.5; set CODEX_MODEL to override.",
       "command": [
         "{repo}/legion-observability/bench/adapters/direct-codex.sh"
       ],
@@ -63,7 +63,7 @@
       "label": "Direct Claude Code",
       "kind": "live",
       "live": true,
-      "description": "Runs Claude Code directly in the case workspace. Set CLAUDE_MODEL to override the default.",
+      "description": "Runs Claude Code directly in the case workspace. Defaults to opus; set CLAUDE_MODEL to override.",
       "command": [
         "{repo}/legion-observability/bench/adapters/direct-claude.sh"
       ],
@@ -74,7 +74,7 @@
       "label": "Direct Cursor Agent",
       "kind": "live",
       "live": true,
-      "description": "Runs Cursor Agent directly in the case workspace. Set CURSOR_MODEL to override the default.",
+      "description": "Runs Cursor Agent directly in the case workspace. Defaults to composer-2.5; set CURSOR_MODEL to override.",
       "command": [
         "{repo}/legion-observability/bench/adapters/cursor-agent.sh"
       ],

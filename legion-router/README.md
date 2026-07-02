@@ -1,6 +1,6 @@
 # legion-router
 
-Legion's multi-model brain. Lets Opus orchestrate and **delegate scoped sub-tasks to external model agents** (Codex / GPT-5.5 / GPT-5.4 / Cursor Agent), bringing back a **verified, metered diff** — plus an opt-in Anthropic-compatible metering proxy so all model spend lands in one place.
+Legion's multi-model brain. Lets Opus orchestrate and **delegate scoped sub-tasks to external model agents** (Codex / GPT-5.5 / Cursor Agent), bringing back a **verified, metered diff** — plus an opt-in Anthropic-compatible metering proxy so all model spend lands in one place.
 
 > One orchestrator, a legion of models.
 
@@ -49,7 +49,7 @@ legion-delegate review --model gpt-5.5 --base main --repo .
 Requires: `codex` CLI for `legion-delegate`, Cursor CLI (`agent` or `cursor-agent`) for `legion-cursor`, plus `jq` and `git`. The proxy additionally needs `bun`.
 
 `legion-intake` is intentionally one level above the provider. By default it runs
-`legion-delegate` (`gpt-5.4`), but `--worker cursor` or
+`legion-delegate` (`gpt-5.5`), but `--worker cursor` or
 `--worker custom --worker-bin ./path/to/runner` can swap in any runner that
 accepts `run --sandbox ... --task ... --repo ...` and returns the standard
 Legion JSON fields (`status`, `run_id`, `diff_path`, `last_message_path` or

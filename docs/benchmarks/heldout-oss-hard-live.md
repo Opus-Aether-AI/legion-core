@@ -49,11 +49,12 @@ frontier single-shot models on self-contained Python — pass rate does not
 discriminate. What *does* separate the modes, now that the direct adapters emit real
 `legion.span.v1` spans, is **cost at equal quality**:
 
-- **Legion's cost-routing thesis holds, and is now measurable.** `legion-delegate`
+- **Legion's historical cost-routing thesis became measurable in this run.** `legion-delegate`
   reaches the same 38/38 as `direct-claude` for **$3.95 vs $14.83 — about 1/4 the
-  cost** ($10.88 saved), because the router sends the work to `gpt-5.4` (via Codex)
-  instead of a premium Claude model. This is the headline number the benchmark
-  previously could not produce, because direct adapters reported `$0`.
+  cost** ($10.88 saved), because the then-current router sent the work to
+  `gpt-5.4` (via Codex) instead of a premium Claude model. Current runs use
+  `gpt-5.5` for Legion-managed Codex work; this is the headline number the
+  benchmark previously could not produce, because direct adapters reported `$0`.
 - **The Legion wrapper adds negligible cost over the raw executor it routes to.**
   `legion-delegate` ($3.95) vs `direct-codex` ($3.79) is a `+$0.17` delta — the
   orchestration/telemetry/worktree overhead is real but small. It does add latency

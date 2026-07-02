@@ -1,8 +1,8 @@
 # Legion Bench Corpora
 
 `legion-bench corpus` is the proper-number path. It runs the same cases across
-multiple harness modes and reports pass rate, lift, duration, cost/tokens from
-Legion spans, and sample-size reliability.
+multiple harness modes and reports pass rate, lift, duration, cost/tokens/model
+rollups from Legion spans, and sample-size reliability.
 
 The packaged `local-smoke.json` corpus is only a runner smoke test. It is tiny
 and intentionally marked unreliable for performance claims.
@@ -93,16 +93,18 @@ legion-bench corpus \
 
 Optional live modes currently packaged:
 
-- `direct-codex`
+- `direct-codex` (defaults to `CODEX_MODEL=gpt-5.5`)
 - `legion-delegate`
-- `direct-claude`
-- `cursor-agent`
-- `legion-cursor`
+- `direct-claude` (defaults to `CLAUDE_MODEL=opus`)
+- `cursor-agent` (defaults to `CURSOR_MODEL=composer-2.5`)
+- `legion-cursor` (defaults to `CURSOR_MODEL=composer-2.5`)
 
 Live modes require the corresponding CLI and auth on the machine running the
 bench. The adapters restore the real user `HOME` for the live CLI process so
 Codex, Claude, and Cursor can read their normal auth state while the editable
-task workspace remains isolated. GitHub Actions also has a manual
+task workspace remains isolated. Cursor modes emit token/model spans but keep
+USD cost at `$0` unless Cursor reports a per-call charge, because Composer runs
+through the Cursor subscription. GitHub Actions also has a manual
 `legion-live-bench` workflow with an explicit `run_live=true` guard before any
 live modes run.
 
@@ -122,7 +124,7 @@ Use 30+ held-out cases for a reliable comparison:
       "command": [
         "bash",
         "-lc",
-        "codex exec --json -m ${CODEX_MODEL:-gpt-5.4} -s workspace-write -C {workspace} --skip-git-repo-check - < {task_file}"
+        "codex exec --json -m ${CODEX_MODEL:-gpt-5.5} -s workspace-write -C {workspace} --skip-git-repo-check - < {task_file}"
       ],
       "timeout": 900
     },
@@ -157,7 +159,7 @@ Use 30+ held-out cases for a reliable comparison:
         "direct-codex": [
           "bash",
           "-lc",
-          "codex exec --json -m ${CODEX_MODEL:-gpt-5.4} -s workspace-write -C {workspace} --skip-git-repo-check - < {task_file} && python3 test_app.py"
+          "codex exec --json -m ${CODEX_MODEL:-gpt-5.5} -s workspace-write -C {workspace} --skip-git-repo-check - < {task_file} && python3 test_app.py"
         ],
         "legion-delegate": [
           "bash",

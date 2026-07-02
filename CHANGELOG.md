@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.10.0...v0.10.1) (2026-07-02)
+
+
+### Documentation
+
+* **enterprise:** add ENTERPRISE.md; drop awspex ignore bleed-through ([#60](https://github.com/Opus-Aether-AI/legion-core/issues/60)) ([cd1cfa4](https://github.com/Opus-Aether-AI/legion-core/commit/cd1cfa4a318f8407774db589875d1b199fdc2fac))
+
 ## [0.10.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.9.2...v0.10.0) (2026-07-02)
 
 

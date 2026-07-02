@@ -44,8 +44,8 @@ the next adapter.
 > **Direct baselines use best-in-family models.** Direct Codex defaults to
 > `CODEX_MODEL=gpt-5.5`, direct Claude defaults to `CLAUDE_MODEL=opus`, and
 > Cursor-backed modes default to `CURSOR_MODEL=composer-2.5` /
-> `LEGION_CURSOR_MODEL=composer-2.5`. The model and tokens are recorded in
-> `legion.span.v1`; Cursor USD cost stays `$0` unless Cursor returns a per-call
+> `LEGION_CURSOR_MODEL=composer-2.5`. Span telemetry (`legion.span.v1`) records
+> the chosen model and usage counts; Cursor USD cost stays `$0` unless Cursor returns a per-call
 > charge because Composer is subscription-priced here.
 
 ## Goals

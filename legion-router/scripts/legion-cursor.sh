@@ -78,7 +78,17 @@ emit_span() {
 usage_json() {
   local file="$1"
   local usage
-  usage="$(jq -c '.usage // .tokens // {}' "$file" 2>/dev/null || true)"
+  # cursor-agent reports camelCase token keys (inputTokens/outputTokens/
+  # cacheReadTokens/cacheWriteTokens). Normalize to the canonical snake_case
+  # keys so spans aggregate in legion-aggregate / legion-bench token totals.
+  usage="$(jq -c '
+    (.usage // .tokens // {}) as $u
+    | {
+        input_tokens: ($u.input_tokens // $u.inputTokens // 0),
+        output_tokens: ($u.output_tokens // $u.outputTokens // 0),
+        cache_read_input_tokens: ($u.cache_read_input_tokens // $u.cacheReadTokens // $u.cached_input_tokens // 0),
+        cache_creation_input_tokens: ($u.cache_creation_input_tokens // $u.cacheWriteTokens // 0)
+      }' "$file" 2>/dev/null || true)"
   [[ -n "$usage" ]] && printf '%s' "$usage" || printf '{}'
 }
 

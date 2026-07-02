@@ -63,8 +63,8 @@ setup() {
   jq -e '
     .ok == true
     and .metrics.iterations == 2
-    and .metrics.cases_per_iteration == 49
-    and .metrics.total_case_runs == 98
+    and .metrics.cases_per_iteration == 51
+    and .metrics.total_case_runs == 102
     and .metrics.flake_count == 0
     and .dimensions["cli-contract"].pass_rate == 1
     and .dimensions.routing.pass_rate == 1
@@ -88,6 +88,42 @@ setup() {
     and .run_path
     and .cases_path
   ' <<<"$output" >/dev/null
+}
+
+@test "legion-bench: heldout corpus dry-run is reliable without model calls" {
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" corpus --corpus heldout-oss-36 --repo "$ROOT" --dry-run --require-reliable --json
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .schema == "legion.bench.corpus-plan.v1"
+    and .corpus == "heldout-oss-36"
+    and .case_count == 36
+    and .total_case_runs == 72
+    and .comparisons["scripted-baseline..scripted-oracle"].case_runs == 36
+    and .comparisons["scripted-baseline..scripted-oracle"].reliable == true
+    and .has_live_modes_selected == false
+  ' <<<"$output" >/dev/null
+}
+
+@test "legion-bench: heldout corpus control run writes markdown report" {
+  report="$BATS_TEST_TMPDIR/heldout-report.md"
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" corpus --corpus heldout-oss-36 --repo "$ROOT" --json --strict --require-reliable --report-md "$report"
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  jq -e '
+    .summary.ok == true
+    and .summary.modes["scripted-baseline"].metrics.pass == 0
+    and .summary.modes["scripted-oracle"].metrics.pass == 36
+    and .summary.comparisons["scripted-baseline..scripted-oracle"].reliable == true
+    and .summary.comparisons["scripted-baseline..scripted-oracle"].paired.candidate_only_pass == 36
+    and (.summary.failure_clusters | length > 0)
+  ' <<<"$output" >/dev/null
+  grep -Fq "Legion Corpus Benchmark: heldout-oss-36" "$report"
 }
 
 @test "legion-bench: record-failures writes legion-bench outcomes" {

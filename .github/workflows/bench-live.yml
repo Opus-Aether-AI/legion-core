@@ -1,0 +1,151 @@
+name: legion-live-bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      corpus:
+        description: Corpus name or path.
+        required: true
+        default: heldout-oss-36
+        type: string
+      modes:
+        description: Comma-separated modes. Use scripted-baseline,scripted-oracle for no-spend control.
+        required: true
+        default: scripted-baseline,scripted-oracle
+        type: string
+      baseline:
+        description: Baseline mode for comparisons.
+        required: true
+        default: scripted-baseline
+        type: string
+      repeat:
+        description: Repeat count per case/mode.
+        required: true
+        default: "1"
+        type: string
+      run_live:
+        description: Must be true when selecting live modes such as direct-codex or legion-delegate.
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Guard live model spend
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra selected_modes <<< "${{ inputs.modes }}"
+          for mode in "${selected_modes[@]}"; do
+            mode="$(echo "$mode" | xargs)"
+            case "$mode" in
+              direct-codex|legion-delegate|direct-claude|cursor-agent|legion-cursor)
+                if [[ "${{ inputs.run_live }}" != "true" ]]; then
+                  echo "Live mode '$mode' selected but run_live is not true." >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done
+
+      - name: Configure Codex for Codex-backed modes
+        if: contains(inputs.modes, 'direct-codex') || contains(inputs.modes, 'legion-delegate')
+        env:
+          CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_HOME: ${{ runner.temp }}/codex-home
+        run: |
+          set -euo pipefail
+          npm install -g @openai/codex
+          mkdir -p "$CODEX_HOME"
+          if [[ -n "${CODEX_AUTH:-}" ]]; then
+            printf '%s' "$CODEX_AUTH" > "$CODEX_HOME/auth.json"
+          elif [[ -n "${OPENAI_API_KEY:-}" ]]; then
+            printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key >/dev/null
+          else
+            echo "CODEX_AUTH or OPENAI_API_KEY is required for Codex-backed live modes." >&2
+            exit 1
+          fi
+          codex login status >/dev/null
+
+      - name: Configure Claude for Claude-backed modes
+        if: contains(inputs.modes, 'direct-claude')
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+            echo "ANTHROPIC_API_KEY is required for direct-claude live mode." >&2
+            exit 1
+          fi
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      - name: Check Cursor Agent for Cursor-backed modes
+        if: contains(inputs.modes, 'cursor-agent') || contains(inputs.modes, 'legion-cursor')
+        run: |
+          set -euo pipefail
+          if ! command -v cursor-agent >/dev/null 2>&1; then
+            echo "cursor-agent is required for cursor-agent or legion-cursor live modes." >&2
+            echo "Run those modes locally or use a runner image that preinstalls Cursor Agent." >&2
+            exit 1
+          fi
+          cursor-agent --version
+
+      - name: Run corpus benchmark
+        env:
+          CODEX_HOME: ${{ runner.temp }}/codex-home
+          CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          LEGION_BENCH_DIR: ${{ runner.temp }}/legion-bench
+          LEGION_TELEMETRY_DIR: ${{ runner.temp }}/legion-spans
+        run: |
+          set -euo pipefail
+          args=()
+          IFS=',' read -ra selected_modes <<< "${{ inputs.modes }}"
+          for mode in "${selected_modes[@]}"; do
+            mode="$(echo "$mode" | xargs)"
+            [[ -n "$mode" ]] && args+=(--mode "$mode")
+          done
+          legion-observability/bin/legion-bench corpus \
+            --corpus "${{ inputs.corpus }}" \
+            --repo . \
+            --baseline "${{ inputs.baseline }}" \
+            --repeat "${{ inputs.repeat }}" \
+            --require-reliable \
+            --json \
+            --report-md "$RUNNER_TEMP/legion-bench-report.md" \
+            "${args[@]}" \
+            > "$RUNNER_TEMP/legion-bench-result.json"
+          jq '.summary.comparisons' "$RUNNER_TEMP/legion-bench-result.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: legion-live-bench
+          path: |
+            ${{ runner.temp }}/legion-bench
+            ${{ runner.temp }}/legion-spans
+            ${{ runner.temp }}/legion-bench-result.json
+            ${{ runner.temp }}/legion-bench-report.md

@@ -1,0 +1,574 @@
+{
+  "schema": "legion.bench.corpus.v1",
+  "corpus": "heldout-oss-hard",
+  "description": "Held-out, harder pure-Python corpus (multi-file, longer-horizon, rich edge cases) authored to DISCRIMINATE between agent harnesses where the saturated heldout-oss-36 micro corpus cannot. Validators are the oracle; answer_files pass, stubs fail.",
+  "baseline": "scripted-baseline",
+  "reliability_min_cases": 18,
+  "required_clean_modes": [
+    "scripted-oracle"
+  ],
+  "modes": [
+    {
+      "id": "scripted-baseline",
+      "label": "No-op scripted baseline",
+      "description": "Does not edit files. Used only to prove corpus reliability mechanics without model spend.",
+      "command": [
+        "python3",
+        "{repo}/legion-observability/bench/adapters/fixture-agent.py",
+        "--apply",
+        "none"
+      ],
+      "timeout": 20
+    },
+    {
+      "id": "scripted-oracle",
+      "label": "Scripted oracle",
+      "description": "Applies answer_files. Used only to prove corpus reliability mechanics without model spend.",
+      "command": [
+        "python3",
+        "{repo}/legion-observability/bench/adapters/fixture-agent.py",
+        "--apply",
+        "answer"
+      ],
+      "timeout": 20
+    },
+    {
+      "id": "direct-codex",
+      "label": "Direct Codex",
+      "kind": "live",
+      "live": true,
+      "description": "Runs Codex directly in the case workspace. Set CODEX_MODEL to override the default.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/direct-codex.sh"
+      ],
+      "timeout": 900
+    },
+    {
+      "id": "legion-delegate",
+      "label": "Legion delegate",
+      "kind": "live",
+      "live": true,
+      "description": "Runs the same task through legion-delegate with apply enabled.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/legion-delegate.sh"
+      ],
+      "timeout": 900
+    },
+    {
+      "id": "direct-claude",
+      "label": "Direct Claude Code",
+      "kind": "live",
+      "live": true,
+      "description": "Runs Claude Code directly in the case workspace. Set CLAUDE_MODEL to override the default.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/direct-claude.sh"
+      ],
+      "timeout": 900
+    },
+    {
+      "id": "cursor-agent",
+      "label": "Direct Cursor Agent",
+      "kind": "live",
+      "live": true,
+      "description": "Runs Cursor Agent directly in the case workspace. Set CURSOR_MODEL to override the default.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/cursor-agent.sh"
+      ],
+      "timeout": 900
+    },
+    {
+      "id": "legion-cursor",
+      "label": "Legion Cursor",
+      "kind": "live",
+      "live": true,
+      "description": "Runs the same task through Legion's Cursor wrapper.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/legion-cursor.sh"
+      ],
+      "timeout": 900
+    }
+  ],
+  "cases": [
+    {
+      "id": "py-interval-merge",
+      "dimension": "algorithmic",
+      "summary": "Merge overlapping/touching integer intervals.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement merge_intervals(intervals).",
+      "files": {
+        "task.py": "def merge_intervals(intervals):\n    return intervals\n",
+        "test_task.py": "from task import merge_intervals\nassert merge_intervals([]) == []\nassert merge_intervals([[1, 3]]) == [[1, 3]]\nassert merge_intervals([[1, 3], [2, 6], [8, 10]]) == [[1, 6], [8, 10]]\nassert merge_intervals([[8, 10], [1, 3], [2, 6]]) == [[1, 6], [8, 10]]\nassert merge_intervals([[1, 4], [4, 5]]) == [[1, 5]]\nassert merge_intervals([[1, 4], [5, 6]]) == [[1, 4], [5, 6]]\nassert merge_intervals([[1, 10], [2, 3], [4, 5]]) == [[1, 10]]\n"
+      },
+      "answer_files": {
+        "task.py": "def merge_intervals(intervals):\n    out = []\n    for start, end in sorted(intervals):\n        if out and start <= out[-1][1]:\n            out[-1][1] = max(out[-1][1], end)\n        else:\n            out.append([start, end])\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-rpn-eval",
+      "dimension": "algorithmic",
+      "summary": "Evaluate a reverse-polish-notation token list.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement eval_rpn(tokens) using +,-,*,/ with float division.",
+      "files": {
+        "task.py": "def eval_rpn(tokens):\n    return 0\n",
+        "test_task.py": "from task import eval_rpn\nassert eval_rpn(['3']) == 3\nassert eval_rpn(['2', '3', '+']) == 5\nassert eval_rpn(['4', '2', '-']) == 2\nassert eval_rpn(['3', '4', '+', '2', '*']) == 14\nassert eval_rpn(['10', '2', '/']) == 5\nassert eval_rpn(['2', '3', '4', '*', '+']) == 14\nassert eval_rpn(['-3', '4', '+']) == 1\n"
+      },
+      "answer_files": {
+        "task.py": "def eval_rpn(tokens):\n    stack = []\n    ops = {'+': lambda a, b: a + b, '-': lambda a, b: a - b,\n           '*': lambda a, b: a * b, '/': lambda a, b: a / b}\n    for tok in tokens:\n        if tok in ops:\n            b = stack.pop()\n            a = stack.pop()\n            stack.append(ops[tok](a, b))\n        else:\n            stack.append(float(tok))\n    result = stack[0]\n    return int(result) if result == int(result) else result\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-topo-order",
+      "dimension": "algorithmic",
+      "summary": "Deterministic topological sort; raise on cycle.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement topo_order(graph) returning a list; ties broken by sorted node order; raise ValueError on a cycle.",
+      "files": {
+        "task.py": "def topo_order(graph):\n    return list(graph)\n",
+        "test_task.py": "from task import topo_order\nassert topo_order({}) == []\nassert topo_order({'a': []}) == ['a']\nassert topo_order({'a': ['b'], 'b': ['c'], 'c': []}) == ['a', 'b', 'c']\nassert topo_order({'a': ['c'], 'b': ['c'], 'c': []}) == ['a', 'b', 'c']\nassert topo_order({'b': [], 'a': ['b']}) == ['a', 'b']\ntry:\n    topo_order({'a': ['b'], 'b': ['a']})\n    assert False\nexcept ValueError:\n    pass\n"
+      },
+      "answer_files": {
+        "task.py": "def topo_order(graph):\n    indeg = {n: 0 for n in graph}\n    for n in graph:\n        for m in graph[n]:\n            indeg[m] = indeg.get(m, 0) + 1\n            indeg.setdefault(n, indeg[n])\n    ready = sorted(n for n, d in indeg.items() if d == 0)\n    out = []\n    while ready:\n        n = ready.pop(0)\n        out.append(n)\n        for m in graph.get(n, []):\n            indeg[m] -= 1\n            if indeg[m] == 0:\n                ready.append(m)\n        ready.sort()\n    if len(out) != len(indeg):\n        raise ValueError('cycle detected')\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-spiral-read",
+      "dimension": "algorithmic",
+      "summary": "Read a 2D grid in clockwise spiral order.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement spiral(grid) -> list read clockwise from top-left.",
+      "files": {
+        "task.py": "def spiral(grid):\n    return []\n",
+        "test_task.py": "from task import spiral\nassert spiral([]) == []\nassert spiral([[1]]) == [1]\nassert spiral([[1, 2, 3]]) == [1, 2, 3]\nassert spiral([[1], [2], [3]]) == [1, 2, 3]\nassert spiral([[1, 2], [3, 4]]) == [1, 2, 4, 3]\nassert spiral([[1, 2, 3], [4, 5, 6], [7, 8, 9]]) == [1, 2, 3, 6, 9, 8, 7, 4, 5]\n"
+      },
+      "answer_files": {
+        "task.py": "def spiral(grid):\n    out = []\n    grid = [row[:] for row in grid if row]\n    while grid:\n        out.extend(grid.pop(0))\n        grid = [list(row) for row in zip(*grid)][::-1] if grid else []\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-run-length",
+      "dimension": "algorithmic",
+      "summary": "Round-trip run-length encode and decode.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement rle_encode(s)->list[(char,count)] and rle_decode(pairs)->str.",
+      "files": {
+        "task.py": "def rle_encode(s):\n    return []\n\n\ndef rle_decode(pairs):\n    return ''\n",
+        "test_task.py": "from task import rle_encode, rle_decode\nassert rle_encode('') == []\nassert rle_encode('a') == [('a', 1)]\nassert rle_encode('aaabb') == [('a', 3), ('b', 2)]\nassert rle_encode('aabaa') == [('a', 2), ('b', 1), ('a', 2)]\nassert rle_decode([]) == ''\nassert rle_decode([('a', 3), ('b', 2)]) == 'aaabb'\nfor s in ['', 'a', 'aaabb', 'aabaa', 'xyzzy']:\n    assert rle_decode(rle_encode(s)) == s\n"
+      },
+      "answer_files": {
+        "task.py": "def rle_encode(s):\n    out = []\n    for ch in s:\n        if out and out[-1][0] == ch:\n            out[-1] = (ch, out[-1][1] + 1)\n        else:\n            out.append((ch, 1))\n    return out\n\n\ndef rle_decode(pairs):\n    return ''.join(ch * count for ch, count in pairs)\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-deep-merge",
+      "dimension": "data-transform",
+      "summary": "Recursively merge two nested dicts.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement deep_merge(a, b): dict values merge recursively, other values from b win; inputs not mutated.",
+      "files": {
+        "task.py": "def deep_merge(a, b):\n    return b\n",
+        "test_task.py": "from task import deep_merge\nassert deep_merge({}, {}) == {}\nassert deep_merge({'a': 1}, {'b': 2}) == {'a': 1, 'b': 2}\nassert deep_merge({'a': 1}, {'a': 2}) == {'a': 2}\nassert deep_merge({'a': {'x': 1}}, {'a': {'y': 2}}) == {'a': {'x': 1, 'y': 2}}\nassert deep_merge({'a': {'x': 1}}, {'a': {'x': 9}}) == {'a': {'x': 9}}\nbase = {'a': {'x': 1}}\ndeep_merge(base, {'a': {'y': 2}})\nassert base == {'a': {'x': 1}}\nassert deep_merge({'a': {'x': 1}}, {'a': 5}) == {'a': 5}\n"
+      },
+      "answer_files": {
+        "task.py": "def deep_merge(a, b):\n    out = dict(a)\n    for key, value in b.items():\n        if isinstance(value, dict) and isinstance(out.get(key), dict):\n            out[key] = deep_merge(out[key], value)\n        else:\n            out[key] = value\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-group-by",
+      "dimension": "data-transform",
+      "summary": "Group records by a key into a dict of lists.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement group_by(records, key) preserving input order within each group.",
+      "files": {
+        "task.py": "def group_by(records, key):\n    return {}\n",
+        "test_task.py": "from task import group_by\nassert group_by([], 'k') == {}\nr = [{'k': 'a', 'v': 1}, {'k': 'b', 'v': 2}, {'k': 'a', 'v': 3}]\nassert group_by(r, 'k') == {'a': [{'k': 'a', 'v': 1}, {'k': 'a', 'v': 3}], 'b': [{'k': 'b', 'v': 2}]}\nassert list(group_by(r, 'k').keys()) == ['a', 'b']\nr2 = [{'k': 1}, {'k': 1}, {'k': 2}]\nassert group_by(r2, 'k') == {1: [{'k': 1}, {'k': 1}], 2: [{'k': 2}]}\n"
+      },
+      "answer_files": {
+        "task.py": "def group_by(records, key):\n    out = {}\n    for record in records:\n        out.setdefault(record[key], []).append(record)\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-flatten-deep",
+      "dimension": "data-transform",
+      "summary": "Flatten an arbitrarily nested list of ints.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement flatten(items) -> flat list, depth-first, preserving order.",
+      "files": {
+        "task.py": "def flatten(items):\n    return items\n",
+        "test_task.py": "from task import flatten\nassert flatten([]) == []\nassert flatten([1, 2, 3]) == [1, 2, 3]\nassert flatten([1, [2, 3]]) == [1, 2, 3]\nassert flatten([1, [2, [3, [4]]]]) == [1, 2, 3, 4]\nassert flatten([[1, 2], [3, [4, 5]], 6]) == [1, 2, 3, 4, 5, 6]\nassert flatten([[], [1], []]) == [1]\n"
+      },
+      "answer_files": {
+        "task.py": "def flatten(items):\n    out = []\n    for item in items:\n        if isinstance(item, list):\n            out.extend(flatten(item))\n        else:\n            out.append(item)\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-ini-parse",
+      "dimension": "parsing",
+      "summary": "Parse an INI-like config into a nested dict.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement parse_ini(text): [section] headers, key=value lines, ';' or '#' comments, blank lines ignored, keys/values stripped.",
+      "files": {
+        "task.py": "def parse_ini(text):\n    return {}\n",
+        "test_task.py": "from task import parse_ini\nassert parse_ini('') == {}\ntxt = '[a]\\nx = 1\\ny=2\\n\\n[b]\\n; comment\\nz = hi there\\n# full line\\n'\nassert parse_ini(txt) == {'a': {'x': '1', 'y': '2'}, 'b': {'z': 'hi there'}}\nassert parse_ini('[s]\\nk=v=w\\n') == {'s': {'k': 'v=w'}}\nassert parse_ini('k=v\\n') == {'': {'k': 'v'}}\n"
+      },
+      "answer_files": {
+        "task.py": "def parse_ini(text):\n    out = {}\n    section = ''\n    for raw in text.splitlines():\n        line = raw.strip()\n        if not line or line[0] in ';#':\n            continue\n        if line.startswith('[') and line.endswith(']'):\n            section = line[1:-1].strip()\n            out.setdefault(section, {})\n            continue\n        if '=' in line:\n            key, value = line.split('=', 1)\n            out.setdefault(section, {})[key.strip()] = value.strip()\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-glob-match",
+      "dimension": "parsing",
+      "summary": "Match a string against a simple glob (* and ?).",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement glob_match(pattern, text): '*' matches any run (incl. empty), '?' matches exactly one char.",
+      "files": {
+        "task.py": "def glob_match(pattern, text):\n    return pattern == text\n",
+        "test_task.py": "from task import glob_match\nassert glob_match('', '') is True\nassert glob_match('abc', 'abc') is True\nassert glob_match('a?c', 'abc') is True\nassert glob_match('a?c', 'ac') is False\nassert glob_match('a*c', 'ac') is True\nassert glob_match('a*c', 'abbbc') is True\nassert glob_match('*', '') is True\nassert glob_match('*c', 'abc') is True\nassert glob_match('a*', 'abc') is True\nassert glob_match('a*c', 'abd') is False\n"
+      },
+      "answer_files": {
+        "task.py": "def glob_match(pattern, text):\n    memo = {}\n    def go(i, j):\n        if (i, j) in memo:\n            return memo[(i, j)]\n        if i == len(pattern):\n            ans = j == len(text)\n        elif pattern[i] == '*':\n            ans = go(i + 1, j) or (j < len(text) and go(i, j + 1))\n        elif j < len(text) and pattern[i] in ('?', text[j]):\n            ans = go(i + 1, j + 1)\n        else:\n            ans = False\n        memo[(i, j)] = ans\n        return ans\n    return go(0, 0)\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-csv-lite",
+      "dimension": "parsing",
+      "summary": "Parse one CSV line with quoted fields (no csv module).",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement parse_csv_line(line): comma-separated, double-quoted fields may contain commas; '\"\"' inside quotes is a literal quote. Do not import csv.",
+      "files": {
+        "task.py": "def parse_csv_line(line):\n    return line.split(',')\n",
+        "test_task.py": "from task import parse_csv_line\nassert parse_csv_line('a,b,c') == ['a', 'b', 'c']\nassert parse_csv_line('') == ['']\nassert parse_csv_line('a,,c') == ['a', '', 'c']\nassert parse_csv_line('\"a,b\",c') == ['a,b', 'c']\nassert parse_csv_line('\"he said \"\"hi\"\"\",x') == ['he said \"hi\"', 'x']\nassert parse_csv_line('\"plain\"') == ['plain']\n"
+      },
+      "answer_files": {
+        "task.py": "def parse_csv_line(line):\n    fields = []\n    cur = []\n    in_quotes = False\n    i = 0\n    while i < len(line):\n        ch = line[i]\n        if in_quotes:\n            if ch == '\"':\n                if i + 1 < len(line) and line[i + 1] == '\"':\n                    cur.append('\"')\n                    i += 2\n                    continue\n                in_quotes = False\n            else:\n                cur.append(ch)\n        elif ch == '\"':\n            in_quotes = True\n        elif ch == ',':\n            fields.append(''.join(cur))\n            cur = []\n        else:\n            cur.append(ch)\n        i += 1\n    fields.append(''.join(cur))\n    return fields\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-bracket-stack",
+      "dimension": "state-machine",
+      "summary": "Validate mixed bracket nesting.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement is_balanced(s) for (), [], {} ignoring other chars.",
+      "files": {
+        "task.py": "def is_balanced(s):\n    return True\n",
+        "test_task.py": "from task import is_balanced\nassert is_balanced('') is True\nassert is_balanced('()') is True\nassert is_balanced('([{}])') is True\nassert is_balanced('([)]') is False\nassert is_balanced('(') is False\nassert is_balanced(']') is False\nassert is_balanced('a(b)c[d]{e}') is True\nassert is_balanced('{[}') is False\n"
+      },
+      "answer_files": {
+        "task.py": "def is_balanced(s):\n    pairs = {')': '(', ']': '[', '}': '{'}\n    stack = []\n    for ch in s:\n        if ch in '([{':\n            stack.append(ch)\n        elif ch in pairs:\n            if not stack or stack.pop() != pairs[ch]:\n                return False\n    return not stack\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-turnstile-fsm",
+      "dimension": "state-machine",
+      "summary": "Run a turnstile state machine over events.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement run(events): start 'locked'; 'coin'->'unlocked'; 'push' on unlocked->'locked' (+1 entry); 'push' on locked stays locked; return (final_state, entries).",
+      "files": {
+        "task.py": "def run(events):\n    return ('locked', 0)\n",
+        "test_task.py": "from task import run\nassert run([]) == ('locked', 0)\nassert run(['push']) == ('locked', 0)\nassert run(['coin']) == ('unlocked', 0)\nassert run(['coin', 'push']) == ('locked', 1)\nassert run(['coin', 'push', 'coin', 'push']) == ('locked', 2)\nassert run(['coin', 'coin', 'push']) == ('locked', 1)\nassert run(['push', 'coin', 'push', 'push']) == ('locked', 1)\n"
+      },
+      "answer_files": {
+        "task.py": "def run(events):\n    state = 'locked'\n    entries = 0\n    for event in events:\n        if state == 'locked' and event == 'coin':\n            state = 'unlocked'\n        elif state == 'unlocked' and event == 'push':\n            state = 'locked'\n            entries += 1\n    return (state, entries)\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-bank-accounts",
+      "dimension": "multi-file",
+      "summary": "Implement Account + Bank across two modules.",
+      "task": "Edit account.py and bank.py only so python3 test_task.py passes. Account holds a balance with deposit/withdraw (no overdraft -> raise ValueError); Bank manages named accounts and transfer().",
+      "files": {
+        "account.py": "class Account:\n    def __init__(self, balance=0):\n        self.balance = balance\n",
+        "bank.py": "class Bank:\n    def __init__(self):\n        self.accounts = {}\n",
+        "test_task.py": "from account import Account\nfrom bank import Bank\na = Account(100)\na.deposit(50)\nassert a.balance == 150\na.withdraw(30)\nassert a.balance == 120\ntry:\n    a.withdraw(1000)\n    assert False\nexcept ValueError:\n    pass\nbank = Bank()\nbank.open('alice', 100)\nbank.open('bob', 0)\nbank.transfer('alice', 'bob', 40)\nassert bank.balance('alice') == 60\nassert bank.balance('bob') == 40\ntry:\n    bank.transfer('bob', 'alice', 1000)\n    assert False\nexcept ValueError:\n    pass\nassert bank.balance('bob') == 40\n"
+      },
+      "answer_files": {
+        "account.py": "class Account:\n    def __init__(self, balance=0):\n        self.balance = balance\n\n    def deposit(self, amount):\n        self.balance += amount\n\n    def withdraw(self, amount):\n        if amount > self.balance:\n            raise ValueError('insufficient funds')\n        self.balance -= amount\n",
+        "bank.py": "from account import Account\n\n\nclass Bank:\n    def __init__(self):\n        self.accounts = {}\n\n    def open(self, name, balance=0):\n        self.accounts[name] = Account(balance)\n\n    def balance(self, name):\n        return self.accounts[name].balance\n\n    def transfer(self, src, dst, amount):\n        self.accounts[src].withdraw(amount)\n        self.accounts[dst].deposit(amount)\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-rule-engine",
+      "dimension": "multi-file",
+      "summary": "Implement validation rules + a form runner across two modules.",
+      "task": "Edit rules.py and form.py only so python3 test_task.py passes. rules.py provides required(field) and max_len(field, n) rule factories returning (field, message_or_None); form.py validate(data, rules) collects messages into a dict by field.",
+      "files": {
+        "rules.py": "def required(field):\n    return None\n\n\ndef max_len(field, n):\n    return None\n",
+        "form.py": "def validate(data, rules):\n    return {}\n",
+        "test_task.py": "from rules import required, max_len\nfrom form import validate\nrules = [required('name'), max_len('name', 5)]\nassert validate({'name': 'ok'}, rules) == {}\nassert validate({}, rules) == {'name': ['required']}\nassert validate({'name': ''}, rules) == {'name': ['required']}\nassert validate({'name': 'toolong'}, rules) == {'name': ['max_len:5']}\nr2 = [required('a'), required('b')]\nassert validate({'a': '1'}, r2) == {'b': ['required']}\n"
+      },
+      "answer_files": {
+        "rules.py": "def required(field):\n    def check(data):\n        value = data.get(field)\n        return (field, 'required') if not value else (field, None)\n    return check\n\n\ndef max_len(field, n):\n    def check(data):\n        value = data.get(field) or ''\n        return (field, f'max_len:{n}') if len(value) > n else (field, None)\n    return check\n",
+        "form.py": "def validate(data, rules):\n    out = {}\n    for rule in rules:\n        field, message = rule(data)\n        if message:\n            out.setdefault(field, []).append(message)\n    return out\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-pipeline-compose",
+      "dimension": "multi-file",
+      "summary": "Compose transform steps into a pipeline across two modules.",
+      "task": "Edit steps.py and pipeline.py only so python3 test_task.py passes. steps.py provides add(n) and mul(n) returning callables; pipeline.py compose(*fns) returns a function applying them left-to-right, and run(value, fns).",
+      "files": {
+        "steps.py": "def add(n):\n    return None\n\n\ndef mul(n):\n    return None\n",
+        "pipeline.py": "def compose(*fns):\n    return None\n\n\ndef run(value, fns):\n    return value\n",
+        "test_task.py": "from steps import add, mul\nfrom pipeline import compose, run\nf = compose(add(1), mul(3))\nassert f(2) == 9\nassert compose()(5) == 5\nassert run(2, [add(1), mul(3)]) == 9\nassert run(10, []) == 10\nassert compose(mul(2), add(1))(3) == 7\n"
+      },
+      "answer_files": {
+        "steps.py": "def add(n):\n    return lambda value: value + n\n\n\ndef mul(n):\n    return lambda value: value * n\n",
+        "pipeline.py": "def compose(*fns):\n    def composed(value):\n        for fn in fns:\n            value = fn(value)\n        return value\n    return composed\n\n\ndef run(value, fns):\n    return compose(*fns)(value)\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-fix-median",
+      "dimension": "refactor",
+      "summary": "Fix a buggy median (even-length case) without changing the signature.",
+      "task": "Edit task.py only so python3 test_task.py passes. median(nums) must average the two middle values for even length and handle unsorted input.",
+      "files": {
+        "task.py": "def median(nums):\n    s = nums\n    n = len(s)\n    return s[n // 2]\n",
+        "test_task.py": "from task import median\nassert median([1]) == 1\nassert median([3, 1, 2]) == 2\nassert median([1, 2, 3, 4]) == 2.5\nassert median([4, 1, 3, 2]) == 2.5\nassert median([5, 5, 5]) == 5\nassert median([1, 2]) == 1.5\n"
+      },
+      "answer_files": {
+        "task.py": "def median(nums):\n    s = sorted(nums)\n    n = len(s)\n    mid = n // 2\n    if n % 2 == 1:\n        return s[mid]\n    return (s[mid - 1] + s[mid]) / 2\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-fix-paginate",
+      "dimension": "refactor",
+      "summary": "Fix an off-by-one paginator without changing the signature.",
+      "task": "Edit task.py only so python3 test_task.py passes. paginate(items, size) -> list of chunks of length<=size, last chunk may be short, size<=0 raises ValueError.",
+      "files": {
+        "task.py": "def paginate(items, size):\n    pages = []\n    for i in range(0, len(items), size):\n        pages.append(items[i:i + size - 1])\n    return pages\n",
+        "test_task.py": "from task import paginate\nassert paginate([], 3) == []\nassert paginate([1, 2, 3], 3) == [[1, 2, 3]]\nassert paginate([1, 2, 3, 4], 2) == [[1, 2], [3, 4]]\nassert paginate([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]\nassert paginate([1], 10) == [[1]]\ntry:\n    paginate([1], 0)\n    assert False\nexcept ValueError:\n    pass\n"
+      },
+      "answer_files": {
+        "task.py": "def paginate(items, size):\n    if size <= 0:\n        raise ValueError('size must be positive')\n    return [items[i:i + size] for i in range(0, len(items), size)]\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "py-roman-encode",
+      "dimension": "edge-cases",
+      "summary": "Convert an integer (1..3999) to a Roman numeral.",
+      "task": "Edit task.py only so python3 test_task.py passes. Implement to_roman(n) for 1<=n<=3999, raise ValueError otherwise.",
+      "files": {
+        "task.py": "def to_roman(n):\n    return ''\n",
+        "test_task.py": "from task import to_roman\nassert to_roman(1) == 'I'\nassert to_roman(4) == 'IV'\nassert to_roman(9) == 'IX'\nassert to_roman(40) == 'XL'\nassert to_roman(90) == 'XC'\nassert to_roman(1994) == 'MCMXCIV'\nassert to_roman(3999) == 'MMMCMXCIX'\nfor bad in [0, -1, 4000]:\n    try:\n        to_roman(bad)\n        assert False\n    except ValueError:\n        pass\n"
+      },
+      "answer_files": {
+        "task.py": "def to_roman(n):\n    if not 1 <= n <= 3999:\n        raise ValueError('out of range')\n    table = [(1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'),\n             (100, 'C'), (90, 'XC'), (50, 'L'), (40, 'XL'),\n             (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I')]\n    out = []\n    for value, symbol in table:\n        while n >= value:\n            out.append(symbol)\n            n -= value\n    return ''.join(out)\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "test_task.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 15
+        }
+      ],
+      "required": true
+    }
+  ]
+}

@@ -27,6 +27,7 @@
     "legion-self-learn": "legion-observability/bin/legion-self-learn",
     "legion-share": "legion-observability/bin/legion-share",
     "legion-trace": "legion-observability/bin/legion-trace",
+    "legion-code-intel": "legion-code-intel/bin/legion-code-intel",
     "legion-fanout": "legion-orchestrate/bin/legion-fanout",
     "legion-claude": "legion-router/bin/legion-claude",
     "legion-control": "legion-router/bin/legion-control",
@@ -43,6 +44,7 @@
   "files": [
     "legion-router/",
     "legion-observability/",
+    "legion-code-intel/",
     "legion-orchestrate/",
     "legion-setup/",
     "legion-codex-mode/",

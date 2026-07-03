@@ -1,6 +1,6 @@
 # Keeping legion-core and legion-code in sync
 
-legion-core is the **single source of truth** for the engine (the 5 `legion-*`
+legion-core is the **single source of truth** for the engine (the 6 `legion-*`
 plugins). legion-code (the coding agent) and future agents (e.g. moneyball)
 **consume** it; they don't edit the engine in place.
 
@@ -12,7 +12,7 @@ the same way — its own engine becomes just another pinned upstream.
 
 ### One-time conversion (in legion-code)
 
-For each of the 5 plugins, change its `marketplace.json` entry from an in-repo
+For each of the 6 plugins, change its `marketplace.json` entry from an in-repo
 source to a git-subdir source pointing at legion-core:
 
 ```jsonc

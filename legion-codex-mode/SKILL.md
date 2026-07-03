@@ -49,7 +49,7 @@ Rule of thumb: **delegate up for judgement, design, polish, and verification —
 legion-claude run --task "Design the module boundary for X: options, tradeoffs, a recommendation" --repo .
 
 # Force a specific Claude model (default is the strongest available):
-legion-claude run --task "..." --model claude-opus-4-8 --repo .
+legion-claude run --task "..." --model opus --repo .
 
 # Frontend polish with Opus + impeccable (describe the surface + the bar):
 legion-claude run --task "Polish the settings page: spacing, a11y, responsive, motion — impeccable pass" --repo .

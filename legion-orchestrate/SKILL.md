@@ -2,12 +2,12 @@
 name: legion-orchestrate
 kind: procedure
 # disable-model-invocation intentionally false: cross-harness orchestrator entrypoint
-description: Use to deliver a multi-step coding goal with Legion's dynamic MULTI-MODEL orchestration — decompose the goal, fan out implementation slices to GPT-5.4 in PARALLEL, cross-model verify with GPT-5.5, synthesize, and gate. The multi-model version of ultracode/Workflow orchestration. Triggers on "orchestrate with legion", "fan out", "ultracode", "build this with legion", parallel multi-model delivery, or any sizeable feature/refactor you want delivered with codex doing the bulk.
+description: Use to deliver a multi-step coding goal with Legion's dynamic MULTI-MODEL orchestration — decompose the goal, fan out implementation slices to GPT-5.5 in PARALLEL, cross-model verify with GPT-5.5, synthesize, and gate. The multi-model version of ultracode/Workflow orchestration. Triggers on "orchestrate with legion", "fan out", "ultracode", "build this with legion", parallel multi-model delivery, or any sizeable feature/refactor you want delivered with codex doing the bulk.
 ---
 
 # Legion Orchestrate — dynamic multi-model delivery (ultracode for a legion of models)
 
-The Claude "ultracode" loop (decompose → fan out → adversarially verify → synthesize → gate), but **executor-aware**: Opus conducts, **GPT-5.4 does the bulk of coding in parallel**, **GPT-5.5 verifies**, all metered and kept at ≥50% codex ([[project_legion_marketplace]]).
+The Claude "ultracode" loop (decompose → fan out → adversarially verify → synthesize → gate), but **executor-aware**: Opus conducts, **GPT-5.5 does the bulk of coding in parallel**, **GPT-5.5 verifies**, all metered and kept at ≥50% codex ([[project_legion_marketplace]]).
 
 ## Preflight
 
@@ -32,13 +32,13 @@ fan-out even begins. Do not run broad session/log greps as preflight.
 ## The loop
 
 1. **Decompose** (Opus) — break the goal into **dependency-aware slices**. Independent slices can run in parallel; dependent ones are sequenced.
-2. **Classify** — tag each slice with a routing archetype (`legion-route --list`): implementation → `implement-feature`/`write-tests`/`fix-bug`/`refactor-module`/… (GPT-5.4); genuine design/judgement → `deep-reasoning`/`architecture-decision` (stays on Opus).
+2. **Classify** — tag each slice with a routing archetype (`legion-route --list`): implementation → `implement-feature`/`write-tests`/`fix-bug`/`refactor-module`/… (GPT-5.5); genuine design/judgement → `deep-reasoning`/`architecture-decision` (stays on Opus).
 3. **Fan out** (parallel) — write the independent slices as JSONL and run them at once:
    ```bash
    legion-fanout --slices slices.jsonl --repo . --max-concurrency 4
    #   {"archetype":"implement-feature","task":"...self-contained spec..."}
    ```
-   GPT-5.4 slices run in parallel worktrees; `self` slices come back `status:"inline"` for you to do. You stay free to coordinate.
+   GPT-5.5 slices run in parallel worktrees; `self` slices come back `status:"inline"` for you to do. You stay free to coordinate.
 4. **Cross-model verify** (GPT-5.5) — for each returned diff, get an independent structured verdict:
    ```bash
    legion-delegate review --archetype final-review --base <branch>   # gpt-5.5, schema verdict
@@ -59,7 +59,7 @@ Go maximally exhaustive:
 
 - Before doing an eligible implementation slice **yourself**, check `legion-share next` — if it says `codex`, delegate it.
 - **Log your own slices** so the split has a denominator: `legion-trace emit --executor opus --model opus --status ok`.
-- `legion-share` shows the live ratio; aim to keep codex (5.4 + 5.5) ≥ target.
+- `legion-share` shows the live ratio; aim to keep Codex/GPT-5.5 work ≥ target.
 
 ## Verify every delegated diff
 

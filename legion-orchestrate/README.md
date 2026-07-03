@@ -1,8 +1,8 @@
 # legion-orchestrate
 
-Legion's dynamic **multi-model** orchestrator — the ultracode loop, but Opus conducts while **GPT-5.4 does the bulk of coding in parallel** and **GPT-5.5 verifies**.
+Legion's dynamic **multi-model** orchestrator — the ultracode loop, but Opus conducts while **GPT-5.5 does the bulk of coding in parallel** and **GPT-5.5 verifies**.
 
-> Decompose → fan out (GPT-5.4, parallel) → cross-model verify (GPT-5.5) → synthesize → gate.
+> Decompose → fan out (GPT-5.5, parallel) → cross-model verify (GPT-5.5) → synthesize → gate.
 
 ## `legion-fanout`
 
@@ -16,7 +16,7 @@ printf '%s\n' \
   | legion-fanout --slices - --repo . --max-concurrency 4
 ```
 
-- GPT-5.4/5.5 slices run in parallel git worktrees via `legion-delegate`; `self`/`deep-reasoning` slices return `status:"inline"` for Opus to do.
+- GPT-5.5 slices run in parallel git worktrees via `legion-delegate`; `self`/`deep-reasoning` slices return `status:"inline"` for Opus to do.
 - Output: per-slice `{status, model, diff_path, cost_usd}` + totals + `by_model` + `total_cost_usd`.
 - Bounded by `--max-concurrency` (or `LEGION_MAX_CONCURRENCY`, default 4). Portable to bash 3.2.
 

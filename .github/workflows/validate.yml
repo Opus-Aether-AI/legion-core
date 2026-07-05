@@ -211,6 +211,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install uv
+        run: python3 -m pip install uv --quiet
+
       - name: Install pyyaml
         run: pip install pyyaml --quiet
 
@@ -228,8 +231,7 @@ jobs:
         run: |
           set -e
           if [ -d tests/python ]; then
-            pip install pytest --quiet
-            python3 -m pytest -q tests/python
+            uv run --locked pytest -q tests/python
           else
             echo "No tests/python suite."
           fi

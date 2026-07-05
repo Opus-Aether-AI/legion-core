@@ -114,6 +114,7 @@ After that, adding `agent:explore` to an issue posts a short assessment comment,
 
 ```bash
 bats tests/                                   # unit + component suite
+tests/python/run-tests.sh tests/python        # locked Python unit suite (uv.lock)
 legion-observability/bin/legion-doctor        # install / schema / MCP / bridge health
 ```
 

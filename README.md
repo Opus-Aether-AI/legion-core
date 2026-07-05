@@ -11,18 +11,16 @@
   <img alt="agents" src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20%C2%B7%20Cursor%20%C2%B7%20opencode-8a2be2">
 </p>
 
-> **legion-core** — the model-agnostic orchestration engine behind Legion. The base layer you build your own agents, plugins, and app-building workflows on.
+> **legion-core** is the model-agnostic orchestration engine behind Legion:
+> routing, fan-out, review, observability, self-learning, healing, and the
+> `legion-run` domain-plugin pipeline.
 
-Legion lets one operator command many coding agents: **GPT-5.x via Codex**,
-**Cursor**, **Claude**, and humans. legion-core gives custom plugins the reusable
-engine: scoped multi-model **delegation**, **fan-out**, **telemetry**, a
-**health check**, **self-learning**, and **auto-healing**.
+Use it directly, or build your own domain plugins on top of it.
 
 ## Quickstart
 
-Install once, then use Legion from any git repo. No per-repo shell exports are
-required; Legion automatically stores runtime state under
-`~/.legion/projects/<repo-id>/`.
+Install once, then run Legion from any git repo. No repo-local config is needed;
+state and reports are created automatically under `~/.legion/projects/<repo-id>/`.
 
 ```bash
 npm install -g @opus-aether-ai/legion-core
@@ -32,116 +30,87 @@ legion-doctor --repo .
 legion-state --repo .
 ```
 
-Prefer the release installer if you want Legion to install/update the local
-skill bundle and CLI shims together:
-
-```bash
-curl -fsSL https://github.com/Opus-Aether-AI/legion-core/releases/latest/download/install.sh | bash
-```
-
-If you do not want a global install:
+One-off usage without installing globally:
 
 ```bash
 npx --package @opus-aether-ai/legion-core legion-doctor --repo .
 ```
 
-Expected Doctor result: `0 fail`. A router warning is acceptable unless your
-Claude config forces traffic through `ANTHROPIC_BASE_URL=http://127.0.0.1:8082`.
+Expected doctor result: `0 fail`. A router warning is only blocking if your
+Claude config forces traffic through the local router.
 
-## The Simple Idea
+## What Legion Core Does
 
-Your plugin decides what should happen. Legion Core executes the work, measures
-it, reviews it, and learns from the result.
+Your plugin owns the product/domain decisions. Legion Core owns the execution
+pipeline and evidence.
 
 ```mermaid
 flowchart LR
-  A["User asks for work"] --> B["Your plugin<br/>domain plan + gates"]
-  B --> C["legion-run<br/>fixed full-app pipeline"]
-  C --> D["Doctor + hints<br/>health + memory"]
-  D --> E["Route + fan out<br/>safe slices"]
-  E --> F["Review + apply<br/>diffs, tests, verdicts"]
-  F --> G["Observe<br/>HTML + spans + cost"]
-  G --> H["Self-learn + heal<br/>hints + recovery plan"]
-  H --> B
+  U["User prompt<br/>goal + context"] --> P["Domain plugin<br/>brief, rules, gates, evals"]
+  P --> R["legion-run<br/>fixed pipeline contract"]
+
+  subgraph C["Legion Core enforced pipeline"]
+    D["Doctor<br/>health"] --> H["Hints<br/>prior learning"]
+    H --> PL["Plan<br/>plugin hook"]
+    PL --> RO["Route<br/>model + executor"]
+    RO --> F["Fanout + Apply<br/>parallel slices"]
+    F --> RV["Review<br/>independent verdict"]
+    RV --> VE["Validate + Evaluate<br/>plugin hooks"]
+    VE --> RP["Report<br/>HTML + JSON"]
+    RP --> SH["Share<br/>work split + cost"]
+    SH --> LN["Learn<br/>future hints"]
+    LN --> HE["Heal<br/>repair plan"]
+  end
+
+  R --> D
+  HE --> A["Required artifacts<br/>plan, slices, fanout, review, eval,<br/>reports, share, learn, heal"]
 ```
 
-## Use It From A Plugin
+The important split:
 
-Legion Core should not know your product domain. Put that knowledge in your own
-plugin or skill: slice templates, evals, app gates, review rules, and recovery
-policy.
+| Stage | Purpose |
+|---|---|
+| `share` | Evidence/accounting: proves who did the work, cost, latency, and Codex-vs-Opus split. It is not a planning step, but it belongs in the proof trail. |
+| `learn` | Stores outcome memory so future runs get better hints before they start. |
+| `heal` | Looks at failures and produces a repair plan, or in explicit heal mode, opens a fix PR. |
+
+## Use `legion-run`
+
+`legion-run` is the default entrypoint for domain plugins. It enforces the same
+full-app pipeline every time and fails if required artifacts are missing.
+
+```bash
+legion-run \
+  --plugin-manifest /path/to/my-plugin/legion-plugin.toml \
+  --repo . \
+  --task "Build organization invitations" \
+  --json
+```
+
+The JSON output includes `run_dir`. Open:
 
 ```text
-my-product-plugin/
-  SKILL.md                    # when to use it and how it builds/reviews
-  legion-plugin.toml           # Legion runner contract
-  .claude-plugin/plugin.json   # plugin metadata
-  evals/                       # optional golden tasks
-  bin/                         # optional deterministic helpers
+<run_dir>/legion-observability.html
 ```
 
-Minimal `legion-plugin.toml`:
+That report shows the stages, artifacts, validation results, review findings,
+cost/latency evidence, self-learning output, and heal plan.
 
-```toml
-[plugin]
-name = "product-app-builder"
-kind = "domain-plugin"
+## Build A Domain Plugin
 
-[pipeline]
-profile = "legion.full_app.v1"
-entrypoint = "legion-run"
-
-[commands]
-plan = "product-plan"
-validate = "product-validate"
-evaluate = "product-eval"
-```
-
-Minimal `SKILL.md`:
-
-```md
----
-name: product-app-builder
-description: Use when building or changing this product with Legion Core.
----
-
-For app changes:
-
-1. Convert the request into your domain plan, gates, and eval.
-2. Run `legion-run --plugin-manifest <this-plugin>/legion-plugin.toml --repo . --task "<request>" --json`.
-3. Inspect `run_dir` from the JSON output for `legion-observability.html`.
-4. Do not call `legion-fanout` directly unless you are debugging the lower-level primitive.
-```
-
-Installed plugins should pass their bundled manifest path, so users do not need
-to configure every repo. Repo-local manifests under
-`.legion/plugins/<name>/legion-plugin.toml` are only for teams that want an app
-to pin or override plugin behavior.
-
-Private Legion Code plugins use this same pattern without exposing their full
-internals: an app-builder plugin can turn a product request into backend, UI,
-test, review, and eval slices; an AI architect plugin can provide the planning
-command; a software architect plugin can provide validation gates. The plugin
-owns those domain rules. Legion Core owns the execution, evidence, reports,
-self-learning, and healing loop.
-
-## Create A Domain Plugin
-
-A domain plugin is small. It needs one manifest, one skill file, and three
-commands. The commands can be shell scripts, Node scripts, Python scripts, or
-anything on `PATH`.
+A domain plugin has one required machine surface and one optional agent surface:
 
 ```text
-support-app-builder/
-  SKILL.md
-  legion-plugin.toml
-  bin/
-    support-plan
-    support-validate
-    support-eval
+legion-plugin.toml
+  Required. Contract for legion-run. This is where you name the executable hooks.
+
+SKILL.md
+  Optional. Instructions for Codex/Claude/Cursor when you want natural-language
+  skill activation.
 ```
 
-`legion-plugin.toml` links your plugin to Legion Core:
+The hooks named under `[commands]` are **executables**, not skills. They can be
+shell, Node, Python, or private Legion Code CLIs.
 
 ```toml
 [plugin]
@@ -158,141 +127,57 @@ validate = "support-validate"
 evaluate = "support-eval"
 ```
 
-`SKILL.md` tells the coding agent when to use it:
+What the hooks do:
 
-```md
----
-name: support-app-builder
-description: Use when building or changing a customer-support SaaS app.
----
+| Hook | What it returns |
+|---|---|
+| `plan` | Writes `plan.json`. It may also write `slices.jsonl`; if it does not, Legion Core generates a compact TDD slice set from the plan brief. |
+| `validate` | Runs app gates such as tests, typecheck, lint, build, browser checks. |
+| `evaluate` | Scores whether the domain goal was satisfied. |
 
-When the user asks for a support-app feature, run:
-
-`legion-run --plugin-manifest <plugin-dir>/legion-plugin.toml --repo . --task "<request>" --json`
-
-Then open the returned `run_dir/legion-observability.html`.
-```
-
-`support-plan` turns the user request into Legion slices:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-cat > "$LEGION_RUN_PLAN_FILE" <<JSON
-{"schema":"legion.plugin.plan.v1","plugin":"$LEGION_PLUGIN_NAME","task":"$LEGION_TASK"}
-JSON
-
-cat > "$LEGION_RUN_SLICES_FILE" <<JSONL
-{"archetype":"implement-feature","task":"Build the backend/API part for: $LEGION_TASK"}
-{"archetype":"implement-feature","task":"Build the UI/workflow part for: $LEGION_TASK"}
-{"archetype":"write-tests","task":"Add tests for: $LEGION_TASK"}
-JSONL
-```
-
-`support-validate` runs the app's gates:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-npm test
-npm run build
-printf '{"ok":true,"gates":["npm test","npm run build"]}\n'
-```
-
-`support-eval` scores the result in your domain language:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-printf '{"ok":true,"score":1,"total":1,"checks":["support workflow implemented"]}\n'
-```
-
-Make the commands executable and run the plugin:
-
-```bash
-chmod +x support-app-builder/bin/*
-export PATH="$PWD/support-app-builder/bin:$PATH"
-
-legion-run \
-  --plugin-manifest "$PWD/support-app-builder/legion-plugin.toml" \
-  --repo /path/to/app \
-  --task "Add SLA-based ticket escalation" \
-  --json
-```
-
-The important rule: your plugin owns the domain decisions, but it should enter
-Legion through `legion-run`. That is what guarantees doctor, routing, fan-out,
-review, validation, evaluation, observability HTML, self-learning, and heal
-planning all happen every time.
-
-## Build In Conversation
-
-Most users should talk to Claude Code, Codex, or Cursor through their plugin
-instead of memorizing commands.
+Minimal plugin layout:
 
 ```text
-Use product-app-builder to add organization invitations to this app.
-
-Plan the change, run the fixed Legion pipeline, apply the safe slices, run the
-repo gates, then open the generated Legion observability report.
+support-app-builder/
+  legion-plugin.toml
+  bin/
+    support-plan
+    support-validate
+    support-eval
+  SKILL.md        # optional
 ```
 
-The plugin can then produce slices like:
+Full copy-pasteable guide: [docs/domain-plugins.md](docs/domain-plugins.md).
 
-```jsonl
-{"archetype":"implement-feature","task":"Add organization invitation API, validation, and persistence."}
-{"archetype":"implement-feature","task":"Add invitation UI states and form handling."}
-{"archetype":"write-tests","task":"Add unit and integration tests for invitations."}
-{"archetype":"final-review","task":"Review the full diff for correctness, security, and missing tests."}
-```
+## Core Commands
 
-The plugin executes the whole pipeline through one command:
+| Command | Use |
+|---|---|
+| `legion-run` | Run a domain plugin through the fixed full-app pipeline. |
+| `legion-doctor` | Check install, repo, routing, state, and plugin health. |
+| `legion-route` | Resolve a task archetype to model, executor, sandbox, and effort. |
+| `legion-fanout` | Run independent slices in parallel and collect/apply diffs. |
+| `legion-delegate` | Send one scoped task or review to a configured executor. |
+| `legion-report` | Generate/open HTML and JSON observability reports. |
+| `legion-share` | Show work split, token/cost accounting, and balance status. |
+| `legion-self-learn` | Record outcomes and produce future run hints. |
+| `legion-heal` | Plan or execute repairs for doctor/test failures. |
+| `legion-bench` | Run repeatable benchmark and demo-readiness checks. |
 
-```bash
-legion-run \
-  --plugin-manifest /path/to/product-app-builder/legion-plugin.toml \
-  --repo . \
-  --task "Add organization invitations to this app." \
-  --json
-```
+## Bundled Plugins
 
-`legion-fanout`, `legion-route`, and `legion-delegate` are still available as
-lower-level primitives, but `legion-run` is the default entrypoint for domain
-plugins because it always produces the same full-pipeline evidence contract.
+| Plugin | Gives you |
+|---|---|
+| **legion-orchestrate** | `legion-run` for domain plugins plus `legion-fanout` for lower-level parallel delivery. |
+| **legion-router** | `legion-route`, `legion-delegate`, Codex/Cursor/Claude executors, worktrees, routing policy, and cost tables. |
+| **legion-observability** | `legion-doctor`, `legion-trace`, `legion-report`, `legion-share`, `legion-self-learn`, `legion-heal`, `legion-eval`, and `legion-bench`. |
+| **legion-code-intel** | Optional TypeScript/Pyright diagnostics and `legion.code-intel.v1` artifacts. |
+| **legion-setup** | Install/update flow and Codex/Cursor bridge wiring. |
+| **legion-codex-mode** | Codex-side routing guidance and skill wiring. |
 
-## State And Reports
+## Prove It Works
 
-By default, every repo gets a stable global state root:
-
-```text
-~/.legion/projects/<repo-id>/
-  spans/        # legion.span.v1 telemetry
-  registry/     # run-state records
-  bench/        # benchmark artifacts
-  reports/      # HTML reports
-  self-learn/   # durable memory and scorecards
-```
-
-Useful commands:
-
-```bash
-legion-state --repo .               # show resolved state paths
-legion-report path latest           # print latest HTML report path
-legion-report open latest           # generate and open latest report
-legion-share --window 1d --json     # inspect Codex-vs-Opus work split
-```
-
-Advanced users and CI can still override state with env vars or an optional
-`.legion/config.toml`, but normal users should not need to configure anything.
-
-## Prove The Pipeline Works
-
-Run the bundled single-task benchmark before a release or demo. It only passes
-if Legion can route, fan out, apply code, review, evaluate, emit observability
-HTML, record self-learn data, run heal, and pass the nested core bench.
+Run the single-task FieldOps benchmark before a demo or release:
 
 ```bash
 legion-bench corpus \
@@ -303,151 +188,28 @@ legion-bench corpus \
   --json --strict
 ```
 
-The `fieldops-triage-e2e` corpus is a public regression fixture for Legion Core.
-It is not the app-building API; it proves the engine still works end to end.
+It passes only if Legion can route, fan out, apply code, review, evaluate, emit
+observability HTML, record self-learning data, run heal planning, and pass the
+nested core bench.
 
-## What's inside (6 plugins)
+## More Docs
 
-| Plugin | Gives you |
-|---|---|
-| **legion-router** | `legion-delegate` (scoped task → any model in an isolated git worktree → verified, metered diff), `legion-cursor`, `legion-claude`, routing + cost tables (`routing.toml`, `costs.json`), `legion-route`/`legion-optimize`. |
-| **legion-observability** | `legion.span.v1` telemetry + `legion-state`/`legion-trace`/`legion-report`/`legion-otel-export`, and the loops: `legion-doctor`, `legion-self-learn`, `legion-heal`, `legion-eval`, `legion-share`. |
-| **legion-code-intel** | Optional repo-native TypeScript/Pyright diagnostics, changed-file gates, `legion.code-intel.v1` artifacts, and telemetry spans for benchmarkable code-intelligence checks. |
-| **legion-orchestrate** | Multi-model goal orchestration (fan-out → cross-verify → synthesize). |
-| **legion-setup** | Cross-harness install + Codex/Cursor bridges. |
-| **legion-codex-mode** | Codex-side wiring. |
-
-## Using legion-core as a base
-
-legion-core is meant to be the foundation under a domain agent (e.g. a trading agent, a research agent). You bring the domain; the core brings the orchestration:
-
-1. **Consume it** — vendor this repo or install its marketplace, then layer your own plugins/skills/agents on top.
-2. **Delegate work** — hand scoped tasks to `legion-delegate` / `legion-orchestrate`; you get verified, metered diffs back without wiring a model harness yourself.
-3. **Stay healthy** — wire `legion-doctor` into CI (it already gates this repo), and opt into `legion-heal` (`LEGION_HEAL=1`) to auto-PR fixes for what the doctor finds.
-4. **Tune routing** — point `legion-router/config/routing.toml` + `costs.json` at the models/archetypes your agent should prefer.
-
-See [`docs/building-an-agent.md`](docs/building-an-agent.md) for the full recipe and [`docs/self-learning.md`](docs/self-learning.md) for the learn/heal loop.
-
-## Install as a package
-
-legion-core is published as a public npm package, so a downstream agent can pin a
-versioned copy of the engine (bins + scripts + plugins) instead of cloning. This is
-additive — the marketplace / source-clone paths still work.
-
-```bash
-# Global CLI install.
-npm install -g @opus-aether-ai/legion-core
-
-# Project-pinned install.
-npm install @opus-aether-ai/legion-core            # or: bun add / pnpm add
-npx legion-doctor --repo .
-npx legion-delegate run --archetype fix-bug --task "…" --repo .
-npx legion-code-intel diagnostics --repo . --changed-only --json
-
-# One-off commands without modifying package.json.
-npx --package @opus-aether-ai/legion-core legion-doctor --repo .
-npx --package @opus-aether-ai/legion-core legion-state --repo .
-```
-
-Package links:
-
-- npmjs: <https://www.npmjs.com/package/@opus-aether-ai/legion-core>
-- GitHub Packages mirror: <https://github.com/orgs/Opus-Aether-AI/packages/npm/package/legion-core>
-- dist-tags: `npm view @opus-aether-ai/legion-core dist-tags`
-
-Publishing is automated: [`release-please`](.github/workflows/release-please.yml)
-cuts the release, then publishes to npmjs with Trusted Publishing / GitHub OIDC
-and mirrors to GitHub Packages with `GITHUB_TOKEN`. Stable releases publish to
-the npmjs `latest` dist-tag. The first package is live; before the next
-automated publish, configure the npm Trusted Publisher for
-`@opus-aether-ai/legion-core` at
-<https://www.npmjs.com/package/@opus-aether-ai/legion-core/access> with
-organization `Opus-Aether-AI`, repository `legion-core`, workflow filename
-`release-please.yml`, environment `release`, and allowed action `npm publish`.
-Each npm package supports one Trusted Publisher, so keep `release-please.yml` as
-the canonical npmjs publisher.
-
-## Configuration
-
-Most users do not need repo-local Legion config. Runtime state auto-resolves per
-repo under `~/.legion/projects/<repo-id>/`.
-
-Use env vars only for CI, tests, or custom state locations:
-
-```bash
-export LEGION_STATE_ROOT=/path/to/state
-export LEGION_TELEMETRY_DIR=$LEGION_STATE_ROOT/spans
-export LEGION_REGISTRY_DIR=$LEGION_STATE_ROOT/registry
-export LEGION_REPOS_FILE=$LEGION_STATE_ROOT/repos.jsonl
-export LEGION_BENCH_DIR=$LEGION_STATE_ROOT/bench
-export LEGION_REPORTS_DIR=$LEGION_STATE_ROOT/reports
-```
-
-Optional repo config:
-
-```toml
-[state]
-root = ".legion/state"
-
-[reports]
-root = ".legion/reports"
-```
-
-Runtime prerequisites: `gh` + `jq` + `git`; `codex` and `cursor-agent` CLIs
-(authenticated) for those executors; `ANTHROPIC_API_KEY` for Claude routing.
-
-## AFK intake lane
-
-The GitHub intake edge lets humans or telemetry file an issue, then hand it to an AFK Legion worker by label. It is queue-based (`concurrency: agent-intake`), bounded, routed through Legion archetypes, and `implement` always opens a PR for human review; it never auto-merges.
-
-```bash
-# One-time label setup
-gh label create 'agent:explore' --color 1d76db --description 'Run read-only AFK issue triage'
-gh label create 'agent:implement' --color b60205 --description 'Run AFK implementation and open a PR'
-
-# One-time secret setup
-# Preferred generic secret. For the current Codex-backed delegate backend, this
-# is the contents of ~/.codex/auth.json from a machine with `codex login status`.
-gh secret set LEGION_INTAKE_AUTH_JSON < ~/.codex/auth.json
-
-# Compatibility alias for existing installs; not needed if the generic secret is set.
-# gh secret set CODEX_AUTH < ~/.codex/auth.json
-
-# Fallback if using API-key login instead of auth JSON.
-# gh secret set OPENAI_API_KEY --body "$OPENAI_API_KEY"
-
-# Optional routing overrides. Usually leave these unset and use the defaults:
-# explore -> second-opinion-review, implement -> implement-feature.
-gh variable set LEGION_INTAKE_EXPLORE_ARCHETYPE --body final-review
-gh variable set LEGION_INTAKE_IMPLEMENT_ARCHETYPE --body hard-bug
-# Optional explicit model override; usually leave unset so models.toml controls it.
-# gh variable set LEGION_INTAKE_MODEL --body "$(legion-route --model-ref codex_workhorse)"
-```
-
-After that, adding `agent:explore` to an issue posts a short assessment comment, and adding `agent:implement` runs the same intake prompt in write mode and opens a PR whose body includes `Closes #N`. You can also run the thin `agent-intake-trigger` workflow manually with an issue number, mode, worker (`delegate`, `cursor`, or `custom`), optional `archetype` / `model` override, and optional `worker_bin` for a repo-local compatible runner. `legion-intake` also accepts `--worker` / `--worker-bin` / `LEGION_INTAKE_WORKER_BIN` for any runner that follows the Legion JSON result contract.
+- [Build domain plugins](docs/domain-plugins.md)
+- [Build an agent on Legion Core](docs/building-an-agent.md)
+- [Benchmarking](docs/benchmarking.md)
+- [Self-learning and heal loop](docs/self-learning.md)
+- [Sync with Legion Code](docs/sync-with-legion-code.md)
 
 ## Quality
 
-`legion-doctor` + the `bats` suite gate every change (`.github/workflows/`). Run locally:
+Local gates:
 
 ```bash
-bats tests/                                   # unit + component suite
-tests/python/run-tests.sh tests/python        # locked Python unit suite (uv.lock)
-legion-observability/bin/legion-doctor        # install / schema / MCP / bridge health
+bats tests/
+tests/python/run-tests.sh tests/python
+legion-observability/bin/legion-doctor --repo . --strict-demo
 ```
-
-## Security
-
-Report suspected vulnerabilities privately; see [SECURITY.md](SECURITY.md).
-
-## Credits
-
-legion-core is original integration code, built in conversation with a broader
-agent-harness ecosystem. See [CREDITS.md](CREDITS.md) for full attribution,
-including svineet/harness-bench, autoresearch, auto-harness, MCP, Codex,
-Claude Code, Cursor, and the local validation toolchain.
 
 ## License
 
-[Apache-2.0](LICENSE). This is the reusable, model-agnostic Legion engine.
-Enterprise support and pilots: see [ENTERPRISE.md](./ENTERPRISE.md).
+[Apache-2.0](LICENSE). Enterprise support and pilots: [ENTERPRISE.md](ENTERPRISE.md).

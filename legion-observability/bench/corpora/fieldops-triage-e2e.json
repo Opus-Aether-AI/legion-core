@@ -45,7 +45,7 @@
       "command": [
         "{repo}/legion-observability/bench/adapters/legion-fanout-review.sh"
       ],
-      "timeout": 1200
+      "timeout": 2400
     }
   ],
   "cases": [

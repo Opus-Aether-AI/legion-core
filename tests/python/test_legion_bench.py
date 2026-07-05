@@ -227,6 +227,7 @@ def test_load_corpus_reads_packaged_fieldops_e2e_live_mode():
     assert [mode["id"] for mode in default_modes] == ["scripted-baseline", "scripted-oracle"]
     assert live_modes[0]["live"] is True
     assert live_modes[0]["command"] == ["{repo}/legion-observability/bench/adapters/legion-fanout-review.sh"]
+    assert live_modes[0]["timeout"] >= 2400
     assert {
         "slices",
         "applied",

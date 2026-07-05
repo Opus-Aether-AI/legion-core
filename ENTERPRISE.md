@@ -14,17 +14,21 @@ line for it.
 
 ## Enterprise-safe by design
 
-### 1. No Legion cloud. Your code doesn't pass through us.
-Legion has **no SaaS backend**. It is a set of CLIs and **isolated local git worktrees** that run
-on your developers' machines and inside your CI. There is no "Legion server" your source is routed
-to. The only outbound calls are to the **model providers you configure** — and Legion is
-**model-agnostic and endpoint-configurable**, so for a strict VPC we point it at your **in-VPC
-model endpoints** (Amazon Bedrock, Azure OpenAI, or a self-hosted gateway) via `routing.toml` and
-base-URL config. Result: prompts and code stay on infrastructure **you** control.
+### 1. Local-first. No Legion cloud, no middleman.
+Legion runs **locally on your engineers' machines** — CLIs plus **isolated local git worktrees**.
+There is no Legion server, and unlike Cursor there is **no third-party vendor in the path**. Model
+inference runs on **your own Claude and Codex accounts directly**, so context sent for inference
+goes to Anthropic / OpenAI **under your own agreement with them** (use their enterprise /
+zero-retention / no-training tiers) — never routed through us. Your repository, history, and
+worktrees stay on your machine.
 
-> Contrast with the concern you raised about Cursor: tools like it route your code through *their*
-> cloud. Legion doesn't have one to route through. *(In-VPC model endpoints are wired during
-> onboarding — see "What we stand up," item 1.)*
+> Contrast with the Cursor concern you raised: Cursor puts *its* cloud between you and the model.
+> Legion doesn't — it drives *your* accounts from a local CLI. The one external hop is the model
+> inference itself, the same hop any use of Claude or Codex makes.
+>
+> **Roadmap:** an API-key-based, **hostable** deployment for centralized/team use; and because
+> routing is endpoint-agnostic, on-network model endpoints for teams that need inference to stay
+> inside their boundary too.
 
 ### 2. Agent code passes the same quality gate as human code — no bypass.
 Legion's output is a **normal Pull Request**. It flows through your existing pipeline — **Sonar
@@ -58,7 +62,7 @@ handling policy: [`SECURITY.md`](SECURITY.md).
 | Pillar | How Legion serves it |
 |---|---|
 | **Operational excellence** | Every run is a metered `legion.span.v1` trace exported to OTLP; `legion-doctor` health-gates the toolchain; self-healing opens (never merges) remediation PRs. |
-| **Security** | No Legion cloud; isolated git worktrees per task; sandboxed executors; agent PRs pass your Sonar/security gates; Apache-2.0 auditable core; in-VPC model endpoints. |
+| **Security** | Runs locally (no Legion cloud, no vendor middleman); your own model accounts under your data terms; isolated git worktrees; sandboxed executors; agent PRs pass your Sonar/security gates; Apache-2.0 auditable core. |
 | **Reliability** | Built for long-running/overnight agents: worktree isolation + observability + self-healing keep multi-hour runs from drifting. Deterministic orchestration, not a single unbounded agent. |
 | **Performance efficiency** | `routing.toml` sends each task to the cheapest **capable** model, escalating only hard work; parallel fan-out across worktrees. |
 | **Cost optimization** | Spend is metered per task on one dollar scale across providers; routing policy enforces cost ceilings; `legion-report` shows the bill by model. |
@@ -77,9 +81,10 @@ you can trust with a background lane.
 
 ## What we stand up (the engagement)
 
-1. **Deploy in your environment (VPC / on-prem).** Legion configured against **your** model
-   endpoints, your CI, your telemetry sink — validated with a green `legion-doctor`. Prompts and
-   code stay inside your boundary.
+1. **Runs on your machines (local, today).** Legion CLIs + your own Claude/Codex accounts; your
+   repo, history, and worktrees stay local — no Legion cloud, no vendor middleman. We configure it
+   against your CI and telemetry sink and hand you a green `legion-doctor`. *(A hostable,
+   API-key-based deployment for centralized/team use is on the roadmap.)*
 2. **Wire your Secure SDLC.** Sonar and your quality gates (line ceiling, duplication threshold,
    security scans) integrated into Legion's pre-PR verify, so agent output is gated *before* it
    asks for a human's time — and always at the same bar on merge.
@@ -93,8 +98,11 @@ you can trust with a background lane.
 6. **Support & SLA.** A named channel, priority fixes, and upgrade help.
 
 ## Deployment models
-- **Self-hosted / VPC** — you run the CLIs + your model endpoints; we configure and validate.
-- **On-prem air-gapped** — vendored pinned release from source; in-VPC or self-hosted models only.
+- **Local (today)** — Legion CLIs on each developer's machine, driving your Claude + Codex
+  accounts; repo and worktrees stay local.
+- **Hostable (roadmap)** — a centralized/team deployment via API-key-based Claude/Codex.
+- **On-network inference (roadmap)** — endpoint-agnostic routing to model endpoints inside your
+  boundary for teams that need inference to stay on-network.
 - **Managed pilot** — Opus Aether builds a scoped domain agent in your repos to prove value fast.
 
 ## Commercial

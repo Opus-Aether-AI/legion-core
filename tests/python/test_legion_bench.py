@@ -160,6 +160,40 @@ def test_load_corpus_reads_packaged_heldout_default_modes():
     assert [mode["id"] for mode in modes] == ["scripted-baseline", "scripted-oracle"]
 
 
+def test_load_corpus_reads_packaged_fieldops_e2e_live_mode():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    corpus = bench.load_corpus(repo, "fieldops-triage-e2e")
+    default_modes = bench._selected_corpus_modes(corpus, [])
+    live_modes = bench._selected_corpus_modes(corpus, ["legion-fanout-review"])
+    case = corpus["cases"][0]
+    live_validators = case["validators_by_mode"]["legion-fanout-review"]
+    checked_fields = {
+        validator.get("field")
+        for validator in live_validators
+        if validator.get("type") == "json_file_field_equals"
+    }
+
+    assert corpus["corpus"] == "fieldops-triage-e2e"
+    assert len(corpus["cases"]) == 1
+    assert "one coding task can route, fan out, apply code, review" in corpus["description"]
+    assert "still cold" in case["task"]
+    assert "No heat in the classroom but the room is still cold." in case["files"]["eval_fieldops_triage.py"]
+    assert [mode["id"] for mode in default_modes] == ["scripted-baseline", "scripted-oracle"]
+    assert live_modes[0]["live"] is True
+    assert live_modes[0]["command"] == ["{repo}/legion-observability/bench/adapters/legion-fanout-review.sh"]
+    assert {
+        "slices",
+        "applied",
+        "status",
+        "total.success_rate",
+        "groups.codex-review.success_rate",
+        "target_name",
+        "applied_memory",
+        "scorecard.ok",
+        "summary.ok",
+    }.issubset(checked_fields)
+
+
 def test_packaged_live_corpora_default_to_no_spend_controls():
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
 

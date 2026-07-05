@@ -1,0 +1,250 @@
+{
+  "schema": "legion.bench.corpus.v1",
+  "corpus": "fieldops-triage-e2e",
+  "description": "Reusable one-task end-to-end Legion coding benchmark. Scripted modes prove the evaluator; the live legion-fanout-review mode proves one coding task can route, fan out, apply code, review, evaluate, emit observability HTML, and record self-learn data.",
+  "baseline": "scripted-baseline",
+  "default_modes": [
+    "scripted-baseline",
+    "scripted-oracle"
+  ],
+  "reliability_min_cases": 30,
+  "required_clean_modes": [
+    "scripted-oracle"
+  ],
+  "modes": [
+    {
+      "id": "scripted-baseline",
+      "label": "No-op scripted baseline",
+      "description": "Leaves the stub in place. Used to prove the evaluator fails bad implementations without model spend.",
+      "command": [
+        "python3",
+        "{repo}/legion-observability/bench/adapters/fixture-agent.py",
+        "--apply",
+        "none"
+      ],
+      "timeout": 20
+    },
+    {
+      "id": "scripted-oracle",
+      "label": "Scripted oracle",
+      "description": "Applies answer_files. Used to prove the evaluator passes the intended solution without model spend.",
+      "command": [
+        "python3",
+        "{repo}/legion-observability/bench/adapters/fixture-agent.py",
+        "--apply",
+        "answer"
+      ],
+      "timeout": 20
+    },
+    {
+      "id": "legion-fanout-review",
+      "label": "Legion fanout + review",
+      "kind": "live",
+      "live": true,
+      "description": "Runs one task through route, legion-fanout, diff apply, legion-delegate final-review, golden eval, observability HTML, share metrics, self-learn, heal, and the nested core bench.",
+      "command": [
+        "{repo}/legion-observability/bench/adapters/legion-fanout-review.sh"
+      ],
+      "timeout": 1200
+    }
+  ],
+  "cases": [
+    {
+      "id": "fieldops-triage-scorer",
+      "dimension": "agentic-e2e",
+      "summary": "Implement a deterministic FieldOps ticket triage scorer and pass a golden eval set.",
+      "task": "Edit fieldops_triage.py only. Implement triage_ticket(message, inventory=None) so python3 eval_fieldops_triage.py passes. Return a dict with category, urgency, required_skill, required_parts, risk_score, and customer_eta_required. Treat status phrases like still cold as urgency hints, not as refrigeration category by themselves. Do not edit eval_fieldops_triage.py.",
+      "files": {
+        "fieldops_triage.py": "def triage_ticket(message, inventory=None):\n    return {\n        \"category\": \"general\",\n        \"urgency\": \"scheduled\",\n        \"required_skill\": \"general\",\n        \"required_parts\": [],\n        \"risk_score\": 10,\n        \"customer_eta_required\": False,\n    }\n",
+        "eval_fieldops_triage.py": "import json\nfrom fieldops_triage import triage_ticket\n\nCASES = [\n    {\n        \"message\": \"Our cafe freezer is down and we are losing stock. Can someone come today?\",\n        \"inventory\": {\"compressor\": 1, \"fan_motor\": 0, \"filter\": 4},\n        \"category\": \"refrigeration\",\n        \"urgency\": \"emergency\",\n        \"required_skill\": \"refrigeration\",\n        \"part\": \"compressor\",\n        \"risk_min\": 90,\n        \"risk_max\": 100,\n        \"eta\": True,\n    },\n    {\n        \"message\": \"No heat in the daycare classroom and toddlers arrive in an hour.\",\n        \"inventory\": {\"thermostat\": 2, \"filter\": 3},\n        \"category\": \"hvac\",\n        \"urgency\": \"emergency\",\n        \"required_skill\": \"hvac\",\n        \"part\": \"thermostat\",\n        \"risk_min\": 85,\n        \"risk_max\": 100,\n        \"eta\": True,\n    },\n    {\n        \"message\": \"No heat in the classroom but the room is still cold.\",\n        \"inventory\": {\"thermostat\": 1, \"fan_motor\": 2},\n        \"category\": \"hvac\",\n        \"urgency\": \"same_day\",\n        \"required_skill\": \"hvac\",\n        \"part\": \"thermostat\",\n        \"risk_min\": 50,\n        \"risk_max\": 85,\n        \"eta\": True,\n    },\n    {\n        \"message\": \"The kitchen sink is draining slowly. Next week is fine.\",\n        \"inventory\": {\"trap\": 2},\n        \"category\": \"plumbing\",\n        \"urgency\": \"scheduled\",\n        \"required_skill\": \"plumbing\",\n        \"part\": \"trap\",\n        \"risk_min\": 0,\n        \"risk_max\": 45,\n        \"eta\": False,\n    },\n    {\n        \"message\": \"Breaker keeps tripping and the lights flicker in the stock room.\",\n        \"inventory\": {\"breaker\": 1},\n        \"category\": \"electrical\",\n        \"urgency\": \"same_day\",\n        \"required_skill\": \"electrical\",\n        \"part\": \"breaker\",\n        \"risk_min\": 60,\n        \"risk_max\": 89,\n        \"eta\": True,\n    },\n    {\n        \"message\": \"Walk-in cooler is making a loud noise but it is still cold.\",\n        \"inventory\": {\"fan_motor\": 1, \"compressor\": 0},\n        \"category\": \"refrigeration\",\n        \"urgency\": \"same_day\",\n        \"required_skill\": \"refrigeration\",\n        \"part\": \"fan_motor\",\n        \"risk_min\": 50,\n        \"risk_max\": 80,\n        \"eta\": True,\n    },\n    {\n        \"message\": \"Annual HVAC filter service for the office, no rush.\",\n        \"inventory\": {\"filter\": 8},\n        \"category\": \"hvac\",\n        \"urgency\": \"scheduled\",\n        \"required_skill\": \"hvac\",\n        \"part\": \"filter\",\n        \"risk_min\": 0,\n        \"risk_max\": 35,\n        \"eta\": False,\n    },\n]\n\n\ndef check_case(case):\n    result = triage_ticket(case[\"message\"], inventory=case[\"inventory\"])\n    if not isinstance(result, dict):\n        return [\"result is not a dict\"]\n    failures = []\n    for key in (\"category\", \"urgency\", \"required_skill\", \"required_parts\", \"risk_score\", \"customer_eta_required\"):\n        if key not in result:\n            failures.append(f\"missing {key}\")\n    if failures:\n        return failures\n    if result[\"category\"] != case[\"category\"]:\n        failures.append(f\"category expected {case['category']} got {result['category']}\")\n    if result[\"urgency\"] != case[\"urgency\"]:\n        failures.append(f\"urgency expected {case['urgency']} got {result['urgency']}\")\n    if result[\"required_skill\"] != case[\"required_skill\"]:\n        failures.append(f\"skill expected {case['required_skill']} got {result['required_skill']}\")\n    parts = result[\"required_parts\"]\n    if not isinstance(parts, list) or case[\"part\"] not in parts:\n        failures.append(f\"required_parts missing {case['part']}: {parts}\")\n    risk = result[\"risk_score\"]\n    if not isinstance(risk, int) or not (case[\"risk_min\"] <= risk <= case[\"risk_max\"]):\n        failures.append(f\"risk_score expected {case['risk_min']}..{case['risk_max']} got {risk}\")\n    if result[\"customer_eta_required\"] is not case[\"eta\"]:\n        failures.append(f\"eta expected {case['eta']} got {result['customer_eta_required']}\")\n    return failures\n\n\ndef main():\n    failures = {case[\"message\"]: check_case(case) for case in CASES}\n    failures = {message: items for message, items in failures.items() if items}\n    total = len(CASES)\n    passed = total - len(failures)\n    payload = {\"schema\": \"fieldops.triage.eval.v1\", \"passed\": passed == total, \"score\": passed, \"total\": total, \"failures\": failures}\n    with open(\"score.json\", \"w\", encoding=\"utf-8\") as handle:\n        json.dump(payload, handle, indent=2, sort_keys=True)\n        handle.write(\"\\n\")\n    print(json.dumps(payload, sort_keys=True))\n    if failures:\n        raise SystemExit(1)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+      },
+      "answer_files": {
+        "fieldops_triage.py": "def _has(text, *needles):\n    return any(needle in text for needle in needles)\n\n\ndef triage_ticket(message, inventory=None):\n    inventory = inventory or {}\n    text = message.lower()\n    category = \"general\"\n    skill = \"general\"\n    parts = []\n    urgency = \"scheduled\"\n    risk = 20\n\n    if _has(text, \"freezer\", \"fridge\", \"cooler\", \"walk-in\"):\n        category = skill = \"refrigeration\"\n        if _has(text, \"freezer\", \"down\", \"losing stock\"):\n            parts.append(\"compressor\")\n        if _has(text, \"noise\", \"loud\"):\n            parts.append(\"fan_motor\")\n    elif _has(text, \"heat\", \"hvac\", \"filter\", \"thermostat\"):\n        category = skill = \"hvac\"\n        if _has(text, \"filter\", \"annual\"):\n            parts.append(\"filter\")\n        else:\n            parts.append(\"thermostat\")\n    elif _has(text, \"sink\", \"drain\", \"pipe\", \"leak\"):\n        category = skill = \"plumbing\"\n        parts.append(\"trap\")\n    elif _has(text, \"breaker\", \"lights\", \"flicker\", \"electrical\"):\n        category = skill = \"electrical\"\n        parts.append(\"breaker\")\n\n    if _has(text, \"down\", \"losing stock\", \"toddlers\", \"daycare\", \"in an hour\", \"emergency\"):\n        urgency = \"emergency\"\n        risk = 95 if category == \"refrigeration\" else 90\n    elif _has(text, \"today\", \"tripping\", \"flicker\", \"noise\", \"loud\", \"still cold\"):\n        urgency = \"same_day\"\n        risk = 72 if category == \"electrical\" else 65\n    elif _has(text, \"annual\", \"no rush\", \"next week\"):\n        urgency = \"scheduled\"\n        risk = 25 if category == \"hvac\" else 30\n\n    if category == \"refrigeration\" and urgency == \"scheduled\":\n        risk = max(risk, 55)\n    if category == \"electrical\" and urgency != \"emergency\":\n        urgency = \"same_day\"\n        risk = max(risk, 70)\n\n    available_parts = [part for part in parts if inventory.get(part, 0) > 0]\n    required_parts = available_parts or parts\n\n    return {\n        \"category\": category,\n        \"urgency\": urgency,\n        \"required_skill\": skill,\n        \"required_parts\": required_parts,\n        \"risk_score\": max(0, min(100, int(risk))),\n        \"customer_eta_required\": urgency in {\"emergency\", \"same_day\"},\n    }\n"
+      },
+      "validators": [
+        {
+          "type": "command",
+          "command": [
+            "python3",
+            "eval_fieldops_triage.py"
+          ],
+          "cwd": "{workspace}",
+          "timeout": 20
+        },
+        {
+          "type": "json_file_field_equals",
+          "path": "{workspace}/score.json",
+          "field": "passed",
+          "equals": true
+        }
+      ],
+      "validators_by_mode": {
+        "legion-fanout-review": [
+          {
+            "type": "file_exists",
+            "path": "{workspace}/doctor.json"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/route-implement.json",
+            "field": "resolved",
+            "equals": true
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/route-review.json",
+            "field": "resolved",
+            "equals": true
+          },
+          {
+            "type": "file_exists",
+            "path": "{workspace}/fanout.json"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/fanout.json",
+            "field": "slices",
+            "equals": 1
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/fanout.json",
+            "field": "ok",
+            "equals": 1
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/fanout.json",
+            "field": "failed",
+            "equals": 0
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/fanout.json",
+            "field": "applied",
+            "equals": 1
+          },
+          {
+            "type": "file_exists",
+            "path": "{workspace}/review.json"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/review.json",
+            "field": "status",
+            "equals": "ok"
+          },
+          {
+            "type": "file_exists",
+            "path": "{workspace}/legion-report.json"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/legion-report.json",
+            "field": "total.success_rate",
+            "equals": 1.0
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/legion-report.json",
+            "field": "groups.codex.success_rate",
+            "equals": 1.0
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/legion-report.json",
+            "field": "groups.codex-review.success_rate",
+            "equals": 1.0
+          },
+          {
+            "type": "file_contains",
+            "path": "{workspace}/legion-report.html",
+            "text": "<!doctype html>"
+          },
+          {
+            "type": "file_contains",
+            "path": "{workspace}/legion-report.html",
+            "text": "Legion Observability Report"
+          },
+          {
+            "type": "file_exists",
+            "path": "{workspace}/legion-share.json"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/legion-share.json",
+            "field": "failed_runs",
+            "equals": 0
+          },
+          {
+            "type": "file_exists",
+            "path": "{workspace}/self-learn-record.json"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/self-learn-record.json",
+            "field": "schema",
+            "equals": "legion.outcome.v1"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/self-learn-record.json",
+            "field": "target_type",
+            "equals": "benchmark"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/self-learn-record.json",
+            "field": "target_name",
+            "equals": "fieldops-triage-e2e"
+          },
+          {
+            "type": "file_exists",
+            "path": "{workspace}/self-learn-hints.json"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/self-learn-hints.json",
+            "field": "schema",
+            "equals": "legion.self-learning.hints.v1"
+          },
+          {
+            "type": "file_exists",
+            "path": "{workspace}/self-learn-run.json"
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/self-learn-run.json",
+            "field": "applied_memory",
+            "equals": true
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/self-learn-run.json",
+            "field": "by_entity.benchmark:fieldops-triage-e2e",
+            "equals": 1
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/self-learn-run.json",
+            "field": "scorecard.ok",
+            "equals": true
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/heal-plan.json",
+            "field": "total",
+            "equals": 0
+          },
+          {
+            "type": "json_file_field_equals",
+            "path": "{workspace}/bench-core.json",
+            "field": "summary.ok",
+            "equals": true
+          }
+        ]
+      },
+      "required": true
+    }
+  ]
+}

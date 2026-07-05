@@ -10,13 +10,126 @@
   <img alt="agents" src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20%C2%B7%20Cursor-8a2be2">
 </p>
 
-> **legion-core** — the model-agnostic orchestration engine behind Legion. The base layer you build your own agents on.
+> **legion-core** — the model-agnostic orchestration engine behind Legion. The base layer you build your own agents, plugins, and app-building workflows on.
 
-One will commands a host of agents — **GPT-5.x via Codex**, **Cursor**, **Claude** (and humans). legion-core gives you the parts that aren't domain-specific: scoped multi-model **delegation**, **telemetry**, a **health check**, **self-learning**, and **auto-healing** — so a new agent project starts from a working spine instead of a blank page.
+Legion lets one operator command many coding agents: **GPT-5.x via Codex**, **Cursor**, **Claude**, and humans. legion-core gives you the parts that are useful in any agent project: scoped multi-model **delegation**, **fan-out**, **telemetry**, a **health check**, **self-learning**, and **auto-healing**.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash
 ```
+
+## The simple idea
+
+Give Legion one goal. Legion picks the right worker, lets that worker edit in an
+isolated git worktree, reviews the result, records cost/success telemetry, and
+saves lessons for the next run.
+
+```mermaid
+flowchart LR
+  A["You give a goal"] --> B["Route<br/>pick model + tool"]
+  B --> C["Fan out<br/>split into safe slices"]
+  C --> D["Agents code<br/>isolated worktrees"]
+  D --> E["Apply + review<br/>diffs, tests, verdicts"]
+  E --> F["Observe<br/>spans, cost, HTML report"]
+  F --> G["Self-learn<br/>record lessons + hints"]
+  G --> H["Your plugin or app gets better"]
+```
+
+## What you can build on it
+
+**Build a plugin:** add your domain knowledge and commands, then let Legion
+handle routing, model execution, telemetry, and learning.
+
+```text
+my-fieldops-plugin/
+  SKILL.md                  # tells agents when and how to use your plugin
+  .claude-plugin/plugin.json # name, description, version, metadata
+  bin/fieldops-triage        # optional deterministic CLI your agents can call
+```
+
+Minimal `SKILL.md`:
+
+```md
+---
+name: fieldops-triage
+description: Use when a user asks to classify field-service tickets.
+---
+
+1. Read the ticket.
+2. Decide category, urgency, required skill, required parts, and risk.
+3. Use legion-delegate for code changes and legion-report for the run summary.
+```
+
+Minimal `.claude-plugin/plugin.json`:
+
+```json
+{
+  "name": "fieldops-triage",
+  "version": "0.1.0",
+  "description": "Field-service ticket triage workflows built on legion-core.",
+  "license": "Apache-2.0"
+}
+```
+
+**Use it to build an app:** keep your app in its own repo, then ask Legion to
+make scoped changes.
+
+```bash
+# See which worker Legion would choose.
+legion-route implement-feature --task "Build the ticket triage page"
+
+# Run one coding task and get a metered diff back.
+legion-delegate run \
+  --repo . \
+  --archetype implement-feature \
+  --task "Add a ticket triage page with filters, priority badges, and tests"
+
+# For bigger work, run several scoped slices in parallel.
+legion-fanout --slices slices.jsonl --repo . --apply --json
+
+# See cost, latency, and success as JSON or HTML.
+legion-report --trace latest --html > legion-report.html
+
+# Record what happened so the harness can learn.
+legion-self-learn record \
+  --entity plugin:fieldops-triage \
+  --summary "The app needed stricter priority rules for freezer outages."
+```
+
+Example `slices.jsonl`:
+
+```jsonl
+{"archetype":"implement-feature","task":"Create the triage API and tests"}
+{"archetype":"frontend-review","task":"Review the triage UI for usability"}
+{"archetype":"final-review","task":"Review the full diff before merge"}
+```
+
+## Prove the full pipeline works
+
+Run the bundled single-task benchmark before a demo. It asks Legion to solve one
+small coding task and only passes if Legion can route, fan out, apply code,
+review, evaluate, emit an observability HTML report, record self-learn data, run
+heal, and pass the core bench.
+
+```bash
+legion-bench corpus \
+  --corpus fieldops-triage-e2e \
+  --repo . \
+  --mode legion-fanout-review \
+  --baseline legion-fanout-review \
+  --json --strict \
+  --report-md .legion/fieldops-e2e-report.md
+```
+
+The useful outputs are:
+
+| Output | What it proves |
+|---|---|
+| `fanout.json` | Legion split the task and applied a diff. |
+| `review.json` | A final review agent ran on the result. |
+| `score.json` | The app task passed its golden evaluator. |
+| `legion-report.html` | Observability produced a readable HTML cost/success report. |
+| `self-learn-run.json` | Self-learning recorded the run and refreshed memory. |
 
 ## What's inside (5 plugins)
 

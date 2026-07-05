@@ -7,6 +7,35 @@ rollups from Legion spans, and sample-size reliability.
 The packaged `local-smoke.json` corpus is only a runner smoke test. It is tiny
 and intentionally marked unreliable for performance claims.
 
+The packaged `fieldops-triage-e2e.json` corpus is the single-task Legion
+pipeline benchmark for demo readiness. Its default scripted modes prove the
+scorer evaluator without model spend. Its live `legion-fanout-review` mode runs
+one FieldOps triage coding task through the full local pipeline: strict doctor,
+route decisions, `legion-fanout`, diff apply, `legion-delegate review`, golden
+eval, `legion-report` JSON + HTML, `legion-share`, `legion-self-learn`,
+`legion-heal plan`, and a nested strict `legion-bench run --suite core`.
+
+No-spend evaluator check:
+
+```bash
+legion-bench corpus --corpus fieldops-triage-e2e --repo . --json --strict
+```
+
+Live full-pipeline check:
+
+```bash
+legion-bench corpus \
+  --corpus fieldops-triage-e2e \
+  --repo . \
+  --mode legion-fanout-review \
+  --baseline legion-fanout-review \
+  --json --strict
+```
+
+This is intentionally a smoke benchmark, not a model-quality leaderboard. It
+passes only when the one task produces the expected scorer and the full artifact
+trail exists, including the observability HTML report and self-learn output.
+
 ## Two corpus layers
 
 The packaged live corpora are deliberately split into two layers, because they

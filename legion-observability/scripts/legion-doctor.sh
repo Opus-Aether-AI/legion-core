@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
     --strict-demo) STRICT_DEMO=1; shift ;;
     --record-failures) RECORD_FAILURES=1; shift ;;
     --json) JSON=1; shift ;;
-    -h|--help) echo "usage: legion-doctor [--repo DIR] [--strict-demo] [--record-failures] [--json] [--only marketplace-schema|plugins|frontmatter|descriptions|mcp|bridges|costs|telemetry-schema|codex|router|route-smoke|delegate-smoke|state-root|test-tools]"; exit 0 ;;
+    -h|--help) echo "usage: legion-doctor [--repo DIR] [--strict-demo] [--record-failures] [--json] [--only marketplace-schema|plugins|frontmatter|descriptions|mcp|bridges|costs|telemetry-schema|codex|router|route-smoke|delegate-smoke|state-root|test-tools|domain-plugin]"; exit 0 ;;
     *) echo "legion-doctor: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
@@ -410,6 +410,96 @@ check_test_tools() {
   [[ "$missing" -eq 0 ]] && pass "required demo test tools present (git, jq, python3, bats)"
 }
 
+check_domain_plugin() {
+  local root="$REPO/.legion" found=0 bad=0 f out rc status name message
+  [[ -d "$root" ]] || { pass "no domain plugin manifests found"; return; }
+  while IFS= read -r f; do
+    out="$(python3 - "$f" <<'PY'
+import json
+import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
+
+
+def simple_toml(path):
+    data = {}
+    current = None
+    with open(path, encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                current = data
+                for part in line[1:-1].split("."):
+                    current = current.setdefault(part.strip(), {})
+                continue
+            if current is not None and "=" in line:
+                key, value = line.split("=", 1)
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                    value = value[1:-1]
+                current[key.strip()] = value
+    return data
+
+
+path = sys.argv[1]
+try:
+    if tomllib is not None:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    else:
+        data = simple_toml(path)
+except Exception as exc:
+    print(json.dumps({"status": "fail", "message": f"invalid domain plugin TOML: {exc}"}))
+    sys.exit(1)
+
+plugin = data.get("plugin") if isinstance(data.get("plugin"), dict) else {}
+pipeline = data.get("pipeline") if isinstance(data.get("pipeline"), dict) else {}
+commands = data.get("commands") if isinstance(data.get("commands"), dict) else {}
+kind = str(plugin.get("kind") or "")
+name = str(plugin.get("name") or path)
+if not kind.startswith("domain-"):
+    print(json.dumps({"status": "skip", "name": name}))
+    sys.exit(0)
+
+errors = []
+if pipeline.get("entrypoint") != "legion-run":
+    errors.append('domain plugin must run through legion-run: set [pipeline].entrypoint = "legion-run"')
+if pipeline.get("profile") != "legion.full_app.v1":
+    errors.append('domain plugin must use [pipeline].profile = "legion.full_app.v1"')
+missing = [key for key in ("plan", "validate", "evaluate") if not str(commands.get(key) or "").strip()]
+if missing:
+    errors.append("domain plugin missing commands: " + ", ".join(missing))
+
+if errors:
+    print(json.dumps({"status": "fail", "name": name, "message": "; ".join(errors)}))
+    sys.exit(1)
+print(json.dumps({"status": "ok", "name": name}))
+PY
+    )"; rc=$?
+    status="$(jq -r '.status // "fail"' <<<"$out" 2>/dev/null || echo fail)"
+    name="$(jq -r '.name // ""' <<<"$out" 2>/dev/null || true)"
+    message="$(jq -r '.message // ""' <<<"$out" 2>/dev/null || true)"
+    case "$status" in
+      ok) found=$((found + 1)) ;;
+      skip) ;;
+      *) fail "${message:-invalid domain plugin manifest}: ${f#"$REPO/"}" "plugin:${name:-domain-plugin}"; bad=1 ;;
+    esac
+    [[ "$rc" -eq 0 || "$status" == "fail" ]] || { fail "domain plugin manifest check crashed: ${f#"$REPO/"}" "plugin:${name:-domain-plugin}"; bad=1; }
+  done < <(find "$root" -type f \( -name 'legion-plugin.toml' -o -name 'plugin.toml' -o -name '*.toml' \) -not -path '*/.git/*' 2>/dev/null)
+  if [[ "$bad" -eq 0 ]]; then
+    if [[ "$found" -gt 0 ]]; then
+      pass "all domain plugin manifests require legion-run ($found checked)"
+    else
+      pass "no domain plugin manifests found"
+    fi
+  fi
+}
+
 check_router() {
   if curl -sf -m 2 "http://127.0.0.1:$ROUTER_PORT/health" >/dev/null 2>&1; then
     pass "router responding on 127.0.0.1:$ROUTER_PORT"
@@ -452,6 +542,7 @@ run_one() {
     delegate-smoke)     check_delegate_smoke ;;
     state-root)         check_state_root ;;
     test-tools)         check_test_tools ;;
+    domain-plugin)      check_domain_plugin ;;
     router)             check_router ;;
     *) echo "legion-doctor: unknown check '$1'" >&2; exit 2 ;;
   esac
@@ -467,7 +558,7 @@ else
     run_one "$c"
   done
   if [[ "$STRICT_DEMO" == "1" ]]; then
-    for c in route-smoke delegate-smoke state-root test-tools; do
+    for c in route-smoke delegate-smoke state-root test-tools domain-plugin; do
       run_one "$c"
     done
   fi

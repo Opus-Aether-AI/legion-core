@@ -48,8 +48,10 @@ fi
 # edge) or LEGION_REF=<tag> to pin. Falls back to main if no release / offline.
 MARKETPLACE_REF="${LEGION_REF:-}"
 if [ -z "$MARKETPLACE_REF" ]; then
+    # `|| true` so a failed lookup (offline / rate-limit / non-GitHub repo) can't
+    # trip `set -e` — we simply fall back to `main` below.
     MARKETPLACE_REF="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null \
-        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
 fi
 [ -z "$MARKETPLACE_REF" ] && MARKETPLACE_REF="main"
 MARKETPLACE_RAW_BASE="${LEGION_RAW_BASE:-https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${MARKETPLACE_REF}}"

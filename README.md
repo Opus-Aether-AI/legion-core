@@ -3,11 +3,12 @@
 </div>
 
 <p align="center">
+  <a href="https://legion.opusaether.com"><img alt="site" src="https://img.shields.io/badge/site-legion.opusaether.com-c7a24e?logo=vercel&logoColor=white"></a>
   <a href="https://www.npmjs.com/package/@opus-aether-ai/legion-core"><img alt="npm" src="https://img.shields.io/npm/v/@opus-aether-ai/legion-core?logo=npm&label=npm&color=cb3837"></a>
   <a href="https://github.com/Opus-Aether-AI/legion-core/releases"><img alt="release" src="https://img.shields.io/github/v/release/Opus-Aether-AI/legion-core?display_name=tag&label=release&color=2ea043"></a>
   <a href="https://github.com/Opus-Aether-AI/legion-core/actions/workflows/legion-ci.yml"><img alt="ci" src="https://img.shields.io/github/actions/workflow/status/Opus-Aether-AI/legion-core/legion-ci.yml?branch=main&label=ci&logo=github"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/Opus-Aether-AI/legion-core?label=license&color=6e5494"></a>
-  <img alt="agents" src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20%C2%B7%20Cursor-8a2be2">
+  <img alt="agents" src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20%C2%B7%20Cursor%20%C2%B7%20opencode-8a2be2">
 </p>
 
 > **legion-core** — the model-agnostic orchestration engine behind Legion. The base layer you build your own agents on.
@@ -15,7 +16,7 @@
 One will commands a host of agents — **GPT-5.x via Codex**, **Cursor**, **Claude** (and humans). legion-core gives you the parts that aren't domain-specific: scoped multi-model **delegation**, **telemetry**, a **health check**, **self-learning**, and **auto-healing** — so a new agent project starts from a working spine instead of a blank page.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash
+curl -fsSL https://github.com/Opus-Aether-AI/legion-core/releases/latest/download/install.sh | bash
 ```
 
 ## What's inside (6 plugins)

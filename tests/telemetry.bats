@@ -7,7 +7,7 @@ setup() {
 }
 
 @test "telemetry: emit writes a valid span + appends to the daily log" {
-  run "$TEL" emit --executor codex --model gpt-5.5 --status ok --cost 0.05 \
+  run "$TEL" emit --executor codex --model fixture-codex --status ok --cost 0.05 \
     --duration-ms 1200 --tokens '{"input_tokens":10}'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.schema=="legion.span.v1" and .executor=="codex" and .cost_usd==0.05 and .tokens.input_tokens==10'
@@ -15,27 +15,27 @@ setup() {
 }
 
 @test "telemetry: emit defaults run_id, mirrors trace_id, nulls parent" {
-  run "$TEL" emit --executor claude --model claude-opus-4-8 --status ok
+  run "$TEL" emit --executor claude --model fixture-claude --status ok
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.run_id != "" and .trace_id == .run_id and .parent_id == null'
 }
 
 @test "telemetry: emit carries task / trace-id / parent-id / artifacts" {
-  run "$TEL" emit --executor codex --model gpt-5.5 --status ok \
+  run "$TEL" emit --executor codex --model fixture-codex --status ok \
     --task "do x" --trace-id T1 --parent-id P1 --artifacts '{"diff":"d"}'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.task=="do x" and .trace_id=="T1" and .parent_id=="P1" and .artifacts.diff=="d"'
 }
 
 @test "telemetry: emit carries harness target metadata" {
-  run "$TEL" emit --executor codex --model gpt-5.5 --status blocked \
+  run "$TEL" emit --executor codex --model fixture-codex --status blocked \
     --target-type command --target-name feature
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.status=="blocked" and .target_type=="command" and .target_name=="feature"'
 }
 
 @test "telemetry: emit requires executor/model/status" {
-  run "$TEL" emit --executor codex --model gpt-5.5
+  run "$TEL" emit --executor codex --model fixture-codex
   [ "$status" -eq 2 ]
 }
 
@@ -45,8 +45,8 @@ setup() {
 }
 
 @test "telemetry: validate passes for emitted spans" {
-  "$TEL" emit --executor codex --model gpt-5.5 --status ok >/dev/null
-  "$TEL" emit --executor codex --model gpt-5.4 --status failed >/dev/null
+  "$TEL" emit --executor codex --model fixture-codex --status ok >/dev/null
+  "$TEL" emit --executor codex --model fixture-other --status failed >/dev/null
   run "$TEL" validate "$LEGION_TELEMETRY_DIR"/*.jsonl
   [ "$status" -eq 0 ]
   [[ "$output" == *"valid"* ]]
@@ -58,7 +58,7 @@ setup() {
 }
 
 @test "telemetry: validate passes a good span via stdin" {
-  span="$("$TEL" emit --executor codex --model gpt-5.5 --status ok)"
+  span="$("$TEL" emit --executor codex --model fixture-codex --status ok)"
   run bash -c "printf '%s\n' '$span' | '$TEL' validate -"
   [ "$status" -eq 0 ]
 }

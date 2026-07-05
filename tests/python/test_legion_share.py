@@ -23,12 +23,12 @@ def test_is_codex():
 
 
 def test_compute_share_runs_and_tokens():
-    spans = [_span("codex", "gpt-5.4", 300), _span("opus", "opus", 500), _span("opus", "opus", 400)]
+    spans = [_span("codex", "fixture-codex", 300), _span("opus", "fixture-claude", 500), _span("opus", "fixture-claude", 400)]
     c = ls.compute(spans)
     assert c["total_runs"] == 3 and c["codex_runs"] == 1 and c["opus_runs"] == 2
     assert c["codex_share_runs"] == round(1 / 3, 4)
     assert c["codex_share_tokens"] == round(300 / 1200, 4)
-    assert c["by_model"]["opus"] == 2 and c["by_model"]["gpt-5.4"] == 1
+    assert c["by_model"]["fixture-claude"] == 2 and c["by_model"]["fixture-codex"] == 1
 
 
 def test_compute_empty_is_safe():
@@ -56,9 +56,9 @@ def test_target_reads_routing_toml():
 
 def test_failed_runs_excluded_from_share():
     spans = [
-        _span("codex", "gpt-5.4", 100),
-        {"schema": "legion.span.v1", "executor": "codex", "model": "gpt-5.4", "status": "failed", "tokens": {"output_tokens": 9}},
-        _span("opus", "opus", 100),
+        _span("codex", "fixture-codex", 100),
+        {"schema": "legion.span.v1", "executor": "codex", "model": "fixture-codex", "status": "failed", "tokens": {"output_tokens": 9}},
+        _span("opus", "fixture-claude", 100),
     ]
     c = ls.compute(spans)
     assert c["total_runs"] == 2          # failed one not counted
@@ -69,9 +69,9 @@ def test_failed_runs_excluded_from_share():
 
 def test_reasoning_tokens_count_toward_codex():
     spans = [
-        {"schema": "legion.span.v1", "executor": "codex", "model": "gpt-5.5", "status": "ok",
+        {"schema": "legion.span.v1", "executor": "codex", "model": "fixture-codex", "status": "ok",
          "tokens": {"output_tokens": 100, "reasoning_output_tokens": 300}},
-        _span("opus", "opus", 100),
+        _span("opus", "fixture-claude", 100),
     ]
     c = ls.compute(spans)
     # codex generated 400 (100 out + 300 reasoning), opus 100 -> 0.8
@@ -92,14 +92,14 @@ def test_recommend_next_converges_to_target():
 
 def test_gate_under_target_signals_delegate():
     # All Opus, no codex -> under target -> exit 1 + a delegate directive.
-    c = ls.compute([_span("opus", "opus", 100), _span("opus", "opus", 100)])
+    c = ls.compute([_span("opus", "fixture-claude", 100), _span("opus", "fixture-claude", 100)])
     line, code = ls.gate(c, 0.5)
     assert code == 1
     assert "legion-delegate" in line and "<" in line
 
 
 def test_gate_met_is_quiet():
-    c = ls.compute([_span("codex", "gpt-5.4", 100), _span("opus", "opus", 100)])
+    c = ls.compute([_span("codex", "fixture-codex", 100), _span("opus", "fixture-claude", 100)])
     line, code = ls.gate(c, 0.5)
     assert code == 0 and "on balance" in line
 
@@ -116,7 +116,7 @@ def test_gate_cli_exit_code(capsys):
 
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "spans.jsonl"), "w") as fh:
-            fh.write(_json.dumps(_span("opus", "opus", 100)) + "\n")
+            fh.write(_json.dumps(_span("opus", "fixture-claude", 100)) + "\n")
         code = ls.main(["gate", "--dir", d, "--routing", "/nope", "--target", "0.5"])
     assert code == 1
     assert "legion-delegate" in capsys.readouterr().out

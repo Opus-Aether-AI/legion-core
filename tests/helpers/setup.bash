@@ -130,7 +130,7 @@ path_without() {
         bash sh env grep awk sed cat find mkdir ln rm rmdir ls printf echo
         chmod cp mv git base64 readlink jq dirname basename head tail tr sort
         uniq wc gzip cut tee xargs id date
-        mktemp
+        mktemp python3
         curl
     )
     for cmd in "${needed[@]}"; do

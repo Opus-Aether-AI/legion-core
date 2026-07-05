@@ -7,12 +7,19 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck disable=SC1091
 source "$script_dir/_span.sh"
+# shellcheck disable=SC1091
+# shellcheck source=../../../legion-router/scripts/lib/model-config.sh
+source "$script_dir/../../../legion-router/scripts/lib/model-config.sh"
 
 if [[ -n "${LEGION_BENCH_REAL_HOME:-}" ]]; then
   export HOME="$LEGION_BENCH_REAL_HOME"
 fi
 
-model="${CLAUDE_MODEL:-opus}"
+default_model="$(legion_model_ref claude_default)" || {
+  printf 'direct-claude: could not resolve claude_default in models.toml\n' >&2
+  exit 2
+}
+model="${CLAUDE_MODEL:-$default_model}"
 args=(-p --permission-mode acceptEdits --output-format json --no-session-persistence --model "$model")
 task="$(<"$task_file")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/direct-claude.XXXXXX")"

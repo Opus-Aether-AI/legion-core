@@ -1,7 +1,7 @@
 ---
 name: legion-router
 kind: ability
-description: Use when Opus should hand a scoped sub-task to an external model (Codex / GPT-5.5 / Cursor Agent) instead of doing it itself — bulk mechanical edits, independent parallel code generation, cross-model review, Cursor second opinions, or tie-breaks. Drives `legion-delegate` for Codex and `legion-cursor` for Cursor Agent, both in isolated worktrees with metered telemetry. Triggers on "delegate to codex/gpt/cursor", "second opinion", "cross-model review", or cost-metered model routing. (For orchestrating a whole multi-step goal across models, use legion-orchestrate.)
+description: Use when Claude should hand a scoped sub-task to an external model (Codex / Cursor Agent) instead of doing it itself — bulk mechanical edits, independent parallel code generation, cross-model review, Cursor second opinions, or tie-breaks. Drives `legion-delegate` for Codex and `legion-cursor` for Cursor Agent, both in isolated worktrees with metered telemetry. Triggers on "delegate to codex/gpt/cursor", "second opinion", "cross-model review", or cost-metered model routing. (For orchestrating a whole multi-step goal across models, use legion-orchestrate.)
 ---
 
 # Legion Router — delegate to a legion of models
@@ -17,17 +17,17 @@ legion-self-learn hints --entity plugin:legion-router
 
 Legion is a team. Play each model to its strength:
 
-- **Opus = orchestrate** — plan, decompose, decide, **verify**, integrate. Opus is the *conductor*, not the bulk coder. (archetypes: `orchestrate`, `architecture-decision`, `deep-reasoning`)
-- **GPT-5.5 = the Codex workhorse** — do **most of the coding** and final review: implementation, tests, refactors, bulk edits, migrations, boilerplate, hard/critical/risky work, and cross-model verification.
+- **Claude = orchestrate** — plan, decompose, decide, **verify**, integrate. Claude is the *conductor*, not the bulk coder. (archetypes: `orchestrate`, `architecture-decision`, `deep-reasoning`)
+- **Codex workhorse = implementation + review** — do **most of the coding** and final review: implementation, tests, refactors, bulk edits, migrations, boilerplate, hard/critical/risky work, and cross-model verification. The concrete model ID resolves from `config/models.toml`.
 
-**The rule:** codex (GPT-5.5) should do **≥50% of delegatable work** (`routing.toml [targets].codex_share`). Concretely — when you have an implementation task, **delegate it to GPT-5.5 by default** rather than coding it yourself; reserve your own cycles for orchestration + judgement, and route the **final review to GPT-5.5**.
+**The rule:** codex should do **≥50% of delegatable work** (`routing.toml [targets].codex_share`). Concretely — when you have an implementation task, **delegate by archetype by default** rather than coding it yourself; reserve your own cycles for orchestration + judgement, and route the **final review to the configured Codex reviewer**.
 
 **Make it measurable (the controller loop):**
-1. When you do a task **yourself**, log it: `legion-trace emit --executor opus --model opus --status ok` (so the split has a denominator).
-2. Before doing an eligible implementation task inline, check `legion-share next` — if it says `codex`, **delegate it** (you're under target); if `opus`, your call.
+1. When you do a task **yourself**, log it: `legion-trace emit --executor opus --model "$(legion-route --model-ref claude_orchestrator)" --status ok` (so the split has a denominator).
+2. Before doing an eligible implementation task inline, check `legion-share next` — if it says `codex`, **delegate it** (you're under target); if it says `opus`, your call.
 3. `legion-share` shows the live ratio + per-model breakdown vs the 0.5 target.
 
-So: **Delegate any task that's independent and self-contained** to GPT-5.5 or Cursor Agent so Opus stays free to coordinate. Keep only orchestration + genuine judgement inline.
+So: **Delegate any task that's independent and self-contained** to the configured Codex workhorse or Cursor Agent so Claude stays free to coordinate. Keep only orchestration + genuine judgement inline.
 
 ## The honest mechanism
 
@@ -47,9 +47,9 @@ Cursor Agent uses the same sidecar pattern through `legion-cursor`: it runs Curs
 
 | Situation | Delegate? | How |
 |---|---|---|
-| Bulk mechanical edit across many files | ✅ yes | `run --model gpt-5.5 --sandbox workspace-write` |
+| Bulk mechanical edit across many files | ✅ yes | `run --archetype bulk-mechanical-edit` |
 | Independent module/file you can spec fully | ✅ yes | `run` with a tight, stateless task description |
-| Second opinion on a risky diff / PR | ✅ yes | `review --model gpt-5.5 --base <branch>` |
+| Second opinion on a risky diff / PR | ✅ yes | `review --archetype second-opinion-review --base <branch>` |
 | Two designs both plausible (tie-break) | ✅ yes | `review` on each, compare verdicts |
 | Task needs your conversation context / judgement | ❌ no | do it inline |
 | Tiny edit you can do in one tool call | ❌ no | do it inline (delegation overhead isn't worth it) |
@@ -67,10 +67,10 @@ Run `legion-route --list` for the full set. Grouped by role:
 
 | Role | Archetypes | → model |
 |---|---|---|
-| **Opus orchestrates (self)** | `orchestrate`, `architecture-decision`, `deep-reasoning` | opus — **refuses to delegate** |
-| **GPT-5.5 Codex path** | `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `final-review`, `second-opinion-review`, `cross-model-tiebreak`, `security-review`, `hard-bug`, `perf-optimization` | gpt-5.5 |
+| **Claude orchestrates (self)** | `orchestrate`, `architecture-decision`, `deep-reasoning` | `claude_orchestrator` — **refuses to delegate** |
+| **Codex implementation/review path** | `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `final-review`, `second-opinion-review`, `cross-model-tiebreak`, `security-review`, `hard-bug`, `perf-optimization` | `codex_workhorse` / `codex_review` |
 
-So: most coding + final review + hard/critical → GPT-5.5; orchestration + judgement → you keep it (delegating it is refused).
+So: most coding + final review + hard/critical → Codex roles from `models.toml`; orchestration + judgement → you keep it (delegating it is refused).
 
 ## Commands
 
@@ -83,7 +83,8 @@ legion-delegate run --archetype bulk-mechanical-edit \
 legion-cursor run --task "Try the same fix using Cursor Agent; minimal edit only" --repo .
 
 # Pin a model/effort explicitly (overrides the archetype):
-printf '%s' "$LONG_TASK" | legion-delegate run --model gpt-5.5 --reasoning-effort high --repo .
+printf '%s' "$LONG_TASK" | legion-delegate run \
+  --model "$(legion-route --model-ref codex_workhorse)" --reasoning-effort high --repo .
 
 # Cross-model second opinion → STRUCTURED verdict JSON you can reconcile:
 legion-delegate review --archetype second-opinion-review --base main --repo .
@@ -98,14 +99,14 @@ legion-delegate apply   --run <RUN_ID> --repo .
 legion-delegate cleanup --run <RUN_ID> --repo .
 ```
 
-Reasoning effort (via codex `-c model_reasoning_effort`): **codex always runs at `xhigh`** — every archetype is xhigh and `legion-delegate` defaults to xhigh when unset (on a subscription the marginal cost is flat, so favor quality). Opus orchestrates at **xhigh minimum** (dynamic higher if a task needs it). `review` returns a schema-valid verdict (`schema/review-verdict.schema.json`) so you can weigh GPT's findings against your own programmatically.
+Reasoning effort (via codex `-c model_reasoning_effort`): **codex always runs at `xhigh`** — every archetype is xhigh and `legion-delegate` defaults to xhigh when unset (on a subscription the marginal cost is flat, so favor quality). Claude orchestration runs at **xhigh minimum** (dynamic higher if a task needs it). `review` returns a schema-valid verdict (`schema/review-verdict.schema.json`) so you can weigh Codex findings against your own programmatically.
 
 ## Credit / quota resilience (self-healing)
 
 - **Auto-fallback:** if the chosen model hits a quota/rate-limit error, `run` automatically walks the archetype's `fallback` chain when one is configured and retries; a *non*-quota failure stops immediately (doesn't burn the chain).
 - **Low-credit mode:** set `LEGION_LOW_CREDIT` to steer away from a depleted provider:
-  - `LEGION_LOW_CREDIT=claude` → Claude is low: delegate *more* to GPT (even normally-self tasks route to GPT-5.5).
-  - `LEGION_LOW_CREDIT=codex` (or `gpt`) → GPT is low: **refuse to delegate**, so Opus does it inline instead (`LEGION_FORCE_DELEGATE=1` overrides if you want to spend the last credits anyway).
+  - `LEGION_LOW_CREDIT=claude` → Claude is low: delegate *more* to the configured Codex workhorse, even normally-self tasks.
+  - `LEGION_LOW_CREDIT=codex` (or `gpt`) → GPT is low: **refuse to delegate**, so Claude does it inline instead (`LEGION_FORCE_DELEGATE=1` overrides if you want to spend the last credits anyway).
 - **Budget is advisory:** `--budget-tokens N` flags an over-budget run (`status: over_budget`) but still returns the usable diff and **exits 0** — codex can't be pre-empted mid-run, so budget never silently fails a good result.
 
 ## Worktree lifecycle

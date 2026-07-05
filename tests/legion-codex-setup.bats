@@ -83,7 +83,7 @@ _copy_codex_setup_scripts() {
 @test "merge: reconciles a stale marketplace block and preserves unrelated config" {
   mkdir -p "$(dirname "$CODEX_CONFIG")"
   cat > "$CODEX_CONFIG" <<'TOML'
-model = "gpt-5.5"
+model = "user-configured-model"
 
 [mcp_servers.context7]
 command = "MINE"
@@ -92,7 +92,7 @@ TOML
   run bash -c "echo '{\"context7\":{\"command\":\"npx\",\"args\":[\"-y\",\"x\"]},\"new\":{\"command\":\"n\",\"args\":[]}}' | python3 '$MERGE_PY' --config '$CODEX_CONFIG'"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.updated == ["context7"] and .added == ["new"]'
-  grep -qF 'model = "gpt-5.5"' "$CODEX_CONFIG"
+  grep -qF 'model = "user-configured-model"' "$CODEX_CONFIG"
   grep -qF 'command = "npx"' "$CODEX_CONFIG"
   ! grep -qF 'command = "MINE"' "$CODEX_CONFIG"
   grep -q '^\[mcp_servers.new\]' "$CODEX_CONFIG"

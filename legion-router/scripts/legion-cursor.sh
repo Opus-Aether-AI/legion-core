@@ -9,6 +9,9 @@ _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 # shellcheck source=lib/cost.sh
 source "$_self_dir/lib/cost.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/model-config.sh
+source "$_self_dir/lib/model-config.sh"
 
 CURSOR_AGENT_BIN="${CURSOR_AGENT_BIN:-}"
 LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
@@ -122,7 +125,10 @@ actual_model_from_output() {
 }
 
 cmd_run() {
-  local task="" model="${LEGION_CURSOR_MODEL:-${CURSOR_MODEL:-composer-2.5}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
+  local default_model
+  default_model="$(legion_model_ref cursor_default)" || die "could not resolve cursor_default in models.toml"
+
+  local task="" model="${LEGION_CURSOR_MODEL:-${CURSOR_MODEL:-$default_model}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 agent_bin="" start_ms=0 end_ms=0 dur=0 rc=0
 
@@ -235,7 +241,8 @@ Usage:
   legion-cursor run [--repo DIR] < task.txt
 
 Set CURSOR_AGENT_BIN to override the agent binary. By default Legion tries
-`agent`, then `cursor-agent`.
+`agent`, then `cursor-agent`. The default model resolves from
+legion-router/config/models.toml.
 EOF
 }
 

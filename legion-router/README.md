@@ -1,6 +1,6 @@
 # legion-router
 
-Legion's multi-model brain. Lets Opus orchestrate and **delegate scoped sub-tasks to external model agents** (Codex / GPT-5.5 / Cursor Agent), bringing back a **verified, metered diff** — plus an opt-in Anthropic-compatible metering proxy so all model spend lands in one place.
+Legion's multi-model brain. Lets Claude orchestrate and **delegate scoped sub-tasks to external model agents** (Codex / Cursor Agent), bringing back a **verified, metered diff** — plus an opt-in Anthropic-compatible metering proxy so all model spend lands in one place.
 
 > One orchestrator, a legion of models.
 
@@ -35,21 +35,21 @@ The proxy binds **loopback only** — that is the sole auth on `/ingest`. Secret
 ## Quick start
 
 ```bash
-# Delegate an edit to GPT-5.5; inspect the diff it returns, then apply
-legion-delegate run --model gpt-5.5 --task "add a null-guard to bar() in src/foo.ts" --repo .
+# Delegate an edit through the configured Codex workhorse; inspect the diff, then apply
+legion-delegate run --archetype implement-feature --task "add a null-guard to bar() in src/foo.ts" --repo .
 legion-delegate apply --run <RUN_ID> --repo .
 
 # Delegate a scoped task to Cursor Agent headless
 legion-cursor run --task "try the same fix with Cursor Agent; minimal edit" --repo .
 
 # Cross-model second opinion on a branch
-legion-delegate review --model gpt-5.5 --base main --repo .
+legion-delegate review --archetype second-opinion-review --base main --repo .
 ```
 
 Requires: `codex` CLI for `legion-delegate`, Cursor CLI (`agent` or `cursor-agent`) for `legion-cursor`, plus `jq` and `git`. The proxy additionally needs `bun`.
 
 `legion-intake` is intentionally one level above the provider. By default it runs
-`legion-delegate` (`gpt-5.5`), but `--worker cursor` or
+`legion-delegate` (using the configured Codex route), but `--worker cursor` or
 `--worker custom --worker-bin ./path/to/runner` can swap in any runner that
 accepts `run --sandbox ... --task ... --repo ...` and returns the standard
 Legion JSON fields (`status`, `run_id`, `diff_path`, `last_message_path` or
@@ -65,8 +65,8 @@ explicit delegation, install Sandcastle in your working copy:
 
 ```bash
 npm i -D @ai-hero/sandcastle
-legion-delegate run --model gpt-5.5 --sandbox docker --task "..." --repo .
-legion-delegate run --model gpt-5.5 --sandbox vercel --task "..." --repo .
+legion-delegate run --model "$(legion-route --model-ref codex_workhorse)" --sandbox docker --task "..." --repo .
+legion-delegate run --model "$(legion-route --model-ref codex_workhorse)" --sandbox vercel --task "..." --repo .
 ```
 
 `docker`, `podman`, and `vercel` are opt-in blast-radius protection only. If

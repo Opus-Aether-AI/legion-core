@@ -1,201 +1,201 @@
-# Legion routing policy — balance work by model strength.
+# Legion routing policy — balance work by model role.
 #
-#   Opus     orchestrates: plan, decompose, decide, verify, integrate (NOT the bulk coder)
-#   GPT-5.5  the Codex workhorse: implementation, tests, refactors, reviews, hard work
+# Concrete model IDs live in models.toml. This file should refer to model_ref
+# keys only, so model upgrades do not require sweeping route-policy edits.
 #
-# Goal: codex (GPT-5.5) does >= [targets].codex_share of delegatable work, measured and
-# self-corrected by `legion-share`. Resolved by `legion-route <archetype>`, consumed by
-# `legion-delegate --archetype`. This is the single place model selection lives.
+# Goal: codex does >= [targets].codex_share of delegatable work, measured and
+# self-corrected by `legion-share`. Resolved by `legion-route <archetype>`,
+# consumed by `legion-delegate --archetype`.
 #
-#   executor          self (Opus inline) | codex (delegate to a GPT model)
-#   model             gpt-5.5 | opus
+#   executor          self (Claude inline) | codex (delegate to a GPT model)
+#   model_ref         key in models.toml
 #   sandbox           read-only | workspace-write
 #   reasoning_effort  low | medium | high | xhigh
-#   fallback          models to try on quota/rate-limit before failing
+#   fallback_refs     model_ref keys to try on quota/rate-limit before failing
 #
-# EFFORT POLICY: codex (GPT-5.5) ALWAYS runs at xhigh — quality over speed; on a
-# ChatGPT subscription the marginal cost is flat, so there's no reason to skimp. Opus
-# orchestrates at xhigh minimum (dynamic higher if a task needs it). Every archetype
-# below is xhigh; legion-delegate also defaults effort to xhigh when none is given.
+# EFFORT POLICY: codex ALWAYS runs at xhigh — quality over speed; on a
+# subscription the marginal cost is flat, so there's no reason to skimp. Claude
+# orchestration also runs at xhigh minimum. Every archetype below is xhigh;
+# legion-delegate also defaults effort to xhigh when none is given.
 
 [targets]
 codex_share = 0.5          # floor: >= 50% of delegatable work to codex (the policy below exceeds it)
 
 [defaults]
 executor = "self"          # an unclassified task: Opus decides (it should classify into an archetype)
-model = "opus"
+model_ref = "claude_orchestrator"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 
-# ── Opus orchestrates (self) — judgement, not bulk execution ─────────
+# ── Claude orchestrates (self) — judgement, not bulk execution ───────
 [archetypes.orchestrate]
 executor = "self"
-model = "opus"
+model_ref = "claude_orchestrator"
 reasoning_effort = "xhigh"
-note = "Plan / decompose / coordinate / integrate — the orchestration itself stays on Opus."
+note = "Plan / decompose / coordinate / integrate — the orchestration itself stays on Claude."
 
 [archetypes.architecture-decision]
 executor = "self"
-model = "opus"
+model_ref = "claude_orchestrator"
 reasoning_effort = "xhigh"
-note = "MAKING a design/architecture/tradeoff decision — keep on Opus (review of one goes to 5.5)."
+note = "MAKING a design/architecture/tradeoff decision — keep on Claude; review can use the Codex review role."
 
 [archetypes.deep-reasoning]
 executor = "self"
-model = "opus"
+model_ref = "claude_orchestrator"
 reasoning_effort = "xhigh"
-note = "High-judgement reasoning — keep on Opus, do NOT delegate."
+note = "High-judgement reasoning — keep on Claude, do NOT delegate."
 
-# ── GPT-5.5 — Codex implementation/review path ───────────────────────
+# ── Codex implementation path ────────────────────────────────────────
 [archetypes.implement-feature]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "A fully-specced feature slice — the default home for real coding."
 
 # ── Frontend: correctness is VISUAL, so it routes by TASTE, not bulk coding ──
 # A rendered UI can't be verified from a diff (the reviewer can't see the pixels),
-# so frontend leans on Opus's judgement + GPT-5.5 and
+# so frontend leans on Claude judgement + Codex review and
 # is verified by SCREENSHOT (browser-patterns visual-regression), not diff-reading.
 # Pairs with the `impeccable` skill (shape -> craft -> polish). See
 # docs/frontend-workflow.md.
 [archetypes.frontend-implement]
 executor = "self"
-model = "opus"
+model_ref = "claude_orchestrator"
 reasoning_effort = "xhigh"
-note = "Layout / component structure / design intent stays on Opus (impeccable shape->craft). Frontend quality is taste, not throughput."
+note = "Layout / component structure / design intent stays on Claude (impeccable shape->craft). Frontend quality is taste, not throughput."
 
 [archetypes.frontend-polish]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
-note = "The polish / a11y / responsive pass — the strong model (5.5), not the bulk coder."
+fallback_refs = []
+note = "The polish / a11y / responsive pass uses the configured Codex workhorse."
 
 [archetypes.frontend-review]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_review"
 sandbox = "read-only"
 reasoning_effort = "xhigh"
-note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. 5.5 signs off."
+note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. The configured Codex reviewer signs off."
 
 [archetypes.write-tests]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "Author unit/integration tests for a described surface."
 
 [archetypes.fix-bug]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
-note = "A reproducible, well-scoped bug fix (deep/tricky ones -> hard-bug on 5.5)."
+fallback_refs = []
+note = "A reproducible, well-scoped bug fix (deep/tricky ones -> hard-bug)."
 
 [archetypes.refactor-module]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "Restructure a module/file with characterization intact."
 
 [archetypes.bulk-mechanical-edit]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "Wide, low-judgement edits across many files."
 
 [archetypes.parallel-codegen]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
-note = "Independent, fully-specified modules generated while Opus coordinates."
+fallback_refs = []
+note = "Independent, fully-specified modules generated while Claude coordinates."
 
 [archetypes.cheap-bulk]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "Throughput-oriented work still uses the best Codex model, at xhigh effort."
 
 [archetypes.docs-edit]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "Docs / comments / changelog edits."
 
 [archetypes.boilerplate]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "Scaffolding, config, repetitive plumbing."
 
 [archetypes.migration]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "Codemod / dependency / API migration across the codebase."
 
-# ── GPT-5.5 review + hard/critical work ──────────────────────────────
+# ── Codex review + hard/critical work ────────────────────────────────
 [archetypes.final-review]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_review"
 sandbox = "read-only"
 reasoning_effort = "xhigh"
-note = "The final review before merge — 5.5 is the best reviewer; always get its sign-off."
+note = "The final review before merge — always get the configured Codex review sign-off."
 
 [archetypes.second-opinion-review]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_review"
 sandbox = "read-only"
 reasoning_effort = "xhigh"
 note = "A different model reviews a diff Opus wrote — diversity catches what self-review misses."
 
 [archetypes.cross-model-tiebreak]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_review"
 sandbox = "read-only"
 reasoning_effort = "xhigh"
 note = "Break a tie between two plausible approaches with an independent verdict."
 
 [archetypes.security-review]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_review"
 sandbox = "read-only"
 reasoning_effort = "xhigh"
 note = "Adversarial security review of a change (auth/secrets/input surfaces)."
 
 [archetypes.hard-bug]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "A deep/tricky bug needing the strongest model."
 
 [archetypes.perf-optimization]
 executor = "codex"
-model = "gpt-5.5"
+model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
-fallback = []
+fallback_refs = []
 note = "Latency/throughput optimization with measured tradeoffs."

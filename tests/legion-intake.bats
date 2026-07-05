@@ -12,6 +12,8 @@ setup() {
   export MOCK_GH_ISSUE_JSON="$TEST_TMPDIR/gh-issue.json"
   export MOCK_DELEGATE_RESULT="$TEST_TMPDIR/delegate-result.json"
   export REPO_DIR="$(make_issue_repo)"
+  CODEX_WORKHORSE="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
+  CURSOR_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref cursor_default)"
   write_mock_gh
   write_mock_delegate
 }
@@ -119,7 +121,7 @@ make_patch() {
   run bash -c "cd '$REPO_DIR' && env LEGION_CURSOR_BIN=legion-cursor bash '$INTAKE' explore --issue 8 --repo acme/widgets --worker cursor"
 
   [ "$status" -eq 0 ]
-  assert_mock_called legion-cursor "--sandbox read-only --model composer-2.5"
+  assert_mock_called legion-cursor "--sandbox read-only --model $CURSOR_DEFAULT"
   grep -Fq "cursor assessment" "$MOCK_GH_COMMENTS"
   if grep -F "legion-cursor " "$MOCK_CALL_LOG" | grep -q -- "--untrusted"; then
     echo "cursor worker should not receive delegate-only --untrusted flag" >&2
@@ -184,10 +186,10 @@ make_patch() {
   printf 'assessment\n' > "$TEST_TMPDIR/last-message.txt"
   printf '{"status":"ok","last_message_path":"%s"}\n' "$TEST_TMPDIR/last-message.txt" > "$MOCK_DELEGATE_RESULT"
 
-  run bash -c "cd '$REPO_DIR' && env LEGION_DELEGATE_BIN=legion-delegate bash '$INTAKE' explore --issue 7 --repo acme/widgets --model gpt-5.5"
+  run bash -c "cd '$REPO_DIR' && env LEGION_DELEGATE_BIN=legion-delegate bash '$INTAKE' explore --issue 7 --repo acme/widgets --model '$CODEX_WORKHORSE'"
 
   [ "$status" -eq 0 ]
-  assert_mock_called legion-delegate "--sandbox read-only --model gpt-5.5"
+  assert_mock_called legion-delegate "--sandbox read-only --model $CODEX_WORKHORSE"
   if grep -Fq -- "--archetype" "$MOCK_CALL_LOG"; then
     echo "unexpected archetype when explicit model was passed" >&2
     cat "$MOCK_CALL_LOG" >&2

@@ -52,8 +52,8 @@ discriminate. What *does* separate the modes, now that the direct adapters emit 
 - **Legion's historical cost-routing thesis became measurable in this run.** `legion-delegate`
   reaches the same 38/38 as `direct-claude` for **$3.95 vs $14.83 — about 1/4 the
   cost** ($10.88 saved), because the then-current router sent the work to
-  `gpt-5.4` (via Codex) instead of a premium Claude model. Current runs use
-  `gpt-5.5` for Legion-managed Codex work; this is the headline number the
+  `gpt-5.4` (via Codex) instead of a premium Claude model. Current runs use the
+  configured Codex workhorse from `legion-router/config/models.toml`; this is the headline number the
   benchmark previously could not produce, because direct adapters reported `$0`.
 - **The Legion wrapper adds negligible cost over the raw executor it routes to.**
   `legion-delegate` ($3.95) vs `direct-codex` ($3.79) is a `+$0.17` delta — the

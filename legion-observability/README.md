@@ -46,7 +46,7 @@ legion-context-profile apply --dry-run     # preview profile/group context trim
 legion-session-learn --query moneyball --record
 
 # Emit a span from any runner/executor:
-legion-trace emit --executor codex --model gpt-5.5 --status ok \
+legion-trace emit --executor codex --model "$(legion-route --model-ref codex_workhorse)" --status ok \
   --cost 0.05 --duration-ms 1800 --tokens '{"input_tokens":12000}'
 ```
 

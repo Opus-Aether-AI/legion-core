@@ -37,7 +37,7 @@ legion-setup update             # pulls latest + re-syncs everything
 
 Legion is built for Claude Code but runs natively on Codex CLI too: both speak MCP,
 both read skills from `~/.agents/skills`, and `legion-claude` lets a Codex-primary
-session call Claude when it's worth it (with automatic GPT-5.5 fallback when your
+session call Claude when it's worth it (with automatic configured Codex fallback when your
 Claude limit is hit). One command wires the marketplace into Codex:
 
 ```bash

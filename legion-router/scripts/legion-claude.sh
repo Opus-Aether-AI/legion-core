@@ -8,6 +8,9 @@ _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 # shellcheck source=lib/cost.sh
 source "$_self_dir/lib/cost.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/model-config.sh
+source "$_self_dir/lib/model-config.sh"
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
@@ -132,7 +135,11 @@ run_fallback() {
 }
 
 cmd_run() {
-  local task="" model="opus" repo="$PWD" fallback_model="gpt-5.5"
+  local default_model default_fallback_model
+  default_model="$(legion_model_ref claude_default)" || die "could not resolve claude_default in models.toml"
+  default_fallback_model="$(legion_model_ref codex_workhorse)" || die "could not resolve codex_workhorse in models.toml"
+
+  local task="" model="${LEGION_CLAUDE_MODEL:-${CLAUDE_MODEL:-$default_model}}" repo="$PWD" fallback_model="${LEGION_CLAUDE_FALLBACK_MODEL:-${CODEX_MODEL:-$default_fallback_model}}"
   local allow_fallback=1 tmpdir="" out_file="" err_file="" artifacts="{}"
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
@@ -238,10 +245,12 @@ usage() {
 legion-claude — delegate a scoped task to Claude headless, with fallback to Codex.
 
 Usage:
-  legion-claude run --task "TASK" [--model opus] [--repo DIR]
-                    [--quiet] [--no-fallback] [--fallback-model gpt-5.5]
-  legion-claude run [--model opus] [--repo DIR] [--quiet]
-                    [--no-fallback] [--fallback-model gpt-5.5] < task.txt
+  legion-claude run --task "TASK" [--model MODEL] [--repo DIR]
+                    [--quiet] [--no-fallback] [--fallback-model MODEL]
+  legion-claude run [--model MODEL] [--repo DIR] [--quiet]
+                    [--no-fallback] [--fallback-model MODEL] < task.txt
+
+Defaults resolve from legion-router/config/models.toml.
 EOF
 }
 

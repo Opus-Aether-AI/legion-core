@@ -7,6 +7,7 @@ setup() {
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
     export LEGION_COSTS_FILE="$REPO_ROOT/legion-router/config/costs.json"
     export LEGION_CLAUDE="$REPO_ROOT/legion-router/bin/legion-claude"
+    CLAUDE_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref claude_default)"
 }
 
 make_test_repo() {
@@ -78,5 +79,5 @@ make_test_repo() {
     run bash -c "printf 'stdin task' | '$LEGION_CLAUDE' run --repo '$repo' --quiet"
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
-    assert_mock_called claude "output-format json --model opus"
+    assert_mock_called claude "output-format json --model $CLAUDE_DEFAULT"
 }

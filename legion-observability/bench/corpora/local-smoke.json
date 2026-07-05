@@ -77,15 +77,15 @@
       "task": "Resolve final-review routing.",
       "command": [
         "bash",
-        "-lc",
-        "printf '{\"model\":\"gpt-5.5\",\"sandbox\":\"read-only\"}\\n' > route.json"
+        "-c",
+        "{repo}/legion-router/bin/legion-route final-review > route.json"
       ],
       "validators": [
         {
           "type": "json_file_field_equals",
           "path": "{workspace}/route.json",
-          "field": "model",
-          "equals": "gpt-5.5"
+          "field": "model_ref",
+          "equals": "codex_review"
         },
         {
           "type": "json_file_field_equals",

@@ -35,6 +35,8 @@ DELEGATED_EXECUTORS = {"codex", "cursor", "claude"}
 DEFAULT_SPANS_DIR = legion_state.resolve_state(os.getcwd())["telemetry_dir"]
 DEFAULT_ROUTING_FILE = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "config", "routing.toml"))
+DEFAULT_MODELS_FILE = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "config", "models.toml"))
 
 
 def _strip_inline_comment(line):
@@ -99,6 +101,40 @@ def _load_toml_fallback(path):
             key, raw_value = line.split("=", 1)
             current[key.strip()] = _parse_toml_value(raw_value)
     return table
+
+
+def load_models(path=None):
+    models_path = os.path.expanduser(str(path or DEFAULT_MODELS_FILE))
+    if not os.path.exists(models_path):
+        return {}
+    if tomllib is None:
+        table = _load_toml_fallback(models_path)
+    else:
+        with open(models_path, "rb") as fh:
+            table = tomllib.load(fh)
+    models = table.get("models", table)
+    if not isinstance(models, dict):
+        raise ValueError("models.toml must contain a [models] table")
+    return {
+        key: value
+        for key, value in models.items()
+        if isinstance(key, str) and isinstance(value, str) and value
+    }
+
+
+def _resolve_model(cfg, models):
+    model = cfg.get("model")
+    if isinstance(model, str) and model:
+        return model
+    model_ref = cfg.get("model_ref")
+    if model_ref is None:
+        return None
+    if not isinstance(model_ref, str) or not model_ref:
+        raise ValueError("model_ref must be a non-empty string")
+    try:
+        return models[model_ref]
+    except KeyError as exc:
+        raise ValueError(f"unknown model_ref '{model_ref}'") from exc
 
 
 def percentile(values, p):
@@ -225,7 +261,7 @@ def stats_by_arch_model(spans):
     return out
 
 
-def load_routing(path):
+def load_routing(path, models_path=None):
     if not path:
         return {}
     path = os.path.expanduser(str(path))
@@ -236,12 +272,13 @@ def load_routing(path):
     else:
         with open(path, "rb") as fh:
             table = tomllib.load(fh)
+    models = load_models(models_path)
     archetypes = table.get("archetypes") or {}
     out = {}
     for name, cfg in archetypes.items():
         if not isinstance(cfg, dict):
             continue
-        out[name] = {"model": cfg.get("model"), "executor": cfg.get("executor")}
+        out[name] = {"model": _resolve_model(cfg, models), "executor": cfg.get("executor")}
     return out
 
 

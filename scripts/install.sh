@@ -43,7 +43,16 @@ if [ -z "$MARKETPLACE_CLONE_URL" ]; then
         *) MARKETPLACE_CLONE_URL="https://github.com/${MARKETPLACE_REPO}.git" ;;
     esac
 fi
-MARKETPLACE_RAW_BASE="${LEGION_RAW_BASE:-https://raw.githubusercontent.com/${MARKETPLACE_REPO}/main}"
+# Install from the latest published release by default (reproducible — a bad
+# `main` commit can't break installs). Override with LEGION_REF=main (bleeding
+# edge) or LEGION_REF=<tag> to pin. Falls back to main if no release / offline.
+MARKETPLACE_REF="${LEGION_REF:-}"
+if [ -z "$MARKETPLACE_REF" ]; then
+    MARKETPLACE_REF="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null \
+        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+fi
+[ -z "$MARKETPLACE_REF" ] && MARKETPLACE_REF="main"
+MARKETPLACE_RAW_BASE="${LEGION_RAW_BASE:-https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${MARKETPLACE_REF}}"
 
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="$AGENTS_HOME/sources/legion-core"
@@ -198,13 +207,14 @@ setup_source_clone() {
             yellow "  (Commit, stash, or 'git restore .' in $SOURCE_CLONE to allow auto-refresh next run.)"
             git -C "$SOURCE_CLONE" fetch origin --quiet
         else
-            dim "Source clone exists — pulling latest"
-            git -C "$SOURCE_CLONE" fetch origin --quiet
-            git -C "$SOURCE_CLONE" reset --hard origin/main --quiet
+            dim "Source clone exists — syncing to $MARKETPLACE_REF"
+            git -C "$SOURCE_CLONE" fetch origin --tags --force --quiet
+            git -C "$SOURCE_CLONE" checkout --quiet --force "$MARKETPLACE_REF"
+            git -C "$SOURCE_CLONE" reset --hard --quiet "origin/$MARKETPLACE_REF" 2>/dev/null || true
         fi
     else
-        bold "Cloning $MARKETPLACE_CLONE_URL → $SOURCE_CLONE"
-        git clone --depth 1 --quiet "$MARKETPLACE_CLONE_URL" "$SOURCE_CLONE"
+        bold "Cloning $MARKETPLACE_CLONE_URL @ $MARKETPLACE_REF → $SOURCE_CLONE"
+        git clone --depth 1 --branch "$MARKETPLACE_REF" --quiet "$MARKETPLACE_CLONE_URL" "$SOURCE_CLONE"
     fi
 }
 

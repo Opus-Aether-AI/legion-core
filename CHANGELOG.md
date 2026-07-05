@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.12.0...v0.13.0) (2026-07-05)
+
+
+### Added
+
+* generate domain plugin TDD slices from briefs ([#75](https://github.com/Opus-Aether-AI/legion-core/issues/75)) ([605aad3](https://github.com/Opus-Aether-AI/legion-core/commit/605aad3d2ba0e0227e9eca1179082fea896cf377))
+
 ## [0.12.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.11.1...v0.12.0) (2026-07-05)
 
 

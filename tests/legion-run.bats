@@ -45,16 +45,22 @@ TOML
 json_from_output() {
   python3 -c '
 import json
+import re
 import sys
 
 text = sys.stdin.read()
-start = text.find("{")
-end = text.rfind("}")
-if start < 0 or end < start:
-    raise SystemExit("no JSON object in output")
-payload = text[start : end + 1]
-json.loads(payload)
-print(payload)
+decoder = json.JSONDecoder()
+for match in re.finditer(r"{", text):
+    try:
+        obj, _ = decoder.raw_decode(text[match.start():])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict) and (
+        obj.get("schema") == "legion.run.contract.v1" or "run_dir" in obj
+    ):
+        print(json.dumps(obj, indent=2, sort_keys=True))
+        raise SystemExit(0)
+raise SystemExit("no Legion JSON object in output")
 '
 }
 

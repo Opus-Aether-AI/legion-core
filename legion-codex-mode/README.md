@@ -3,7 +3,7 @@
 The **Codex-primary** routing brain for Legion — the mirror image of [`legion-router`](../legion-router)
 (which is the Claude-primary brain).
 
-When you run Legion under **Codex CLI**, you (GPT-5.5) are the primary and do most of the
+When you run Legion under **Codex CLI**, the configured Codex workhorse is primary and does most of the
 work. This skill tells you the few cases where it's worth handing a task **up to Claude**
 via [`legion-claude`](../legion-router/scripts/legion-claude.sh):
 
@@ -13,7 +13,7 @@ via [`legion-claude`](../legion-router/scripts/legion-claude.sh):
 - tie-breaks between plausible designs,
 - when you're stuck after a couple honest attempts.
 
-`legion-claude` is **metered** and **auto-falls-back to GPT-5.5** when the Claude usage
+`legion-claude` is **metered** and **auto-falls-back to the configured Codex model** when the Claude usage
 limit is hit, so reaching for Claude never blocks you.
 
 It also maps what already works natively on Codex after `legion-setup codex` — registered

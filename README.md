@@ -103,7 +103,8 @@ gh secret set LEGION_INTAKE_AUTH_JSON < ~/.codex/auth.json
 # explore -> second-opinion-review, implement -> implement-feature.
 gh variable set LEGION_INTAKE_EXPLORE_ARCHETYPE --body final-review
 gh variable set LEGION_INTAKE_IMPLEMENT_ARCHETYPE --body hard-bug
-gh variable set LEGION_INTAKE_MODEL --body gpt-5.5
+# Optional explicit model override; usually leave unset so models.toml controls it.
+# gh variable set LEGION_INTAKE_MODEL --body "$(legion-route --model-ref codex_workhorse)"
 ```
 
 After that, adding `agent:explore` to an issue posts a short assessment comment, and adding `agent:implement` runs the same intake prompt in write mode and opens a PR whose body includes `Closes #N`. You can also run the thin `agent-intake-trigger` workflow manually with an issue number, mode, worker (`delegate`, `cursor`, or `custom`), optional `archetype` / `model` override, and optional `worker_bin` for a repo-local compatible runner. `legion-intake` also accepts `--worker` / `--worker-bin` / `LEGION_INTAKE_WORKER_BIN` for any runner that follows the Legion JSON result contract.

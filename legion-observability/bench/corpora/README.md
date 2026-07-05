@@ -93,11 +93,11 @@ legion-bench corpus \
 
 Optional live modes currently packaged:
 
-- `direct-codex` (defaults to `CODEX_MODEL=gpt-5.5`)
+- `direct-codex` (defaults to `models.toml` `codex_workhorse`; set `CODEX_MODEL` to override)
 - `legion-delegate`
-- `direct-claude` (defaults to `CLAUDE_MODEL=opus`)
-- `cursor-agent` (defaults to `CURSOR_MODEL=composer-2.5`)
-- `legion-cursor` (defaults to `CURSOR_MODEL=composer-2.5`)
+- `direct-claude` (defaults to `models.toml` `claude_default`; set `CLAUDE_MODEL` to override)
+- `cursor-agent` (defaults to `models.toml` `cursor_default`; set `CURSOR_MODEL` to override)
+- `legion-cursor` (defaults to `models.toml` `cursor_default`; set `LEGION_CURSOR_MODEL` or `CURSOR_MODEL` to override)
 
 Live modes require the corresponding CLI and auth on the machine running the
 bench. The adapters restore the real user `HOME` for the live CLI process so
@@ -124,7 +124,7 @@ Use 30+ held-out cases for a reliable comparison:
       "command": [
         "bash",
         "-lc",
-        "codex exec --json -m ${CODEX_MODEL:-gpt-5.5} -s workspace-write -C {workspace} --skip-git-repo-check - < {task_file}"
+        "codex exec --json -m ${CODEX_MODEL:-$({repo}/legion-router/bin/legion-route --model-ref codex_workhorse)} -s workspace-write -C {workspace} --skip-git-repo-check - < {task_file}"
       ],
       "timeout": 900
     },
@@ -159,7 +159,7 @@ Use 30+ held-out cases for a reliable comparison:
         "direct-codex": [
           "bash",
           "-lc",
-          "codex exec --json -m ${CODEX_MODEL:-gpt-5.5} -s workspace-write -C {workspace} --skip-git-repo-check - < {task_file} && python3 test_app.py"
+          "codex exec --json -m ${CODEX_MODEL:-$({repo}/legion-router/bin/legion-route --model-ref codex_workhorse)} -s workspace-write -C {workspace} --skip-git-repo-check - < {task_file} && python3 test_app.py"
         ],
         "legion-delegate": [
           "bash",

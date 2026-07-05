@@ -39,7 +39,7 @@
       "archetype": "frontend-review",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_review",
         "sandbox": "read-only",
         "reasoning_effort": "xhigh"
       },
@@ -49,11 +49,11 @@
       "id": "route.docs-edit",
       "type": "route",
       "dimension": "routing",
-      "summary": "Docs edits should use the GPT-5.5 workhorse route.",
+      "summary": "Docs edits should use the configured Codex workhorse route.",
       "archetype": "docs-edit",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },

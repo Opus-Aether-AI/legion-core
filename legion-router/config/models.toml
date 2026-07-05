@@ -1,0 +1,14 @@
+# Legion default model catalog.
+#
+# This is the single source for active default model IDs. Runtime route policy,
+# runners, and benchmark adapters refer to these keys instead of embedding
+# provider model names in their own files.
+
+[models]
+claude_orchestrator = "opus"
+claude_default = "opus"
+claude_sonnet = "claude-sonnet-5"
+codex_workhorse = "gpt-5.5"
+codex_review = "gpt-5.5"
+cursor_default = "composer-2.5"
+auto_tier_haiku = "claude-haiku-4-5"

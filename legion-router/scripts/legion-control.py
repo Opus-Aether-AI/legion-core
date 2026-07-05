@@ -152,7 +152,7 @@ def _start_matches(recorded, observed):
     observed = str(observed or "").strip()
     # Fail CLOSED for a destructive action: if we can't establish process identity
     # (either side missing/unparseable), refuse to signal. A blank started_at must
-    # NOT let a reused PID/PGID pass (GPT-5.5 verify: fail-open -> wrong-process kill).
+    # NOT let a reused PID/PGID pass (review finding: fail-open -> wrong-process kill).
     if not recorded or not observed:
         return False
     if recorded == observed:
@@ -601,7 +601,7 @@ def _check_peer_connection(conn, audit_dir):
     if uid is None:
         # Fail CLOSED: if we cannot establish the peer's UID (unsupported platform or
         # a broken lookup), refuse — never serve a control verb to an unauthenticated
-        # peer (GPT-5.5 re-verify: peer auth must not fail open).
+        # peer (review finding: peer auth must not fail open).
         resp = _response(False, "connection", None, "peer_unavailable")
         return False, _audit_or_response(audit_dir, resp, decision="reject")
     if uid != _now_uid():

@@ -7,14 +7,21 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck disable=SC1091
 source "$script_dir/_span.sh"
+# shellcheck disable=SC1091
+# shellcheck source=../../../legion-router/scripts/lib/model-config.sh
+source "$script_dir/../../../legion-router/scripts/lib/model-config.sh"
 
 if [[ -n "${LEGION_BENCH_REAL_HOME:-}" ]]; then
   export HOME="$LEGION_BENCH_REAL_HOME"
 fi
 
-# Pin the strongest Codex benchmark baseline so the priced/labeled model matches
-# the one the CLI actually runs. Set CODEX_MODEL for controlled comparisons.
-model="${CODEX_MODEL:-gpt-5.5}"
+# Use the same configured Codex default as Legion routes. Set CODEX_MODEL for
+# controlled comparisons.
+default_model="$(legion_model_ref codex_workhorse)" || {
+  printf 'direct-codex: could not resolve codex_workhorse in models.toml\n' >&2
+  exit 2
+}
+model="${CODEX_MODEL:-$default_model}"
 args=(exec --json -m "$model" -s workspace-write -C "$workspace" --skip-git-repo-check -)
 
 tmp="$(mktemp "${TMPDIR:-/tmp}/direct-codex.XXXXXX")"

@@ -10,6 +10,8 @@ setup() {
   export LEGION_DELEGATE="$ROOT/legion-router/bin/legion-delegate"
   export LEGION_TELEMETRY="$ROOT/legion-observability/bin/legion-trace"
   export LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans"
+  CODEX_WORKHORSE="$("$ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
+  CODEX_REVIEW="$("$ROOT/legion-router/bin/legion-route" --model-ref codex_review)"
   REPO="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$REPO"
   git -C "$REPO" init -q
@@ -57,15 +59,15 @@ SH
   run "$FANOUT" --slices "$BATS_TEST_TMPDIR/s.jsonl" --repo "$REPO" --max-concurrency 2
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.slices == 3 and .ok == 2 and .inline == 1 and .failed == 0'
-  echo "$output" | jq -e '.by_model["gpt-5.5"] == 2'
+  echo "$output" | jq -e --arg model "$CODEX_WORKHORSE" '.by_model[$model] == 2'
   echo "$output" | jq -e '[.results[] | select(.status=="inline") | .archetype] == ["deep-reasoning"]'
 }
 
-@test "fanout: routes review slices to gpt-5.5" {
+@test "fanout: routes review slices to configured Codex reviewer" {
   printf '%s\n' '{"archetype":"final-review","task":"review the diff"}' > "$BATS_TEST_TMPDIR/r.jsonl"
   run "$FANOUT" --slices "$BATS_TEST_TMPDIR/r.jsonl" --repo "$REPO"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.by_model["gpt-5.5"] == 1'
+  echo "$output" | jq -e --arg model "$CODEX_REVIEW" '.by_model[$model] == 1'
 }
 
 @test "fanout: stdin slices work" {

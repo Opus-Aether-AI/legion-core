@@ -3,7 +3,7 @@
 #
 # Claude Code and Codex CLI both speak MCP, both read skills from ~/.agents/skills,
 # and Legion adds `legion-claude` so a Codex-primary session can call Claude when
-# it's worth it (with GPT-5.5 fallback). This script wires the Claude-side
+# it's worth it (with configured Codex fallback). This script wires the Claude-side
 # marketplace into Codex:
 #
 #   legion-codex-setup            # all: register MCPs + skills + bridge agents/commands + verify

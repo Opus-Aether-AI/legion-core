@@ -441,7 +441,7 @@ def test_handle_diff_apply_rejects_on_toctou_sha_change(ctl, tmp_path, monkeypat
 
 
 def test_guard_kill_fails_closed_when_start_time_missing(ctl, tmp_path, monkeypatch):
-    # GPT-5.5 verify: a blank started_at must NOT let a reused PID/PGID pass.
+    # A blank started_at must NOT let a reused PID/PGID pass.
     rec = _record(tmp_path)
     rec["process"]["started_at"] = ""
     monkeypatch.setattr(
@@ -454,7 +454,7 @@ def test_guard_kill_fails_closed_when_start_time_missing(ctl, tmp_path, monkeypa
 
 
 def test_guard_apply_rejects_parent_directory_symlink(ctl, tmp_path, monkeypatch):
-    # GPT-5.5 verify: a symlink on a PARENT component (not just the leaf) must reject.
+    # A symlink on a PARENT component (not just the leaf) must reject.
     repo = tmp_path / "repo"
     repo.mkdir()
     outside = tmp_path / "outside"

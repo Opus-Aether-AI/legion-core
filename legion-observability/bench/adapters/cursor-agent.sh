@@ -7,12 +7,19 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck disable=SC1091
 source "$script_dir/_span.sh"
+# shellcheck disable=SC1091
+# shellcheck source=../../../legion-router/scripts/lib/model-config.sh
+source "$script_dir/../../../legion-router/scripts/lib/model-config.sh"
 
 if [[ -n "${LEGION_BENCH_REAL_HOME:-}" ]]; then
   export HOME="$LEGION_BENCH_REAL_HOME"
 fi
 
-model="${CURSOR_MODEL:-${LEGION_CURSOR_MODEL:-composer-2.5}}"
+default_model="$(legion_model_ref cursor_default)" || {
+  printf 'cursor-agent: could not resolve cursor_default in models.toml\n' >&2
+  exit 2
+}
+model="${CURSOR_MODEL:-${LEGION_CURSOR_MODEL:-$default_model}}"
 args=(--print --output-format json --force --trust --workspace "$workspace" --model "$model")
 task="$(<"$task_file")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/cursor-agent.XXXXXX")"

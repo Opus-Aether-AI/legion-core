@@ -167,12 +167,13 @@ legion-bench corpus \
 The `fieldops-triage-e2e` corpus is a public regression fixture for Legion Core.
 It is not the app-building API; it proves the engine still works end to end.
 
-## What's inside (5 plugins)
+## What's inside (6 plugins)
 
 | Plugin | Gives you |
 |---|---|
 | **legion-router** | `legion-delegate` (scoped task → any model in an isolated git worktree → verified, metered diff), `legion-cursor`, `legion-claude`, routing + cost tables (`routing.toml`, `costs.json`), `legion-route`/`legion-optimize`. |
 | **legion-observability** | `legion.span.v1` telemetry + `legion-state`/`legion-trace`/`legion-report`/`legion-otel-export`, and the loops: `legion-doctor`, `legion-self-learn`, `legion-heal`, `legion-eval`, `legion-share`. |
+| **legion-code-intel** | Optional repo-native TypeScript/Pyright diagnostics, changed-file gates, `legion.code-intel.v1` artifacts, and telemetry spans for benchmarkable code-intelligence checks. |
 | **legion-orchestrate** | Multi-model goal orchestration (fan-out → cross-verify → synthesize). |
 | **legion-setup** | Cross-harness install + Codex/Cursor bridges. |
 | **legion-codex-mode** | Codex-side wiring. |
@@ -201,8 +202,11 @@ npm install -g @opus-aether-ai/legion-core
 # Project-pinned install.
 npm install @opus-aether-ai/legion-core            # or: bun add / pnpm add
 npx legion-doctor --repo .
+npx legion-delegate run --archetype fix-bug --task "…" --repo .
+npx legion-code-intel diagnostics --repo . --changed-only --json
 
-# One-off command without modifying package.json.
+# One-off commands without modifying package.json.
+npx --package @opus-aether-ai/legion-core legion-doctor --repo .
 npx --package @opus-aether-ai/legion-core legion-state --repo .
 ```
 

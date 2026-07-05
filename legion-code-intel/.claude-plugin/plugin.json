@@ -1,0 +1,20 @@
+{
+  "name": "legion-code-intel",
+  "description": "Optional Legion code-intelligence diagnostics. Runs repo-native TypeScript and Pyright checks, filters changed-file diagnostics, emits legion.code-intel.v1 artifacts, and can append legion.span.v1 telemetry for benchmarkable pre-PR gates without making LSP servers a core dependency.",
+  "version": "0.1.0",
+  "author": {
+    "name": "legion-core"
+  },
+  "homepage": "https://github.com/Opus-Aether-AI/legion-core/tree/main/legion-code-intel",
+  "license": "UNLICENSED",
+  "keywords": [
+    "code-intelligence",
+    "diagnostics",
+    "lsp",
+    "typescript",
+    "pyright",
+    "quality-gate",
+    "benchmarks",
+    "legion"
+  ]
+}

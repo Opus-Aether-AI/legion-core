@@ -7,6 +7,7 @@
 - `legion-router`: delegate scoped work to Codex/Cursor/Claude-side executors using routing policy, isolated worktrees, and telemetry.
 - `legion-orchestrate`: decompose a larger coding goal, fan out parallel slices, cross-verify, then synthesize.
 - `legion-observability`: inspect cost/latency/success, validate `legion.span.v1`, run `legion-doctor`, and drive self-learn/heal loops.
+- `legion-code-intel`: run optional repo-native TypeScript/Pyright diagnostics, changed-file gates, and code-intelligence telemetry.
 - `legion-setup`: install/update the marketplace and wire Codex/Cursor bridges plus shared skills/bins.
 - `legion-codex-mode`: Codex-primary routing guidance for when to stay inline vs call Claude.
 

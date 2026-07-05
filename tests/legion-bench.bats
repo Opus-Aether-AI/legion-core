@@ -17,7 +17,7 @@ setup() {
   [ -f "$run_path" ]
   [ -f "$summary_path" ]
   [ -f "$span_path" ]
-  jq -e '.summary.metrics.cases == 10 and .summary.metrics.required_fail == 0 and .summary.metrics.task_cases == 3' <<<"$output" >/dev/null
+  jq -e '.summary.metrics.cases == 11 and .summary.metrics.required_fail == 0 and .summary.metrics.task_cases == 4' <<<"$output" >/dev/null
   jq -e 'select(.executor == "legion-bench" and .model == "offline")' "$span_path" >/dev/null
   run "$ROOT/legion-observability/bin/legion-trace" validate "$span_path"
   [ "$status" -eq 0 ]
@@ -63,8 +63,8 @@ setup() {
   jq -e '
     .ok == true
     and .metrics.iterations == 2
-    and .metrics.cases_per_iteration == 51
-    and .metrics.total_case_runs == 102
+    and .metrics.cases_per_iteration == 52
+    and .metrics.total_case_runs == 104
     and .metrics.flake_count == 0
     and .dimensions["cli-contract"].pass_rate == 1
     and .dimensions.routing.pass_rate == 1

@@ -3,7 +3,7 @@
   "owner": {
     "name": "legion-core"
   },
-  "version": "0.10.2",
+  "version": "0.11.0",
   "metadata": {
     "description": "Legion Core — a model-agnostic orchestration engine for AI coding agents. It ships scoped delegation, multi-model fan-out, telemetry/cost reporting, doctor/self-learning/heal loops, and cross-harness setup for Claude Code, Codex, and Cursor. One orchestrator, a legion of models.",
     "repository": "https://github.com/Opus-Aether-AI/legion-core"
@@ -120,6 +120,28 @@
         "legion-claude",
         "routing",
         "reverse-delegate",
+        "legion"
+      ],
+      "author": {
+        "name": "legion-core"
+      },
+      "repository": "https://github.com/Opus-Aether-AI/legion-core",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "legion-code-intel",
+      "source": "./legion-code-intel",
+      "description": "Optional Legion code-intelligence diagnostics. Runs repo-native TypeScript and Pyright checks, filters changed-file diagnostics, emits legion.code-intel.v1 artifacts, and can append legion.span.v1 telemetry for benchmarkable pre-PR gates without making LSP servers a core dependency.",
+      "version": "0.1.0",
+      "category": "code-quality",
+      "keywords": [
+        "code-intelligence",
+        "diagnostics",
+        "lsp",
+        "typescript",
+        "pyright",
+        "quality-gate",
+        "benchmarks",
         "legion"
       ],
       "author": {

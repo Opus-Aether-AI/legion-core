@@ -126,6 +126,36 @@ setup() {
   grep -Fq "Legion Corpus Benchmark: heldout-oss-36" "$report"
 }
 
+@test "legion-bench: fieldops e2e corpus proves evaluator without live model calls" {
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" corpus --corpus fieldops-triage-e2e --repo "$ROOT" --json --strict
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .summary.ok == true
+    and .summary.corpus == "fieldops-triage-e2e"
+    and .summary.modes["scripted-baseline"].metrics.pass == 0
+    and .summary.modes["scripted-oracle"].metrics.pass == 1
+    and .summary.comparisons["scripted-baseline..scripted-oracle"].delta_pct_points == 100
+    and .summary.comparisons["scripted-baseline..scripted-oracle"].reliable == false
+  ' <<<"$output" >/dev/null
+}
+
+@test "legion-bench: fieldops e2e dry-run exposes live fanout-review mode" {
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" corpus --corpus fieldops-triage-e2e --repo "$ROOT" --mode legion-fanout-review --baseline legion-fanout-review --dry-run --json
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .corpus == "fieldops-triage-e2e"
+    and .has_live_modes_selected == true
+    and .live_modes_selected == ["legion-fanout-review"]
+    and .total_case_runs == 1
+  ' <<<"$output" >/dev/null
+}
+
 @test "legion-bench: record-failures writes legion-bench outcomes" {
   suite="$BATS_TEST_TMPDIR/fail-suite.json"
   cat > "$suite" <<'JSON'

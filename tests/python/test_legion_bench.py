@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
 
 
 HERE = os.path.dirname(__file__)
@@ -150,6 +151,51 @@ def test_load_corpus_reads_packaged_local_smoke():
     assert len(corpus["cases"]) == 3
 
 
+def test_run_command_resolves_default_state_from_target_repo(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "app"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    for key in ("LEGION_STATE_ROOT", "LEGION_BENCH_DIR", "LEGION_TELEMETRY_DIR"):
+        monkeypatch.delenv(key, raising=False)
+
+    suite = {"schema": bench.SUITE_SCHEMA, "suite": "core", "cases": []}
+
+    def fake_run_suite_artifacts(repo, suite, bench_dir, run_id):
+        assert repo == str(tmp_path / "app")
+        assert bench_dir.startswith(str(home / ".legion" / "projects"))
+        return {
+            "results": [],
+            "summary": {"ok": True, "metrics": {"cases": 0, "pass": 0, "fail": 0}},
+            "artifacts": {"run_path": os.path.join(bench_dir, "run.json"), "summary_path": os.path.join(bench_dir, "summary.json")},
+        }
+
+    def fake_emit_bench_span(summary, artifacts, telemetry_dir):
+        assert telemetry_dir.startswith(str(home / ".legion" / "projects"))
+        return os.path.join(telemetry_dir, "span.jsonl")
+
+    monkeypatch.setattr(bench, "load_suite", lambda repo, suite_name: suite)
+    monkeypatch.setattr(bench, "_run_suite_artifacts", fake_run_suite_artifacts)
+    monkeypatch.setattr(bench, "emit_bench_span", fake_emit_bench_span)
+
+    args = argparse.Namespace(
+        repo=str(repo),
+        suite="core",
+        bench_dir="",
+        logs="",
+        telemetry_dir="",
+        run_id="state-test",
+        record_failures=False,
+        strict=True,
+        json=True,
+        quiet=True,
+    )
+
+    assert bench.run_command(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["ok"] is True
+
+
 def test_load_corpus_reads_packaged_heldout_default_modes():
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
     corpus = bench.load_corpus(repo, "heldout-oss-36")
@@ -158,6 +204,114 @@ def test_load_corpus_reads_packaged_heldout_default_modes():
     assert corpus["corpus"] == "heldout-oss-36"
     assert len(corpus["cases"]) == 36
     assert [mode["id"] for mode in modes] == ["scripted-baseline", "scripted-oracle"]
+
+
+def test_load_corpus_reads_packaged_fieldops_e2e_live_mode():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    corpus = bench.load_corpus(repo, "fieldops-triage-e2e")
+    default_modes = bench._selected_corpus_modes(corpus, [])
+    live_modes = bench._selected_corpus_modes(corpus, ["legion-fanout-review"])
+    case = corpus["cases"][0]
+    live_validators = case["validators_by_mode"]["legion-fanout-review"]
+    checked_fields = {
+        validator.get("field")
+        for validator in live_validators
+        if validator.get("type") == "json_file_field_equals"
+    }
+
+    assert corpus["corpus"] == "fieldops-triage-e2e"
+    assert len(corpus["cases"]) == 1
+    assert "one coding task can route, fan out, apply code, review" in corpus["description"]
+    assert "still cold" in case["task"]
+    assert "No heat in the classroom but the room is still cold." in case["files"]["eval_fieldops_triage.py"]
+    assert [mode["id"] for mode in default_modes] == ["scripted-baseline", "scripted-oracle"]
+    assert live_modes[0]["live"] is True
+    assert live_modes[0]["command"] == ["{repo}/legion-observability/bench/adapters/legion-fanout-review.sh"]
+    assert live_modes[0]["timeout"] >= 2400
+    assert {
+        "slices",
+        "applied",
+        "status",
+        "total.success_rate",
+        "groups.codex-review.success_rate",
+        "target_name",
+        "applied_memory",
+        "scorecard.ok",
+        "summary.ok",
+    }.issubset(checked_fields)
+
+
+def test_fieldops_pipeline_report_renderer_embeds_full_artifact_trail(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task_file = tmp_path / "task.txt"
+    task_file.write_text("Implement the FieldOps scorer.", encoding="utf-8")
+    diff = workspace / "diff.patch"
+    diff.write_text("diff --git a/fieldops_triage.py b/fieldops_triage.py\n", encoding="utf-8")
+    payloads = {
+        "doctor.json": [
+            {"check": "codex", "severity": "pass", "message": "codex present"},
+            {"check": "router", "severity": "warn", "message": "optional router"},
+        ],
+        "route-implement.json": {"resolved": True, "executor": "codex", "model": "gpt-5.5", "sandbox": "workspace-write"},
+        "route-review.json": {"resolved": True, "executor": "codex-review", "model": "gpt-5.5"},
+        "fanout.json": {
+            "slices": 1,
+            "ok": 1,
+            "failed": 0,
+            "applied": 1,
+            "apply_conflicts": 0,
+            "results": [{"diff_path": str(diff)}],
+        },
+        "review.json": {"status": "ok", "model": "gpt-5.5", "verdict": "Looks good."},
+        "score.json": {"passed": True, "score": 7, "total": 7, "failures": {}},
+        "legion-report.json": {
+            "groups": {"codex": {"count": 1, "ok": 1, "success_rate": 1.0, "cost_usd": 0.1, "p50_ms": 10, "p95_ms": 10}},
+            "total": {"count": 1, "ok": 1, "success_rate": 1.0, "cost_usd": 0.1},
+        },
+        "legion-share.json": {"status": "met", "failed_runs": 0, "codex_runs": 1},
+        "self-learn-record.json": {"target_type": "benchmark", "target_name": "fieldops-triage-e2e"},
+        "self-learn-hints.json": {"schema": "legion.self-learning.hints.v1"},
+        "self-learn-run.json": {
+            "applied_memory": True,
+            "by_entity": {"benchmark:fieldops-triage-e2e": 1},
+            "summary": {"outcomes": 1},
+            "scorecard": {"ok": True},
+        },
+        "heal-plan.json": {"total": 0, "fixable": 0, "findings": []},
+        "bench-core.json": {"summary": {"ok": True, "metrics": {"pass": 10, "fail": 0}}},
+    }
+    for name, payload in payloads.items():
+        (workspace / name).write_text(json.dumps(payload), encoding="utf-8")
+    (workspace / "fieldops_triage.py").write_text("def triage_ticket(message, inventory=None):\n    return {}\n", encoding="utf-8")
+    (workspace / "legion-observability.html").write_text("<!doctype html>Legion Observability Report\n", encoding="utf-8")
+
+    script = os.path.abspath(os.path.join(
+        HERE,
+        "..",
+        "..",
+        "legion-observability",
+        "bench",
+        "adapters",
+        "render-fieldops-pipeline-report.py",
+    ))
+    output = workspace / "legion-report.html"
+    proc = subprocess.run(
+        ["python3", script, "--workspace", str(workspace), "--task-file", str(task_file), "--output", str(output)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    html = output.read_text(encoding="utf-8")
+    assert "Legion Full Pipeline Report" in html
+    assert "Pipeline Timeline" in html
+    assert "Raw JSON Evidence" in html
+    assert "Applied diff from Legion delegate" in html
+    assert "legion-observability.html" in html
+    assert "7/7" in html
 
 
 def test_packaged_live_corpora_default_to_no_spend_controls():
@@ -431,6 +585,92 @@ def test_corpus_case_exports_real_home_for_live_adapters(tmp_path):
     assert env["home"] == env["bench_home"]
     assert env["real_home"] == os.environ["HOME"]
     assert env["home"] != env["real_home"]
+
+
+def test_corpus_case_exports_coherent_legion_state(tmp_path):
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    result = bench.run_corpus_case_mode(
+        {
+            "id": "state-export",
+            "type": "task",
+            "task": "Record benchmark state environment.",
+            "command": [
+                "python3",
+                "-c",
+                (
+                    "import json, os, pathlib; "
+                    "pathlib.Path('state-env.json').write_text(json.dumps({"
+                    "'logs': os.environ.get('LEGION_BENCH_LOGS'), "
+                    "'state_root': os.environ.get('LEGION_STATE_ROOT'), "
+                    "'telemetry_dir': os.environ.get('LEGION_TELEMETRY_DIR'), "
+                    "'registry_dir': os.environ.get('LEGION_REGISTRY_DIR'), "
+                    "'repos_file': os.environ.get('LEGION_REPOS_FILE'), "
+                    "'bench_dir': os.environ.get('LEGION_BENCH_DIR'), "
+                    "'reports_dir': os.environ.get('LEGION_REPORTS_DIR')"
+                    "}), encoding='utf-8')"
+                ),
+            ],
+            "validators": [
+                {
+                    "type": "json_file_field_equals",
+                    "path": "{workspace}/state-env.json",
+                    "field": "state_root",
+                    "equals": "{logs}",
+                }
+            ],
+        },
+        {"id": "state-mode"},
+        repo=repo,
+        run_dir=str(tmp_path / "run"),
+        repeat_index=1,
+    )
+
+    env_path = (
+        tmp_path
+        / "run"
+        / "corpus-workspaces"
+        / "state-mode"
+        / "attempt-01"
+        / "state-export"
+        / "state-env.json"
+    )
+    env = json.loads(env_path.read_text(encoding="utf-8"))
+    assert result["status"] == "pass"
+    assert env["state_root"] == env["logs"]
+    assert env["telemetry_dir"] == os.path.join(env["state_root"], "spans")
+    assert env["registry_dir"] == os.path.join(env["state_root"], "registry")
+    assert env["repos_file"] == os.path.join(env["state_root"], "repos.jsonl")
+    assert env["bench_dir"] == os.path.join(env["state_root"], "bench")
+    assert env["reports_dir"] == os.path.join(env["state_root"], "reports")
+
+
+def test_corpus_summary_fails_selected_mode_when_clean_mode_not_selected(tmp_path):
+    summary = bench.summarize_corpus_run(
+        {
+            "corpus": "fieldops-triage-e2e",
+            "required_clean_modes": ["scripted-oracle"],
+        },
+        [
+            {
+                "id": "fieldops",
+                "mode": "legion-fanout-review",
+                "status": "fail",
+                "ok": False,
+                "required": True,
+                "dimension": "agentic-e2e",
+                "metrics": {"duration_ms": 10},
+                "reason": "exit=1 expected=0",
+            }
+        ],
+        run_id="live-only",
+        repo=str(tmp_path),
+        baseline_mode="legion-fanout-review",
+        reliability_min_cases=30,
+    )
+
+    assert summary["required_clean_modes"] == []
+    assert summary["modes"]["legion-fanout-review"]["metrics"]["required_fail"] == 1
+    assert summary["ok"] is False
 
 
 def test_corpus_case_marks_provider_usage_limit_as_blocked(tmp_path):

@@ -12,9 +12,9 @@
 # legion-heal/<check>-<hash> branch; skips a finding that already has an open PR),
 # and --dry-run shows the plan with zero side effects.
 #
-#   legion-heal plan [--repo DIR] [--severity fail|warn]
+#   legion-heal plan [--repo DIR] [--severity fail|warn] [--json]
 #   legion-heal run  [--repo DIR] [--max N] [--budget-tokens T] [--base REF]
-#                    [--dry-run] [--no-pr] [--no-verify] [--archetype A]
+#                    [--dry-run] [--no-pr] [--no-verify] [--archetype A] [--json]
 #
 # Tool bins are env-injectable for tests: LEGION_DOCTOR_BIN, LEGION_DELEGATE_BIN,
 # GH_BIN, BATS_BIN.
@@ -32,7 +32,7 @@ BATS="${BATS_BIN:-bats}"
 # (auth / running service), not code defects — never auto-fixed.
 HEALABLE="descriptions mcp bridges frontmatter marketplace-schema plugins costs telemetry-schema"
 
-note() { printf '%s\n' "$*" >&2; }
+note() { [[ "${JSON:-0}" == "1" ]] && return 0; printf '%s\n' "$*" >&2; }
 die()  { printf 'legion-heal: %s\n' "$*" >&2; exit 2; }
 
 _sha8() {
@@ -204,18 +204,34 @@ heal_one() {
 
 cmd_plan() {
   local repo="$1" sev="$2" n=0 fixable=0
+  local findings_tmp=""
+  [[ "$JSON" == "1" ]] && findings_tmp="$(mktemp)"
   note "legion-heal plan — $repo (severity: $sev)"
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
     n=$((n + 1))
-    local check msg; check="$(jq -r '.check' <<<"$f")"; msg="$(jq -r '.message' <<<"$f")"
+    local check msg healable branch
+    check="$(jq -r '.check' <<<"$f")"; msg="$(jq -r '.message' <<<"$f")"
+    healable=false; branch=""
     if _is_healable "$check"; then
+      healable=true; branch="legion-heal/${check}-$(_sha8 "$check:$msg")"
       fixable=$((fixable + 1)); note "  [fixable] $check: $msg"
     else
       note "  [manual ] $check: $msg"
     fi
+    if [[ "$JSON" == "1" ]]; then
+      jq -c --argjson healable "$healable" --arg branch "$branch" \
+        '. + {healable:$healable, branch:$branch}' <<<"$f" >> "$findings_tmp"
+    fi
   done < <(_findings "$repo" "$sev")
   note "── $n finding(s), $fixable auto-fixable ──"
+  if [[ "$JSON" == "1" ]]; then
+    jq -s --arg repo "$repo" --arg severity "$sev" \
+      --argjson total "$n" --argjson fixable "$fixable" \
+      '{repo:$repo,severity:$severity,total:$total,fixable:$fixable,findings:.}' \
+      "$findings_tmp"
+    rm -f "$findings_tmp"
+  fi
   [[ "$n" -eq 0 ]]
 }
 
@@ -223,9 +239,11 @@ cmd_run() {
   local repo="$1" base="$2" max="$3" sev="$4"
   command -v "$GH" >/dev/null 2>&1 || [[ "$DRY_RUN" == "1" || "$NO_PR" == "1" ]] || die "gh not found (needed to open PRs)"
   local count=0 healed=0 rejected=0 failed=0
+  local results_tmp=""
+  [[ "$JSON" == "1" ]] && results_tmp="$(mktemp)"
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
-    local check; check="$(jq -r '.check' <<<"$f")"
+    local check msg; check="$(jq -r '.check' <<<"$f")"; msg="$(jq -r '.message' <<<"$f")"
     _is_healable "$check" || continue
     if [[ "$count" -ge "$max" ]]; then note "  (--max $max reached; stopping)"; break; fi
     count=$((count + 1))
@@ -235,8 +253,20 @@ cmd_run() {
       rejected) rejected=$((rejected + 1)) ;;
       failed)   failed=$((failed + 1)) ;;
     esac
+    if [[ "$JSON" == "1" ]]; then
+      jq -cn --arg check "$check" --arg message "$msg" --arg result "$r" \
+        '{check:$check,message:$message,result:$result}' >> "$results_tmp"
+    fi
   done < <(_findings "$repo" "$sev")
   note "── legion-heal: $healed healed, $rejected rejected, $failed failed (of $count attempted) ──"
+  if [[ "$JSON" == "1" ]]; then
+    jq -s --arg repo "$repo" --arg severity "$sev" \
+      --argjson attempted "$count" --argjson healed "$healed" \
+      --argjson rejected "$rejected" --argjson failed "$failed" \
+      '{repo:$repo,severity:$severity,attempted:$attempted,healed:$healed,rejected:$rejected,failed:$failed,results:.}' \
+      "$results_tmp"
+    rm -f "$results_tmp"
+  fi
   [[ "$failed" -eq 0 ]]
 }
 
@@ -245,7 +275,7 @@ SUB="${1:-}"; shift || true
 # Default archetype: legion-delegate requires --archetype or --model. "fix-bug"
 # resolves model/sandbox/effort from routing.toml for a scoped defect fix.
 REPO=""; BASE="main"; MAX=3; SEV="fail"; BUDGET=""; ARCHETYPE="fix-bug"
-DRY_RUN=0; NO_PR=0; NO_VERIFY=0
+DRY_RUN=0; NO_PR=0; NO_VERIFY=0; JSON=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -257,6 +287,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1; shift ;;
     --no-pr) NO_PR=1; shift ;;
     --no-verify) NO_VERIFY=1; shift ;;
+    --json) JSON=1; shift ;;
     -h|--help) sed -n '2,20p' "$_self/$(basename "${BASH_SOURCE[0]}")" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown arg '$1'" ;;
   esac

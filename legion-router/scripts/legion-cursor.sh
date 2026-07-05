@@ -12,9 +12,13 @@ source "$_self_dir/lib/cost.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/model-config.sh
 source "$_self_dir/lib/model-config.sh"
+_state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
+if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1091
+  source "$_state_lib"
+fi
 
 CURSOR_AGENT_BIN="${CURSOR_AGENT_BIN:-}"
-LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
 
 die() { printf 'legion-cursor: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -153,6 +157,12 @@ cmd_run() {
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   agent_bin="$(resolve_cursor_bin)" || die "Cursor Agent CLI not found. Install Cursor CLI or set CURSOR_AGENT_BIN."
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"
+  if declare -F legion_resolve_state >/dev/null 2>&1; then
+    legion_resolve_state "$repo"
+  else
+    export LEGION_STATE_ROOT="${LEGION_STATE_ROOT:-$HOME/.legion/projects/default}"
+    export LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$LEGION_STATE_ROOT/spans}"
+  fi
 
   RUN_ID="$(_run_id)"
   local wt="$repo/.legion/worktrees/$RUN_ID"

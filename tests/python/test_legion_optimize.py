@@ -7,6 +7,7 @@ _PATH = os.path.join(HERE, "..", "..", "legion-router", "scripts", "legion-optim
 _spec = importlib.util.spec_from_file_location("legion_optimize", _PATH)
 opt = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(opt)
+ROUTING = os.path.join(HERE, "..", "..", "legion-router", "config", "routing.toml")
 
 
 def test_stats_by_arch_model_success_cost_and_percentiles():
@@ -155,6 +156,14 @@ def test_load_spans_filters_wrong_schema_self_executor_and_missing_archetype(tmp
     spans.write_text("\n".join(json.dumps(row) for row in rows) + "\nNOT JSON\n")
     got = opt.load_spans(tmp_path)
     assert got == [rows[0], rows[1]]
+
+
+def test_load_routing_without_tomllib_uses_stdlib_fallback(monkeypatch):
+    monkeypatch.setattr(opt, "tomllib", None)
+    routing = opt.load_routing(ROUTING)
+    assert routing["implement-feature"] == {"executor": "codex", "model": "gpt-5.5"}
+    assert routing["final-review"] == {"executor": "codex", "model": "gpt-5.5"}
+    assert routing["deep-reasoning"] == {"executor": "self", "model": "opus"}
 
 
 def test_optimize_skips_self_routing_and_includes_stats_only_arch():

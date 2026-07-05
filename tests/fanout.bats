@@ -76,9 +76,35 @@ SH
   echo "$output" | jq -e '.ok == 1 and .total_cost_usd >= 0'
 }
 
+@test "fanout: --task file expands demo slices and --json is accepted" {
+  printf 'Build a dispatch board with AI scheduling suggestions.\n' > "$BATS_TEST_TMPDIR/task.md"
+  run "$FANOUT" --task "$BATS_TEST_TMPDIR/task.md" --repo "$REPO" --json --max-concurrency 1
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.slices == 3 and .ok == 3 and .failed == 0'
+  echo "$output" | jq -e '[.results[].model] == ["gpt-5.5","gpt-5.5","gpt-5.5"]'
+}
+
 @test "fanout: missing --slices exits 2" {
   run "$FANOUT" --repo "$REPO"
   [ "$status" -eq 2 ]
+}
+
+@test "fanout: route failures are returned as structured route-stage errors" {
+  local bad_route="$BATS_TEST_TMPDIR/bad-legion-route"
+  cat > "$bad_route" <<'SH'
+#!/usr/bin/env bash
+echo "tomllib unavailable" >&2
+exit 2
+SH
+  chmod +x "$bad_route"
+
+  printf '%s\n' '{"archetype":"implement-feature","task":"build A"}' > "$BATS_TEST_TMPDIR/bad-route.jsonl"
+  LEGION_ROUTE="$bad_route" run "$FANOUT" --slices "$BATS_TEST_TMPDIR/bad-route.jsonl" --repo "$REPO"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.failed == 1 and .ok == 0'
+  echo "$output" | jq -e '.results[0].status == "error" and .results[0].stage == "route"'
+  echo "$output" | jq -e '.results[0].archetype == "implement-feature"'
+  echo "$output" | jq -e '.results[0].error | contains("tomllib unavailable")'
 }
 
 @test "fanout: all delegate spans + the root span share ONE trace_id (OTel tree)" {

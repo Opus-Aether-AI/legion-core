@@ -12,6 +12,7 @@ This tool is report-only. It never writes `routing.toml`.
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import json
 import os
@@ -22,13 +23,118 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - py<3.11
     tomllib = None
 
+sys.path.insert(
+    0,
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "legion-observability", "scripts")),
+)
+import legion_state  # noqa: E402
 
 SPAN_SCHEMA = "legion.span.v1"
 SUCCESS_STATUSES = {"ok", "over_budget"}
 DELEGATED_EXECUTORS = {"codex", "cursor", "claude"}
-DEFAULT_SPANS_DIR = os.path.expanduser("~/.claude/logs/legion/spans")
+DEFAULT_SPANS_DIR = legion_state.resolve_state(os.getcwd())["telemetry_dir"]
 DEFAULT_ROUTING_FILE = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "config", "routing.toml"))
+DEFAULT_MODELS_FILE = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "config", "models.toml"))
+
+
+def _strip_inline_comment(line):
+    in_string = False
+    escaped = False
+    out = []
+    for ch in line:
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\" and in_string:
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+        if ch == "#" and not in_string:
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+
+def _parse_toml_value(raw):
+    raw = raw.strip()
+    if raw == "[]":
+        return []
+    if raw.startswith('"') and raw.endswith('"'):
+        try:
+            return ast.literal_eval(raw)
+        except (SyntaxError, ValueError):
+            return raw[1:-1]
+    if raw in {"true", "false"}:
+        return raw == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        return raw
+
+
+def _load_toml_fallback(path):
+    table = {}
+    current = table
+    with open(path, encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = _strip_inline_comment(raw_line)
+            if not line:
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                current = table
+                for part in line[1:-1].split("."):
+                    current = current.setdefault(part, {})
+                continue
+            if "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            current[key.strip()] = _parse_toml_value(raw_value)
+    return table
+
+
+def load_models(path=None):
+    models_path = os.path.expanduser(str(path or DEFAULT_MODELS_FILE))
+    if not os.path.exists(models_path):
+        return {}
+    if tomllib is None:
+        table = _load_toml_fallback(models_path)
+    else:
+        with open(models_path, "rb") as fh:
+            table = tomllib.load(fh)
+    models = table.get("models", table)
+    if not isinstance(models, dict):
+        raise ValueError("models.toml must contain a [models] table")
+    return {
+        key: value
+        for key, value in models.items()
+        if isinstance(key, str) and isinstance(value, str) and value
+    }
+
+
+def _resolve_model(cfg, models):
+    model = cfg.get("model")
+    if isinstance(model, str) and model:
+        return model
+    model_ref = cfg.get("model_ref")
+    if model_ref is None:
+        return None
+    if not isinstance(model_ref, str) or not model_ref:
+        raise ValueError("model_ref must be a non-empty string")
+    try:
+        return models[model_ref]
+    except KeyError as exc:
+        raise ValueError(f"unknown model_ref '{model_ref}'") from exc
 
 
 def percentile(values, p):
@@ -155,22 +261,24 @@ def stats_by_arch_model(spans):
     return out
 
 
-def load_routing(path):
-    if tomllib is None:
-        raise RuntimeError("tomllib unavailable (need Python 3.11+)")
+def load_routing(path, models_path=None):
     if not path:
         return {}
     path = os.path.expanduser(str(path))
     if not os.path.exists(path):
         return {}
-    with open(path, "rb") as fh:
-        table = tomllib.load(fh)
+    if tomllib is None:
+        table = _load_toml_fallback(path)
+    else:
+        with open(path, "rb") as fh:
+            table = tomllib.load(fh)
+    models = load_models(models_path)
     archetypes = table.get("archetypes") or {}
     out = {}
     for name, cfg in archetypes.items():
         if not isinstance(cfg, dict):
             continue
-        out[name] = {"model": cfg.get("model"), "executor": cfg.get("executor")}
+        out[name] = {"model": _resolve_model(cfg, models), "executor": cfg.get("executor")}
     return out
 
 

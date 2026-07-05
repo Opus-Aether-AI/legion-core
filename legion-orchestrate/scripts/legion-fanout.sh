@@ -5,11 +5,14 @@
 # dynamic orchestrator (the ultracode "decompose -> fan out -> verify -> synthesize" loop).
 #
 #   legion-fanout --slices <file|-> [--repo DIR] [--max-concurrency N] [--keep] [--apply]
+#   legion-fanout --task <file|-> [--repo DIR] [--json]
 #
 # Each slice is one JSON line: {"archetype":"implement-feature","task":"..."}
 #   (optionally {"model":"$(legion-route --model-ref codex_workhorse)", ...}).
 # Archetypes that route to executor=self are NOT delegated — they come back with
 # status "inline" for Claude to handle.
+# --task is a demo/runbook compatibility mode: it expands one task document into
+# implement/test/review slices before running the same fan-out engine.
 #
 # Portable to bash 3.2 (batch-wait concurrency, no `wait -n`).
 set -euo pipefail
@@ -46,7 +49,11 @@ resolve_optional_legion_cmd() {
 LEGION_DELEGATE="${LEGION_DELEGATE:-$(resolve_legion_cmd legion-delegate "$_self/../../legion-router/bin/legion-delegate")}"
 LEGION_ROUTE="${LEGION_ROUTE:-$(resolve_legion_cmd legion-route "$_self/../../legion-router/bin/legion-route")}"
 LEGION_TELEMETRY="${LEGION_TELEMETRY:-$(resolve_optional_legion_cmd legion-trace "$_self/../../legion-observability/bin/legion-trace")}"
-LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$HOME/.claude/logs/legion/registry}"
+_state_lib="$_self/../../legion-observability/scripts/lib/state.sh"
+if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1091
+  source "$_state_lib"
+fi
 
 # Preallocate a queued run-state record so a fan-out's pending slices show as
 # "queued / up-next" in the Console before they launch. The delegate adopts the id
@@ -66,21 +73,44 @@ write_queued_record() {
 }
 MAXC="${LEGION_MAX_CONCURRENCY:-4}"
 
-slices_src="" ; repo="$PWD" ; apply=""
+slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; json=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slices) slices_src="$2"; shift 2 ;;
+    --task) task_src="$2"; shift 2 ;;
     --repo) repo="$2"; shift 2 ;;
     --max-concurrency) MAXC="$2"; shift 2 ;;
     --keep) shift ;; # accepted for compatibility; delegated slices are always kept
     --apply) apply="1"; shift ;;
-    -h|--help) echo "usage: legion-fanout --slices <file|-> [--repo DIR] [--max-concurrency N] [--keep] [--apply]"; exit 0 ;;
+    --json) json=1; shift ;; # output is already JSON; accepted for roadmap compatibility
+    -h|--help) echo "usage: legion-fanout (--slices <file|-> | --task <file|->) [--repo DIR] [--max-concurrency N] [--keep] [--apply] [--json]"; exit 0 ;;
     *) echo "legion-fanout: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
-[[ -n "$slices_src" ]] || { echo "legion-fanout: --slices required" >&2; exit 2; }
+if [[ -z "$slices_src" && -n "$task_src" ]]; then
+  task_slices="$(mktemp)"
+  if [[ "$task_src" == "-" ]]; then
+    task_body="$(cat)"
+  else
+    task_body="$(cat "$task_src")"
+  fi
+  jq -cn --arg t "$task_body" \
+    '{archetype:"implement-feature",task:$t}' > "$task_slices"
+  jq -cn --arg t "$task_body" \
+    '{archetype:"write-tests",task:("Write focused tests for: " + $t)}' >> "$task_slices"
+  jq -cn --arg t "$task_body" \
+    '{archetype:"final-review",task:("Review implementation, tests, and risk for: " + $t)}' >> "$task_slices"
+  slices_src="$task_slices"
+fi
+[[ -n "$slices_src" ]] || { echo "legion-fanout: --slices or --task required" >&2; exit 2; }
 [[ "$slices_src" == "-" ]] && slices_src=/dev/stdin
 repo="$(cd "$repo" && pwd)"
+if declare -F legion_resolve_state >/dev/null 2>&1; then
+  legion_resolve_state "$repo"
+else
+  export LEGION_STATE_ROOT="${LEGION_STATE_ROOT:-$HOME/.legion/projects/default}"
+  export LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$LEGION_STATE_ROOT/registry}"
+fi
 
 work="$repo/.legion/fanout/$(date -u +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$work"
@@ -126,7 +156,26 @@ launch_slice() {
   # self archetypes are NOT delegated — return for Opus to do inline (drop the queued
   # record: it's not a delegated agent).
   if [[ -n "$arch" ]]; then
-    ex="$("$LEGION_ROUTE" "$arch" 2>/dev/null | jq -r '.executor // ""' 2>/dev/null || echo "")"
+    local route_out route_err route_rc
+    route_out="$work/slice-$i.route.json"
+    route_err="$work/slice-$i.route.err"
+    set +e
+    "$LEGION_ROUTE" "$arch" > "$route_out" 2> "$route_err"
+    route_rc=$?
+    set -e
+    if [[ "$route_rc" -ne 0 ]]; then
+      [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
+      jq -cn --arg a "$arch" --arg t "$task" --arg e "$(tr '\n' ' ' < "$route_err")" \
+        '{status:"error",stage:"route",archetype:$a,task:$t,error:$e}' > "$work/slice-$i.out"
+      return
+    fi
+    if ! jq -e 'type == "object"' "$route_out" >/dev/null 2>&1; then
+      [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
+      jq -cn --arg a "$arch" --arg t "$task" --arg e "$(cat "$route_out" 2>/dev/null)" \
+        '{status:"error",stage:"route",archetype:$a,task:$t,error:("invalid route JSON: " + $e)}' > "$work/slice-$i.out"
+      return
+    fi
+    ex="$(jq -r '.executor // ""' "$route_out" 2>/dev/null || echo "")"
     if [[ "$ex" == "self" ]]; then
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
       jq -cn --arg a "$arch" --arg t "$task" '{status:"inline",archetype:$a,task:$t,note:"Opus should do this inline"}' > "$work/slice-$i.out"

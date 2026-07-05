@@ -40,14 +40,27 @@ source "$_self_dir/lib/model-config.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/sandbox-setup.sh
 source "$_self_dir/lib/sandbox-setup.sh"
+_state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
+if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1091
+  source "$_state_lib"
+fi
 
 CODEX_BIN="${CODEX_BIN:-codex}"
 LEGION_ROUTER_URL="${LEGION_ROUTER_URL:-http://127.0.0.1:8082}"
-LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
+
+resolve_runtime_state() {
+  if declare -F legion_resolve_state >/dev/null 2>&1; then
+    legion_resolve_state "$1"
+  else
+    export LEGION_STATE_ROOT="${LEGION_STATE_ROOT:-$HOME/.legion/projects/default}"
+    export LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$LEGION_STATE_ROOT/spans}"
+    export LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$LEGION_STATE_ROOT/registry}"
+    export LEGION_REPOS_FILE="${LEGION_REPOS_FILE:-$LEGION_STATE_ROOT/repos.jsonl}"
+  fi
+}
 # Global, NON-purgeable run registry (Console/handoff foundation): a run stays
 # discoverable here even after `cleanup --purge` wipes the repo's .legion/.
-LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$HOME/.claude/logs/legion/registry}"
-LEGION_REPOS_FILE="${LEGION_REPOS_FILE:-$HOME/.claude/logs/legion/repos.jsonl}"
 
 die() { printf 'legion-delegate: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -364,7 +377,7 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"        # read from stdin if not given
   [[ -n "$task" ]] || die "run: empty task"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"
+  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
 
   RUN_ID="${preset_run_id:-$(_run_id)}"
   local wt="$repo/.legion/worktrees/$RUN_ID"
@@ -522,7 +535,7 @@ cmd_review() {
   [[ -n "$model" ]] || model="$(legion_model_ref codex_review)" || die "could not resolve codex_review in models.toml"
   [[ -n "$effort" ]] || effort="xhigh"   # codex review always at xhigh unless overridden
   [[ -n "$base" ]] || die "review: --base BRANCH required"
-  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"
+  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
   RUN_ID="$(_run_id)"
   local art="$repo/.legion/runs/$RUN_ID"; mkdir -p "$art"
   local verdict_file="$art/verdict.json"
@@ -578,7 +591,7 @@ cmd_resume() {
     esac
   done
   [[ -n "$run" ]] || die "resume: --run RUN_ID required"
-  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"
+  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "resume: empty follow-up task"
   scan_task_text "$task"
@@ -642,7 +655,7 @@ cmd_apply() {
     esac
   done
   [[ -n "$run" ]] || die "apply: --run RUN_ID required"
-  repo="$(cd "$repo" && pwd)"
+  repo="$(cd "$repo" && pwd)"; resolve_runtime_state "$repo"
   local diff="$repo/.legion/runs/$run/diff.patch"
   [[ -s "$diff" ]] || die "apply: no diff at $diff"
   git -C "$repo" apply --check "$diff" || die "apply: diff does not apply cleanly"
@@ -665,7 +678,7 @@ cmd_cleanup() {
       *) die "cleanup: unknown arg '$1'" ;;
     esac
   done
-  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"
+  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
   local wtroot="$repo/.legion/worktrees" runsroot="$repo/.legion/runs"
   local n_wt=0 n_br=0 n_runs=0 wt b extra=""
   if [[ "$all" -eq 1 ]]; then

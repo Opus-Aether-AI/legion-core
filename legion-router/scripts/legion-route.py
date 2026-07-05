@@ -7,10 +7,12 @@ hardcode model choices. Pure stdlib; full routing uses tomllib on Python 3.11+,
 while simple model-ref lookups use a tiny parser for shell entrypoint portability.
 
   legion-route bulk-mechanical-edit
+  legion-route implement-feature --task "Build the demo flow"
   legion-route --list
   legion-route --model-ref codex_workhorse
 """
 import argparse
+import ast
 import copy
 import json
 import os
@@ -30,9 +32,73 @@ class RouteConfigError(ValueError):
     pass
 
 
+def _strip_inline_comment(line):
+    in_string = False
+    escaped = False
+    out = []
+    for ch in line:
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\" and in_string:
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+        if ch == "#" and not in_string:
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+
+def _parse_value(raw):
+    raw = raw.strip()
+    if raw == "[]":
+        return []
+    if raw.startswith('"') and raw.endswith('"'):
+        try:
+            return ast.literal_eval(raw)
+        except (SyntaxError, ValueError):
+            return raw[1:-1]
+    if raw in {"true", "false"}:
+        return raw == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        return raw
+
+
+def _load_routing_toml_fallback(path):
+    table = {}
+    current = table
+    with open(path, encoding="utf-8") as f:
+        for raw_line in f:
+            line = _strip_inline_comment(raw_line)
+            if not line:
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                current = table
+                for part in line[1:-1].split("."):
+                    current = current.setdefault(part, {})
+                continue
+            if "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            current[key.strip()] = _parse_value(raw_value)
+    return table
+
+
 def load_table(path):
     if tomllib is None:
-        raise RuntimeError("tomllib unavailable (need Python 3.11+)")
+        return _load_routing_toml_fallback(path)
     with open(path, "rb") as f:
         return tomllib.load(f)
 
@@ -126,6 +192,7 @@ def main(argv=None):
     ap.add_argument("--file", default=os.environ.get("LEGION_ROUTING_FILE", _DEFAULT_FILE))
     ap.add_argument("--models-file", default=os.environ.get("LEGION_MODELS_FILE", _DEFAULT_MODELS_FILE))
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--task", default="", help="optional task text hint; accepted for demo/runbook compatibility")
     ap.add_argument("--list-models", action="store_true")
     ap.add_argument("--model-ref")
     a = ap.parse_args(argv)

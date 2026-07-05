@@ -18,8 +18,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import legion_state  # noqa: E402
+
 OUTCOME_SCHEMA = "legion.outcome.v1"
-DEFAULT_LOG_ROOT = "~/.claude/logs/legion"
+DEFAULT_LOG_ROOT = ""
 MAX_BLOCK_CHARS = 20000
 
 STOPWORDS = {
@@ -526,6 +529,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--record", action="store_true", help="append candidates as self-learning outcomes")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if not args.logs:
+        args.logs = legion_state.resolve_state(os.getcwd())["state_root"]
 
     payload = scan(
         Path(args.home).expanduser(),

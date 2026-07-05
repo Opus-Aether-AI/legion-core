@@ -29,6 +29,14 @@ make_test_repo() {
     echo "$d"
 }
 
+registry_dir_for_repo() {
+    python3 "$REPO_ROOT/legion-observability/scripts/legion_state.py" --repo "$1" --field registry_dir
+}
+
+repos_file_for_repo() {
+    python3 "$REPO_ROOT/legion-observability/scripts/legion_state.py" --repo "$1" --field repos_file
+}
+
 # ── codex-json parser ────────────────────────────────────────────────
 @test "codex-json: thread-id from fixture" {
     run "$LIB/codex-json.sh" thread-id "$FIXTURE"
@@ -147,7 +155,7 @@ make_test_repo() {
     local repo; repo="$(make_test_repo rs1)"
     out="$("$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet)"
     rid="$(echo "$out" | jq -r .run_id)"
-    local rec="$HOME/.claude/logs/legion/registry/$rid.json"
+    local rec="$(registry_dir_for_repo "$repo")/$rid.json"
     [ -f "$rec" ]
     [ "$(jq -r .schema "$rec")" = "legion.run-state.v1" ]
     [ "$(jq -r .run_id "$rec")" = "$rid" ]
@@ -159,7 +167,7 @@ make_test_repo() {
     local repo; repo="$(make_test_repo rs2)"
     out="$("$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet)"
     rid="$(echo "$out" | jq -r .run_id)"
-    local rec="$HOME/.claude/logs/legion/registry/$rid.json"
+    local rec="$(registry_dir_for_repo "$repo")/$rid.json"
     [ "$(jq -r '.process.pid > 0' "$rec")" = "true" ]
     [ "$(jq -r '.process.pgid >= 0' "$rec")" = "true" ]
     [ "$(jq -r '.process.started_at | length > 0' "$rec")" = "true" ]
@@ -169,7 +177,7 @@ make_test_repo() {
 @test "delegate run: registers the repo in repos.jsonl for cross-repo discovery" {
     local repo; repo="$(make_test_repo rs3)"
     "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet >/dev/null
-    local repos="$HOME/.claude/logs/legion/repos.jsonl"
+    local repos="$(repos_file_for_repo "$repo")"
     [ -f "$repos" ]
     grep -qF "$repo" "$repos"
 }
@@ -178,7 +186,7 @@ make_test_repo() {
     local repo; repo="$(make_test_repo rs4)"
     out="$(MOCK_CODEX_FAIL=1 "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet || true)"
     rid="$(echo "$out" | jq -r .run_id)"
-    local rec="$HOME/.claude/logs/legion/registry/$rid.json"
+    local rec="$(registry_dir_for_repo "$repo")/$rid.json"
     [ -f "$rec" ]
     [ "$(jq -r .lifecycle.phase "$rec")" = "failed" ]
 }
@@ -187,7 +195,7 @@ make_test_repo() {
     local repo; repo="$(make_test_repo rid1)"
     out="$("$DELEGATE" run --model gpt-5.4 --run-id "preset-xyz-123" --task "x" --repo "$repo" --quiet)"
     [ "$(echo "$out" | jq -r .run_id)" = "preset-xyz-123" ]
-    [ -f "$HOME/.claude/logs/legion/registry/preset-xyz-123.json" ]
+    [ -f "$(registry_dir_for_repo "$repo")/preset-xyz-123.json" ]
 }
 
 @test "delegate run: standalone span is its own trace root (trace_id=run_id, parent null)" {

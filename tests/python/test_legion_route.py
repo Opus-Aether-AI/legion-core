@@ -31,6 +31,17 @@ def test_resolve_known_archetype():
     assert r["resolved"] is True
 
 
+def test_load_table_without_tomllib_uses_stdlib_fallback(monkeypatch):
+    monkeypatch.setattr(lr, "tomllib", None)
+    table = lr.load_table(TABLE)
+    r = lr.resolve(table, "final-review")
+    assert table["targets"]["codex_share"] == 0.5
+    assert r["resolved"] is True
+    assert r["executor"] == "codex"
+    assert r["model"] == "gpt-5.5"
+    assert r["sandbox"] == "read-only"
+
+
 def test_resolve_unknown_falls_to_defaults():
     model_table = models()
     r = lr.resolve(table(), "does-not-exist", model_table)
@@ -77,6 +88,13 @@ def test_main_list(capsys):
     assert lr.main(["--list", "--file", TABLE, "--models-file", MODELS_TABLE]) == 0
     out = json.loads(capsys.readouterr().out)
     assert "bulk-mechanical-edit" in out and "deep-reasoning" in out
+
+
+def test_main_accepts_demo_task_hint(capsys):
+    assert lr.main(["implement-feature", "--task", "Build the demo workflow", "--file", TABLE, "--models-file", MODELS_TABLE]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["archetype"] == "implement-feature"
+    assert out["resolved"] is True
 
 
 def test_main_resolves_model_ref(capsys):

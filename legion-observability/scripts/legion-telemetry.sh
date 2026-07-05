@@ -8,11 +8,14 @@
 #       [--target-type command --target-name feature]
 #   legion-trace validate <file|->     # exit 1 if any line isn't a valid span
 #
-# Spans append to $LEGION_TELEMETRY_DIR/<date>.jsonl (default ~/.claude/logs/legion/spans).
+# Spans append to $LEGION_TELEMETRY_DIR/<date>.jsonl.
 
 set -euo pipefail
 
-LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
+_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$_self/lib/state.sh"
+legion_resolve_state "$PWD"
 
 _now()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today() { date -u +%Y-%m-%d; }

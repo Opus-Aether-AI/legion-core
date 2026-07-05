@@ -26,8 +26,11 @@ LATEST_SCHEMA = "legion.bench.latest.v1"
 COMPARE_SCHEMA = "legion.bench.compare.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
 SPAN_SCHEMA = "legion.span.v1"
-DEFAULT_LOG_ROOT = "~/.claude/logs/legion"
-DEFAULT_BENCH_ROOT = "~/.claude/logs/legion/bench"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import legion_state  # noqa: E402
+
+DEFAULT_LOG_ROOT = ""
+DEFAULT_BENCH_ROOT = ""
 POSITIVE_QUALITY_METRICS = [
     "score",
     "pass_rate",
@@ -702,6 +705,18 @@ def _span_totals(logs: str) -> dict[str, Any]:
     return totals
 
 
+def _case_state_env(logs: str) -> dict[str, str]:
+    root = os.path.abspath(os.path.expanduser(logs))
+    return {
+        "LEGION_STATE_ROOT": root,
+        "LEGION_TELEMETRY_DIR": os.path.join(root, "spans"),
+        "LEGION_REGISTRY_DIR": os.path.join(root, "registry"),
+        "LEGION_REPOS_FILE": os.path.join(root, "repos.jsonl"),
+        "LEGION_BENCH_DIR": os.path.join(root, "bench"),
+        "LEGION_REPORTS_DIR": os.path.join(root, "reports"),
+    }
+
+
 def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, Any]:
     case_id = _text(case.get("id")) or _stable_id([case])
     safe_case_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in case_id)
@@ -723,9 +738,9 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
     argv = _command_argv(case.get("command"), context)
 
     env = os.environ.copy()
+    env.update(_case_state_env(logs))
     env.update({
         "HOME": home,
-        "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
         "PYTHONUNBUFFERED": "1",
     })
     env.update({key: str(value) for key, value in _dict(_render(case.get("env"), context)).items()})
@@ -1453,7 +1468,8 @@ def _learning_probe_results(repo: str, home: str, logs: str, env: dict[str, str]
 
 def learning_lift_payload(args: argparse.Namespace) -> dict[str, Any]:
     repo = os.path.abspath(args.repo)
-    bench_dir = os.path.abspath(os.path.expanduser(args.bench_dir))
+    paths = legion_state.resolve_state(repo)
+    bench_dir = os.path.abspath(os.path.expanduser(args.bench_dir or paths["bench_dir"]))
     run_id = args.run_id or _run_id("learning-lift")
     workspace = os.path.join(bench_dir, "runs", run_id, "learning-workspace")
     home = os.path.join(workspace, "home")
@@ -1462,9 +1478,9 @@ def learning_lift_payload(args: argparse.Namespace) -> dict[str, Any]:
     os.makedirs(logs, exist_ok=True)
     session_path = _write_learning_session(home, args.correction)
     env = os.environ.copy()
+    env.update(_case_state_env(logs))
     env.update({
         "HOME": home,
-        "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
         "PYTHONUNBUFFERED": "1",
     })
     suite = {
@@ -1971,9 +1987,9 @@ def run_corpus_case_mode(
 
     env = os.environ.copy()
     real_home = env.get("HOME", "")
+    env.update(_case_state_env(logs))
     env.update({
         "HOME": home,
-        "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
         "LEGION_BENCH_REPO": os.path.abspath(repo),
         "LEGION_BENCH_WORKSPACE": workspace,
         "LEGION_BENCH_HOME": home,
@@ -2204,8 +2220,12 @@ def summarize_corpus_run(
             int(_dict(_dict(modes[mode_id]).get("metrics")).get("required_fail") or 0) == 0
             for mode_id in required_clean_modes
         )
-    elif configured_clean_modes:
-        ok = True
+    elif configured_clean_modes and any(mode_id != baseline_mode for mode_id in modes):
+        ok = any(
+            mode_id != baseline_mode
+            and int(_dict(summary.get("metrics")).get("required_fail") or 0) == 0
+            for mode_id, summary in modes.items()
+        )
     else:
         ok = all(_dict(summary.get("metrics")).get("required_fail") == 0 for summary in modes.values())
     comparisons: dict[str, dict[str, Any]] = {}
@@ -2483,6 +2503,9 @@ def render_corpus_markdown(summary: dict[str, Any], artifacts: dict[str, str]) -
 
 def corpus_command(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo)
+    paths = legion_state.resolve_state(repo)
+    args.logs = args.logs or paths["state_root"]
+    args.bench_dir = args.bench_dir or paths["bench_dir"]
     corpus = load_corpus(repo, args.corpus)
     modes = _selected_corpus_modes(corpus, args.mode or [])
     mode_ids = [_text(mode.get("id")) for mode in modes]
@@ -2605,6 +2628,9 @@ def corpus_command(args: argparse.Namespace) -> int:
 
 def run_command(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo)
+    paths = legion_state.resolve_state(repo)
+    args.logs = args.logs or paths["state_root"]
+    args.bench_dir = args.bench_dir or paths["bench_dir"]
     suite = load_suite(repo, args.suite)
     suite_name = _text(suite.get("suite")) or "suite"
     run_id = args.run_id or _run_id(suite_name)
@@ -2612,9 +2638,7 @@ def run_command(args: argparse.Namespace) -> int:
     results = _list(run_payload.get("results"))
     summary = _dict(run_payload.get("summary"))
     artifacts = _dict(run_payload.get("artifacts"))
-    telemetry_dir = args.telemetry_dir or os.environ.get("LEGION_TELEMETRY_DIR") or os.path.join(
-        os.path.expanduser(args.logs), "spans"
-    )
+    telemetry_dir = args.telemetry_dir or paths["telemetry_dir"]
     span_path = emit_bench_span(summary, artifacts, telemetry_dir)
     recorded = []
     if args.record_failures:
@@ -2652,6 +2676,8 @@ def run_command(args: argparse.Namespace) -> int:
 
 def stable_command(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo)
+    paths = legion_state.resolve_state(repo)
+    args.bench_dir = args.bench_dir or paths["bench_dir"]
     suite = load_suite(repo, args.suite)
     suite_name = _text(suite.get("suite")) or "suite"
     run_id = args.run_id or _run_id(f"{suite_name}-stable")

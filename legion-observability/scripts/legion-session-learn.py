@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 OUTCOME_SCHEMA = "legion.outcome.v1"
-DEFAULT_LOG_ROOT = "~/.claude/logs/legion"
+DEFAULT_LOG_ROOT = os.environ.get("LEGION_STATE_ROOT", "~/.claude/logs/legion")
 MAX_BLOCK_CHARS = 20000
 
 STOPWORDS = {

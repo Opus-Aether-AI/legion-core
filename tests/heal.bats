@@ -71,6 +71,20 @@ EOF
   [[ "$output" == *"[fixable] descriptions"* ]]
 }
 
+@test "heal plan --json emits machine-readable findings" {
+  run bash "$HEAL" plan --repo "$REPO" --json
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '
+    .repo == "'"$REPO"'" and
+    .severity == "fail" and
+    .total == 1 and
+    .fixable == 1 and
+    .findings[0].check == "descriptions" and
+    .findings[0].healable == true and
+    (.findings[0].branch | startswith("legion-heal/descriptions-"))
+  '
+}
+
 @test "heal run --dry-run: plans but creates no branch and never delegates" {
   _mk_delegate; _mk_gh
   LEGION_DELEGATE_BIN="$STUB/delegate" GH_BIN="$STUB/gh" \
@@ -181,4 +195,22 @@ EOF
   [ ! -f "$GH_LOG" ] || ! grep -q "pr create" "$GH_LOG"
   run git -C "$REPO" ls-remote --heads origin 'legion-heal/descriptions-*'
   [ -z "$output" ]
+}
+
+@test "heal run --no-pr --json emits machine-readable summary" {
+  _mk_delegate; _mk_gh
+  LEGION_DELEGATE_BIN="$STUB/delegate" GH_BIN="$STUB/gh" BATS_BIN=true \
+    run bash "$HEAL" run --repo "$REPO" --no-pr --json --max 5
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .repo == "'"$REPO"'" and
+    .severity == "fail" and
+    .attempted == 1 and
+    .healed == 1 and
+    .rejected == 0 and
+    .failed == 0 and
+    .results[0].check == "descriptions" and
+    (.results[0].result | startswith("healed:legion-heal/descriptions-"))
+  '
+  [ ! -f "$GH_LOG" ] || ! grep -q "pr create" "$GH_LOG"
 }

@@ -41,7 +41,9 @@ SPAN_SCHEMA = "legion.span.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
 MEMORY_SCHEMA = "legion.self-learning.memory.v1"
 SCORECARD_SCHEMA = "legion.self-learning.scorecard.v1"
-DEFAULT_LOG_ROOT = os.path.expanduser("~/.claude/logs/legion")
+DEFAULT_LOG_ROOT = os.path.expanduser(
+    os.environ.get("LEGION_STATE_ROOT", "~/.claude/logs/legion")
+)
 SAFE_SOURCE_TYPES = {"skill", "command", "agent", "plugin"}
 SUCCESS_STATUSES = {"ok"}
 DEFAULT_MIN_SCORE_DELTA = 0.001

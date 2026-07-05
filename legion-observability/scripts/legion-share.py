@@ -7,6 +7,7 @@ it to the target (routing.toml [targets].codex_share, or $LEGION_TARGET_CODEX_SH
 default 0.5).
 
   legion-share            # JSON report: share by runs + tokens, per-model, status
+  legion-share --window 7d --json
   legion-share next       # -> "codex" or "opus": who should do the NEXT task to converge
   legion-share gate       # -> one-line directive; exit 1 when under target (for hooks/CI)
 
@@ -23,7 +24,13 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
-_DEF_SPANS = os.environ.get("LEGION_TELEMETRY_DIR", os.path.expanduser("~/.claude/logs/legion/spans"))
+_DEFAULT_STATE_ROOT = os.environ.get("LEGION_STATE_ROOT")
+_DEF_SPANS = os.environ.get(
+    "LEGION_TELEMETRY_DIR",
+    os.path.join(os.path.expanduser(_DEFAULT_STATE_ROOT), "spans")
+    if _DEFAULT_STATE_ROOT
+    else os.path.expanduser("~/.claude/logs/legion/spans"),
+)
 _DEF_ROUTING = os.path.join(os.path.dirname(__file__), "..", "..", "legion-router", "config", "routing.toml")
 
 
@@ -146,6 +153,8 @@ def main(argv=None):
     ap.add_argument("--dir", default=_DEF_SPANS)
     ap.add_argument("--routing", default=_DEF_ROUTING)
     ap.add_argument("--target", type=float, default=None)
+    ap.add_argument("--window", default=None, help="accepted report window label, e.g. 7d")
+    ap.add_argument("--json", action="store_true", help="accepted for report compatibility; report output is JSON by default")
     a = ap.parse_args(argv)
     c = compute(load_spans(a.dir))
     tgt = target_share(a.target, a.routing)
@@ -157,6 +166,7 @@ def main(argv=None):
         print(line)
         return code
     c["target"] = tgt
+    c["window"] = a.window or "all"
     # The share is only meaningful if BOTH sides are logged. An all-codex corpus means
     # Opus isn't logging its self-work — report that honestly instead of a false "met".
     if c["codex_runs"] > 0 and c["opus_runs"] == 0:

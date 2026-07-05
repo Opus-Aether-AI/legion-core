@@ -56,3 +56,12 @@ setup() {
   run "$SHARE" next --target 0.8
   [ "$output" = "codex" ]
 }
+
+@test "share: --window and --json accept roadmap report flags" {
+  "$TRACE" emit --executor codex --model gpt-5.4 --status ok >/dev/null
+  "$TRACE" emit --executor opus  --model opus    --status ok >/dev/null
+
+  run "$SHARE" --window 7d --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.total_runs == 2 and .window == "7d"'
+}

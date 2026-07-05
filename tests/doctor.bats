@@ -118,6 +118,80 @@ _make_good() {
   [ "$status" -eq 2 ]
 }
 
+@test "doctor: route-smoke passes with a valid route CLI" {
+  fake="$BATS_TEST_TMPDIR/fake-route-ok"; mkdir -p "$fake"
+  cat > "$fake/legion-route" <<'EOF'
+#!/bin/sh
+case "$1" in
+  implement-feature) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}' ;;
+  final-review) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"read-only","resolved":true}' ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "$fake/legion-route"
+
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS"* ]]
+}
+
+@test "doctor: route-smoke fails with the underlying route error" {
+  fake="$BATS_TEST_TMPDIR/fake-route-bad"; mkdir -p "$fake"
+  cat > "$fake/legion-route" <<'EOF'
+#!/bin/sh
+echo "tomllib unavailable" >&2
+exit 2
+EOF
+  chmod +x "$fake/legion-route"
+
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL"* ]]
+  [[ "$output" == *"final-review"* ]]
+  [[ "$output" == *"tomllib unavailable"* ]]
+}
+
+@test "doctor: state-root fails when LEGION_STATE_ROOT is missing" {
+  LEGION_STATE_ROOT= LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only state-root
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"LEGION_STATE_ROOT"* ]]
+}
+
+@test "doctor: strict-demo runs demo-critical checks and passes when they are wired" {
+  fake="$BATS_TEST_TMPDIR/fake-strict"; mkdir -p "$fake"
+  cat > "$fake/legion-route" <<'EOF'
+#!/bin/sh
+case "$1" in
+  implement-feature) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}' ;;
+  final-review) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"read-only","resolved":true}' ;;
+  *) exit 2 ;;
+esac
+EOF
+  cat > "$fake/legion-delegate" <<'EOF'
+#!/bin/sh
+case "$1" in
+  -h|--help|help|"") exit 0 ;;
+  *) exit 2 ;;
+esac
+EOF
+  cat > "$fake/bats" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  chmod +x "$fake/legion-route" "$fake/legion-delegate" "$fake/bats"
+
+  PATH="$fake:$PATH" \
+    LEGION_ROOT="$GOOD" \
+    LEGION_STATE_ROOT="$BATS_TEST_TMPDIR/state" \
+    LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/state/spans" \
+    LEGION_REGISTRY_DIR="$BATS_TEST_TMPDIR/state/registry" \
+    LEGION_REPOS_FILE="$BATS_TEST_TMPDIR/state/repos.jsonl" \
+    LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/state/bench" \
+    run "$DOCTOR" --repo "$GOOD" --strict-demo --json
+  [ "$status" -eq 0 ]
+  echo "$output" | tail -n 1 | jq -e '[.[].check] | index("route-smoke") and index("delegate-smoke") and index("state-root") and index("test-tools")'
+}
+
 @test "doctor: router warns (exit 0) when nothing is listening" {
   ROUTER_PORT=59999 run "$DOCTOR" --repo "$GOOD" --only router
   [ "$status" -eq 0 ]
@@ -165,6 +239,15 @@ _make_good() {
   printf -- '---\nname: p\ndescription:\n---\nbody\n' > "$e/p/SKILL.md"
   LEGION_ROOT="$e" run "$DOCTOR" --only descriptions
   [ "$status" -eq 1 ]
+}
+
+@test "doctor: descriptions scans --repo even when nested under a .legion state root" {
+  bad="$BATS_TEST_TMPDIR/state/.legion/bench/run/bad"; mkdir -p "$bad/p"
+  printf -- '---\nname: p\ndescription: >\n  Multi-line description body.\n---\nbody\n' > "$bad/p/SKILL.md"
+
+  run "$DOCTOR" --repo "$bad" --only descriptions
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"block-scalar description"* ]]
 }
 
 # ── mcp ─────────────────────────────────────────────────────────────────

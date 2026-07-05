@@ -16,9 +16,9 @@
 #     the telemetry schema). Auto-resolved from this script's install location so
 #     the install-checks are correct no matter the working directory or --repo.
 #     Override with the LEGION_ROOT env var for tests / non-standard layouts.
-#   * REPO (--repo) — the repo scanned for SKILL.md frontmatter. Defaults to
+#   * REPO (--repo) — the repo scanned for SKILL.md checks. Defaults to
 #     LEGION_ROOT. Pointing it at a product repo (e.g. a webapp) is fine and only
-#     affects the frontmatter scan — it no longer false-fails the Legion-internal
+#     affects those repo-local scans — it no longer false-fails Legion-internal
 #     checks just because that repo lacks Legion's files.
 #
 # NOTE: intentionally NOT `set -e` — checks must all run and aggregate.
@@ -31,21 +31,23 @@ REPO=""
 ONLY=""
 RECORD_FAILURES=0
 JSON=0
+STRICT_DEMO=0
 ROUTER_PORT="${ROUTER_PORT:-8082}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
     --only) ONLY="$2"; shift 2 ;;
+    --strict-demo) STRICT_DEMO=1; shift ;;
     --record-failures) RECORD_FAILURES=1; shift ;;
     --json) JSON=1; shift ;;
-    -h|--help) echo "usage: legion-doctor [--repo DIR] [--record-failures] [--json] [--only marketplace-schema|plugins|frontmatter|descriptions|mcp|bridges|costs|telemetry-schema|codex|router]"; exit 0 ;;
+    -h|--help) echo "usage: legion-doctor [--repo DIR] [--strict-demo] [--record-failures] [--json] [--only marketplace-schema|plugins|frontmatter|descriptions|mcp|bridges|costs|telemetry-schema|codex|router|route-smoke|delegate-smoke|state-root|test-tools]"; exit 0 ;;
     *) echo "legion-doctor: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
 
 # Legion install root: env override → git toplevel of this script → path fallback.
 LEGION_ROOT="${LEGION_ROOT:-$(git -C "$_self" rev-parse --show-toplevel 2>/dev/null || echo "$_default_root")}"
-# Frontmatter scan target defaults to the install root.
+# Repo-local scan target defaults to the install root.
 [[ -n "$REPO" ]] || REPO="$LEGION_ROOT"
 
 # --json: emit one record per result as a JSON array on stdout (human PASS/FAIL/
@@ -75,6 +77,29 @@ _maybe_record() {
 pass() { _line "$(printf '\033[0;32mPASS\033[0m %s' "$*")"; _emit pass "$*" ""; }
 fail() { _line "$(printf '\033[0;31mFAIL\033[0m %s' "$1")"; FAILS=$((FAILS + 1)); _emit fail "$1" "${2:-}"; _maybe_record "$1" "${2:-}"; }
 warn() { _line "$(printf '\033[0;33mWARN\033[0m %s' "$*")"; WARNS=$((WARNS + 1)); _emit warn "$*" ""; }
+
+resolve_legion_cmd() {
+  local cmd="$1" fallback="$2"
+  if [[ -x "$fallback" ]]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  if command -v "$cmd" >/dev/null 2>&1; then
+    command -v "$cmd"
+    return 0
+  fi
+  return 1
+}
+
+find_skill_files() {
+  local root="$1"
+  [[ "$root" != "/" ]] && root="${root%/}"
+  find "$root" -name SKILL.md \
+    -not -path '*/node_modules/*' \
+    -not -path '*/.git/*' \
+    -not -path "$root/.legion/*" \
+    2>/dev/null
+}
 
 check_marketplace_schema() {
   local mf="$LEGION_ROOT/.claude-plugin/marketplace.json"
@@ -108,7 +133,7 @@ check_frontmatter() {
     fi
     grep -qE '^name:[[:space:]]*\S' "$f"        || { fail "SKILL.md missing name: ${f#"$REPO/"}"; bad=1; }
     grep -qE '^description:[[:space:]]*\S' "$f"  || { fail "SKILL.md missing description: ${f#"$REPO/"}"; bad=1; }
-  done < <(find "$REPO" -name SKILL.md -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null)
+  done < <(find_skill_files "$REPO")
   [[ "$bad" -eq 0 ]] && pass "all SKILL.md frontmatter has name + description"
 }
 
@@ -153,7 +178,7 @@ _desc_value() {
 check_descriptions() {
   local bad=0 f val rel
   while IFS= read -r f; do
-    rel="${f#"$LEGION_ROOT/"}"
+    rel="${f#"$REPO/"}"
     val="$(_desc_value "$f")"
     if [[ -z "${val//[[:space:]]/}" ]]; then
       fail "SKILL.md empty/missing description: $rel" "skill:$(basename "$(dirname "$f")")"; bad=1; continue
@@ -162,7 +187,7 @@ check_descriptions() {
       fail "SKILL.md block-scalar description ('$val') blanks line-based readers: $rel" \
         "skill:$(basename "$(dirname "$f")")"; bad=1
     fi
-  done < <(find "$LEGION_ROOT" -name SKILL.md -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null)
+  done < <(find_skill_files "$REPO")
   [[ "$bad" -eq 0 ]] && pass "all SKILL.md descriptions are single-line + non-empty"
 }
 
@@ -260,6 +285,126 @@ check_codex() {
   fi
 }
 
+check_route_smoke() {
+  local route; route="$(resolve_legion_cmd legion-route "$LEGION_ROOT/legion-router/bin/legion-route")" || {
+    fail "legion-route not found" "plugin:legion-router"; return; }
+  local arch out err rc bad=0
+  for arch in implement-feature final-review; do
+    err="$(mktemp)"
+    out="$("$route" "$arch" 2>"$err")"; rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      fail "legion-route $arch failed: $(tr '\n' ' ' < "$err")" "plugin:legion-router"
+      bad=1
+      rm -f "$err"
+      continue
+    fi
+    if ! jq -e '.resolved == true and (.executor | type == "string") and (.model | type == "string") and (.sandbox | type == "string")' <<<"$out" >/dev/null 2>&1; then
+      fail "legion-route $arch returned invalid route JSON: $out" "plugin:legion-router"
+      bad=1
+      rm -f "$err"
+      continue
+    fi
+    case "$arch" in
+      implement-feature)
+        jq -e '.executor == "codex" and .sandbox == "workspace-write"' <<<"$out" >/dev/null 2>&1 || {
+          fail "legion-route implement-feature resolved to unexpected route: $out" "plugin:legion-router"
+          bad=1
+        }
+        ;;
+      final-review)
+        jq -e '.executor == "codex" and .sandbox == "read-only"' <<<"$out" >/dev/null 2>&1 || {
+          fail "legion-route final-review resolved to unexpected route: $out" "plugin:legion-router"
+          bad=1
+        }
+        ;;
+    esac
+    rm -f "$err"
+  done
+  [[ "$bad" -eq 0 ]] && pass "legion-route resolves implement-feature and final-review"
+}
+
+check_delegate_smoke() {
+  local delegate; delegate="$(resolve_legion_cmd legion-delegate "$LEGION_ROOT/legion-router/bin/legion-delegate")" || {
+    fail "legion-delegate not found" "plugin:legion-router"; return; }
+  local out rc
+  out="$("$delegate" -h 2>&1)"; rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    pass "legion-delegate help smoke passed"
+  else
+    fail "legion-delegate help smoke failed: $out" "plugin:legion-router"
+  fi
+}
+
+_abs_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.abspath(os.path.expanduser(sys.argv[1])))
+PY
+}
+
+_path_under() {
+  python3 - "$1" "$2" <<'PY'
+import os
+import sys
+root = os.path.abspath(os.path.expanduser(sys.argv[1]))
+path = os.path.abspath(os.path.expanduser(sys.argv[2]))
+try:
+    ok = os.path.commonpath([root, path]) == root
+except ValueError:
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+}
+
+check_state_root() {
+  local root="${LEGION_STATE_ROOT:-}"
+  [[ -n "$root" ]] || { fail "LEGION_STATE_ROOT is required for demo runs" "plugin:legion-observability"; return; }
+  root="$(_abs_path "$root")"
+  local telemetry="${LEGION_TELEMETRY_DIR:-$root/spans}"
+  local registry="${LEGION_REGISTRY_DIR:-$root/registry}"
+  local repos="${LEGION_REPOS_FILE:-$root/repos.jsonl}"
+  local bench="${LEGION_BENCH_DIR:-$root/bench}"
+  local bad=0 label path
+  for label in telemetry registry repos bench self-learn; do
+    case "$label" in
+      telemetry) path="$telemetry" ;;
+      registry) path="$registry" ;;
+      repos) path="$repos" ;;
+      bench) path="$bench" ;;
+      self-learn) path="$root/self-learn" ;;
+    esac
+    if ! _path_under "$root" "$path"; then
+      fail "$label path is outside LEGION_STATE_ROOT: $path" "plugin:legion-observability"
+      bad=1
+    fi
+  done
+  if [[ "$bad" -eq 0 ]]; then
+    mkdir -p "$root" "$telemetry" "$registry" "$bench" 2>/dev/null || {
+      fail "LEGION_STATE_ROOT is not writable: $root" "plugin:legion-observability"; return; }
+    pass "LEGION_STATE_ROOT centralizes spans, registry, repos, bench, and memory under $root"
+  fi
+}
+
+check_test_tools() {
+  local missing=0 tool
+  for tool in git jq python3; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      fail "required demo test tool missing: $tool"
+      missing=1
+    fi
+  done
+  if command -v bats >/dev/null 2>&1; then
+    :
+  elif command -v npx >/dev/null 2>&1 && npx -y bats --version >/dev/null 2>&1; then
+    :
+  else
+    fail "required demo test tool missing: bats"
+    missing=1
+  fi
+  [[ "$missing" -eq 0 ]] && pass "required demo test tools present (git, jq, python3, bats)"
+}
+
 check_router() {
   if curl -sf -m 2 "http://127.0.0.1:$ROUTER_PORT/health" >/dev/null 2>&1; then
     pass "router responding on 127.0.0.1:$ROUTER_PORT"
@@ -298,13 +443,17 @@ run_one() {
     costs)              check_costs ;;
     telemetry-schema)   check_telemetry_schema ;;
     codex)              check_codex ;;
+    route-smoke)        check_route_smoke ;;
+    delegate-smoke)     check_delegate_smoke ;;
+    state-root)         check_state_root ;;
+    test-tools)         check_test_tools ;;
     router)             check_router ;;
     *) echo "legion-doctor: unknown check '$1'" >&2; exit 2 ;;
   esac
 }
 
 [[ "$REPO" != "$LEGION_ROOT" ]] && \
-  _line "$(printf '\033[0;36mINFO\033[0m frontmatter scan: %s · Legion install: %s' "$REPO" "$LEGION_ROOT")"
+  _line "$(printf '\033[0;36mINFO\033[0m skill scan: %s · Legion install: %s' "$REPO" "$LEGION_ROOT")"
 
 if [[ -n "$ONLY" ]]; then
   run_one "$ONLY"
@@ -312,6 +461,11 @@ else
   for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs telemetry-schema codex router; do
     run_one "$c"
   done
+  if [[ "$STRICT_DEMO" == "1" ]]; then
+    for c in route-smoke delegate-smoke state-root test-tools; do
+      run_one "$c"
+    done
+  fi
 fi
 
 if [[ "$JSON" == "1" ]]; then

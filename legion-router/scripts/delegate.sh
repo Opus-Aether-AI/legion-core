@@ -40,11 +40,18 @@ source "$_self_dir/lib/sandbox-setup.sh"
 
 CODEX_BIN="${CODEX_BIN:-codex}"
 LEGION_ROUTER_URL="${LEGION_ROUTER_URL:-http://127.0.0.1:8082}"
-LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
+LEGION_STATE_ROOT="${LEGION_STATE_ROOT:-}"
+if [[ -n "$LEGION_STATE_ROOT" ]]; then
+  LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$LEGION_STATE_ROOT/spans}"
+  LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$LEGION_STATE_ROOT/registry}"
+  LEGION_REPOS_FILE="${LEGION_REPOS_FILE:-$LEGION_STATE_ROOT/repos.jsonl}"
+else
+  LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
+  LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$HOME/.claude/logs/legion/registry}"
+  LEGION_REPOS_FILE="${LEGION_REPOS_FILE:-$HOME/.claude/logs/legion/repos.jsonl}"
+fi
 # Global, NON-purgeable run registry (Console/handoff foundation): a run stays
 # discoverable here even after `cleanup --purge` wipes the repo's .legion/.
-LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$HOME/.claude/logs/legion/registry}"
-LEGION_REPOS_FILE="${LEGION_REPOS_FILE:-$HOME/.claude/logs/legion/repos.jsonl}"
 
 die() { printf 'legion-delegate: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }

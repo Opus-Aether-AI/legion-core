@@ -26,8 +26,10 @@ LATEST_SCHEMA = "legion.bench.latest.v1"
 COMPARE_SCHEMA = "legion.bench.compare.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
 SPAN_SCHEMA = "legion.span.v1"
-DEFAULT_LOG_ROOT = "~/.claude/logs/legion"
-DEFAULT_BENCH_ROOT = "~/.claude/logs/legion/bench"
+DEFAULT_LOG_ROOT = os.environ.get("LEGION_STATE_ROOT", "~/.claude/logs/legion")
+DEFAULT_BENCH_ROOT = os.environ.get(
+    "LEGION_BENCH_DIR", os.path.join(DEFAULT_LOG_ROOT, "bench")
+)
 POSITIVE_QUALITY_METRICS = [
     "score",
     "pass_rate",

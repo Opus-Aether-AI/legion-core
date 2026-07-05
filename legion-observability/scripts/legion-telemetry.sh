@@ -12,7 +12,11 @@
 
 set -euo pipefail
 
-LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
+if [[ -n "${LEGION_STATE_ROOT:-}" ]]; then
+  LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$LEGION_STATE_ROOT/spans}"
+else
+  LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
+fi
 
 _now()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today() { date -u +%Y-%m-%d; }

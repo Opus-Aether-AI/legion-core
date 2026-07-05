@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.11.0...v0.11.1) (2026-07-05)
+
+
+### Fixed
+
+* **router:** centralize model defaults ([#70](https://github.com/Opus-Aether-AI/legion-core/issues/70)) ([857ffe3](https://github.com/Opus-Aether-AI/legion-core/commit/857ffe3ee57da2590d5a6df353502cf0daa85f49))
+
+
+### Documentation
+
+* **enterprise:** enterprise offering for VPC, SDLC gates, and AWS WAF ([#68](https://github.com/Opus-Aether-AI/legion-core/issues/68)) ([bbda644](https://github.com/Opus-Aether-AI/legion-core/commit/bbda644bdf53e12daeafd246efa3ce7a7f61033f))
+
 ## [0.11.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.10.2...v0.11.0) (2026-07-05)
 
 

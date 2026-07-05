@@ -140,6 +140,8 @@ SH
 set -euo pipefail
 case "$1" in
   implement-feature) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}\n' ;;
+  write-tests) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}\n' ;;
+  refactor-module) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}\n' ;;
   final-review) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"read-only","resolved":true}\n' ;;
   *) exit 2 ;;
 esac
@@ -231,6 +233,40 @@ SH
   grep -q "fieldops-validate" "$run_dir/legion-observability.html"
   grep -q "codex_runs" "$run_dir/legion-observability.html"
   echo "$json" | jq -e '.ok == true and .pipeline.profile == "legion.full_app.v1"'
+}
+
+@test "legion-run: generates default TDD slices when plugin plan emits only a brief" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/fieldops-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{
+  "schema": "legion.plugin.plan.v1",
+  "plugin": "$LEGION_PLUGIN_NAME",
+  "mode": "legion-generate-slices",
+  "task": "$LEGION_TASK",
+  "planning_instruction": "Read PLAN.md and build this app TDD style. Start with failing tests, implement only enough to pass, then refactor after green.",
+  "context_files": ["PLAN.md"],
+  "required_skills": ["ai-architect", "software-architect", "javascript-testing-patterns", "e2e-testing-patterns"],
+  "quality_gates": ["lint", "typecheck", "test", "build", "playwright"],
+  "eval_goal": "Freezer-down request is triaged, scheduled, validated, replied to, and exported."
+}
+JSON
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/fieldops-plan"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build FieldOps AI Dispatch" --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  [ -s "$run_dir/slices.jsonl" ]
+  jq -e '.mode == "legion-generate-slices"' "$run_dir/plan.json"
+  jq -e 'select(.phase == "red" and .archetype == "write-tests")' "$run_dir/slices.jsonl" >/dev/null
+  jq -e 'select(.phase == "green" and .archetype == "implement-feature")' "$run_dir/slices.jsonl" >/dev/null
+  jq -e 'select(.phase == "refactor" and .archetype == "refactor-module")' "$run_dir/slices.jsonl" >/dev/null
+  grep -q "generated_by" "$run_dir/slices.jsonl"
 }
 
 @test "legion-run: installed-style plugin directory works through manifest and bin hooks" {

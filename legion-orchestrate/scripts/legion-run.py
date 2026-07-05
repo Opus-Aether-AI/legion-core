@@ -179,6 +179,13 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "plugin"
 
@@ -292,6 +299,137 @@ def run_process(argv: list[str], env: dict[str, str], cwd: Path, artifact: Path,
     return payload
 
 
+def _load_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _as_text(value: Any, fallback: str = "") -> str:
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    return text or fallback
+
+
+def _as_text_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _sentence(label: str, items: list[str]) -> str:
+    if not items:
+        return ""
+    return f"{label}: {', '.join(items)}. "
+
+
+def default_tdd_slices(plan: dict[str, Any], plugin: dict[str, Any], task: str) -> list[dict[str, Any]]:
+    """Create a compact TDD work queue from a plugin planning brief."""
+    app = _as_text(plan.get("app") or plan.get("product"), plugin["name"])
+    instruction = _as_text(
+        plan.get("planning_instruction"),
+        "Build the requested app TDD style: write failing tests first, implement the minimum code to pass, then refactor after green.",
+    )
+    context_files = _as_text_list(plan.get("context_files") or plan.get("plan_source"))
+    skills = _as_text_list(plan.get("required_skills") or plan.get("legion_code_skills"))
+    gates = _as_text_list(plan.get("quality_gates"))
+    eval_goal = _as_text(plan.get("eval_goal"), "the requested domain workflow works end to end")
+
+    context = (
+        f"{instruction} "
+        f"Task: {task}. "
+        f"App/domain: {app}. "
+        f"{_sentence('Read these context files first', context_files)}"
+        f"{_sentence('Use these skills when relevant', skills)}"
+    ).strip()
+    gate_text = ", ".join(gates) if gates else "lint, typecheck, tests, build, and any repo-native E2E gate"
+
+    common = {
+        "generated_by": "legion-run.default-tdd-planner",
+        "plugin": plugin["name"],
+        "profile": FULL_APP_PROFILE,
+        "source_plan_mode": _as_text(plan.get("mode"), "legion-generate-slices"),
+    }
+    return [
+        {
+            **common,
+            "id": "red-core-tests",
+            "phase": "red",
+            "archetype": "write-tests",
+            "task": (
+                f"RED: {context} Add failing unit/integration tests for the core domain, "
+                "data contracts, AI/schema fallbacks, scheduling or business rules, and API/service boundaries. "
+                "Do not implement production code in this slice."
+            ),
+        },
+        {
+            **common,
+            "id": "green-core-implementation",
+            "phase": "green",
+            "depends_on": ["red-core-tests"],
+            "archetype": "implement-feature",
+            "task": (
+                f"GREEN: {context} Implement the minimal backend/domain/AI/persistence code needed "
+                "to make the red core tests pass. Keep deterministic fallbacks for missing external services."
+            ),
+        },
+        {
+            **common,
+            "id": "red-demo-flow-tests",
+            "phase": "red",
+            "depends_on": ["green-core-implementation"],
+            "archetype": "write-tests",
+            "task": (
+                f"RED: Add failing browser or integration tests for the main demo workflow. "
+                f"The eval goal is: {eval_goal}. Cover the user-visible path plus export/report evidence."
+            ),
+        },
+        {
+            **common,
+            "id": "green-demo-flow",
+            "phase": "green",
+            "depends_on": ["red-demo-flow-tests"],
+            "archetype": "implement-feature",
+            "task": (
+                f"GREEN: Build the UI/API/demo workflow needed to pass the demo-flow tests for {app}. "
+                "Keep the first screen usable, local-first, and backed by fixed seed data."
+            ),
+        },
+        {
+            **common,
+            "id": "refactor-and-gate",
+            "phase": "refactor",
+            "depends_on": ["green-demo-flow"],
+            "archetype": "refactor-module",
+            "task": (
+                f"REFACTOR: Clean boundaries, remove duplication, update demo docs, and run gates: {gate_text}. "
+                "Keep behavior green and leave clear evidence for validation and evaluation."
+            ),
+        },
+    ]
+
+
+def has_jsonl_rows(path: Path) -> bool:
+    if not path.exists():
+        return False
+    return any(line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines())
+
+
+def ensure_slices(path: Path, plan_path: Path, plugin: dict[str, Any], task: str) -> None:
+    if has_jsonl_rows(path):
+        return
+    plan = _load_json_object(plan_path)
+    slices = default_tdd_slices(plan, plugin, task)
+    _write_jsonl(path, slices)
+
+
 def load_slices(path: Path) -> list[dict[str, Any]]:
     slices: list[dict[str, Any]] = []
     if not path.exists():
@@ -394,6 +532,7 @@ def execute(plugin: dict[str, Any], repo: Path, task: str, json_output: bool) ->
     if not plan_path.exists():
         _write_json(plan_path, {"schema": "legion.plugin.plan.v1", "plugin": plugin["name"], "task": task})
     slices_path = run_dir / "slices.jsonl"
+    ensure_slices(slices_path, plan_path, plugin, task)
     slices = load_slices(slices_path)
 
     routes = []

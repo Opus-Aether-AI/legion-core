@@ -3,7 +3,8 @@
 
 Reads routing.toml (executor policy) plus models.toml (default model catalog) and
 prints the resolved decision as JSON, so legion-delegate / the runners don't
-hardcode model choices. Pure stdlib (tomllib, 3.11+). Importable for tests.
+hardcode model choices. Pure stdlib; full routing uses tomllib on Python 3.11+,
+while simple model-ref lookups use a tiny parser for shell entrypoint portability.
 
   legion-route bulk-mechanical-edit
   legion-route --list
@@ -36,8 +37,33 @@ def load_table(path):
         return tomllib.load(f)
 
 
+def load_simple_models(path):
+    models = {}
+    in_models = False
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                in_models = line[1:-1].strip() == "models"
+                continue
+            if not in_models or "=" not in line:
+                continue
+            key, value = [part.strip() for part in line.split("=", 1)]
+            if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+                models[key] = value[1:-1]
+    return models
+
+
 def load_models(path=None):
-    table = load_table(path or os.environ.get("LEGION_MODELS_FILE", _DEFAULT_MODELS_FILE))
+    models_path = path or os.environ.get("LEGION_MODELS_FILE", _DEFAULT_MODELS_FILE)
+    if tomllib is None:
+        models = load_simple_models(models_path)
+        if not models:
+            raise RouteConfigError("models.toml must contain a [models] table")
+        return models
+    table = load_table(models_path)
     models = table.get("models", table)
     if not isinstance(models, dict):
         raise RouteConfigError("models.toml must contain a [models] table")

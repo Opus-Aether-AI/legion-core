@@ -84,6 +84,13 @@ def test_main_resolves_model_ref(capsys):
     assert capsys.readouterr().out.strip() == lr.resolve_model_ref(models(), "codex_workhorse")
 
 
+def test_model_ref_lookup_does_not_require_tomllib(monkeypatch, capsys):
+    monkeypatch.setattr(lr, "tomllib", None)
+
+    assert lr.main(["--model-ref", "cursor_default", "--models-file", MODELS_TABLE]) == 0
+    assert capsys.readouterr().out.strip() == "composer-2.5"
+
+
 def test_main_rejects_unknown_model_ref():
     assert lr.main(["--model-ref", "missing", "--models-file", MODELS_TABLE]) == 2
 

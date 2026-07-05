@@ -125,6 +125,109 @@ command; a software architect plugin can provide validation gates. The plugin
 owns those domain rules. Legion Core owns the execution, evidence, reports,
 self-learning, and healing loop.
 
+## Create A Domain Plugin
+
+A domain plugin is small. It needs one manifest, one skill file, and three
+commands. The commands can be shell scripts, Node scripts, Python scripts, or
+anything on `PATH`.
+
+```text
+support-app-builder/
+  SKILL.md
+  legion-plugin.toml
+  bin/
+    support-plan
+    support-validate
+    support-eval
+```
+
+`legion-plugin.toml` links your plugin to Legion Core:
+
+```toml
+[plugin]
+name = "support-app-builder"
+kind = "domain-plugin"
+
+[pipeline]
+profile = "legion.full_app.v1"
+entrypoint = "legion-run"
+
+[commands]
+plan = "support-plan"
+validate = "support-validate"
+evaluate = "support-eval"
+```
+
+`SKILL.md` tells the coding agent when to use it:
+
+```md
+---
+name: support-app-builder
+description: Use when building or changing a customer-support SaaS app.
+---
+
+When the user asks for a support-app feature, run:
+
+`legion-run --plugin-manifest <plugin-dir>/legion-plugin.toml --repo . --task "<request>" --json`
+
+Then open the returned `run_dir/legion-observability.html`.
+```
+
+`support-plan` turns the user request into Legion slices:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{"schema":"legion.plugin.plan.v1","plugin":"$LEGION_PLUGIN_NAME","task":"$LEGION_TASK"}
+JSON
+
+cat > "$LEGION_RUN_SLICES_FILE" <<JSONL
+{"archetype":"implement-feature","task":"Build the backend/API part for: $LEGION_TASK"}
+{"archetype":"implement-feature","task":"Build the UI/workflow part for: $LEGION_TASK"}
+{"archetype":"write-tests","task":"Add tests for: $LEGION_TASK"}
+JSONL
+```
+
+`support-validate` runs the app's gates:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+npm test
+npm run build
+printf '{"ok":true,"gates":["npm test","npm run build"]}\n'
+```
+
+`support-eval` scores the result in your domain language:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '{"ok":true,"score":1,"total":1,"checks":["support workflow implemented"]}\n'
+```
+
+Make the commands executable and run the plugin:
+
+```bash
+chmod +x support-app-builder/bin/*
+export PATH="$PWD/support-app-builder/bin:$PATH"
+
+legion-run \
+  --plugin-manifest "$PWD/support-app-builder/legion-plugin.toml" \
+  --repo /path/to/app \
+  --task "Add SLA-based ticket escalation" \
+  --json
+```
+
+The important rule: your plugin owns the domain decisions, but it should enter
+Legion through `legion-run`. That is what guarantees doctor, routing, fan-out,
+review, validation, evaluation, observability HTML, self-learning, and heal
+planning all happen every time.
+
 ## Build In Conversation
 
 Most users should talk to Claude Code, Codex, or Cursor through their plugin

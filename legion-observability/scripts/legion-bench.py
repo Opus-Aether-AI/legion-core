@@ -705,6 +705,18 @@ def _span_totals(logs: str) -> dict[str, Any]:
     return totals
 
 
+def _case_state_env(logs: str) -> dict[str, str]:
+    root = os.path.abspath(os.path.expanduser(logs))
+    return {
+        "LEGION_STATE_ROOT": root,
+        "LEGION_TELEMETRY_DIR": os.path.join(root, "spans"),
+        "LEGION_REGISTRY_DIR": os.path.join(root, "registry"),
+        "LEGION_REPOS_FILE": os.path.join(root, "repos.jsonl"),
+        "LEGION_BENCH_DIR": os.path.join(root, "bench"),
+        "LEGION_REPORTS_DIR": os.path.join(root, "reports"),
+    }
+
+
 def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, Any]:
     case_id = _text(case.get("id")) or _stable_id([case])
     safe_case_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in case_id)
@@ -726,9 +738,9 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
     argv = _command_argv(case.get("command"), context)
 
     env = os.environ.copy()
+    env.update(_case_state_env(logs))
     env.update({
         "HOME": home,
-        "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
         "PYTHONUNBUFFERED": "1",
     })
     env.update({key: str(value) for key, value in _dict(_render(case.get("env"), context)).items()})
@@ -1466,9 +1478,9 @@ def learning_lift_payload(args: argparse.Namespace) -> dict[str, Any]:
     os.makedirs(logs, exist_ok=True)
     session_path = _write_learning_session(home, args.correction)
     env = os.environ.copy()
+    env.update(_case_state_env(logs))
     env.update({
         "HOME": home,
-        "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
         "PYTHONUNBUFFERED": "1",
     })
     suite = {
@@ -1975,9 +1987,9 @@ def run_corpus_case_mode(
 
     env = os.environ.copy()
     real_home = env.get("HOME", "")
+    env.update(_case_state_env(logs))
     env.update({
         "HOME": home,
-        "LEGION_TELEMETRY_DIR": os.path.join(logs, "spans"),
         "LEGION_BENCH_REPO": os.path.abspath(repo),
         "LEGION_BENCH_WORKSPACE": workspace,
         "LEGION_BENCH_HOME": home,
@@ -2208,8 +2220,12 @@ def summarize_corpus_run(
             int(_dict(_dict(modes[mode_id]).get("metrics")).get("required_fail") or 0) == 0
             for mode_id in required_clean_modes
         )
-    elif configured_clean_modes:
-        ok = True
+    elif configured_clean_modes and any(mode_id != baseline_mode for mode_id in modes):
+        ok = any(
+            mode_id != baseline_mode
+            and int(_dict(summary.get("metrics")).get("required_fail") or 0) == 0
+            for mode_id, summary in modes.items()
+        )
     else:
         ok = all(_dict(summary.get("metrics")).get("required_fail") == 0 for summary in modes.values())
     comparisons: dict[str, dict[str, Any]] = {}

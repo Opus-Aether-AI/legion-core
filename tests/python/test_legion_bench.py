@@ -586,6 +586,92 @@ def test_corpus_case_exports_real_home_for_live_adapters(tmp_path):
     assert env["home"] != env["real_home"]
 
 
+def test_corpus_case_exports_coherent_legion_state(tmp_path):
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    result = bench.run_corpus_case_mode(
+        {
+            "id": "state-export",
+            "type": "task",
+            "task": "Record benchmark state environment.",
+            "command": [
+                "python3",
+                "-c",
+                (
+                    "import json, os, pathlib; "
+                    "pathlib.Path('state-env.json').write_text(json.dumps({"
+                    "'logs': os.environ.get('LEGION_BENCH_LOGS'), "
+                    "'state_root': os.environ.get('LEGION_STATE_ROOT'), "
+                    "'telemetry_dir': os.environ.get('LEGION_TELEMETRY_DIR'), "
+                    "'registry_dir': os.environ.get('LEGION_REGISTRY_DIR'), "
+                    "'repos_file': os.environ.get('LEGION_REPOS_FILE'), "
+                    "'bench_dir': os.environ.get('LEGION_BENCH_DIR'), "
+                    "'reports_dir': os.environ.get('LEGION_REPORTS_DIR')"
+                    "}), encoding='utf-8')"
+                ),
+            ],
+            "validators": [
+                {
+                    "type": "json_file_field_equals",
+                    "path": "{workspace}/state-env.json",
+                    "field": "state_root",
+                    "equals": "{logs}",
+                }
+            ],
+        },
+        {"id": "state-mode"},
+        repo=repo,
+        run_dir=str(tmp_path / "run"),
+        repeat_index=1,
+    )
+
+    env_path = (
+        tmp_path
+        / "run"
+        / "corpus-workspaces"
+        / "state-mode"
+        / "attempt-01"
+        / "state-export"
+        / "state-env.json"
+    )
+    env = json.loads(env_path.read_text(encoding="utf-8"))
+    assert result["status"] == "pass"
+    assert env["state_root"] == env["logs"]
+    assert env["telemetry_dir"] == os.path.join(env["state_root"], "spans")
+    assert env["registry_dir"] == os.path.join(env["state_root"], "registry")
+    assert env["repos_file"] == os.path.join(env["state_root"], "repos.jsonl")
+    assert env["bench_dir"] == os.path.join(env["state_root"], "bench")
+    assert env["reports_dir"] == os.path.join(env["state_root"], "reports")
+
+
+def test_corpus_summary_fails_selected_mode_when_clean_mode_not_selected(tmp_path):
+    summary = bench.summarize_corpus_run(
+        {
+            "corpus": "fieldops-triage-e2e",
+            "required_clean_modes": ["scripted-oracle"],
+        },
+        [
+            {
+                "id": "fieldops",
+                "mode": "legion-fanout-review",
+                "status": "fail",
+                "ok": False,
+                "required": True,
+                "dimension": "agentic-e2e",
+                "metrics": {"duration_ms": 10},
+                "reason": "exit=1 expected=0",
+            }
+        ],
+        run_id="live-only",
+        repo=str(tmp_path),
+        baseline_mode="legion-fanout-review",
+        reliability_min_cases=30,
+    )
+
+    assert summary["required_clean_modes"] == []
+    assert summary["modes"]["legion-fanout-review"]["metrics"]["required_fail"] == 1
+    assert summary["ok"] is False
+
+
 def test_corpus_case_marks_provider_usage_limit_as_blocked(tmp_path):
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
 

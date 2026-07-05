@@ -42,6 +42,22 @@ TOML
   printf '%s\n' "$dir/legion-plugin.toml"
 }
 
+json_from_output() {
+  python3 -c '
+import json
+import sys
+
+text = sys.stdin.read()
+start = text.find("{")
+end = text.rfind("}")
+if start < 0 or end < start:
+    raise SystemExit("no JSON object in output")
+payload = text[start : end + 1]
+json.loads(payload)
+print(payload)
+'
+}
+
 make_installed_style_plugin() {
   local dir="$BATS_TEST_TMPDIR/support-app-builder"
   mkdir -p "$dir/bin"
@@ -179,10 +195,11 @@ SH
 
   run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --dry-run --json
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.plugin.name == "fieldops"'
-  echo "$output" | jq -e '.pipeline.profile == "legion.full_app.v1"'
-  echo "$output" | jq -e '.pipeline.stages == ["doctor","self-learn-hints","plugin-plan","route","fanout-apply","review","validate","evaluate","report","share","self-learn","heal-plan"]'
-  echo "$output" | jq -e '.pipeline.required_artifacts | index("legion-report.html") and index("fanout.json") and index("heal-plan.json")'
+  json="$(printf '%s' "$output" | json_from_output)"
+  echo "$json" | jq -e '.plugin.name == "fieldops"'
+  echo "$json" | jq -e '.pipeline.profile == "legion.full_app.v1"'
+  echo "$json" | jq -e '.pipeline.stages == ["doctor","self-learn-hints","plugin-plan","route","fanout-apply","review","validate","evaluate","report","share","self-learn","heal-plan"]'
+  echo "$json" | jq -e '.pipeline.required_artifacts | index("legion-report.html") and index("fanout.json") and index("heal-plan.json")'
 }
 
 @test "legion-run: fake plugin run writes the required full-app artifacts" {
@@ -191,7 +208,8 @@ SH
 
   run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
   [ "$status" -eq 0 ]
-  run_dir="$(echo "$output" | jq -r '.run_dir')"
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
   [ -d "$run_dir" ]
   for artifact in \
     doctor.json self-learn-hints.json plan.json slices.jsonl routes.json \
@@ -206,7 +224,7 @@ SH
   grep -q "Full Pipeline Outputs" "$run_dir/legion-observability.html"
   grep -q "fieldops-validate" "$run_dir/legion-observability.html"
   grep -q "codex_runs" "$run_dir/legion-observability.html"
-  echo "$output" | jq -e '.ok == true and .pipeline.profile == "legion.full_app.v1"'
+  echo "$json" | jq -e '.ok == true and .pipeline.profile == "legion.full_app.v1"'
 }
 
 @test "legion-run: installed-style plugin directory works through manifest and bin hooks" {
@@ -217,9 +235,10 @@ SH
 
   run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Add SLA escalation" --json
   [ "$status" -eq 0 ]
-  run_dir="$(echo "$output" | jq -r '.run_dir')"
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
   [ -s "$plugin_dir/SKILL.md" ]
-  echo "$output" | jq -e '.plugin.name == "support-app-builder"'
+  echo "$json" | jq -e '.plugin.name == "support-app-builder"'
   jq -e '.plugin == "support-app-builder" and .source == "installed-style-plugin"' "$run_dir/plan.json"
   jq -e '.ok == true and .command == "support-validate"' "$run_dir/validation.json"
   jq -e '.score == 1 and .total == 1' "$run_dir/eval.json"

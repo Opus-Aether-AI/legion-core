@@ -71,6 +71,76 @@ Minimal `.claude-plugin/plugin.json`:
 }
 ```
 
+### Start a new app repo
+
+Keep the app in its own git repo. During core development, point that repo at
+your local `legion-core` checkout so you use the latest bins instead of any
+older global shims.
+
+```bash
+mkdir -p ~/Documents/legion-demo
+cd ~/Documents/legion-demo
+git init
+
+# Use the current legion-core checkout as the engine.
+export LEGION_CORE="$HOME/Documents/legion-core"
+export PATH="$LEGION_CORE/legion-observability/bin:$LEGION_CORE/legion-router/bin:$LEGION_CORE/legion-orchestrate/bin:$LEGION_CORE/legion-setup/bin:$PATH"
+
+# Keep all telemetry, reports, bench data, registry data, and memory in this app repo.
+export LEGION_STATE_ROOT="$PWD/.legion/state"
+export LEGION_TELEMETRY_DIR="$LEGION_STATE_ROOT/spans"
+export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
+export LEGION_REPOS_FILE="$LEGION_STATE_ROOT/repos.jsonl"
+export LEGION_BENCH_DIR="$LEGION_STATE_ROOT/bench"
+
+mkdir -p "$LEGION_TELEMETRY_DIR" "$LEGION_REGISTRY_DIR" "$LEGION_BENCH_DIR" .legion/reports
+printf '%s\n' '.legion/state/' '.legion/reports/' '.legion/tmp/' >> .gitignore
+```
+
+Verify the repo is ready before asking Legion to build:
+
+```bash
+command -v legion-doctor
+legion-doctor --repo . --strict-demo
+```
+
+Expected result: `0 fail`. A router warning is acceptable unless your Claude
+config forces traffic through `ANTHROPIC_BASE_URL=http://127.0.0.1:8082`.
+
+### Put the build loop in your plugin
+
+Do not make every user memorize the Legion loop. Put the loop in the user's
+domain plugin or skill, next to their app-specific rules, evals, and gates.
+Legion Core owns the engine; the plugin owns the app workflow.
+
+```text
+my-app-plugin/
+  SKILL.md                   # when to use the plugin + the build loop
+  .claude-plugin/plugin.json  # plugin metadata
+  evals/                      # optional app-specific golden checks
+  bin/                        # optional app-specific CLIs
+```
+
+Example plugin loop:
+
+```md
+---
+name: fieldops-app-builder
+description: Use when building or changing the FieldOps dispatch app with Legion Core.
+---
+
+For app changes:
+
+1. Run `legion-self-learn hints --entity plugin:fieldops-app-builder`.
+2. Run `legion-doctor --repo . --strict-demo`.
+3. Make a short plan and split work into backend, UI, tests, and review slices.
+4. Run `legion-fanout --slices slices.jsonl --repo . --max-concurrency 3 --apply --json`.
+5. Run `legion-delegate review --repo . --archetype final-review --base HEAD`.
+6. Run the app gates, for example `npm test`, `npm run lint`, and `npm run build`.
+7. Save an HTML report: `legion-report --html > .legion/reports/latest.html`.
+8. Record the lesson: `legion-self-learn record --entity plugin:fieldops-app-builder --summary "..."`
+```
+
 **Use it to build an app:** keep your app in its own repo, then ask Legion to
 make scoped changes.
 
@@ -88,7 +158,7 @@ legion-delegate run \
 legion-fanout --slices slices.jsonl --repo . --apply --json
 
 # See cost, latency, and success as JSON or HTML.
-legion-report --trace latest --html > legion-report.html
+legion-report --trace latest --html > .legion/reports/latest.html
 
 # Record what happened so the harness can learn.
 legion-self-learn record \
@@ -107,13 +177,13 @@ Example `slices.jsonl`:
 ### Build a full app in conversation
 
 When you are using Claude Code or Codex, you usually do not type every Legion
-command yourself. You ask the agent to use Legion, and the agent should plan,
-slice, delegate, review, test, and report.
+command yourself. You ask the agent to use your app plugin, and that plugin
+should plan, slice, delegate, review, test, report, and learn.
 
 Example first message:
 
 ```text
-Build a FieldOps dispatch app with Legion.
+Use the fieldops-app-builder plugin to build a FieldOps dispatch app with Legion.
 
 The app should let dispatchers paste a service ticket, classify category and
 urgency, assign a required skill, show required parts, show ETA risk, and keep a
@@ -133,9 +203,8 @@ What the agent should do:
 
 ```bash
 # 1. Check the harness before spending on model work.
-legion-self-learn hints --entity skill:legion-orchestrate
-legion-doctor --only codex
-legion-doctor --only router
+legion-self-learn hints --entity plugin:fieldops-app-builder
+legion-doctor --repo . --strict-demo
 
 # 2. Create dependency-aware slices.
 cat > slices.jsonl <<'JSONL'
@@ -158,7 +227,8 @@ npm run lint
 npm run build
 
 # 6. Produce evidence.
-legion-report --trace latest --html > legion-report.html
+mkdir -p .legion/reports
+legion-report --trace latest --html > .legion/reports/latest.html
 legion-share --window 1d --json
 legion-self-learn record --entity app:fieldops-dispatch --summary "Built first FieldOps dispatch workflow."
 ```

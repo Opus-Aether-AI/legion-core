@@ -2,7 +2,7 @@
 # legion-telemetry — emit and validate legion.span.v1 telemetry spans.
 #
 # The one emitter every executor/runner/orchestrator uses, so spans are uniform.
-#   legion-trace emit --executor codex --model gpt-5.5 --status ok \
+#   legion-trace emit --executor codex --model "$(legion-route --model-ref codex_workhorse)" --status ok \
 #       [--run-id ID] [--trace-id ID] [--parent-id ID] [--cost 0.01] \
 #       [--duration-ms 1200] [--task "..."] [--tokens '{...}'] [--artifacts '{...}']
 #       [--target-type command --target-name feature]

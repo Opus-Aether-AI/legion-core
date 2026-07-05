@@ -35,6 +35,9 @@ source "$_self_dir/lib/codex-json.sh"
 # shellcheck source=lib/cost.sh
 source "$_self_dir/lib/cost.sh"
 # shellcheck disable=SC1091
+# shellcheck source=lib/model-config.sh
+source "$_self_dir/lib/model-config.sh"
+# shellcheck disable=SC1091
 # shellcheck source=lib/sandbox-setup.sh
 source "$_self_dir/lib/sandbox-setup.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
@@ -343,7 +346,7 @@ cmd_run() {
       *) die "run: unknown arg '$1'" ;;
     esac
   done
-  # Archetype fills model/sandbox/effort/fallback from routing.toml; explicit flags win.
+  # Archetype fills model/sandbox/effort/fallback from routing + model config; explicit flags win.
   local r_exec="" r_fallback=""
   if [[ -n "$archetype" ]]; then
     local r_model r_sandbox r_effort
@@ -357,8 +360,8 @@ cmd_run() {
     claude)       # Claude low -> prefer GPT, even for normally-self work
       if [[ "$r_exec" == "self" ]]; then
         r_exec="codex"
-        # a self archetype carries a Claude model (opus) which codex can't run — force a GPT model.
-        case "${model:-}" in gpt-*|codex*) ;; *) model="gpt-5.5" ;; esac
+        # A self archetype carries a Claude model which codex can't run — force the configured Codex model.
+        case "${model:-}" in gpt-*|codex*) ;; *) model="$(legion_model_ref codex_workhorse)" || die "could not resolve codex_workhorse in models.toml" ;; esac
         # always surface the substitution (even under --quiet) so it's never silent.
         printf '⚠ LEGION_LOW_CREDIT=claude: delegating a normally-self task to GPT (%s)\n' "$model" >&2
       fi ;;
@@ -529,7 +532,7 @@ cmd_review() {
     [[ -n "$model" ]]  || model="$r_model"
     [[ -n "$effort" ]] || effort="$r_effort"
   fi
-  [[ -n "$model" ]] || model="gpt-5.5"   # second opinion defaults to the stronger model
+  [[ -n "$model" ]] || model="$(legion_model_ref codex_review)" || die "could not resolve codex_review in models.toml"
   [[ -n "$effort" ]] || effort="xhigh"   # codex review always at xhigh unless overridden
   [[ -n "$base" ]] || die "review: --base BRANCH required"
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
@@ -600,7 +603,7 @@ cmd_resume() {
   [[ -n "$thread_id" ]] || die "resume: no codex thread id recorded for run '$run'"
   # Inherit the original run's model (persisted by `run`) so resume doesn't silently drift (M2).
   [[ -n "$model" ]] || model="$(cat "$art/model.txt" 2>/dev/null || true)"
-  [[ -n "$model" ]] || model="gpt-5.5"
+  [[ -n "$model" ]] || model="$(legion_model_ref codex_workhorse)" || die "could not resolve codex_workhorse in models.toml"
   [[ -n "$effort" ]] || effort="xhigh"   # codex always at xhigh unless overridden
 
   RUN_ID="$run"
@@ -735,7 +738,7 @@ legion-delegate — delegate a scoped task to an external model agent (Codex / G
            (run auto-deletes its own worktree on completion unless --keep; this
             reclaims --keep'd/resume worktrees + branches; --purge also drops run artifacts)
 
---archetype resolves model/sandbox/effort from routing.toml. List them: legion-route --list
+--archetype resolves model/sandbox/effort from routing.toml + models.toml. List them: legion-route --list
 EOF
       [[ "$cmd" == "" ]] && exit 2 || exit 0 ;;
     *) die "unknown command '$cmd' (run|review|resume|apply|cleanup)" ;;

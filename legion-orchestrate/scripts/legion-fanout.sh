@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # legion-fanout — dynamic multi-model fan-out. Run many scoped slices in PARALLEL across
-# executors (GPT-5.5 via legion-delegate; self/Opus slices are returned for Opus
+# executors (Codex via legion-delegate; self/Claude slices are returned for Claude
 # to do inline), collect verified diffs + cost, and report. The executable core of Legion's
 # dynamic orchestrator (the ultracode "decompose -> fan out -> verify -> synthesize" loop).
 #
@@ -8,8 +8,9 @@
 #   legion-fanout --task <file|-> [--repo DIR] [--json]
 #
 # Each slice is one JSON line: {"archetype":"implement-feature","task":"..."}
-#   (optionally {"model":"gpt-5.5", ...}). Archetypes that route to executor=self are NOT
-#   delegated — they come back with status "inline" for Opus to handle.
+#   (optionally {"model":"$(legion-route --model-ref codex_workhorse)", ...}).
+# Archetypes that route to executor=self are NOT delegated — they come back with
+# status "inline" for Claude to handle.
 # --task is a demo/runbook compatibility mode: it expands one task document into
 # implement/test/review slices before running the same fan-out engine.
 #

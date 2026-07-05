@@ -105,11 +105,11 @@
       "id": "route.orchestrate",
       "type": "route",
       "dimension": "routing",
-      "summary": "High-level orchestration stays on Opus.",
+      "summary": "High-level orchestration stays on Claude.",
       "archetype": "orchestrate",
       "expect": {
         "executor": "self",
-        "model": "opus",
+        "model_ref": "claude_orchestrator",
         "reasoning_effort": "xhigh"
       },
       "required": true
@@ -118,11 +118,11 @@
       "id": "route.architecture-decision",
       "type": "route",
       "dimension": "routing",
-      "summary": "Architecture decisions stay on Opus.",
+      "summary": "Architecture decisions stay on Claude.",
       "archetype": "architecture-decision",
       "expect": {
         "executor": "self",
-        "model": "opus",
+        "model_ref": "claude_orchestrator",
         "reasoning_effort": "xhigh"
       },
       "required": true
@@ -131,11 +131,11 @@
       "id": "route.deep-reasoning",
       "type": "route",
       "dimension": "routing",
-      "summary": "Deep reasoning stays on Opus.",
+      "summary": "Deep reasoning stays on Claude.",
       "archetype": "deep-reasoning",
       "expect": {
         "executor": "self",
-        "model": "opus",
+        "model_ref": "claude_orchestrator",
         "reasoning_effort": "xhigh"
       },
       "required": true
@@ -144,11 +144,11 @@
       "id": "route.implement-feature",
       "type": "route",
       "dimension": "routing",
-      "summary": "Feature implementation uses GPT-5.5 workspace write.",
+      "summary": "Feature implementation uses configured Codex workspace-write.",
       "archetype": "implement-feature",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -158,11 +158,11 @@
       "id": "route.frontend-implement",
       "type": "route",
       "dimension": "routing",
-      "summary": "Frontend structure stays on Opus.",
+      "summary": "Frontend structure stays on Claude.",
       "archetype": "frontend-implement",
       "expect": {
         "executor": "self",
-        "model": "opus",
+        "model_ref": "claude_orchestrator",
         "reasoning_effort": "xhigh"
       },
       "required": true
@@ -171,11 +171,11 @@
       "id": "route.frontend-polish",
       "type": "route",
       "dimension": "routing",
-      "summary": "Frontend polish uses GPT-5.5 workspace write.",
+      "summary": "Frontend polish uses configured Codex workspace-write.",
       "archetype": "frontend-polish",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -185,11 +185,11 @@
       "id": "route.write-tests",
       "type": "route",
       "dimension": "routing",
-      "summary": "Test writing uses GPT-5.5 workspace write.",
+      "summary": "Test writing uses configured Codex workspace-write.",
       "archetype": "write-tests",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -199,11 +199,11 @@
       "id": "route.fix-bug",
       "type": "route",
       "dimension": "routing",
-      "summary": "Scoped bug fixes use GPT-5.5 workspace write.",
+      "summary": "Scoped bug fixes use configured Codex workspace-write.",
       "archetype": "fix-bug",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -213,11 +213,11 @@
       "id": "route.refactor-module",
       "type": "route",
       "dimension": "routing",
-      "summary": "Module refactors use GPT-5.5 workspace write.",
+      "summary": "Module refactors use configured Codex workspace-write.",
       "archetype": "refactor-module",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -227,11 +227,11 @@
       "id": "route.bulk-mechanical-edit",
       "type": "route",
       "dimension": "routing",
-      "summary": "Bulk mechanical edits use GPT-5.5 workspace write.",
+      "summary": "Bulk mechanical edits use configured Codex workspace-write.",
       "archetype": "bulk-mechanical-edit",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -241,11 +241,11 @@
       "id": "route.parallel-codegen",
       "type": "route",
       "dimension": "routing",
-      "summary": "Parallel codegen uses GPT-5.5 workspace write.",
+      "summary": "Parallel codegen uses configured Codex workspace-write.",
       "archetype": "parallel-codegen",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -255,11 +255,11 @@
       "id": "route.cheap-bulk",
       "type": "route",
       "dimension": "routing",
-      "summary": "Cheap bulk work uses GPT-5.5 workspace write.",
+      "summary": "Cheap bulk work uses configured Codex workspace-write.",
       "archetype": "cheap-bulk",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -269,11 +269,11 @@
       "id": "route.boilerplate",
       "type": "route",
       "dimension": "routing",
-      "summary": "Boilerplate uses GPT-5.5 workspace write.",
+      "summary": "Boilerplate uses configured Codex workspace-write.",
       "archetype": "boilerplate",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -283,11 +283,11 @@
       "id": "route.migration",
       "type": "route",
       "dimension": "routing",
-      "summary": "Migrations use GPT-5.5 workspace write.",
+      "summary": "Migrations use configured Codex workspace-write.",
       "archetype": "migration",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -297,11 +297,11 @@
       "id": "route.final-review",
       "type": "route",
       "dimension": "routing",
-      "summary": "Final review uses GPT-5.5 read-only.",
+      "summary": "Final review uses configured Codex read-only.",
       "archetype": "final-review",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_review",
         "sandbox": "read-only",
         "reasoning_effort": "xhigh"
       },
@@ -311,11 +311,11 @@
       "id": "route.second-opinion-review",
       "type": "route",
       "dimension": "routing",
-      "summary": "Second opinion review uses GPT-5.5 read-only.",
+      "summary": "Second opinion review uses configured Codex read-only.",
       "archetype": "second-opinion-review",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_review",
         "sandbox": "read-only",
         "reasoning_effort": "xhigh"
       },
@@ -325,11 +325,11 @@
       "id": "route.cross-model-tiebreak",
       "type": "route",
       "dimension": "routing",
-      "summary": "Cross-model tiebreak uses GPT-5.5 read-only.",
+      "summary": "Cross-model tiebreak uses configured Codex read-only.",
       "archetype": "cross-model-tiebreak",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_review",
         "sandbox": "read-only",
         "reasoning_effort": "xhigh"
       },
@@ -339,11 +339,11 @@
       "id": "route.security-review",
       "type": "route",
       "dimension": "routing",
-      "summary": "Security review uses GPT-5.5 read-only.",
+      "summary": "Security review uses configured Codex read-only.",
       "archetype": "security-review",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_review",
         "sandbox": "read-only",
         "reasoning_effort": "xhigh"
       },
@@ -353,11 +353,11 @@
       "id": "route.hard-bug",
       "type": "route",
       "dimension": "routing",
-      "summary": "Hard bugs use GPT-5.5 workspace write.",
+      "summary": "Hard bugs use configured Codex workspace-write.",
       "archetype": "hard-bug",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -367,11 +367,11 @@
       "id": "route.perf-optimization",
       "type": "route",
       "dimension": "routing",
-      "summary": "Performance optimization uses GPT-5.5 workspace write.",
+      "summary": "Performance optimization uses configured Codex workspace-write.",
       "archetype": "perf-optimization",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
         "reasoning_effort": "xhigh"
       },
@@ -405,7 +405,7 @@
       "id": "task.route-cli-final-review",
       "type": "task",
       "dimension": "cli-contract",
-      "summary": "The public route CLI should resolve final-review as GPT-5.5 read-only.",
+      "summary": "The public route CLI should resolve final-review as configured Codex read-only.",
       "target_type": "plugin",
       "target_name": "legion-router",
       "command": [
@@ -420,8 +420,8 @@
         },
         {
           "type": "stdout_json_field_equals",
-          "field": "model",
-          "equals": "gpt-5.5"
+          "field": "model_ref",
+          "equals": "codex_review"
         },
         {
           "type": "stdout_json_field_equals",
@@ -440,8 +440,8 @@
       "target_name": "legion-observability",
       "command": [
         "bash",
-        "-lc",
-        "{repo}/legion-observability/bin/legion-trace emit --executor codex --model gpt-5.5 --status ok --task bench-fixture > {workspace}/span.jsonl && {repo}/legion-observability/bin/legion-trace validate {workspace}/span.jsonl"
+        "-c",
+        "{repo}/legion-observability/bin/legion-trace emit --executor codex --model \"$({repo}/legion-router/bin/legion-route --model-ref codex_workhorse)\" --status ok --task bench-fixture > {workspace}/span.jsonl && {repo}/legion-observability/bin/legion-trace validate {workspace}/span.jsonl"
       ],
       "validators": [
         {

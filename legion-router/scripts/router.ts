@@ -35,6 +35,7 @@ const UPSTREAM_TIMEOUT = _optionalEnvInt("UPSTREAM_TIMEOUT_MS", 120_000);
 const STREAM_UPSTREAM_TIMEOUT = _optionalEnvInt("STREAM_UPSTREAM_TIMEOUT_MS", 0);
 const LOG_FORMAT = _optionalEnv("LOG_FORMAT", "json");
 const AUTO_TIER = process.env.AUTO_TIER === "true"; // Enable automatic model tiering by request size
+const MODEL_CONFIG_FILE = _optionalEnv("LEGION_MODELS_FILE", `${import.meta.dir}/../config/models.toml`);
 
 // ── Structured logging ──────────────────────────────────────────────
 function log(level: "info" | "warn" | "error", msg: string, meta?: Record<string, unknown>) {
@@ -50,6 +51,38 @@ function log(level: "info" | "warn" | "error", msg: string, meta?: Record<string
 		const metaStr = meta ? ` ${JSON.stringify(meta)}` : "";
 		console.log(`[router] [${level}] ${msg}${metaStr}`);
 	}
+}
+
+function parseModelCatalogToml(text: string): Record<string, string> {
+	const out: Record<string, string> = {};
+	let inModels = false;
+	for (const raw of text.split(/\r?\n/)) {
+		const line = raw.replace(/\s+#.*$/, "").trim();
+		if (!line || line.startsWith("#")) continue;
+		const section = line.match(/^\[([^\]]+)\]$/);
+		if (section) {
+			inModels = section[1] === "models";
+			continue;
+		}
+		if (!inModels) continue;
+		const entry = line.match(/^([A-Za-z0-9_-]+)\s*=\s*"([^"]+)"$/);
+		if (entry) out[entry[1]] = entry[2];
+	}
+	return out;
+}
+
+async function loadModelCatalog(path: string): Promise<Record<string, string>> {
+	try {
+		return parseModelCatalogToml(await Bun.file(path).text());
+	} catch (err) {
+		log("warn", "model catalog unavailable", { path, error: String(err) });
+		return {};
+	}
+}
+
+const MODEL_CATALOG = await loadModelCatalog(MODEL_CONFIG_FILE);
+function configuredModel(ref: string): string {
+	return MODEL_CATALOG[ref] ?? "";
 }
 
 // ── Upstream configs ────────────────────────────────────────────────
@@ -531,12 +564,16 @@ async function parseRequest(req: Request): Promise<ParsedRequest> {
 				const lowerModel = model.toLowerCase();
 				// Only downgrade if the model is an expensive tier (opus/sonnet)
 				if (lowerModel.includes("opus") || lowerModel.includes("sonnet")) {
-					// Use a known-good haiku id; regex-substituting tier tokens can mangle
+					// Use the configured haiku id; regex-substituting tier tokens can mangle
 					// provider-specific model aliases into names that do not exist.
-					const haiku = _optionalEnv("AUTO_TIER_HAIKU_MODEL", "claude-haiku-4-5");
-					log("info", "Auto-tier: downgraded for small request", { from: model, to: haiku, bodyLen: body.length });
-					model = haiku;
-					parsedBody.model = haiku;
+					const haiku = _optionalEnv("AUTO_TIER_HAIKU_MODEL", configuredModel("auto_tier_haiku"));
+					if (haiku) {
+						log("info", "Auto-tier: downgraded for small request", { from: model, to: haiku, bodyLen: body.length });
+						model = haiku;
+						parsedBody.model = haiku;
+					} else {
+						log("warn", "Auto-tier skipped: missing auto_tier_haiku in model catalog", { from: model, bodyLen: body.length });
+					}
 				}
 			}
 

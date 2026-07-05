@@ -23,9 +23,10 @@ legion-observability/bin/legion-bench corpus --corpus aider-polyglot-python --re
 
 Models used for this historical pre-pin run (as labeled on the spans): codex
 `gpt-5.4`, an older Sonnet baseline, the old Cursor default, and
-`legion-delegate` on the then-current `gpt-5.4` route. Current runs pin direct
-Codex and Legion Codex routing to `gpt-5.5`, direct Claude to `opus`, and Cursor
-to `composer-2.5`; explicit Sonnet runs should use `claude-sonnet-5`.
+`legion-delegate` on the then-current `gpt-5.4` route. Current runs read direct
+Codex, Legion Codex, Claude, and Cursor defaults from
+`legion-router/config/models.toml`; explicit Sonnet runs should use
+`CLAUDE_MODEL="$(legion-route --model-ref claude_sonnet)"`.
 
 ## Results
 
@@ -83,9 +84,9 @@ non-saturated 79–100% spread. Future runs use the fixed runner.
   (e.g. claude 0.63–0.90). The codex-vs-claude gap is significant even at n=34, but
   the smaller deltas (cursor/delegate ±2.9pp, p=1.0) are noise. Re-run with
   `--repeat 3+` to tighten.
-- **Default models** — this historical run used the old CLI defaults, not the new
-  best-model pins. Current direct-Claude runs default to `opus`; if you need a
-  Sonnet-only baseline, use `CLAUDE_MODEL=claude-sonnet-5`. The spans label the
+- **Default models** — this historical run used the old CLI defaults, not the
+  current `models.toml` catalog. If you need a Sonnet-only baseline, use
+  `CLAUDE_MODEL="$(legion-route --model-ref claude_sonnet)"`. The spans label the
   actual model.
 - **Python-only / 34 cases** — only the Python subset of Polyglot is packaged;
   JS/Go/Rust/Java/C++ need extra toolchains. SWE-bench-style repo-level difficulty

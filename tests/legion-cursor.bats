@@ -6,6 +6,7 @@ setup() {
     setup_test_env
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
     export LEGION_CURSOR="$REPO_ROOT/legion-router/bin/legion-cursor"
+    CURSOR_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref cursor_default)"
 }
 
 make_test_repo() {
@@ -24,11 +25,11 @@ make_test_repo() {
     local repo; repo="$(make_test_repo ok1)"
     run "$LEGION_CURSOR" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e '.status == "ok" and .executor == "cursor" and .model == "composer-2.5"'
+    echo "$output" | jq -e --arg model "$CURSOR_DEFAULT" '.status == "ok" and .executor == "cursor" and .model == $model'
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
     grep -q "MOCK_CURSOR_CHANGE" "$diff"
-    assert_mock_called agent "-p --output-format json --trust --force --model composer-2.5"
+    assert_mock_called agent "-p --output-format json --trust --force --model $CURSOR_DEFAULT"
 
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$output" = "cursor" ]
@@ -38,7 +39,7 @@ make_test_repo() {
     local repo; repo="$(make_test_repo ro1)"
     run "$LEGION_CURSOR" run --task "inspect only" --repo "$repo" --sandbox read-only --quiet
     [ "$status" -eq 0 ]
-    assert_mock_called agent "-p --output-format json --trust --mode plan --model composer-2.5 inspect only"
+    assert_mock_called agent "-p --output-format json --trust --mode plan --model $CURSOR_DEFAULT inspect only"
     [ ! -s "$(echo "$output" | jq -r .diff_path)" ]
 }
 

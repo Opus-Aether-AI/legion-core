@@ -9,6 +9,9 @@ while [ -L "$src" ]; do
   case "$src" in /*) ;; *) src="$dir/$src" ;; esac
 done
 _self_dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+# shellcheck disable=SC1091
+# shellcheck source=lib/model-config.sh
+source "$_self_dir/lib/model-config.sh"
 
 GH="${GH_BIN:-gh}"
 
@@ -58,8 +61,10 @@ resolve_worker() {
       untrusted_flag="--untrusted"
       ;;
     cursor)
+      local cursor_default_model
+      cursor_default_model="$(legion_model_ref cursor_default)" || die "could not resolve cursor_default in models.toml"
       worker_bin="${worker_bin:-${LEGION_INTAKE_WORKER_BIN:-${LEGION_CURSOR_BIN:-$_self_dir/legion-cursor.sh}}}"
-      default_model="${LEGION_CURSOR_MODEL:-${CURSOR_MODEL:-composer-2.5}}"
+      default_model="${LEGION_CURSOR_MODEL:-${CURSOR_MODEL:-$cursor_default_model}}"
       untrusted_flag=""
       ;;
     custom)

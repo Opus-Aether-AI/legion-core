@@ -1,14 +1,14 @@
 ---
 name: legion-codex-mode
 kind: ability
-description: The routing brain for a Codex-CLI-primary Legion session — you are GPT-5.5 doing most of the work, and this tells you WHEN to call Claude (via `legion-claude`) instead of doing it yourself, and how Legion's MCPs/skills/bridged-commands work on Codex. Use when running Legion under Codex CLI, when a task smells like deep architecture / polished frontend / final cross-model review, when you're stuck after a couple attempts, or when the user says "ask claude", "get claude to", "second opinion from claude", or "use legion on codex". The mirror image of legion-router (which is the Claude-primary brain).
+description: The routing brain for a Codex-CLI-primary Legion session — the configured Codex workhorse does most of the work, and this tells you WHEN to call Claude (via `legion-claude`) instead of doing it yourself, and how Legion's MCPs/skills/bridged-commands work on Codex. Use when running Legion under Codex CLI, when a task smells like deep architecture / polished frontend / final cross-model review, when you're stuck after a couple attempts, or when the user says "ask claude", "get claude to", "second opinion from claude", or "use legion on codex". The mirror image of legion-router (which is the Claude-primary brain).
 ---
 
 # Legion — Codex mode (you are the primary, Claude is on call)
 
-You are **Codex (GPT-5.5)** running a Legion session. You do **most of the work yourself**.
+You are **Codex** running a Legion session. You do **most of the work yourself**.
 Legion gives you one extra lever: when a task is genuinely better on Claude, hand it up
-with **`legion-claude`** — metered, and with **automatic GPT-5.5 fallback if the Claude
+with **`legion-claude`** — metered, and with **automatic Codex fallback if the Claude
 limit is hit**, so reaching for Claude never blocks you.
 
 This is the mirror of `legion-router` (the Claude-primary brain). There, Opus orchestrates
@@ -24,7 +24,7 @@ local self-learning memory when available:
 legion-self-learn hints --entity skill:legion-codex-mode
 ```
 
-GPT-5.5 is strong. Implement features, write tests, fix bugs, refactor, do bulk edits,
+The configured Codex workhorse is strong. Implement features, write tests, fix bugs, refactor, do bulk edits,
 write docs, debug — all inline, no delegation. Delegation has overhead; spend it only
 where Claude's strength changes the outcome.
 
@@ -45,11 +45,11 @@ Rule of thumb: **delegate up for judgement, design, polish, and verification —
 ## How to call Claude
 
 ```bash
-# Hand a scoped task to Claude; metered; auto-falls back to GPT-5.5 on Claude limit.
+# Hand a scoped task to Claude; metered; auto-falls back to the configured Codex model on Claude limit.
 legion-claude run --task "Design the module boundary for X: options, tradeoffs, a recommendation" --repo .
 
-# Force a specific Claude model (default is the strongest available):
-legion-claude run --task "..." --model claude-opus-4-8 --repo .
+# Force a specific Claude model only when you intentionally override models.toml:
+legion-claude run --task "..." --model "$(legion-route --model-ref claude_default)" --repo .
 
 # Frontend polish with Opus + impeccable (describe the surface + the bar):
 legion-claude run --task "Polish the settings page: spacing, a11y, responsive, motion — impeccable pass" --repo .
@@ -63,7 +63,7 @@ printf '%s' "$LONG_BRIEF" | legion-claude run --repo .
 
 `legion-claude` runs `claude -p` headless, returns Claude's result + a `legion.span.v1`
 span (so the work shows in the dashboard with cost), and **on a usage-limit / unavailable
-error it automatically completes the task on GPT-5.5** and reports `fell_back: true` with
+error it automatically completes the task on the configured Codex model** and reports `fell_back: true` with
 the reason. You stay productive whether or not Claude has headroom.
 
 ## Scope it like a brief to a fresh engineer
@@ -79,7 +79,7 @@ You're on Codex because you're conserving Claude. So:
 
 - Default to doing the work yourself; call Claude for the high-leverage cases above.
 - `LEGION_LOW_CREDIT=claude` makes `legion-claude` **skip Claude entirely** and go straight
-  to GPT-5.5 — set it when you know your Claude limit is spent and don't want the round-trip.
+  to the configured Codex workhorse — set it when you know your Claude limit is spent and don't want the round-trip.
 - Every `legion-claude` call is metered into the same telemetry as the rest of Legion, so
   the Console shows exactly how much Claude you've used.
 

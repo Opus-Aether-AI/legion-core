@@ -12,6 +12,8 @@ setup() {
     FIXTURE="$BATS_TEST_DIRNAME/fixtures/codex-json/turn-with-diff.jsonl"
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
     export LEGION_COSTS_FILE="$REPO_ROOT/legion-router/config/costs.json"
+    CODEX_WORKHORSE="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
+    CODEX_REVIEW="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_review)"
 }
 
 # Make a throwaway git repo with one source file; echoes its path.
@@ -356,8 +358,8 @@ repos_file_for_repo() {
   local repo; repo="$(make_test_repo arch1)"
   run "$DELEGATE" run --archetype bulk-mechanical-edit --task "x" --repo "$repo" --quiet
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.model == "gpt-5.5"'
-  assert_mock_called codex "exec --json -m gpt-5.5 -s workspace-write"
+  echo "$output" | jq -e --arg model "$CODEX_WORKHORSE" '.model == $model'
+  assert_mock_called codex "exec --json -m $CODEX_WORKHORSE -s workspace-write"
   assert_mock_called codex "model_reasoning_effort=xhigh"
 }
 
@@ -375,12 +377,12 @@ repos_file_for_repo() {
   [[ "$output" == *"executor=self"* ]]
 }
 
-@test "delegate review: --archetype gives gpt-5.5 + structured verdict via --output-schema" {
+@test "delegate review: --archetype gives configured reviewer + structured verdict via --output-schema" {
   local repo; repo="$(make_test_repo arch4)"
   run "$DELEGATE" review --archetype second-opinion-review --base main --repo "$repo" --quiet
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.model == "gpt-5.5" and .verdict.verdict == "approve" and (.verdict.summary | type == "string")'
-  assert_mock_called codex "exec review --base main -m gpt-5.5"
+  echo "$output" | jq -e --arg model "$CODEX_REVIEW" '.model == $model and .verdict.verdict == "approve" and (.verdict.summary | type == "string")'
+  assert_mock_called codex "exec review --base main -m $CODEX_REVIEW"
   assert_mock_called codex "output-schema"
 }
 
@@ -403,18 +405,18 @@ repos_file_for_repo() {
   [[ "$output" == *"--keep"* ]]
 }
 
-@test "delegate run: archetype quota failure does not downgrade off gpt-5.5" {
+@test "delegate run: archetype quota failure does not downgrade off configured workhorse" {
   local repo; repo="$(make_test_repo fb1)"
-  MOCK_CODEX_QUOTA_FAIL=gpt-5.5 run "$DELEGATE" run --archetype bulk-mechanical-edit --task x --repo "$repo" --quiet
+  MOCK_CODEX_QUOTA_FAIL="$CODEX_WORKHORSE" run "$DELEGATE" run --archetype bulk-mechanical-edit --task x --repo "$repo" --quiet
   [ "$status" -eq 1 ]
-  echo "$output" | jq -e '.status == "failed" and .model == "gpt-5.5"'
+  echo "$output" | jq -e --arg model "$CODEX_WORKHORSE" '.status == "failed" and .model == $model'
 }
 
 @test "delegate run: a non-quota failure does NOT burn the fallback chain" {
   local repo; repo="$(make_test_repo fb2)"
   MOCK_CODEX_FAIL=1 run "$DELEGATE" run --archetype bulk-mechanical-edit --task x --repo "$repo" --quiet
   [ "$status" -eq 1 ]
-  echo "$output" | jq -e '.status == "failed" and .model == "gpt-5.5"'
+  echo "$output" | jq -e --arg model "$CODEX_WORKHORSE" '.status == "failed" and .model == $model'
 }
 
 @test "delegate run: LEGION_LOW_CREDIT=codex refuses to delegate to a depleted provider" {
@@ -431,13 +433,13 @@ repos_file_for_repo() {
   echo "$output" | jq -e '.status == "ok"'
 }
 
-@test "delegate run: LEGION_LOW_CREDIT=claude delegates a normally-self task to GPT" {
+@test "delegate run: LEGION_LOW_CREDIT=claude delegates a normally-self task to Codex" {
   local repo; repo="$(make_test_repo lc2)"
   LEGION_LOW_CREDIT=claude run "$DELEGATE" run --archetype deep-reasoning --task x --repo "$repo" --quiet
   [ "$status" -eq 0 ]
   # the substitution warning goes to stderr (merged into $output by bats run); the
   # JSON result is the last line of stdout.
-  echo "$output" | tail -n1 | jq -e '.status == "ok" and .model == "gpt-5.5"'
+  echo "$output" | tail -n1 | jq -e --arg model "$CODEX_WORKHORSE" '.status == "ok" and .model == $model'
 }
 
 @test "delegate run: over_budget exits 0 — usable diff, graceful degradation (M1)" {

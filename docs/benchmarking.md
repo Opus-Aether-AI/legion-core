@@ -41,11 +41,12 @@ the next adapter.
 > zeroing the `cursor-agent` and `legion-cursor` modes. Run the live bench with a
 > short `LEGION_BENCH_DIR` (e.g. under `/tmp`); CI uses the short `$RUNNER_TEMP`.
 
-> **Direct baselines use best-in-family models.** Direct Codex defaults to
-> `CODEX_MODEL=gpt-5.5`, direct Claude defaults to `CLAUDE_MODEL=opus`, and
-> Cursor-backed modes default to `CURSOR_MODEL=composer-2.5` /
-> `LEGION_CURSOR_MODEL=composer-2.5`. Span telemetry (`legion.span.v1`) records
-> the chosen model and usage counts; Cursor USD cost stays `$0` unless Cursor returns a per-call
+> **Direct baselines use the same configured model catalog as Legion.** Direct
+> Codex, direct Claude, Cursor Agent, and Legion Cursor read defaults from
+> `legion-router/config/models.toml`; `CODEX_MODEL`, `CLAUDE_MODEL`,
+> `CURSOR_MODEL`, and `LEGION_CURSOR_MODEL` are explicit overrides for controlled
+> comparisons. Span telemetry (`legion.span.v1`) records the chosen model and
+> usage counts; Cursor USD cost stays `$0` unless Cursor returns a per-call
 > charge because Composer is subscription-priced here.
 
 ## Goals
@@ -199,7 +200,7 @@ the Python standard library:
       "archetype": "frontend-review",
       "expect": {
         "executor": "codex",
-        "model": "gpt-5.5",
+        "model_ref": "codex_review",
         "sandbox": "read-only"
       },
       "required": true

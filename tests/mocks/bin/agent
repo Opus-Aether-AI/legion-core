@@ -5,7 +5,7 @@ set -euo pipefail
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'agent %s\n' "$*" >> "$MOCK_CALL_LOG"
 
 force=0
-model="composer-2.5"
+model="fixture-cursor"
 mode=""
 while [[ $# -gt 0 ]]; do
   case "$1" in

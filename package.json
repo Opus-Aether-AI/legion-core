@@ -51,6 +51,7 @@
     "legion-setup/",
     "legion-codex-mode/",
     "scripts/",
+    "docs/",
     ".claude-plugin/",
     "identity/",
     "README.md",

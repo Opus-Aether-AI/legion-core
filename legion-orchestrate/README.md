@@ -41,6 +41,11 @@ Installed plugins should pass their own manifest path. Repo-local manifests unde
 `.legion/plugins/<name>/legion-plugin.toml` are optional overrides, not required
 per-repo setup.
 
+The `plan` command must write `plan.json`. It may also write `slices.jsonl` for
+full control. If it only writes a brief plan with `mode =
+"legion-generate-slices"`, `legion-run` generates a compact default TDD slice
+set from that brief and records it as `slices.jsonl` in the run directory.
+
 ## `legion-fanout`
 
 Run many scoped slices in **parallel** across executors and collect verified diffs + cost:

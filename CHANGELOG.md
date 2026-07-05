@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.11.1...v0.12.0) (2026-07-05)
+
+
+### Added
+
+* enforce domain plugin pipeline runner ([#72](https://github.com/Opus-Aether-AI/legion-core/issues/72)) ([14ca173](https://github.com/Opus-Aether-AI/legion-core/commit/14ca1733e29a612751494780d02c199728aced73))
+
 ## [0.11.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.11.0...v0.11.1) (2026-07-05)
 
 

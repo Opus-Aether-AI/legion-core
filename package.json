@@ -1,6 +1,6 @@
 {
   "name": "@opus-aether-ai/legion-core",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "description": "Legion engine — model-agnostic delegation, observability, orchestration, and cross-harness setup for AI coding agents. Consumed by legion-code and other agents.",
   "license": "Apache-2.0",
   "repository": {

@@ -4,7 +4,8 @@ Legion is the open-source (Apache-2.0) engine that runs a cohort of coding agent
 **Codex, Cursor, Claude, and the models you already trust** — as one accountable workflow:
 **plan → execute → review → a verified Pull Request**. The core is free forever. Enterprise is
 Legion run **inside your environment, on your models, gated by your standards** — with us on the
-line for it.
+line for it. It meets your engineers in the tools they already use — **Claude Code, Codex, Cursor,
+and opencode** — from one shared install.
 
 > The one-line pitch for a CTO: *Legion is orchestration, not another cloud. It adds no place for
 > your code to go that it doesn't already go — and every change it makes lands as a normal PR that

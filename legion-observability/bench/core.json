@@ -201,6 +201,48 @@
         }
       ],
       "required": true
+    },
+    {
+      "id": "task.code-intel-typescript-diagnostics",
+      "type": "task",
+      "dimension": "code-intelligence",
+      "summary": "Code intelligence should catch TypeScript diagnostics and emit a Legion artifact.",
+      "target_type": "plugin",
+      "target_name": "legion-code-intel",
+      "files": {
+        "fake-tsc": "#!/usr/bin/env bash\necho \"src/bad.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.\"\nexit 2\n",
+        "tsconfig.json": "{\"compilerOptions\":{\"strict\":true}}\n",
+        "src/bad.ts": "export const n: number = \"no\";\n"
+      },
+      "command": [
+        "bash",
+        "-lc",
+        "chmod +x ./fake-tsc && LEGION_TSC_BIN=./fake-tsc {repo}/legion-code-intel/bin/legion-code-intel diagnostics --repo . --adapter typescript --emit-span --json"
+      ],
+      "expect_exit": 1,
+      "validators": [
+        {
+          "type": "stdout_json_field_equals",
+          "field": "schema",
+          "equals": "legion.code-intel.v1"
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "status",
+          "equals": "failed"
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "summary.errors",
+          "equals": 1
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "diagnostics.0.code",
+          "equals": "TS2322"
+        }
+      ],
+      "required": true
     }
   ]
 }

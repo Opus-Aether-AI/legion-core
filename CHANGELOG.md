@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.10.2...v0.11.0) (2026-07-05)
+
+
+### Added
+
+* **code-intel:** add optional diagnostic gate ([#65](https://github.com/Opus-Aether-AI/legion-core/issues/65)) ([71efcca](https://github.com/Opus-Aether-AI/legion-core/commit/71efcca87c2e7072933e2217ff5b9bbea54bae84))
+
 ## [0.10.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.10.1...v0.10.2) (2026-07-02)
 
 

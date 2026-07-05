@@ -30,6 +30,7 @@
     "legion-trace": "legion-observability/bin/legion-trace",
     "legion-code-intel": "legion-code-intel/bin/legion-code-intel",
     "legion-fanout": "legion-orchestrate/bin/legion-fanout",
+    "legion-run": "legion-orchestrate/bin/legion-run",
     "legion-claude": "legion-router/bin/legion-claude",
     "legion-control": "legion-router/bin/legion-control",
     "legion-cursor": "legion-router/bin/legion-cursor",

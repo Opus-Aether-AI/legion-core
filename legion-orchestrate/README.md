@@ -4,6 +4,43 @@ Legion's dynamic **multi-model** orchestrator — the ultracode loop, but Claude
 
 > Decompose → fan out (configured Codex, parallel) → cross-model verify (configured reviewer) → synthesize → gate.
 
+## `legion-run`
+
+Run a domain plugin through the fixed full-app Legion pipeline. Use this from
+installed app-builder or domain plugins when you want the same workflow every
+time: doctor, self-learn hints, plugin plan, route, fan-out/apply, final review,
+plugin validation, plugin evaluation, observability HTML, share accounting,
+self-learn, and heal planning.
+
+```bash
+legion-run \
+  --plugin-manifest /path/to/my-product-plugin/legion-plugin.toml \
+  --repo . \
+  --task "Build the requested app change" \
+  --json
+```
+
+Required plugin manifest:
+
+```toml
+[plugin]
+name = "my-product-plugin"
+kind = "domain-plugin"
+
+[pipeline]
+profile = "legion.full_app.v1"
+entrypoint = "legion-run"
+
+[commands]
+plan = "my-product-plan"
+validate = "my-product-validate"
+evaluate = "my-product-eval"
+```
+
+Installed plugins should pass their own manifest path. Repo-local manifests under
+`.legion/plugins/<name>/legion-plugin.toml` are optional overrides, not required
+per-repo setup.
+
 ## `legion-fanout`
 
 Run many scoped slices in **parallel** across executors and collect verified diffs + cost:

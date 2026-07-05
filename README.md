@@ -56,12 +56,12 @@ it, reviews it, and learns from the result.
 ```mermaid
 flowchart LR
   A["User asks for work"] --> B["Your plugin<br/>domain plan + gates"]
-  B --> C["Legion route<br/>pick model + tool"]
-  C --> D["Fan out<br/>safe slices"]
-  D --> E["Agents code<br/>isolated worktrees"]
+  B --> C["legion-run<br/>fixed full-app pipeline"]
+  C --> D["Doctor + hints<br/>health + memory"]
+  D --> E["Route + fan out<br/>safe slices"]
   E --> F["Review + apply<br/>diffs, tests, verdicts"]
-  F --> G["Observe<br/>spans, cost, reports"]
-  G --> H["Self-learn<br/>hints + memory"]
+  F --> G["Observe<br/>HTML + spans + cost"]
+  G --> H["Self-learn + heal<br/>hints + recovery plan"]
   H --> B
 ```
 
@@ -74,9 +74,27 @@ policy.
 ```text
 my-product-plugin/
   SKILL.md                    # when to use it and how it builds/reviews
+  legion-plugin.toml           # Legion runner contract
   .claude-plugin/plugin.json   # plugin metadata
   evals/                       # optional golden tasks
   bin/                         # optional deterministic helpers
+```
+
+Minimal `legion-plugin.toml`:
+
+```toml
+[plugin]
+name = "product-app-builder"
+kind = "domain-plugin"
+
+[pipeline]
+profile = "legion.full_app.v1"
+entrypoint = "legion-run"
+
+[commands]
+plan = "product-plan"
+validate = "product-validate"
+evaluate = "product-eval"
 ```
 
 Minimal `SKILL.md`:
@@ -89,19 +107,126 @@ description: Use when building or changing this product with Legion Core.
 
 For app changes:
 
-1. Run `legion-self-learn hints --entity plugin:product-app-builder`.
-2. Run `legion-doctor --repo . --strict-demo`.
-3. Split the request into implementation, tests, and review slices.
-4. Use `legion-fanout --slices slices.jsonl --repo . --apply --json`.
-5. Run the repo's own gates, such as tests, lint, typecheck, and build.
-6. Open evidence with `legion-report open latest`.
-7. Record useful failures with `legion-self-learn record`.
+1. Convert the request into your domain plan, gates, and eval.
+2. Run `legion-run --plugin-manifest <this-plugin>/legion-plugin.toml --repo . --task "<request>" --json`.
+3. Inspect `run_dir` from the JSON output for `legion-observability.html`.
+4. Do not call `legion-fanout` directly unless you are debugging the lower-level primitive.
 ```
 
-Private Legion Code plugins use this same pattern: for example, an app-builder
-plugin can translate a product request into backend/UI/test/review slices, and a
-review-gate plugin can force final review plus repo gates before a PR. The
-plugin owns those domain rules; Legion Core owns the execution and evidence.
+Installed plugins should pass their bundled manifest path, so users do not need
+to configure every repo. Repo-local manifests under
+`.legion/plugins/<name>/legion-plugin.toml` are only for teams that want an app
+to pin or override plugin behavior.
+
+Private Legion Code plugins use this same pattern without exposing their full
+internals: an app-builder plugin can turn a product request into backend, UI,
+test, review, and eval slices; an AI architect plugin can provide the planning
+command; a software architect plugin can provide validation gates. The plugin
+owns those domain rules. Legion Core owns the execution, evidence, reports,
+self-learning, and healing loop.
+
+## Create A Domain Plugin
+
+A domain plugin is small. It needs one manifest, one skill file, and three
+commands. The commands can be shell scripts, Node scripts, Python scripts, or
+anything on `PATH`.
+
+```text
+support-app-builder/
+  SKILL.md
+  legion-plugin.toml
+  bin/
+    support-plan
+    support-validate
+    support-eval
+```
+
+`legion-plugin.toml` links your plugin to Legion Core:
+
+```toml
+[plugin]
+name = "support-app-builder"
+kind = "domain-plugin"
+
+[pipeline]
+profile = "legion.full_app.v1"
+entrypoint = "legion-run"
+
+[commands]
+plan = "support-plan"
+validate = "support-validate"
+evaluate = "support-eval"
+```
+
+`SKILL.md` tells the coding agent when to use it:
+
+```md
+---
+name: support-app-builder
+description: Use when building or changing a customer-support SaaS app.
+---
+
+When the user asks for a support-app feature, run:
+
+`legion-run --plugin-manifest <plugin-dir>/legion-plugin.toml --repo . --task "<request>" --json`
+
+Then open the returned `run_dir/legion-observability.html`.
+```
+
+`support-plan` turns the user request into Legion slices:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{"schema":"legion.plugin.plan.v1","plugin":"$LEGION_PLUGIN_NAME","task":"$LEGION_TASK"}
+JSON
+
+cat > "$LEGION_RUN_SLICES_FILE" <<JSONL
+{"archetype":"implement-feature","task":"Build the backend/API part for: $LEGION_TASK"}
+{"archetype":"implement-feature","task":"Build the UI/workflow part for: $LEGION_TASK"}
+{"archetype":"write-tests","task":"Add tests for: $LEGION_TASK"}
+JSONL
+```
+
+`support-validate` runs the app's gates:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+npm test
+npm run build
+printf '{"ok":true,"gates":["npm test","npm run build"]}\n'
+```
+
+`support-eval` scores the result in your domain language:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '{"ok":true,"score":1,"total":1,"checks":["support workflow implemented"]}\n'
+```
+
+Make the commands executable and run the plugin:
+
+```bash
+chmod +x support-app-builder/bin/*
+export PATH="$PWD/support-app-builder/bin:$PATH"
+
+legion-run \
+  --plugin-manifest "$PWD/support-app-builder/legion-plugin.toml" \
+  --repo /path/to/app \
+  --task "Add SLA-based ticket escalation" \
+  --json
+```
+
+The important rule: your plugin owns the domain decisions, but it should enter
+Legion through `legion-run`. That is what guarantees doctor, routing, fan-out,
+review, validation, evaluation, observability HTML, self-learning, and heal
+planning all happen every time.
 
 ## Build In Conversation
 
@@ -111,8 +236,8 @@ instead of memorizing commands.
 ```text
 Use product-app-builder to add organization invitations to this app.
 
-Plan the change, split backend/UI/tests/review slices, use Legion Core for
-delegation, run the repo gates, then open the latest Legion report.
+Plan the change, run the fixed Legion pipeline, apply the safe slices, run the
+repo gates, then open the generated Legion observability report.
 ```
 
 The plugin can then produce slices like:
@@ -124,13 +249,19 @@ The plugin can then produce slices like:
 {"archetype":"final-review","task":"Review the full diff for correctness, security, and missing tests."}
 ```
 
-Legion executes them:
+The plugin executes the whole pipeline through one command:
 
 ```bash
-legion-fanout --slices slices.jsonl --repo . --max-concurrency 3 --apply --json
-legion-delegate review --repo . --archetype final-review --base HEAD
-legion-report open latest
+legion-run \
+  --plugin-manifest /path/to/product-app-builder/legion-plugin.toml \
+  --repo . \
+  --task "Add organization invitations to this app." \
+  --json
 ```
+
+`legion-fanout`, `legion-route`, and `legion-delegate` are still available as
+lower-level primitives, but `legion-run` is the default entrypoint for domain
+plugins because it always produces the same full-pipeline evidence contract.
 
 ## State And Reports
 

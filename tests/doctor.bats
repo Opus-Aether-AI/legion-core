@@ -194,6 +194,52 @@ EOF
   echo "$output" | tail -n 1 | jq -e '[.[].check] | index("route-smoke") and index("delegate-smoke") and index("state-root") and index("test-tools")'
 }
 
+@test "doctor: domain-plugin passes when manifest requires legion-run" {
+  d="$BATS_TEST_TMPDIR/domain-ok"
+  mkdir -p "$d/.legion/plugins/fieldops"
+  cat > "$d/.legion/plugins/fieldops/legion-plugin.toml" <<'TOML'
+[plugin]
+name = "fieldops"
+kind = "domain-plugin"
+
+[pipeline]
+profile = "legion.full_app.v1"
+entrypoint = "legion-run"
+
+[commands]
+plan = "fieldops-plan"
+validate = "fieldops-validate"
+evaluate = "fieldops-eval"
+TOML
+
+  run "$DOCTOR" --repo "$d" --only domain-plugin
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS"* ]]
+}
+
+@test "doctor: domain-plugin fails when manifest bypasses legion-run" {
+  d="$BATS_TEST_TMPDIR/domain-bad"
+  mkdir -p "$d/.legion/plugins/fieldops"
+  cat > "$d/.legion/plugins/fieldops/legion-plugin.toml" <<'TOML'
+[plugin]
+name = "fieldops"
+kind = "domain-plugin"
+
+[pipeline]
+profile = "legion.full_app.v1"
+entrypoint = "custom-runner"
+
+[commands]
+plan = "fieldops-plan"
+validate = "fieldops-validate"
+evaluate = "fieldops-eval"
+TOML
+
+  run "$DOCTOR" --repo "$d" --only domain-plugin
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"domain plugin must run through legion-run"* ]]
+}
+
 @test "doctor: router warns (exit 0) when nothing is listening" {
   ROUTER_PORT=59999 run "$DOCTOR" --repo "$GOOD" --only router
   [ "$status" -eq 0 ]

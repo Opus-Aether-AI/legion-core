@@ -164,6 +164,26 @@
           {
             "type": "file_contains",
             "path": "{workspace}/legion-report.html",
+            "text": "Legion Full Pipeline Report"
+          },
+          {
+            "type": "file_contains",
+            "path": "{workspace}/legion-report.html",
+            "text": "Pipeline Timeline"
+          },
+          {
+            "type": "file_contains",
+            "path": "{workspace}/legion-report.html",
+            "text": "Raw JSON Evidence"
+          },
+          {
+            "type": "file_contains",
+            "path": "{workspace}/legion-report.html",
+            "text": "Applied diff from Legion delegate"
+          },
+          {
+            "type": "file_contains",
+            "path": "{workspace}/legion-observability.html",
             "text": "Legion Observability Report"
           },
           {

@@ -49,7 +49,7 @@ jq -e 'type == "object"' "$workspace/review.json" >/dev/null
 
 python3 "$workspace/eval_fieldops_triage.py"
 legion-report --trace latest --json > "$workspace/legion-report.json"
-legion-report --trace latest --html > "$workspace/legion-report.html"
+legion-report --trace latest --html > "$workspace/legion-observability.html"
 legion-share --window 1d --json > "$workspace/legion-share.json"
 legion-self-learn record \
   --logs "$LEGION_STATE_ROOT" \
@@ -72,6 +72,11 @@ LEGION_BENCH_DIR="$LEGION_STATE_ROOT/nested-bench" \
 LEGION_TELEMETRY_DIR="$LEGION_STATE_ROOT/nested-spans" \
   legion-bench run --suite core --repo "$repo" --json --strict > "$workspace/bench-core.json"
 
+python3 "$repo/legion-observability/bench/adapters/render-fieldops-pipeline-report.py" \
+  --workspace "$workspace" \
+  --task-file "$task_file" \
+  --output "$workspace/legion-report.html"
+
 jq -cn \
   --slurpfile doctor "$workspace/doctor.json" \
   --slurpfile route_implement "$workspace/route-implement.json" \
@@ -84,4 +89,6 @@ jq -cn \
   --slurpfile self_learn "$workspace/self-learn-run.json" \
   --slurpfile heal "$workspace/heal-plan.json" \
   --slurpfile bench "$workspace/bench-core.json" \
-  '{schema:"legion.bench.fanout-review.v1",doctor:$doctor[0],routes:{implement:$route_implement[0],review:$route_review[0]},fanout:$fanout[0],review:$review[0],score:$score[0],report:$report[0],share:$share[0],self_learn:$self_learn[0],heal:$heal[0],bench_core:$bench[0]}'
+  --arg pipeline_report "$workspace/legion-report.html" \
+  --arg observability_html "$workspace/legion-observability.html" \
+  '{schema:"legion.bench.fanout-review.v1",doctor:$doctor[0],routes:{implement:$route_implement[0],review:$route_review[0]},fanout:$fanout[0],review:$review[0],score:$score[0],report:$report[0],share:$share[0],self_learn:$self_learn[0],heal:$heal[0],bench_core:$bench[0],artifacts:{pipeline_report:$pipeline_report,observability_html:$observability_html}}'

@@ -12,8 +12,9 @@ pipeline benchmark for demo readiness. Its default scripted modes prove the
 scorer evaluator without model spend. Its live `legion-fanout-review` mode runs
 one FieldOps triage coding task through the full local pipeline: strict doctor,
 route decisions, `legion-fanout`, diff apply, `legion-delegate review`, golden
-eval, `legion-report` JSON + HTML, `legion-share`, `legion-self-learn`,
-`legion-heal plan`, and a nested strict `legion-bench run --suite core`.
+eval, `legion-report` JSON + raw observability HTML, `legion-share`,
+`legion-self-learn`, `legion-heal plan`, and a nested strict
+`legion-bench run --suite core`.
 
 No-spend evaluator check:
 
@@ -34,7 +35,10 @@ legion-bench corpus \
 
 This is intentionally a smoke benchmark, not a model-quality leaderboard. It
 passes only when the one task produces the expected scorer and the full artifact
-trail exists, including the observability HTML report and self-learn output.
+trail exists. The main `legion-report.html` is a full pipeline report with the
+task, timeline, artifacts, applied diff, observability, self-learn, heal, and raw
+JSON evidence. The raw telemetry table is saved beside it as
+`legion-observability.html`.
 
 ## Two corpus layers
 

@@ -104,11 +104,87 @@ Example `slices.jsonl`:
 {"archetype":"final-review","task":"Review the full diff before merge"}
 ```
 
+### Build a full app in conversation
+
+When you are using Claude Code or Codex, you usually do not type every Legion
+command yourself. You ask the agent to use Legion, and the agent should plan,
+slice, delegate, review, test, and report.
+
+Example first message:
+
+```text
+Build a FieldOps dispatch app with Legion.
+
+The app should let dispatchers paste a service ticket, classify category and
+urgency, assign a required skill, show required parts, show ETA risk, and keep a
+history of triage decisions.
+
+Use Legion Core for the build:
+1. Run legion-doctor preflight.
+2. Make a short implementation plan.
+3. Break the app into backend, UI, tests, and review slices.
+4. Use legion-fanout for independent coding slices.
+5. Apply the diffs only after review.
+6. Run tests.
+7. Generate legion-report HTML and record self-learn output.
+```
+
+What the agent should do:
+
+```bash
+# 1. Check the harness before spending on model work.
+legion-self-learn hints --entity skill:legion-orchestrate
+legion-doctor --only codex
+legion-doctor --only router
+
+# 2. Create dependency-aware slices.
+cat > slices.jsonl <<'JSONL'
+{"archetype":"implement-feature","task":"Create the ticket triage API, validation, and persistence."}
+{"archetype":"implement-feature","task":"Create the dispatcher UI with ticket input, result cards, history, and loading/error states."}
+{"archetype":"write-tests","task":"Add unit and integration tests for triage rules and app workflows."}
+{"archetype":"frontend-review","task":"Review the dispatcher UI for clarity, density, and responsive layout."}
+{"archetype":"final-review","task":"Review the final app diff for correctness, security, and missing tests."}
+JSONL
+
+# 3. Let Legion run the independent implementation slices.
+legion-fanout --slices slices.jsonl --repo . --max-concurrency 3 --apply --json
+
+# 4. Ask for a final independent review.
+legion-delegate review --archetype final-review --repo . --base HEAD
+
+# 5. Run the app gates.
+npm test
+npm run lint
+npm run build
+
+# 6. Produce evidence.
+legion-report --trace latest --html > legion-report.html
+legion-share --window 1d --json
+legion-self-learn record --entity app:fieldops-dispatch --summary "Built first FieldOps dispatch workflow."
+```
+
+Example follow-up messages:
+
+```text
+Use Legion to add CSV import and export. Keep it as one backend slice, one UI
+slice, one test slice, and one final-review slice.
+```
+
+```text
+Use Legion to harden this app for a demo. Run doctor, run the app tests, get a
+final-review verdict, produce the HTML report, and show me the artifact paths.
+```
+
+```text
+Use Legion self-learn. Record what failed in this build, run the learning loop,
+then rerun the benchmark or tests that prove the fix worked.
+```
+
 ## Prove the full pipeline works
 
 Run the bundled single-task benchmark before a demo. It asks Legion to solve one
 small coding task and only passes if Legion can route, fan out, apply code,
-review, evaluate, emit an observability HTML report, record self-learn data, run
+review, evaluate, emit a full pipeline HTML report, record self-learn data, run
 heal, and pass the core bench.
 
 ```bash
@@ -128,7 +204,8 @@ The useful outputs are:
 | `fanout.json` | Legion split the task and applied a diff. |
 | `review.json` | A final review agent ran on the result. |
 | `score.json` | The app task passed its golden evaluator. |
-| `legion-report.html` | Observability produced a readable HTML cost/success report. |
+| `legion-report.html` | Full pipeline report: task, timeline, artifacts, diff, observability, self-learn, heal, raw JSON. |
+| `legion-observability.html` | Raw observability cost/success/latency report. |
 | `self-learn-run.json` | Self-learning recorded the run and refreshed memory. |
 
 ## What's inside (5 plugins)

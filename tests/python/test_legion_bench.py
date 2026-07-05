@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
 
 
 HERE = os.path.dirname(__file__)
@@ -192,6 +193,79 @@ def test_load_corpus_reads_packaged_fieldops_e2e_live_mode():
         "scorecard.ok",
         "summary.ok",
     }.issubset(checked_fields)
+
+
+def test_fieldops_pipeline_report_renderer_embeds_full_artifact_trail(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task_file = tmp_path / "task.txt"
+    task_file.write_text("Implement the FieldOps scorer.", encoding="utf-8")
+    diff = workspace / "diff.patch"
+    diff.write_text("diff --git a/fieldops_triage.py b/fieldops_triage.py\n", encoding="utf-8")
+    payloads = {
+        "doctor.json": [
+            {"check": "codex", "severity": "pass", "message": "codex present"},
+            {"check": "router", "severity": "warn", "message": "optional router"},
+        ],
+        "route-implement.json": {"resolved": True, "executor": "codex", "model": "gpt-5.5", "sandbox": "workspace-write"},
+        "route-review.json": {"resolved": True, "executor": "codex-review", "model": "gpt-5.5"},
+        "fanout.json": {
+            "slices": 1,
+            "ok": 1,
+            "failed": 0,
+            "applied": 1,
+            "apply_conflicts": 0,
+            "results": [{"diff_path": str(diff)}],
+        },
+        "review.json": {"status": "ok", "model": "gpt-5.5", "verdict": "Looks good."},
+        "score.json": {"passed": True, "score": 7, "total": 7, "failures": {}},
+        "legion-report.json": {
+            "groups": {"codex": {"count": 1, "ok": 1, "success_rate": 1.0, "cost_usd": 0.1, "p50_ms": 10, "p95_ms": 10}},
+            "total": {"count": 1, "ok": 1, "success_rate": 1.0, "cost_usd": 0.1},
+        },
+        "legion-share.json": {"status": "met", "failed_runs": 0, "codex_runs": 1},
+        "self-learn-record.json": {"target_type": "benchmark", "target_name": "fieldops-triage-e2e"},
+        "self-learn-hints.json": {"schema": "legion.self-learning.hints.v1"},
+        "self-learn-run.json": {
+            "applied_memory": True,
+            "by_entity": {"benchmark:fieldops-triage-e2e": 1},
+            "summary": {"outcomes": 1},
+            "scorecard": {"ok": True},
+        },
+        "heal-plan.json": {"total": 0, "fixable": 0, "findings": []},
+        "bench-core.json": {"summary": {"ok": True, "metrics": {"pass": 10, "fail": 0}}},
+    }
+    for name, payload in payloads.items():
+        (workspace / name).write_text(json.dumps(payload), encoding="utf-8")
+    (workspace / "fieldops_triage.py").write_text("def triage_ticket(message, inventory=None):\n    return {}\n", encoding="utf-8")
+    (workspace / "legion-observability.html").write_text("<!doctype html>Legion Observability Report\n", encoding="utf-8")
+
+    script = os.path.abspath(os.path.join(
+        HERE,
+        "..",
+        "..",
+        "legion-observability",
+        "bench",
+        "adapters",
+        "render-fieldops-pipeline-report.py",
+    ))
+    output = workspace / "legion-report.html"
+    proc = subprocess.run(
+        ["python3", script, "--workspace", str(workspace), "--task-file", str(task_file), "--output", str(output)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    html = output.read_text(encoding="utf-8")
+    assert "Legion Full Pipeline Report" in html
+    assert "Pipeline Timeline" in html
+    assert "Raw JSON Evidence" in html
+    assert "Applied diff from Legion delegate" in html
+    assert "legion-observability.html" in html
+    assert "7/7" in html
 
 
 def test_packaged_live_corpora_default_to_no_spend_controls():

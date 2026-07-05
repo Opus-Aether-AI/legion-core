@@ -42,6 +42,55 @@ TOML
   printf '%s\n' "$dir/legion-plugin.toml"
 }
 
+make_installed_style_plugin() {
+  local dir="$BATS_TEST_TMPDIR/support-app-builder"
+  mkdir -p "$dir/bin"
+  cat > "$dir/SKILL.md" <<'MD'
+---
+name: support-app-builder
+description: Use when building or changing a customer-support SaaS app.
+---
+
+Run legion-run with this plugin manifest for support-app feature work.
+MD
+  cat > "$dir/legion-plugin.toml" <<'TOML'
+[plugin]
+name = "support-app-builder"
+kind = "domain-plugin"
+
+[pipeline]
+profile = "legion.full_app.v1"
+entrypoint = "legion-run"
+
+[commands]
+plan = "support-plan"
+validate = "support-validate"
+evaluate = "support-eval"
+TOML
+  cat > "$dir/bin/support-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{"schema":"legion.plugin.plan.v1","plugin":"$LEGION_PLUGIN_NAME","task":"$LEGION_TASK","source":"installed-style-plugin"}
+JSON
+cat > "$LEGION_RUN_SLICES_FILE" <<JSONL
+{"archetype":"implement-feature","task":"Build the support workflow for: $LEGION_TASK"}
+JSONL
+SH
+  cat > "$dir/bin/support-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"support-validate","gates":["unit","build"]}\n'
+SH
+  cat > "$dir/bin/support-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":1,"total":1,"checks":["support workflow implemented"]}\n'
+SH
+  chmod +x "$dir/bin"/*
+  printf '%s\n' "$dir/legion-plugin.toml"
+}
+
 install_fake_pipeline_bins() {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   cat > "$BATS_TEST_TMPDIR/bin/fieldops-plan" <<'SH'
@@ -158,4 +207,21 @@ SH
   grep -q "fieldops-validate" "$run_dir/legion-observability.html"
   grep -q "codex_runs" "$run_dir/legion-observability.html"
   echo "$output" | jq -e '.ok == true and .pipeline.profile == "legion.full_app.v1"'
+}
+
+@test "legion-run: installed-style plugin directory works through manifest and bin hooks" {
+  install_fake_pipeline_bins
+  manifest="$(make_installed_style_plugin)"
+  plugin_dir="$(dirname "$manifest")"
+  export PATH="$plugin_dir/bin:$PATH"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Add SLA escalation" --json
+  [ "$status" -eq 0 ]
+  run_dir="$(echo "$output" | jq -r '.run_dir')"
+  [ -s "$plugin_dir/SKILL.md" ]
+  echo "$output" | jq -e '.plugin.name == "support-app-builder"'
+  jq -e '.plugin == "support-app-builder" and .source == "installed-style-plugin"' "$run_dir/plan.json"
+  jq -e '.ok == true and .command == "support-validate"' "$run_dir/validation.json"
+  jq -e '.score == 1 and .total == 1' "$run_dir/eval.json"
+  grep -q "support-validate" "$run_dir/legion-observability.html"
 }

@@ -151,6 +151,51 @@ def test_load_corpus_reads_packaged_local_smoke():
     assert len(corpus["cases"]) == 3
 
 
+def test_run_command_resolves_default_state_from_target_repo(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "app"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    for key in ("LEGION_STATE_ROOT", "LEGION_BENCH_DIR", "LEGION_TELEMETRY_DIR"):
+        monkeypatch.delenv(key, raising=False)
+
+    suite = {"schema": bench.SUITE_SCHEMA, "suite": "core", "cases": []}
+
+    def fake_run_suite_artifacts(repo, suite, bench_dir, run_id):
+        assert repo == str(tmp_path / "app")
+        assert bench_dir.startswith(str(home / ".legion" / "projects"))
+        return {
+            "results": [],
+            "summary": {"ok": True, "metrics": {"cases": 0, "pass": 0, "fail": 0}},
+            "artifacts": {"run_path": os.path.join(bench_dir, "run.json"), "summary_path": os.path.join(bench_dir, "summary.json")},
+        }
+
+    def fake_emit_bench_span(summary, artifacts, telemetry_dir):
+        assert telemetry_dir.startswith(str(home / ".legion" / "projects"))
+        return os.path.join(telemetry_dir, "span.jsonl")
+
+    monkeypatch.setattr(bench, "load_suite", lambda repo, suite_name: suite)
+    monkeypatch.setattr(bench, "_run_suite_artifacts", fake_run_suite_artifacts)
+    monkeypatch.setattr(bench, "emit_bench_span", fake_emit_bench_span)
+
+    args = argparse.Namespace(
+        repo=str(repo),
+        suite="core",
+        bench_dir="",
+        logs="",
+        telemetry_dir="",
+        run_id="state-test",
+        record_failures=False,
+        strict=True,
+        json=True,
+        quiet=True,
+    )
+
+    assert bench.run_command(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["ok"] is True
+
+
 def test_load_corpus_reads_packaged_heldout_default_modes():
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
     corpus = bench.load_corpus(repo, "heldout-oss-36")

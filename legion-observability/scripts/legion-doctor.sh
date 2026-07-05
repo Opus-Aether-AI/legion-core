@@ -26,6 +26,8 @@ set -uo pipefail
 
 _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _default_root="$(cd "$_self/../.." && pwd)"   # plugin lives at <root>/legion-observability/scripts
+# shellcheck disable=SC1091
+source "$_self/lib/state.sh"
 
 REPO=""
 ONLY=""
@@ -49,6 +51,7 @@ done
 LEGION_ROOT="${LEGION_ROOT:-$(git -C "$_self" rev-parse --show-toplevel 2>/dev/null || echo "$_default_root")}"
 # Repo-local scan target defaults to the install root.
 [[ -n "$REPO" ]] || REPO="$LEGION_ROOT"
+legion_resolve_state "$REPO"
 
 # --json: emit one record per result as a JSON array on stdout (human PASS/FAIL/
 # WARN lines go to stderr so stdout stays parseable). legion-heal consumes this
@@ -359,19 +362,21 @@ PY
 
 check_state_root() {
   local root="${LEGION_STATE_ROOT:-}"
-  [[ -n "$root" ]] || { fail "LEGION_STATE_ROOT is required for demo runs" "plugin:legion-observability"; return; }
+  [[ -n "$root" ]] || { fail "Legion state root could not be resolved" "plugin:legion-observability"; return; }
   root="$(_abs_path "$root")"
   local telemetry="${LEGION_TELEMETRY_DIR:-$root/spans}"
   local registry="${LEGION_REGISTRY_DIR:-$root/registry}"
   local repos="${LEGION_REPOS_FILE:-$root/repos.jsonl}"
   local bench="${LEGION_BENCH_DIR:-$root/bench}"
+  local reports="${LEGION_REPORTS_DIR:-$root/reports}"
   local bad=0 label path
-  for label in telemetry registry repos bench self-learn; do
+  for label in telemetry registry repos bench reports self-learn; do
     case "$label" in
       telemetry) path="$telemetry" ;;
       registry) path="$registry" ;;
       repos) path="$repos" ;;
       bench) path="$bench" ;;
+      reports) path="$reports" ;;
       self-learn) path="$root/self-learn" ;;
     esac
     if ! _path_under "$root" "$path"; then
@@ -380,9 +385,9 @@ check_state_root() {
     fi
   done
   if [[ "$bad" -eq 0 ]]; then
-    mkdir -p "$root" "$telemetry" "$registry" "$bench" 2>/dev/null || {
+    mkdir -p "$root" "$telemetry" "$registry" "$bench" "$reports" 2>/dev/null || {
       fail "LEGION_STATE_ROOT is not writable: $root" "plugin:legion-observability"; return; }
-    pass "LEGION_STATE_ROOT centralizes spans, registry, repos, bench, and memory under $root"
+    pass "Legion state root centralizes spans, registry, repos, bench, reports, and memory under $root"
   fi
 }
 

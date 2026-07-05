@@ -36,14 +36,14 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import legion_state  # noqa: E402
 
 SPAN_SCHEMA = "legion.span.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
 MEMORY_SCHEMA = "legion.self-learning.memory.v1"
 SCORECARD_SCHEMA = "legion.self-learning.scorecard.v1"
-DEFAULT_LOG_ROOT = os.path.expanduser(
-    os.environ.get("LEGION_STATE_ROOT", "~/.claude/logs/legion")
-)
+DEFAULT_LOG_ROOT = ""
 SAFE_SOURCE_TYPES = {"skill", "command", "agent", "plugin"}
 SUCCESS_STATUSES = {"ok"}
 DEFAULT_MIN_SCORE_DELTA = 0.001
@@ -1850,6 +1850,9 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
+    if hasattr(args, "logs") and not args.logs:
+        repo_for_state = getattr(args, "repo", os.getcwd())
+        args.logs = legion_state.resolve_state(repo_for_state)["state_root"]
     if args.cmd in (None, "run"):
         if args.cmd is None:
             args = parser.parse_args(["run", *(argv or [])])

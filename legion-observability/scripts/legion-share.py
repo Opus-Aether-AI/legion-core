@@ -19,18 +19,16 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import legion_state  # noqa: E402
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
-_DEFAULT_STATE_ROOT = os.environ.get("LEGION_STATE_ROOT")
-_DEF_SPANS = os.environ.get(
-    "LEGION_TELEMETRY_DIR",
-    os.path.join(os.path.expanduser(_DEFAULT_STATE_ROOT), "spans")
-    if _DEFAULT_STATE_ROOT
-    else os.path.expanduser("~/.claude/logs/legion/spans"),
-)
+_STATE = legion_state.resolve_state(os.getcwd())
+_DEF_SPANS = os.environ.get("LEGION_TELEMETRY_DIR", _STATE["telemetry_dir"])
 _DEF_ROUTING = os.path.join(os.path.dirname(__file__), "..", "..", "legion-router", "config", "routing.toml")
 
 

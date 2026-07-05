@@ -26,6 +26,7 @@
     "legion-report": "legion-observability/bin/legion-report",
     "legion-self-learn": "legion-observability/bin/legion-self-learn",
     "legion-share": "legion-observability/bin/legion-share",
+    "legion-state": "legion-observability/bin/legion-state",
     "legion-trace": "legion-observability/bin/legion-trace",
     "legion-fanout": "legion-orchestrate/bin/legion-fanout",
     "legion-claude": "legion-router/bin/legion-claude",

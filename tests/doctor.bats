@@ -151,10 +151,11 @@ EOF
   [[ "$output" == *"tomllib unavailable"* ]]
 }
 
-@test "doctor: state-root fails when LEGION_STATE_ROOT is missing" {
-  LEGION_STATE_ROOT= LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only state-root
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"LEGION_STATE_ROOT"* ]]
+@test "doctor: state-root auto-resolves when LEGION_STATE_ROOT is missing" {
+  HOME="$BATS_TEST_TMPDIR/home" LEGION_STATE_ROOT= LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only state-root
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Legion state root centralizes"* ]]
+  [[ "$output" == *".legion/projects"* ]]
 }
 
 @test "doctor: strict-demo runs demo-critical checks and passes when they are wired" {
@@ -181,12 +182,13 @@ EOF
   chmod +x "$fake/legion-route" "$fake/legion-delegate" "$fake/bats"
 
   PATH="$fake:$PATH" \
+    HOME="$BATS_TEST_TMPDIR/home" \
     LEGION_ROOT="$GOOD" \
-    LEGION_STATE_ROOT="$BATS_TEST_TMPDIR/state" \
-    LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/state/spans" \
-    LEGION_REGISTRY_DIR="$BATS_TEST_TMPDIR/state/registry" \
-    LEGION_REPOS_FILE="$BATS_TEST_TMPDIR/state/repos.jsonl" \
-    LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/state/bench" \
+    LEGION_STATE_ROOT= \
+    LEGION_TELEMETRY_DIR= \
+    LEGION_REGISTRY_DIR= \
+    LEGION_REPOS_FILE= \
+    LEGION_BENCH_DIR= \
     run "$DOCTOR" --repo "$GOOD" --strict-demo --json
   [ "$status" -eq 0 ]
   echo "$output" | tail -n 1 | jq -e '[.[].check] | index("route-smoke") and index("delegate-smoke") and index("state-root") and index("test-tools")'

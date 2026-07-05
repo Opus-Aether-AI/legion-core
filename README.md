@@ -12,250 +12,148 @@
 
 > **legion-core** — the model-agnostic orchestration engine behind Legion. The base layer you build your own agents, plugins, and app-building workflows on.
 
-Legion lets one operator command many coding agents: **GPT-5.x via Codex**, **Cursor**, **Claude**, and humans. legion-core gives you the parts that are useful in any agent project: scoped multi-model **delegation**, **fan-out**, **telemetry**, a **health check**, **self-learning**, and **auto-healing**.
+Legion lets one operator command many coding agents: **GPT-5.x via Codex**,
+**Cursor**, **Claude**, and humans. legion-core gives custom plugins the reusable
+engine: scoped multi-model **delegation**, **fan-out**, **telemetry**, a
+**health check**, **self-learning**, and **auto-healing**.
+
+## Quickstart
+
+Install once, then use Legion from any git repo. No per-repo shell exports are
+required; Legion automatically stores runtime state under
+`~/.legion/projects/<repo-id>/`.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash
+npm install -g @opus-aether-ai/legion-core
+
+cd ~/code/any-app
+legion-doctor --repo .
+legion-state --repo .
 ```
 
-## The simple idea
+If you do not want a global install:
 
-Give Legion one goal. Legion picks the right worker, lets that worker edit in an
-isolated git worktree, reviews the result, records cost/success telemetry, and
-saves lessons for the next run.
+```bash
+npx --package @opus-aether-ai/legion-core legion-doctor --repo .
+```
+
+Expected Doctor result: `0 fail`. A router warning is acceptable unless your
+Claude config forces traffic through `ANTHROPIC_BASE_URL=http://127.0.0.1:8082`.
+
+## The Simple Idea
+
+Your plugin decides what should happen. Legion Core executes the work, measures
+it, reviews it, and learns from the result.
 
 ```mermaid
 flowchart LR
-  A["You give a goal"] --> B["Route<br/>pick model + tool"]
-  B --> C["Fan out<br/>split into safe slices"]
-  C --> D["Agents code<br/>isolated worktrees"]
-  D --> E["Apply + review<br/>diffs, tests, verdicts"]
-  E --> F["Observe<br/>spans, cost, HTML report"]
-  F --> G["Self-learn<br/>record lessons + hints"]
-  G --> H["Your plugin or app gets better"]
+  A["User asks for work"] --> B["Your plugin<br/>domain plan + gates"]
+  B --> C["Legion route<br/>pick model + tool"]
+  C --> D["Fan out<br/>safe slices"]
+  D --> E["Agents code<br/>isolated worktrees"]
+  E --> F["Review + apply<br/>diffs, tests, verdicts"]
+  F --> G["Observe<br/>spans, cost, reports"]
+  G --> H["Self-learn<br/>hints + memory"]
+  H --> B
 ```
 
-## What you can build on it
+## Use It From A Plugin
 
-**Build a plugin:** add your domain knowledge and commands, then let Legion
-handle routing, model execution, telemetry, and learning.
+Legion Core should not know your product domain. Put that knowledge in your own
+plugin or skill: slice templates, evals, app gates, review rules, and recovery
+policy.
 
 ```text
-my-fieldops-plugin/
-  SKILL.md                  # tells agents when and how to use your plugin
-  .claude-plugin/plugin.json # name, description, version, metadata
-  bin/fieldops-triage        # optional deterministic CLI your agents can call
+my-product-plugin/
+  SKILL.md                    # when to use it and how it builds/reviews
+  .claude-plugin/plugin.json   # plugin metadata
+  evals/                       # optional golden tasks
+  bin/                         # optional deterministic helpers
 ```
 
 Minimal `SKILL.md`:
 
 ```md
 ---
-name: fieldops-triage
-description: Use when a user asks to classify field-service tickets.
----
-
-1. Read the ticket.
-2. Decide category, urgency, required skill, required parts, and risk.
-3. Use legion-delegate for code changes and legion-report for the run summary.
-```
-
-Minimal `.claude-plugin/plugin.json`:
-
-```json
-{
-  "name": "fieldops-triage",
-  "version": "0.1.0",
-  "description": "Field-service ticket triage workflows built on legion-core.",
-  "license": "Apache-2.0"
-}
-```
-
-### Start a new app repo
-
-Keep the app in its own git repo. During core development, point that repo at
-your local `legion-core` checkout so you use the latest bins instead of any
-older global shims.
-
-```bash
-mkdir -p ~/Documents/legion-demo
-cd ~/Documents/legion-demo
-git init
-
-# Use the current legion-core checkout as the engine.
-export LEGION_CORE="$HOME/Documents/legion-core"
-export PATH="$LEGION_CORE/legion-observability/bin:$LEGION_CORE/legion-router/bin:$LEGION_CORE/legion-orchestrate/bin:$LEGION_CORE/legion-setup/bin:$PATH"
-
-# Keep all telemetry, reports, bench data, registry data, and memory in this app repo.
-export LEGION_STATE_ROOT="$PWD/.legion/state"
-export LEGION_TELEMETRY_DIR="$LEGION_STATE_ROOT/spans"
-export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
-export LEGION_REPOS_FILE="$LEGION_STATE_ROOT/repos.jsonl"
-export LEGION_BENCH_DIR="$LEGION_STATE_ROOT/bench"
-
-mkdir -p "$LEGION_TELEMETRY_DIR" "$LEGION_REGISTRY_DIR" "$LEGION_BENCH_DIR" .legion/reports
-printf '%s\n' '.legion/state/' '.legion/reports/' '.legion/tmp/' >> .gitignore
-```
-
-Verify the repo is ready before asking Legion to build:
-
-```bash
-command -v legion-doctor
-legion-doctor --repo . --strict-demo
-```
-
-Expected result: `0 fail`. A router warning is acceptable unless your Claude
-config forces traffic through `ANTHROPIC_BASE_URL=http://127.0.0.1:8082`.
-
-### Put the build loop in your plugin
-
-Do not make every user memorize the Legion loop. Put the loop in the user's
-domain plugin or skill, next to their app-specific rules, evals, and gates.
-Legion Core owns the engine; the plugin owns the app workflow.
-
-```text
-my-app-plugin/
-  SKILL.md                   # when to use the plugin + the build loop
-  .claude-plugin/plugin.json  # plugin metadata
-  evals/                      # optional app-specific golden checks
-  bin/                        # optional app-specific CLIs
-```
-
-Example plugin loop:
-
-```md
----
-name: fieldops-app-builder
-description: Use when building or changing the FieldOps dispatch app with Legion Core.
+name: product-app-builder
+description: Use when building or changing this product with Legion Core.
 ---
 
 For app changes:
 
-1. Run `legion-self-learn hints --entity plugin:fieldops-app-builder`.
+1. Run `legion-self-learn hints --entity plugin:product-app-builder`.
 2. Run `legion-doctor --repo . --strict-demo`.
-3. Make a short plan and split work into backend, UI, tests, and review slices.
-4. Run `legion-fanout --slices slices.jsonl --repo . --max-concurrency 3 --apply --json`.
-5. Run `legion-delegate review --repo . --archetype final-review --base HEAD`.
-6. Run the app gates, for example `npm test`, `npm run lint`, and `npm run build`.
-7. Save an HTML report: `legion-report --html > .legion/reports/latest.html`.
-8. Record the lesson: `legion-self-learn record --entity plugin:fieldops-app-builder --summary "..."`
+3. Split the request into implementation, tests, and review slices.
+4. Use `legion-fanout --slices slices.jsonl --repo . --apply --json`.
+5. Run the repo's own gates, such as tests, lint, typecheck, and build.
+6. Open evidence with `legion-report open latest`.
+7. Record useful failures with `legion-self-learn record`.
 ```
 
-**Use it to build an app:** keep your app in its own repo, then ask Legion to
-make scoped changes.
+Private Legion Code plugins use this same pattern: for example, an app-builder
+plugin can translate a product request into backend/UI/test/review slices, and a
+review-gate plugin can force final review plus repo gates before a PR. The
+plugin owns those domain rules; Legion Core owns the execution and evidence.
 
-```bash
-# See which worker Legion would choose.
-legion-route implement-feature --task "Build the ticket triage page"
+## Build In Conversation
 
-# Run one coding task and get a metered diff back.
-legion-delegate run \
-  --repo . \
-  --archetype implement-feature \
-  --task "Add a ticket triage page with filters, priority badges, and tests"
+Most users should talk to Claude Code, Codex, or Cursor through their plugin
+instead of memorizing commands.
 
-# For bigger work, run several scoped slices in parallel.
-legion-fanout --slices slices.jsonl --repo . --apply --json
+```text
+Use product-app-builder to add organization invitations to this app.
 
-# See cost, latency, and success as JSON or HTML.
-legion-report --trace latest --html > .legion/reports/latest.html
-
-# Record what happened so the harness can learn.
-legion-self-learn record \
-  --entity plugin:fieldops-triage \
-  --summary "The app needed stricter priority rules for freezer outages."
+Plan the change, split backend/UI/tests/review slices, use Legion Core for
+delegation, run the repo gates, then open the latest Legion report.
 ```
 
-Example `slices.jsonl`:
+The plugin can then produce slices like:
 
 ```jsonl
-{"archetype":"implement-feature","task":"Create the triage API and tests"}
-{"archetype":"frontend-review","task":"Review the triage UI for usability"}
-{"archetype":"final-review","task":"Review the full diff before merge"}
+{"archetype":"implement-feature","task":"Add organization invitation API, validation, and persistence."}
+{"archetype":"implement-feature","task":"Add invitation UI states and form handling."}
+{"archetype":"write-tests","task":"Add unit and integration tests for invitations."}
+{"archetype":"final-review","task":"Review the full diff for correctness, security, and missing tests."}
 ```
 
-### Build a full app in conversation
-
-When you are using Claude Code or Codex, you usually do not type every Legion
-command yourself. You ask the agent to use your app plugin, and that plugin
-should plan, slice, delegate, review, test, report, and learn.
-
-Example first message:
-
-```text
-Use the fieldops-app-builder plugin to build a FieldOps dispatch app with Legion.
-
-The app should let dispatchers paste a service ticket, classify category and
-urgency, assign a required skill, show required parts, show ETA risk, and keep a
-history of triage decisions.
-
-Use Legion Core for the build:
-1. Run legion-doctor preflight.
-2. Make a short implementation plan.
-3. Break the app into backend, UI, tests, and review slices.
-4. Use legion-fanout for independent coding slices.
-5. Apply the diffs only after review.
-6. Run tests.
-7. Generate legion-report HTML and record self-learn output.
-```
-
-What the agent should do:
+Legion executes them:
 
 ```bash
-# 1. Check the harness before spending on model work.
-legion-self-learn hints --entity plugin:fieldops-app-builder
-legion-doctor --repo . --strict-demo
-
-# 2. Create dependency-aware slices.
-cat > slices.jsonl <<'JSONL'
-{"archetype":"implement-feature","task":"Create the ticket triage API, validation, and persistence."}
-{"archetype":"implement-feature","task":"Create the dispatcher UI with ticket input, result cards, history, and loading/error states."}
-{"archetype":"write-tests","task":"Add unit and integration tests for triage rules and app workflows."}
-{"archetype":"frontend-review","task":"Review the dispatcher UI for clarity, density, and responsive layout."}
-{"archetype":"final-review","task":"Review the final app diff for correctness, security, and missing tests."}
-JSONL
-
-# 3. Let Legion run the independent implementation slices.
 legion-fanout --slices slices.jsonl --repo . --max-concurrency 3 --apply --json
-
-# 4. Ask for a final independent review.
-legion-delegate review --archetype final-review --repo . --base HEAD
-
-# 5. Run the app gates.
-npm test
-npm run lint
-npm run build
-
-# 6. Produce evidence.
-mkdir -p .legion/reports
-legion-report --trace latest --html > .legion/reports/latest.html
-legion-share --window 1d --json
-legion-self-learn record --entity app:fieldops-dispatch --summary "Built first FieldOps dispatch workflow."
+legion-delegate review --repo . --archetype final-review --base HEAD
+legion-report open latest
 ```
 
-Example follow-up messages:
+## State And Reports
+
+By default, every repo gets a stable global state root:
 
 ```text
-Use Legion to add CSV import and export. Keep it as one backend slice, one UI
-slice, one test slice, and one final-review slice.
+~/.legion/projects/<repo-id>/
+  spans/        # legion.span.v1 telemetry
+  registry/     # run-state records
+  bench/        # benchmark artifacts
+  reports/      # HTML reports
+  self-learn/   # durable memory and scorecards
 ```
 
-```text
-Use Legion to harden this app for a demo. Run doctor, run the app tests, get a
-final-review verdict, produce the HTML report, and show me the artifact paths.
+Useful commands:
+
+```bash
+legion-state --repo .               # show resolved state paths
+legion-report path latest           # print latest HTML report path
+legion-report open latest           # generate and open latest report
+legion-share --window 1d --json     # inspect Codex-vs-Opus work split
 ```
 
-```text
-Use Legion self-learn. Record what failed in this build, run the learning loop,
-then rerun the benchmark or tests that prove the fix worked.
-```
+Advanced users and CI can still override state with env vars or an optional
+`.legion/config.toml`, but normal users should not need to configure anything.
 
-## Prove the full pipeline works
+## Prove The Pipeline Works
 
-Run the bundled single-task benchmark before a demo. It asks Legion to solve one
-small coding task and only passes if Legion can route, fan out, apply code,
-review, evaluate, emit a full pipeline HTML report, record self-learn data, run
-heal, and pass the core bench.
+Run the bundled single-task benchmark before a release or demo. It only passes
+if Legion can route, fan out, apply code, review, evaluate, emit observability
+HTML, record self-learn data, run heal, and pass the nested core bench.
 
 ```bash
 legion-bench corpus \
@@ -263,27 +161,18 @@ legion-bench corpus \
   --repo . \
   --mode legion-fanout-review \
   --baseline legion-fanout-review \
-  --json --strict \
-  --report-md .legion/fieldops-e2e-report.md
+  --json --strict
 ```
 
-The useful outputs are:
-
-| Output | What it proves |
-|---|---|
-| `fanout.json` | Legion split the task and applied a diff. |
-| `review.json` | A final review agent ran on the result. |
-| `score.json` | The app task passed its golden evaluator. |
-| `legion-report.html` | Full pipeline report: task, timeline, artifacts, diff, observability, self-learn, heal, raw JSON. |
-| `legion-observability.html` | Raw observability cost/success/latency report. |
-| `self-learn-run.json` | Self-learning recorded the run and refreshed memory. |
+The `fieldops-triage-e2e` corpus is a public regression fixture for Legion Core.
+It is not the app-building API; it proves the engine still works end to end.
 
 ## What's inside (5 plugins)
 
 | Plugin | Gives you |
 |---|---|
 | **legion-router** | `legion-delegate` (scoped task → any model in an isolated git worktree → verified, metered diff), `legion-cursor`, `legion-claude`, routing + cost tables (`routing.toml`, `costs.json`), `legion-route`/`legion-optimize`. |
-| **legion-observability** | `legion.span.v1` telemetry + `legion-trace`/`legion-report`/`legion-otel-export`, and the loops: `legion-doctor`, `legion-self-learn`, `legion-heal`, `legion-eval`, `legion-share`. |
+| **legion-observability** | `legion.span.v1` telemetry + `legion-state`/`legion-trace`/`legion-report`/`legion-otel-export`, and the loops: `legion-doctor`, `legion-self-learn`, `legion-heal`, `legion-eval`, `legion-share`. |
 | **legion-orchestrate** | Multi-model goal orchestration (fan-out → cross-verify → synthesize). |
 | **legion-setup** | Cross-harness install + Codex/Cursor bridges. |
 | **legion-codex-mode** | Codex-side wiring. |
@@ -306,15 +195,15 @@ versioned copy of the engine (bins + scripts + plugins) instead of cloning. This
 additive — the marketplace / source-clone paths still work.
 
 ```bash
-# Add it to a project.
+# Global CLI install.
+npm install -g @opus-aether-ai/legion-core
+
+# Project-pinned install.
 npm install @opus-aether-ai/legion-core            # or: bun add / pnpm add
+npx legion-doctor --repo .
 
-# The engine CLIs are now on your project's bin path.
-npx legion-doctor --help
-npx legion-delegate run --archetype fix-bug --task "…" --repo .
-
-# Or run a CLI without adding it to package.json.
-npx --package @opus-aether-ai/legion-core legion-doctor --help
+# One-off command without modifying package.json.
+npx --package @opus-aether-ai/legion-core legion-state --repo .
 ```
 
 Package links:
@@ -337,7 +226,32 @@ the canonical npmjs publisher.
 
 ## Configuration
 
-Copy [`.env.example`](.env.example) → `.env`. Runtime prerequisites: `gh` + `jq` + `git`; `codex` and `cursor-agent` CLIs (authenticated) for those executors; `ANTHROPIC_API_KEY` for Claude routing.
+Most users do not need repo-local Legion config. Runtime state auto-resolves per
+repo under `~/.legion/projects/<repo-id>/`.
+
+Use env vars only for CI, tests, or custom state locations:
+
+```bash
+export LEGION_STATE_ROOT=/path/to/state
+export LEGION_TELEMETRY_DIR=$LEGION_STATE_ROOT/spans
+export LEGION_REGISTRY_DIR=$LEGION_STATE_ROOT/registry
+export LEGION_REPOS_FILE=$LEGION_STATE_ROOT/repos.jsonl
+export LEGION_BENCH_DIR=$LEGION_STATE_ROOT/bench
+export LEGION_REPORTS_DIR=$LEGION_STATE_ROOT/reports
+```
+
+Optional repo config:
+
+```toml
+[state]
+root = ".legion/state"
+
+[reports]
+root = ".legion/reports"
+```
+
+Runtime prerequisites: `gh` + `jq` + `git`; `codex` and `cursor-agent` CLIs
+(authenticated) for those executors; `ANTHROPIC_API_KEY` for Claude routing.
 
 ## AFK intake lane
 

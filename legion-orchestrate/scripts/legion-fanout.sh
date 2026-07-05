@@ -48,10 +48,10 @@ resolve_optional_legion_cmd() {
 LEGION_DELEGATE="${LEGION_DELEGATE:-$(resolve_legion_cmd legion-delegate "$_self/../../legion-router/bin/legion-delegate")}"
 LEGION_ROUTE="${LEGION_ROUTE:-$(resolve_legion_cmd legion-route "$_self/../../legion-router/bin/legion-route")}"
 LEGION_TELEMETRY="${LEGION_TELEMETRY:-$(resolve_optional_legion_cmd legion-trace "$_self/../../legion-observability/bin/legion-trace")}"
-if [[ -n "${LEGION_STATE_ROOT:-}" ]]; then
-  LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$LEGION_STATE_ROOT/registry}"
-else
-  LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$HOME/.claude/logs/legion/registry}"
+_state_lib="$_self/../../legion-observability/scripts/lib/state.sh"
+if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1091
+  source "$_state_lib"
 fi
 
 # Preallocate a queued run-state record so a fan-out's pending slices show as
@@ -104,6 +104,12 @@ fi
 [[ -n "$slices_src" ]] || { echo "legion-fanout: --slices or --task required" >&2; exit 2; }
 [[ "$slices_src" == "-" ]] && slices_src=/dev/stdin
 repo="$(cd "$repo" && pwd)"
+if declare -F legion_resolve_state >/dev/null 2>&1; then
+  legion_resolve_state "$repo"
+else
+  export LEGION_STATE_ROOT="${LEGION_STATE_ROOT:-$HOME/.legion/projects/default}"
+  export LEGION_REGISTRY_DIR="${LEGION_REGISTRY_DIR:-$LEGION_STATE_ROOT/registry}"
+fi
 
 work="$repo/.legion/fanout/$(date -u +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$work"

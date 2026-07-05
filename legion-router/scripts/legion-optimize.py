@@ -23,11 +23,16 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - py<3.11
     tomllib = None
 
+sys.path.insert(
+    0,
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "legion-observability", "scripts")),
+)
+import legion_state  # noqa: E402
 
 SPAN_SCHEMA = "legion.span.v1"
 SUCCESS_STATUSES = {"ok", "over_budget"}
 DELEGATED_EXECUTORS = {"codex", "cursor", "claude"}
-DEFAULT_SPANS_DIR = os.path.expanduser("~/.claude/logs/legion/spans")
+DEFAULT_SPANS_DIR = legion_state.resolve_state(os.getcwd())["telemetry_dir"]
 DEFAULT_ROUTING_FILE = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "config", "routing.toml"))
 

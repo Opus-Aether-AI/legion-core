@@ -39,6 +39,68 @@ npx --package @opus-aether-ai/legion-core legion-doctor --repo .
 Expected doctor result: `0 fail`. A router warning is only blocking if your
 Claude config forces traffic through the local router.
 
+## Choose The Right Entrypoint
+
+You do not need the full `legion-run` pipeline for every task. Use the smallest
+Legion surface that gives you the proof you need.
+
+| Situation | Use | What happens |
+|---|---|---|
+| One small coding task | `legion-delegate run` | Sends one scoped task to the routed executor and returns a metered diff. |
+| Review the current diff | `legion-delegate review` | Gets an independent structured review from the configured reviewer. |
+| A few independent slices | `legion-fanout` | Runs multiple slices in parallel, collects results, and can apply safe diffs. |
+| Bigger feature/refactor | `legion-orchestrate` | Agent playbook for decomposition, fan-out, cross-review, synthesis, and gates. |
+| Full app/domain workflow | `legion-run` | Enforces the complete domain-plugin pipeline and required artifacts. |
+| Inspect what happened | `legion-report`, `legion-share` | Shows observability HTML, cost, latency, status, and work split. |
+| Teach Legion from a result | `legion-self-learn`, `legion-heal` | Records outcomes and plans repairs for failures. |
+
+Small task:
+
+```bash
+legion-delegate run \
+  --repo . \
+  --archetype fix-bug \
+  --task "Fix the empty-state copy in the settings page and add a focused test"
+```
+
+Review a diff:
+
+```bash
+legion-delegate review \
+  --repo . \
+  --archetype final-review \
+  --base HEAD
+```
+
+Parallel slices:
+
+```bash
+cat > /tmp/legion-slices.jsonl <<'JSONL'
+{"archetype":"implement-feature","task":"Add the export API route"}
+{"archetype":"write-tests","task":"Add tests for the export API route"}
+{"archetype":"implement-feature","task":"Add the export button in the UI"}
+JSONL
+
+legion-fanout --repo . --slices /tmp/legion-slices.jsonl --apply --json
+```
+
+Larger work in an agent conversation:
+
+```text
+Use legion-orchestrate to build the export workflow. Decompose it, fan out the
+safe slices, get reviewer sign-off, apply the good diffs, and run the repo gates.
+```
+
+Full domain-plugin run:
+
+```bash
+legion-run \
+  --plugin-manifest /path/to/my-plugin/legion-plugin.toml \
+  --repo . \
+  --task "Build organization invitations" \
+  --json
+```
+
 ## What Legion Core Does
 
 Your plugin owns the product/domain decisions. Legion Core owns the execution

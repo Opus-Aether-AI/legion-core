@@ -142,8 +142,85 @@ while IFS= read -r line; do
 done < "$slices_src"
 [[ "$n" -gt 0 ]] || { echo "legion-fanout: no slices" >&2; exit 2; }
 
+if ! python3 - "$work" "$n" > "$work/dag.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+work = Path(sys.argv[1])
+n = int(sys.argv[2])
+slices = []
+ids = {}
+errors = []
+
+for i in range(n):
+    try:
+        item = json.loads((work / f"slice-{i}.in").read_text(encoding="utf-8"))
+    except Exception as exc:
+        errors.append(f"slice {i}: invalid JSON: {exc}")
+        item = {}
+    if not isinstance(item, dict):
+        errors.append(f"slice {i}: expected JSON object")
+        item = {}
+    sid = str(item.get("id") or f"s{i}").strip() or f"s{i}"
+    if sid in ids:
+        errors.append(f"duplicate slice id: {sid}")
+    ids[sid] = i
+    raw_deps = item.get("depends_on") or []
+    if isinstance(raw_deps, str):
+        raw_deps = [raw_deps]
+    if not isinstance(raw_deps, list):
+        errors.append(f"slice {sid}: depends_on must be an array")
+        raw_deps = []
+    deps = []
+    for dep in raw_deps:
+        dep = str(dep).strip()
+        if dep:
+            deps.append(dep)
+    slices.append({"index": i, "id": sid, "depends_on": deps})
+
+for item in slices:
+    for dep in item["depends_on"]:
+        if dep not in ids:
+            errors.append(f"slice {item['id']}: unknown dependency {dep}")
+
+visiting = set()
+visited = set()
+
+def visit(sid, stack):
+    if sid in visited:
+        return
+    if sid in visiting:
+        errors.append("dependency cycle: " + " -> ".join(stack + [sid]))
+        return
+    visiting.add(sid)
+    for dep in slices[ids[sid]]["depends_on"]:
+        if dep in ids:
+            visit(dep, stack + [sid])
+    visiting.remove(sid)
+    visited.add(sid)
+
+for item in slices:
+    visit(item["id"], [])
+
+if errors:
+    print(json.dumps({"errors": errors}))
+    sys.exit(1)
+
+print(json.dumps({
+    "slices": slices,
+    "index_by_id": ids,
+    "has_dependencies": any(item["depends_on"] for item in slices),
+}, indent=2, sort_keys=True))
+PY
+then
+  jq -c '{status:"error",stage:"dag",error:(.errors | join("; "))}' "$work/dag.json" 2>/dev/null \
+    || echo '{"status":"error","stage":"dag","error":"invalid dependency graph"}'
+  exit 0
+fi
+
 launch_slice() {
-  local i="$1" line arch model task ex rid
+  local i="$1" base_ref="${2:-HEAD}" line arch model task ex rid
   line="$(cat "$work/slice-$i.in")"
   rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
   arch="$(jq -r '.archetype // ""' <<<"$line" 2>/dev/null || echo "")"
@@ -187,30 +264,154 @@ launch_slice() {
   # index; apply happens SEQUENTIALLY after the wait barrier (below). --keep so diffs survive.
   args=(run --repo "$repo" --quiet --keep)
   [[ -n "$rid" ]]   && args+=(--run-id "$rid")    # adopt the preallocated queued id
+  [[ -n "$base_ref" ]] && args+=(--base "$base_ref")
   [[ -n "$arch" ]]  && args+=(--archetype "$arch")
   [[ -n "$model" ]] && args+=(--model "$model")
   args+=(--task "$task")
   "$LEGION_DELEGATE" "${args[@]}" > "$work/slice-$i.out" 2> "$work/slice-$i.err" || true
 }
 
-# Launch in batches of MAXC (bash 3.2-safe; no `wait -n`).
-i=0
-while [[ $i -lt $n ]]; do
-  launch_slice "$i" &
-  i=$((i + 1))
-  if [[ $((i % MAXC)) -eq 0 ]]; then wait; fi
-done
-wait
+has_dependencies="$(jq -r '.has_dependencies' "$work/dag.json")"
+base_head="$(git -C "$repo" rev-parse HEAD)"
+integration_branch=""
+integration_wt=""
+integrated=0
+integration_conflicts=0
+
+setup_integration_base() {
+  [[ -n "$integration_branch" ]] && return 0
+  integration_branch="legion/fanout-${FANOUT_RUN_ID}"
+  integration_wt="$work/integration"
+  git -C "$repo" branch "$integration_branch" "$base_head"
+  git -C "$repo" worktree add -q "$integration_wt" "$integration_branch"
+}
+
+teardown_integration_base() {
+  [[ -n "$integration_wt" && -d "$integration_wt" ]] && git -C "$repo" worktree remove --force "$integration_wt" >/dev/null 2>&1 || true
+  [[ -n "$integration_branch" ]] && git -C "$repo" branch -D "$integration_branch" >/dev/null 2>&1 || true
+  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+}
+
+mark_blocked() {
+  local i="$1" blocked_by_json="$2"
+  jq -cn --argjson blocked_by "$blocked_by_json" \
+    '{status:"blocked",stage:"dependency",blocked_by:$blocked_by,error:"blocked by failed prerequisite"}' \
+    > "$work/slice-$i.out"
+  local rid
+  rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
+  [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null || true
+}
+
+integrate_slice_diff() {
+  local i="$1" result dpath
+  result="$(cat "$work/slice-$i.out" 2>/dev/null || echo '{}')"
+  dpath="$(jq -r '.diff_path // empty' <<<"$result" 2>/dev/null || echo "")"
+  [[ -n "$dpath" && -s "$dpath" ]] || return 0
+  if git -C "$integration_wt" apply --check "$dpath" 2>/dev/null; then
+    git -C "$integration_wt" apply "$dpath"
+    git -C "$integration_wt" add -A
+    git -C "$integration_wt" -c user.email=legion@local -c user.name=Legion commit -qm "legion fanout slice $i"
+    integrated=$((integrated + 1))
+  else
+    integration_conflicts=$((integration_conflicts + 1))
+    jq -c '. + {status:"error",stage:"integration-apply",error:"diff did not apply cleanly to integration base"}' \
+      "$work/slice-$i.out" > "$work/slice-$i.out.tmp" \
+      && mv "$work/slice-$i.out.tmp" "$work/slice-$i.out"
+  fi
+}
+
+if [[ "$has_dependencies" != "true" ]]; then
+  # Launch in batches of MAXC (bash 3.2-safe; no `wait -n`).
+  i=0
+  while [[ $i -lt $n ]]; do
+    launch_slice "$i" "HEAD" &
+    i=$((i + 1))
+    if [[ $((i % MAXC)) -eq 0 ]]; then wait; fi
+  done
+  wait
+else
+  setup_integration_base
+  completed=0
+  while [[ "$completed" -lt "$n" ]]; do
+    ready=()
+    progress=0
+    i=0
+    while [[ "$i" -lt "$n" ]]; do
+      if [[ -s "$work/slice-$i.out" ]]; then
+        i=$((i + 1))
+        continue
+      fi
+      blocked_by=()
+      waiting=0
+      while IFS= read -r dep; do
+        [[ -n "$dep" ]] || continue
+        dep_i="$(jq -r --arg d "$dep" '.index_by_id[$d]' "$work/dag.json")"
+        if [[ ! -s "$work/slice-$dep_i.out" ]]; then
+          waiting=1
+          continue
+        fi
+        dep_status="$(jq -r '.status // "error"' "$work/slice-$dep_i.out" 2>/dev/null || echo error)"
+        if [[ "$dep_status" != "ok" ]]; then
+          blocked_by+=("$dep")
+        fi
+      done < <(jq -r --argjson i "$i" '.slices[$i].depends_on[]?' "$work/dag.json")
+      if [[ "${#blocked_by[@]}" -gt 0 ]]; then
+        blocked_json="$(printf '%s\n' "${blocked_by[@]}" | jq -R . | jq -s .)"
+        mark_blocked "$i" "$blocked_json"
+        completed=$((completed + 1))
+        progress=1
+      elif [[ "$waiting" -eq 0 ]]; then
+        ready+=("$i")
+      fi
+      i=$((i + 1))
+    done
+
+    if [[ "${#ready[@]}" -eq 0 ]]; then
+      if [[ "$progress" -eq 1 ]]; then
+        continue
+      fi
+      i=0
+      while [[ "$i" -lt "$n" ]]; do
+        if [[ ! -s "$work/slice-$i.out" ]]; then
+          mark_blocked "$i" '[]'
+          completed=$((completed + 1))
+        fi
+        i=$((i + 1))
+      done
+      break
+    fi
+
+    launched=0
+    for i in "${ready[@]}"; do
+      launch_slice "$i" "$integration_branch" &
+      launched=$((launched + 1))
+      if [[ $((launched % MAXC)) -eq 0 ]]; then wait; fi
+    done
+    wait
+    for i in "${ready[@]}"; do
+      completed=$((completed + 1))
+      if [[ "$(jq -r '.status // "error"' "$work/slice-$i.out" 2>/dev/null || echo error)" == "ok" ]]; then
+        integrate_slice_diff "$i"
+      fi
+    done
+  done
+fi
 
 # Collect one JSON result per slice.
 results="$work/results.jsonl"
 : > "$results"
 i=0
 while [[ $i -lt $n ]]; do
+  sid="$(jq -r --argjson i "$i" '.slices[$i].id' "$work/dag.json")"
+  deps_json="$(jq -c --argjson i "$i" '.slices[$i].depends_on' "$work/dag.json")"
   if [[ -s "$work/slice-$i.out" ]]; then
-    head -n1 "$work/slice-$i.out" >> "$results"
+    head -n1 "$work/slice-$i.out" \
+      | jq -c --arg id "$sid" --argjson depends_on "$deps_json" \
+        'if type == "object" then . + {id:$id, depends_on:$depends_on} else {status:"error", id:$id, depends_on:$depends_on, error:"non-object result"} end' \
+      >> "$results"
   else
-    echo '{"status":"error","error":"no output"}' >> "$results"
+    jq -cn --arg id "$sid" --argjson depends_on "$deps_json" \
+      '{status:"error",id:$id,depends_on:$depends_on,error:"no output"}' >> "$results"
   fi
   i=$((i + 1))
 done
@@ -219,7 +420,17 @@ done
 # conflict with each other (parallel codegen touching the same file); report cleanly so Opus
 # resolves. Only when --apply was requested.
 applied=0; apply_conflicts=0
-if [[ -n "$apply" ]]; then
+if [[ -n "$apply" && "$has_dependencies" == "true" ]]; then
+  integration_patch="$work/integration.patch"
+  git -C "$repo" diff --binary "$base_head" "$integration_branch" > "$integration_patch"
+  if [[ -s "$integration_patch" ]]; then
+    if git -C "$repo" apply --check "$integration_patch" 2>/dev/null; then
+      git -C "$repo" apply "$integration_patch" && applied="$integrated"
+    else
+      apply_conflicts=$((apply_conflicts + 1))
+    fi
+  fi
+elif [[ -n "$apply" ]]; then
   while IFS= read -r dpath; do
     [[ -n "$dpath" && -s "$dpath" ]] || continue
     if git -C "$repo" apply --check "$dpath" 2>/dev/null; then
@@ -229,13 +440,18 @@ if [[ -n "$apply" ]]; then
     fi
   done < <(jq -r '.[] | select(.status=="ok") | .diff_path // empty' <(jq -s '.' "$results"))
 fi
+if [[ "$has_dependencies" == "true" ]]; then
+  apply_conflicts=$((apply_conflicts + integration_conflicts))
+  teardown_integration_base
+fi
 
 # Root span for the fan-out itself, so the delegate spans form a tree under it.
 # Best-effort: telemetry is observability, never block the run on it.
 if [[ -x "$LEGION_TELEMETRY" ]]; then
   total_cost="$(jq -s '[.[].cost_usd // 0] | add' "$results" 2>/dev/null || echo 0)"
+  root_status="$(jq -rs 'if any(.[]; (.status != "ok" and .status != "inline")) then "failed" else "ok" end' "$results" 2>/dev/null || echo ok)"
   "$LEGION_TELEMETRY" emit \
-    --executor orchestrator --model legion-fanout --status ok \
+    --executor orchestrator --model legion-fanout --status "${root_status:-ok}" \
     --run-id "$FANOUT_RUN_ID" --trace-id "$FANOUT_TRACE_ID" \
     --parent-id "$FANOUT_INHERITED_PARENT" \
     --cost "${total_cost:-0}" --task "fanout: $n slices" >/dev/null 2>&1 || true

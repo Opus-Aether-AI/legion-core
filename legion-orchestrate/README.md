@@ -6,11 +6,26 @@ Legion's dynamic **multi-model** orchestrator — the ultracode loop, but Claude
 
 ## `legion-run`
 
-Run a domain plugin through the fixed full-app Legion pipeline. Use this from
-installed app-builder or domain plugins when you want the same workflow every
-time: doctor, self-learn hints, plugin plan, route, fan-out/apply, final review,
-plugin validation, plugin evaluation, observability HTML, share accounting,
-self-learn, and heal planning.
+Run any heavy task through the fixed Legion lifecycle. Use direct mode for
+one-off feature/app/refactor work, or use an installed domain plugin when you
+want the same workflow every time: doctor, self-learn hints, plan,
+route, fan-out/apply, final review, validation, evaluation, observability HTML,
+share accounting, self-learn, and heal planning.
+
+Direct mode:
+
+```bash
+legion-run \
+  --repo . \
+  --task "Build the requested app change" \
+  --name app-change \
+  --plan-file ./PLAN.md \
+  --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" \
+  --evaluate-command "./scripts/eval-app-change" \
+  --json
+```
+
+Domain plugin mode:
 
 ```bash
 legion-run \
@@ -28,7 +43,7 @@ name = "my-product-plugin"
 kind = "domain-plugin"
 
 [pipeline]
-profile = "legion.full_app.v1"
+profile = "legion.heavy_task.v1"
 entrypoint = "legion-run"
 
 [commands]
@@ -40,6 +55,9 @@ evaluate = "my-product-eval"
 Installed plugins should pass their own manifest path. Repo-local manifests under
 `.legion/plugins/<name>/legion-plugin.toml` are optional overrides, not required
 per-repo setup.
+
+`legion.full_app.v1` remains supported for existing app-builder plugins, but
+new plugins should use `legion.heavy_task.v1`.
 
 The `plan` command must write `plan.json`. It may also write `slices.jsonl` for
 full control. If it only writes a brief plan with `mode =

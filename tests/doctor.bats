@@ -217,6 +217,29 @@ TOML
   [[ "$output" == *"PASS"* ]]
 }
 
+@test "doctor: domain-plugin accepts the generic heavy-task legion-run profile" {
+  d="$BATS_TEST_TMPDIR/domain-heavy"
+  mkdir -p "$d/.legion/plugins/fieldops"
+  cat > "$d/.legion/plugins/fieldops/legion-plugin.toml" <<'TOML'
+[plugin]
+name = "fieldops"
+kind = "domain-plugin"
+
+[pipeline]
+profile = "legion.heavy_task.v1"
+entrypoint = "legion-run"
+
+[commands]
+plan = "fieldops-plan"
+validate = "fieldops-validate"
+evaluate = "fieldops-eval"
+TOML
+
+  run "$DOCTOR" --repo "$d" --only domain-plugin
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS"* ]]
+}
+
 @test "doctor: domain-plugin fails when manifest bypasses legion-run" {
   d="$BATS_TEST_TMPDIR/domain-bad"
   mkdir -p "$d/.legion/plugins/fieldops"

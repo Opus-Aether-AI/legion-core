@@ -206,8 +206,8 @@ SH
   json="$(printf '%s' "$output" | json_from_output)"
   echo "$json" | jq -e '.plugin.name == "fieldops"'
   echo "$json" | jq -e '.pipeline.profile == "legion.full_app.v1"'
-  echo "$json" | jq -e '.pipeline.stages == ["doctor","self-learn-hints","plugin-plan","route","fanout-apply","review","validate","evaluate","report","share","self-learn","heal-plan"]'
-  echo "$json" | jq -e '.pipeline.required_artifacts | index("legion-report.html") and index("fanout.json") and index("heal-plan.json")'
+  echo "$json" | jq -e '.pipeline.stages == ["doctor","self-learn-hints","plan","route","fanout-apply","review","validate","evaluate","report","share","self-learn","heal-plan"]'
+  echo "$json" | jq -e '.pipeline.required_artifacts | index("legion-report.html") and index("fanout.json") and index("heal-plan.json") and index("artifact-manifest.json")'
 }
 
 @test "legion-run: fake plugin run writes the required full-app artifacts" {
@@ -285,4 +285,141 @@ SH
   jq -e '.ok == true and .command == "support-validate"' "$run_dir/validation.json"
   jq -e '.score == 1 and .total == 1' "$run_dir/eval.json"
   grep -q "support-validate" "$run_dir/legion-observability.html"
+}
+
+@test "legion-run: direct heavy-task mode runs the full lifecycle without a plugin manifest" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{
+  "schema": "legion.heavy-task.plan.v1",
+  "mode": "legion-generate-slices",
+  "task": "$LEGION_TASK",
+  "planning_instruction": "Build this as a TDD feature: failing tests first, implementation second, refactor after green.",
+  "required_skills": ["software-architect", "ai-architect"],
+  "quality_gates": ["unit", "build"],
+  "eval_goal": "The heavy task is complete and verified."
+}
+JSON
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"heavy-validate","gates":["unit","build"]}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":3,"total":3,"rubric":"heavy-task"}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-*
+
+  run "$RUN" \
+    --repo "$REPO" \
+    --task "Add billing export with tests and review" \
+    --name billing-export \
+    --plan-command heavy-plan \
+    --validate-command heavy-validate \
+    --evaluate-command heavy-eval \
+    --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == true and .runner.mode == "direct"'
+  echo "$json" | jq -e '.pipeline.profile == "legion.heavy_task.v1"'
+  [ -s "$run_dir/artifact-manifest.json" ]
+  jq -e '.profile == "legion.heavy_task.v1"' "$run_dir/plan.json"
+  jq -e 'select(.profile == "legion.heavy_task.v1" and .phase == "red")' "$run_dir/slices.jsonl" >/dev/null
+  jq -e '.command == "heavy-validate" and .ok == true' "$run_dir/validation.json"
+  jq -e '.rubric == "heavy-task" and .score == 3' "$run_dir/eval.json"
+  grep -q "Legion Heavy Task Pipeline" "$run_dir/legion-observability.html"
+  grep -q "artifact-manifest.json" "$run_dir/legion-observability.html"
+}
+
+@test "legion-run: direct plan-file is resolved relative to the target repo" {
+  install_fake_pipeline_bins
+  printf 'Use repo-local PLAN.md to build this TDD style.\n' > "$REPO/PLAN.md"
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"heavy-validate"}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":1,"total":1}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-*
+
+  run "$RUN" \
+    --repo "$REPO" \
+    --task "Use the repo plan" \
+    --name repo-plan \
+    --plan-file ./PLAN.md \
+    --validate-command heavy-validate \
+    --evaluate-command heavy-eval \
+    --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  expected_plan="$(cd "$REPO" && pwd -P)/PLAN.md"
+  jq -e --arg p "$expected_plan" '.plan_source == $p and (.planning_instruction | contains("repo-local PLAN.md"))' "$run_dir/plan.json"
+  jq -e 'select(.generated_by == "legion-run.default-tdd-planner")' "$run_dir/slices.jsonl" >/dev/null
+}
+
+@test "legion-run: failed fanout still emits partial report, learning, heal plan, and manifest" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{"schema":"legion.heavy-task.plan.v1","mode":"legion-generate-slices","task":"$LEGION_TASK"}
+JSON
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"heavy-validate"}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":1,"total":1}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":0,"failed":1,"results":[{"status":"failed","id":"green-core-implementation","error":"simulated fanout failure"}]}\n'
+exit 1
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-* "$BATS_TEST_TMPDIR/bin/legion-fanout"
+
+  run "$RUN" \
+    --repo "$REPO" \
+    --task "Add billing export with tests and review" \
+    --name billing-export \
+    --plan-command heavy-plan \
+    --validate-command heavy-validate \
+    --evaluate-command heavy-eval \
+    --json
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "fanout-apply"'
+  for artifact in failure.json stage-status.json partial-summary.json artifact-manifest.json legion-report.html legion-observability.html self-learn.json heal-plan.json
+  do
+    [ -s "$run_dir/$artifact" ] || {
+      echo "missing failure artifact: $artifact in $run_dir" >&2
+      return 1
+    }
+  done
+  jq -e '.failed_stage == "fanout-apply" and (.message | contains("fanout.json"))' "$run_dir/failure.json"
+  jq -e '.stages[] | select(.stage == "fanout-apply" and .status == "failed")' "$run_dir/stage-status.json"
+  jq -e '.stages[] | select(.stage == "review" and .status == "skipped")' "$run_dir/stage-status.json"
+  jq -e '.artifacts[] | select(.path == "fanout.json" and .exists == true)' "$run_dir/artifact-manifest.json"
+  jq -e '.record.ok == true or .record.recorded == true' "$run_dir/self-learn.json"
+  grep -q "FAILED" "$run_dir/legion-observability.html"
+  grep -q "simulated fanout failure" "$run_dir/legion-observability.html"
 }

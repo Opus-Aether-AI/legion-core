@@ -4,8 +4,12 @@ A domain plugin lets you sell Legion Core to a specific software business
 without baking that business logic into the core engine.
 
 Legion Core handles routing, fan-out, review, reports, memory, and repair.
-Your plugin handles domain language, planning briefs or exact slices,
+Your plugin handles reusable domain language, planning briefs or exact slices,
 validation, and evals.
+
+You do not need a domain plugin for every big task. Use `legion-run` direct mode
+when a one-off plan/validate/evaluate setup is enough. Build a plugin when you
+want the same domain workflow reused across many repos or customer demos.
 
 ## Mental Model
 
@@ -15,7 +19,7 @@ Manifest        -> tells legion-run which executable hooks to call
 Plan hook       -> writes plan.json; slices.jsonl is optional
 Validate hook   -> runs app gates after code is applied
 Evaluate hook   -> scores whether the domain goal was met
-legion-run      -> enforces the full Legion pipeline around those hooks
+legion-run      -> enforces the heavy-task lifecycle around those hooks
 ```
 
 The hooks are **commands/executables**, not skills. A hook can be a shell script,
@@ -45,7 +49,7 @@ name = "support-app-builder"
 kind = "domain-plugin"
 
 [pipeline]
-profile = "legion.full_app.v1"
+profile = "legion.heavy_task.v1"
 entrypoint = "legion-run"
 
 [commands]
@@ -58,8 +62,11 @@ evaluate = "support-eval"
 
 - `[plugin].kind` starts with `domain-`
 - `[pipeline].entrypoint` is `legion-run`
-- `[pipeline].profile` is `legion.full_app.v1`
+- `[pipeline].profile` is `legion.heavy_task.v1` or `legion.full_app.v1`
 - `plan`, `validate`, and `evaluate` are present
+
+Use `legion.heavy_task.v1` for new plugins. `legion.full_app.v1` remains
+supported for existing app-builder manifests.
 
 `legion-doctor --only domain-plugin` checks repo-local manifests for the same
 contract. `legion-doctor --strict-demo` includes that check.
@@ -237,6 +244,7 @@ legion-observability.html
 share.json
 self-learn.json
 heal-plan.json
+artifact-manifest.json
 ```
 
 That is why a domain plugin can stay small: it supplies the three domain hooks,

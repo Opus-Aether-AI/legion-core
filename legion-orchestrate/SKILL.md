@@ -31,18 +31,27 @@ fan-out even begins. Do not run broad session/log greps as preflight.
 
 ## The loop
 
-For domain plugins, prefer the fixed runner over manually composing the lower
-level commands:
+For any sizeable task that needs the full proof loop, prefer `legion-run` over
+manually composing the lower-level commands. Use direct mode for one-off heavy
+work:
+
+```bash
+legion-run --repo . --task "..." --plan-file ./PLAN.md --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" --json
+```
+
+Use plugin mode when the plan/validate/evaluate commands are reusable domain
+logic:
 
 ```bash
 legion-run --plugin-manifest <plugin>/legion-plugin.toml --repo . --task "..."
 ```
 
-That runner enforces `legion.full_app.v1`: doctor, self-learn hints, plugin
-plan, route, fan-out/apply, final review, plugin validation, plugin evaluation,
-observability HTML, share accounting, self-learn, and heal planning. Drop to
-`legion-fanout` only when you are debugging the primitive or building a new
-runner profile.
+That runner enforces `legion.heavy_task.v1`: doctor, self-learn hints, plan,
+route, fan-out/apply, final review, validation, evaluation, observability HTML,
+share accounting, self-learn, and heal planning. Existing
+`legion.full_app.v1` plugins are still accepted. Drop to `legion-fanout` only
+when you are debugging the primitive, running small independent slices, or
+building a new runner profile.
 
 1. **Decompose** (Opus) — break the goal into **dependency-aware slices**. Independent slices can run in parallel; dependent ones are sequenced.
 2. **Classify** — tag each slice with a routing archetype (`legion-route --list`): implementation → `implement-feature`/`write-tests`/`fix-bug`/`refactor-module`/… (configured Codex workhorse); genuine design/judgement → `deep-reasoning`/`architecture-decision` (stays on Claude).

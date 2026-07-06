@@ -48,8 +48,8 @@ legion-delegate review \
 jq -e 'type == "object"' "$workspace/review.json" >/dev/null
 
 python3 "$workspace/eval_fieldops_triage.py"
-legion-report --trace latest --json > "$workspace/legion-report.json"
-legion-report --trace latest --html > "$workspace/legion-observability.html"
+legion-report --json > "$workspace/legion-report.json"
+legion-report --html > "$workspace/legion-observability.html"
 legion-share --window 1d --json > "$workspace/legion-share.json"
 legion-self-learn record \
   --logs "$LEGION_STATE_ROOT" \

@@ -13,9 +13,9 @@
 
 > **legion-core** is the model-agnostic orchestration engine behind Legion:
 > routing, fan-out, review, observability, self-learning, healing, and the
-> `legion-run` domain-plugin pipeline.
+> `legion-run` heavy-task lifecycle.
 
-Use it directly, or build your own domain plugins on top of it.
+Use it directly for major work, or build your own domain plugins on top of it.
 
 ## Quickstart
 
@@ -50,7 +50,8 @@ Legion surface that gives you the proof you need.
 | Review the current diff | `legion-delegate review` | Gets an independent structured review from the configured reviewer. |
 | A few independent slices | `legion-fanout` | Runs multiple slices in parallel, collects results, and can apply safe diffs. |
 | Bigger feature/refactor | `legion-orchestrate` | Agent playbook for decomposition, fan-out, cross-review, synthesis, and gates. |
-| Full app/domain workflow | `legion-run` | Enforces the complete domain-plugin pipeline and required artifacts. |
+| Any heavy task with a plan and gates | `legion-run` direct mode | Runs doctor, prior hints, plan, route, fan-out/apply, review, validate, evaluate, report, share, learn, and heal. |
+| Reusable domain workflow | `legion-run` with a domain plugin | Same lifecycle, but the plan/validate/evaluate commands come from the plugin. |
 | Inspect what happened | `legion-report`, `legion-share` | Shows observability HTML, cost, latency, status, and work split. |
 | Teach Legion from a result | `legion-self-learn`, `legion-heal` | Records outcomes and plans repairs for failures. |
 
@@ -91,7 +92,20 @@ Use legion-orchestrate to build the export workflow. Decompose it, fan out the
 safe slices, get reviewer sign-off, apply the good diffs, and run the repo gates.
 ```
 
-Full domain-plugin run:
+Heavy task with no plugin:
+
+```bash
+legion-run \
+  --repo . \
+  --task "Add organization invitations with tests and review" \
+  --name org-invitations \
+  --plan-command "./scripts/legion-plan-org-invitations" \
+  --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" \
+  --evaluate-command "./scripts/eval-org-invitations" \
+  --json
+```
+
+Reusable domain-plugin run:
 
 ```bash
 legion-run \
@@ -109,15 +123,17 @@ pipeline and evidence.
 ```mermaid
 flowchart LR
   U["User prompt<br/>goal + context"] --> P["Domain plugin<br/>brief, rules, gates, evals"]
-  P --> R["legion-run<br/>fixed pipeline contract"]
+  U --> A["Direct mode<br/>plan + validate + evaluate"]
+  P --> R["legion-run<br/>heavy-task lifecycle"]
+  A --> R
 
   subgraph C["Legion Core enforced pipeline"]
     D["Doctor<br/>health"] --> H["Hints<br/>prior learning"]
-    H --> PL["Plan<br/>plugin hook"]
+    H --> PL["Plan<br/>command or file"]
     PL --> RO["Route<br/>model + executor"]
     RO --> F["Fanout + Apply<br/>parallel slices"]
     F --> RV["Review<br/>independent verdict"]
-    RV --> VE["Validate + Evaluate<br/>plugin hooks"]
+    RV --> VE["Validate + Evaluate<br/>commands"]
     VE --> RP["Report<br/>HTML + JSON"]
     RP --> SH["Share<br/>work split + cost"]
     SH --> LN["Learn<br/>future hints"]
@@ -138,8 +154,24 @@ The important split:
 
 ## Use `legion-run`
 
-`legion-run` is the default entrypoint for domain plugins. It enforces the same
-full-app pipeline every time and fails if required artifacts are missing.
+Use `legion-run` for major work that needs the whole lifecycle: feature
+development, app work, large refactors, migrations, or anything where you want
+proof, learning, and a heal plan. You do not need a plugin for one-off work.
+
+Direct mode:
+
+```bash
+legion-run \
+  --repo . \
+  --task "Add organization invitations with tests and review" \
+  --name org-invitations \
+  --plan-file ./plans/org-invitations.md \
+  --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" \
+  --evaluate-command "./scripts/eval-org-invitations" \
+  --json
+```
+
+Domain plugin mode:
 
 ```bash
 legion-run \
@@ -156,7 +188,10 @@ The JSON output includes `run_dir`. Open:
 ```
 
 That report shows the stages, artifacts, validation results, review findings,
-cost/latency evidence, self-learning output, and heal plan.
+cost/latency evidence, self-learning output, and heal plan. If the run fails,
+the same directory still contains `failure.json`, `partial-summary.json`,
+`artifact-manifest.json`, `legion-observability.html`, `self-learn.json`, and
+`heal-plan.json`.
 
 ## Build A Domain Plugin
 
@@ -180,7 +215,7 @@ name = "support-app-builder"
 kind = "domain-plugin"
 
 [pipeline]
-profile = "legion.full_app.v1"
+profile = "legion.heavy_task.v1"
 entrypoint = "legion-run"
 
 [commands]
@@ -196,6 +231,9 @@ What the hooks do:
 | `plan` | Writes `plan.json`. It may also write `slices.jsonl`; if it does not, Legion Core generates a compact TDD slice set from the plan brief. |
 | `validate` | Runs app gates such as tests, typecheck, lint, build, browser checks. |
 | `evaluate` | Scores whether the domain goal was satisfied. |
+
+For new plugins, prefer `profile = "legion.heavy_task.v1"`. Existing
+`legion.full_app.v1` manifests continue to work.
 
 Minimal plugin layout:
 
@@ -215,7 +253,7 @@ Full copy-pasteable guide: [docs/domain-plugins.md](docs/domain-plugins.md).
 
 | Command | Use |
 |---|---|
-| `legion-run` | Run a domain plugin through the fixed full-app pipeline. |
+| `legion-run` | Run a heavy task directly or through a domain plugin with the full lifecycle and evidence contract. |
 | `legion-doctor` | Check install, repo, routing, state, and plugin health. |
 | `legion-route` | Resolve a task archetype to model, executor, sandbox, and effort. |
 | `legion-fanout` | Run independent slices in parallel and collect/apply diffs. |
@@ -230,7 +268,7 @@ Full copy-pasteable guide: [docs/domain-plugins.md](docs/domain-plugins.md).
 
 | Plugin | Gives you |
 |---|---|
-| **legion-orchestrate** | `legion-run` for domain plugins plus `legion-fanout` for lower-level parallel delivery. |
+| **legion-orchestrate** | `legion-run` for heavy tasks/domain plugins plus `legion-fanout` for lower-level parallel delivery. |
 | **legion-router** | `legion-route`, `legion-delegate`, Codex/Cursor/Claude executors, worktrees, routing policy, and cost tables. |
 | **legion-observability** | `legion-doctor`, `legion-trace`, `legion-report`, `legion-share`, `legion-self-learn`, `legion-heal`, `legion-eval`, and `legion-bench`. |
 | **legion-code-intel** | Optional TypeScript/Pyright diagnostics and `legion.code-intel.v1` artifacts. |

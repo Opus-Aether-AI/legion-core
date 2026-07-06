@@ -469,8 +469,8 @@ if not kind.startswith("domain-"):
 errors = []
 if pipeline.get("entrypoint") != "legion-run":
     errors.append('domain plugin must run through legion-run: set [pipeline].entrypoint = "legion-run"')
-if pipeline.get("profile") != "legion.full_app.v1":
-    errors.append('domain plugin must use [pipeline].profile = "legion.full_app.v1"')
+if pipeline.get("profile") not in {"legion.full_app.v1", "legion.heavy_task.v1"}:
+    errors.append('domain plugin must use [pipeline].profile = "legion.full_app.v1" or "legion.heavy_task.v1"')
 missing = [key for key in ("plan", "validate", "evaluate") if not str(commands.get(key) or "").strip()]
 if missing:
     errors.append("domain plugin missing commands: " + ", ".join(missing))

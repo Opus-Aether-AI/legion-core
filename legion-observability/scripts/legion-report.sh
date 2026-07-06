@@ -19,7 +19,7 @@ while [[ $# -gt 0 ]]; do
     --by)   by="$2"; shift 2 ;;
     --html) do_html=1; shift ;;
     --json) do_json=1; shift ;;
-    --trace) trace="$2"; shift 2 ;; # accepted for roadmap compatibility; aggregation still reads the telemetry dir
+    --trace) trace="$2"; shift 2 ;;
     -h|--help) echo "usage: legion-report [open|path latest] [--by executor|model|status] [--html] [--json] [--trace latest|TRACE_ID]"; exit 0 ;;
     *) echo "legion-report: unknown arg '$1'" >&2; exit 2 ;;
   esac
@@ -27,16 +27,23 @@ done
 
 legion_resolve_state "$PWD"
 report_path="$LEGION_REPORTS_DIR/$target.html"
+aggregate_args=(--by "$by" --dir "$LEGION_TELEMETRY_DIR")
+[[ -n "$trace" ]] && aggregate_args+=(--trace "$trace")
+
+render_html_report() {
+  mkdir -p "$LEGION_REPORTS_DIR"
+  python3 "$_self/legion-aggregate.py" "${aggregate_args[@]}" \
+    | python3 "$_self/legion-render.py" --html > "$report_path"
+}
 
 if [[ "$action" == "path" ]]; then
+  [[ -s "$report_path" ]] || render_html_report
   printf '%s\n' "$report_path"
   exit 0
 fi
 
 if [[ "$action" == "open" ]]; then
-  mkdir -p "$LEGION_REPORTS_DIR"
-  python3 "$_self/legion-aggregate.py" --by "$by" --dir "$LEGION_TELEMETRY_DIR" \
-    | python3 "$_self/legion-render.py" --html > "$report_path"
+  render_html_report
   if command -v open >/dev/null 2>&1; then
     open "$report_path" >/dev/null 2>&1 || true
   elif command -v xdg-open >/dev/null 2>&1; then
@@ -47,11 +54,11 @@ if [[ "$action" == "open" ]]; then
 fi
 
 if [[ "$do_json" -eq 1 ]]; then
-  python3 "$_self/legion-aggregate.py" --by "$by" --dir "$LEGION_TELEMETRY_DIR"
+  python3 "$_self/legion-aggregate.py" "${aggregate_args[@]}"
 elif [[ "$do_html" -eq 1 ]]; then
-  python3 "$_self/legion-aggregate.py" --by "$by" --dir "$LEGION_TELEMETRY_DIR" \
+  python3 "$_self/legion-aggregate.py" "${aggregate_args[@]}" \
     | python3 "$_self/legion-render.py" --html
 else
-  python3 "$_self/legion-aggregate.py" --by "$by" --dir "$LEGION_TELEMETRY_DIR" \
+  python3 "$_self/legion-aggregate.py" "${aggregate_args[@]}" \
     | python3 "$_self/legion-render.py"
 fi

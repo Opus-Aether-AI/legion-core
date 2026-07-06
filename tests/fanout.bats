@@ -167,3 +167,127 @@ SH
   run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"orchestrator\") | .parent_id'"
   [ "$output" = '"outer-parent"' ]
 }
+
+@test "fanout: dependent slices run after prerequisites and see the integration base" {
+  local bin="$BATS_TEST_TMPDIR/dag-bin"
+  mkdir -p "$bin"
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"executor":"codex","model":"fake-codex","sandbox":"workspace-write","resolved":true}\n'
+SH
+  cat > "$bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+repo=""
+base="HEAD"
+task=""
+run_id="fake-run"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    run) shift ;;
+    --repo) repo="$2"; shift 2 ;;
+    --base) base="$2"; shift 2 ;;
+    --task) task="$2"; shift 2 ;;
+    --run-id) run_id="$2"; shift 2 ;;
+    --quiet|--keep) shift ;;
+    --archetype|--model|--sandbox|--reasoning-effort|--budget-tokens) shift 2 ;;
+    *) shift ;;
+  esac
+done
+art="$repo/.legion/fake-delegate/$run_id"
+mkdir -p "$art"
+diff="$art/diff.patch"
+case "$task" in
+  *"create platform contract"*)
+    cat > "$diff" <<'PATCH'
+diff --git a/platform.txt b/platform.txt
+new file mode 100644
+index 0000000..e2c6c76
+--- /dev/null
++++ b/platform.txt
+@@ -0,0 +1 @@
++contract
+PATCH
+    printf '{"status":"ok","model":"fake-codex","diff_path":%s,"base_ref":%s,"cost_usd":0}\n' \
+      "$(jq -Rn --arg p "$diff" '$p')" "$(jq -Rn --arg b "$base" '$b')"
+    ;;
+  *"use platform contract"*)
+    if ! git -C "$repo" cat-file -e "$base:platform.txt" 2>/dev/null; then
+      printf '{"status":"failed","model":"fake-codex","error":"missing platform.txt in base","base_ref":%s,"cost_usd":0}\n' \
+        "$(jq -Rn --arg b "$base" '$b')"
+      exit 1
+    fi
+    : > "$diff"
+    printf '{"status":"ok","model":"fake-codex","diff_path":%s,"base_ref":%s,"cost_usd":0}\n' \
+      "$(jq -Rn --arg p "$diff" '$p')" "$(jq -Rn --arg b "$base" '$b')"
+    ;;
+  *)
+    printf '{"status":"failed","model":"fake-codex","error":"unexpected task","cost_usd":0}\n'
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$bin"/*
+
+  printf '%s\n' \
+    '{"id":"platform-contract","archetype":"implement-feature","task":"create platform contract"}' \
+    '{"id":"consumer","depends_on":["platform-contract"],"archetype":"implement-feature","task":"use platform contract"}' \
+    > "$BATS_TEST_TMPDIR/dag.jsonl"
+
+  LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
+    run "$FANOUT" --slices "$BATS_TEST_TMPDIR/dag.jsonl" --repo "$REPO" --max-concurrency 2 --apply --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 2 and .failed == 0 and .applied == 1'
+  echo "$output" | jq -e '[.results[].id] == ["platform-contract","consumer"]'
+  echo "$output" | jq -e '.results[1].base_ref != "HEAD"'
+  [ "$(cat "$REPO/platform.txt")" = "contract" ]
+}
+
+@test "fanout: a failed prerequisite blocks dependents without launching them" {
+  local bin="$BATS_TEST_TMPDIR/block-bin"
+  mkdir -p "$bin"
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"executor":"codex","model":"fake-codex","sandbox":"workspace-write","resolved":true}\n'
+SH
+  cat > "$bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+task=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task) task="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$task" in
+  *"break prerequisite"*)
+    printf '{"status":"failed","model":"fake-codex","error":"boom","cost_usd":0}\n'
+    exit 1
+    ;;
+  *"must never launch"*)
+    printf '{"status":"error","model":"fake-codex","error":"dependent launched","cost_usd":0}\n'
+    exit 1
+    ;;
+  *)
+    printf '{"status":"ok","model":"fake-codex","cost_usd":0}\n'
+    ;;
+esac
+SH
+  chmod +x "$bin"/*
+
+  printf '%s\n' \
+    '{"id":"setup","archetype":"implement-feature","task":"break prerequisite"}' \
+    '{"id":"dependent","depends_on":["setup"],"archetype":"implement-feature","task":"must never launch"}' \
+    > "$BATS_TEST_TMPDIR/blocked.jsonl"
+
+  LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
+    run "$FANOUT" --slices "$BATS_TEST_TMPDIR/blocked.jsonl" --repo "$REPO" --max-concurrency 2 --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 0 and .failed == 2'
+  echo "$output" | jq -e '.results[0].id == "setup" and .results[0].status == "failed"'
+  echo "$output" | jq -e '.results[1].id == "dependent" and .results[1].status == "blocked"'
+  echo "$output" | jq -e '.results[1].blocked_by == ["setup"]'
+}

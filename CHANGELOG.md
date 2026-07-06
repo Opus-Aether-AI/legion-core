@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.13.0...v0.13.1) (2026-07-06)
+
+
+### Fixed
+
+* harden legion run orchestration ([#79](https://github.com/Opus-Aether-AI/legion-core/issues/79)) ([22225f5](https://github.com/Opus-Aether-AI/legion-core/commit/22225f550b5f4aaa5bda0a78725ae4dc630d1b0a))
+
+
+### Documentation
+
+* explain legion usage modes ([#77](https://github.com/Opus-Aether-AI/legion-core/issues/77)) ([cbdb6bb](https://github.com/Opus-Aether-AI/legion-core/commit/cbdb6bb2f25300023d7a63eed5af52b9f829955d))
+
 ## [0.13.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.12.0...v0.13.0) (2026-07-05)
 
 

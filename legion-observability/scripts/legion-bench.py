@@ -721,6 +721,7 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
     case_id = _text(case.get("id")) or _stable_id([case])
     safe_case_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in case_id)
     workspace = os.path.join(run_dir, "workspaces", safe_case_id)
+    real_home = os.path.abspath(os.path.expanduser(os.environ.get("HOME", "~")))
     home = os.path.join(workspace, "home")
     logs = os.path.join(workspace, "logs")
     os.makedirs(home, exist_ok=True)
@@ -729,6 +730,7 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
         "repo": os.path.abspath(repo),
         "workspace": workspace,
         "home": home,
+        "real_home": real_home,
         "logs": logs,
         "case_id": case_id,
         "run_dir": run_dir,
@@ -740,7 +742,7 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
     env = os.environ.copy()
     env.update(_case_state_env(logs))
     env.update({
-        "HOME": home,
+        "HOME": real_home if case.get("preserve_home") is True else home,
         "PYTHONUNBUFFERED": "1",
     })
     env.update({key: str(value) for key, value in _dict(_render(case.get("env"), context)).items()})

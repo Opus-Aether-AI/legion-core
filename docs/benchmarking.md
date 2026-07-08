@@ -92,6 +92,7 @@ Implemented CLI:
 ```bash
 legion-bench run --suite core --repo . --json
 legion-bench run --suite legion-run --repo . --json --strict
+legion-bench run --suite legion-run-live --repo . --json --strict
 legion-bench run --suite stable --repo . --json --strict
 legion-bench stable --suite stable --repo . --repeat 3 --strict
 legion-bench corpus --corpus local-smoke --repo . --json
@@ -105,6 +106,21 @@ legion-bench learning-lift --repo . --json
 For a demo-friendly `legion-run` proof, use `--suite legion-run`. The JSON output
 includes `html_artifacts` with a benchmark overview report plus the nested
 `legion-run` report and observability report.
+
+For an opt-in live-model proof, first confirm local auth and then run the live
+suite:
+
+```bash
+legion-doctor --repo . --strict-demo
+legion-bench run --suite legion-run-live --repo . --json --strict \
+  | tee /tmp/legion-run-live.json
+```
+
+`legion-run-live` preserves the caller's real `HOME` for Codex authentication,
+spends real model calls, and writes the same `html_artifacts` map. Expect several
+minutes of runtime and real model credits. Open the printed `benchmark_overview`
+HTML to inspect fan-out model evidence, validation results, self-learning
+updates, and links to the nested Legion reports.
 
 `run` writes a durable benchmark artifact under
 `~/.claude/logs/legion/bench/` with:

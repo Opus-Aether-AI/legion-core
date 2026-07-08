@@ -759,6 +759,11 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
             timeout=timeout,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
+        try:
+            stdout_payload = json.loads(proc.stdout)
+        except ValueError:
+            stdout_payload = {}
+        html_artifacts = _dict(_dict(stdout_payload).get("html_artifacts"))
         validator_results = run_task_validators(
             _list(case.get("validators")),
             context=context,
@@ -791,6 +796,7 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
                 "validators": validator_results,
                 "stdout": proc.stdout[-4000:],
                 "stderr": proc.stderr[-4000:],
+                "html_artifacts": html_artifacts,
             },
         }
     except subprocess.TimeoutExpired as exc:
@@ -972,6 +978,20 @@ def _run_id(suite_name: str) -> str:
     return f"{stamp}-{suite_name}-{_stable_id([stamp, suite_name, os.getpid(), time.time_ns()], 8)}"
 
 
+def collect_html_artifacts(results: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for result in results:
+        case_id = _text(result.get("id"))
+        html_artifacts = _dict(_dict(result.get("details")).get("html_artifacts"))
+        if case_id and html_artifacts:
+            out[case_id] = {
+                str(key): str(value)
+                for key, value in sorted(html_artifacts.items())
+                if str(value).strip()
+            }
+    return out
+
+
 def write_run_artifacts(
     bench_dir: str,
     run_id: str,
@@ -986,6 +1006,7 @@ def write_run_artifacts(
     summary_path = os.path.join(run_dir, "summary.json")
     run_path = os.path.join(run_dir, "run.json")
     latest_path = os.path.join(root, "latest.json")
+    html_artifacts = collect_html_artifacts(results)
     with open(cases_path, "w", encoding="utf-8") as handle:
         for result in results:
             handle.write(json.dumps(result, sort_keys=True, ensure_ascii=False))
@@ -1005,6 +1026,7 @@ def write_run_artifacts(
             "run": run_path,
             "summary": summary_path,
             "cases": cases_path,
+            "html_artifacts": html_artifacts,
         },
     }
     _write_json(run_path, run_payload)
@@ -1017,6 +1039,7 @@ def write_run_artifacts(
             "run_path": run_path,
             "summary_path": summary_path,
             "cases_path": cases_path,
+            "html_artifacts": html_artifacts,
             "generated_at": summary.get("generated_at"),
         },
     )
@@ -1026,6 +1049,7 @@ def write_run_artifacts(
         "summary_path": summary_path,
         "cases_path": cases_path,
         "latest_path": latest_path,
+        "html_artifacts": html_artifacts,
     }
 
 

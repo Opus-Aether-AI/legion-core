@@ -54,6 +54,23 @@ setup() {
   ' <<<"$output" >/dev/null
 }
 
+@test "legion-bench: legion-run suite exercises direct plan/validate lifecycle" {
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" run --suite legion-run --repo "$ROOT" --json --strict
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .summary.ok == true
+    and .summary.metrics.cases == 1
+    and .summary.metrics.required_fail == 0
+    and .summary.metrics.task_cases == 1
+    and .summary.dimensions.orchestration.required_pass == 1
+    and .html_artifacts["task.legion-run-direct-plan-validate"].benchmark_overview
+    and .html_artifacts["task.legion-run-direct-plan-validate"].legion_observability
+  ' <<<"$output" >/dev/null
+}
+
 @test "legion-bench: stable suite reports repeatable rollup" {
   LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
   LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.13.1...v0.14.0) (2026-07-08)
+
+
+### Added
+
+* support multiple legion-run plan files ([#80](https://github.com/Opus-Aether-AI/legion-core/issues/80)) ([48e8c76](https://github.com/Opus-Aether-AI/legion-core/commit/48e8c76f2a3a714eba614b2b4cb5c2d21be4e249))
+
 ## [0.13.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.13.0...v0.13.1) (2026-07-06)
 
 

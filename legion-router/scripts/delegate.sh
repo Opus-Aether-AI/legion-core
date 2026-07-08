@@ -72,6 +72,24 @@ cleanup_sandbox_dev_on_exit() {
 }
 trap cleanup_sandbox_dev_on_exit EXIT
 
+# codex is launched in the background and immediately waited on, so a terminating
+# signal to this wrapper interrupts the `wait` and runs this handler — otherwise a
+# `kill`/hangup of the wrapper would leave codex orphaned (still billing, its
+# stream.jsonl still growing). Best-effort: TERM the tracked child plus any codex
+# grandchild (review/resume wrap it in a `( cd … && codex )` subshell).
+CODEX_CHILD_PID=""
+kill_codex_child() {
+  local pid="${CODEX_CHILD_PID:-}"
+  [[ -n "$pid" ]] || return 0
+  pkill -TERM -P "$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+}
+on_terminating_signal() {
+  kill_codex_child
+  exit 143   # 128 + SIGTERM; EXIT trap still runs (sandbox teardown)
+}
+trap on_terminating_signal INT TERM HUP
+
 ROUTE_BIN="$_self_dir/legion-route.py"
 REVIEW_SCHEMA="$_self_dir/../schema/review-verdict.schema.json"
 
@@ -99,13 +117,18 @@ run_codex() {
   if [[ -n "$effort" ]]; then
     printf '%s' "$task" | "$CODEX_BIN" exec --json -m "$1" -s "$sandbox" -C "$wt" \
         --skip-git-repo-check -c "model_reasoning_effort=$effort" -o "$art/last-message.txt" - \
-        >"$art/stream.jsonl" 2>"$art/codex.err"
+        >"$art/stream.jsonl" 2>"$art/codex.err" &
+    CODEX_CHILD_PID=$!
   else
     printf '%s' "$task" | "$CODEX_BIN" exec --json -m "$1" -s "$sandbox" -C "$wt" \
         --skip-git-repo-check -o "$art/last-message.txt" - \
-        >"$art/stream.jsonl" 2>"$art/codex.err"
+        >"$art/stream.jsonl" 2>"$art/codex.err" &
+    CODEX_CHILD_PID=$!
   fi
-  rc=${PIPESTATUS[1]}
+  # Backgrounded + waited so on_terminating_signal can reap codex instead of
+  # orphaning it; wait's status is codex's exit (== the old PIPESTATUS[1]).
+  wait "$CODEX_CHILD_PID"; rc=$?
+  CODEX_CHILD_PID=""
   set -e
 }
 
@@ -544,16 +567,23 @@ cmd_review() {
   # a structured verdict Opus can reconcile programmatically.
   local start_ms end_ms dur rc=0
   start_ms="$(date +%s000)"
+  # </dev/null: `codex exec review` takes no task on stdin, so never let it inherit
+  # (and block on / drain) the wrapper's stdin — a non-tty stdin (nohup, pipe,
+  # `script -q`) otherwise fed it a stray EOF. Backgrounded + waited so a killed
+  # wrapper reaps codex via on_terminating_signal instead of orphaning it.
   set +e
   if [[ -n "$effort" ]]; then
     ( cd "$repo" && "$CODEX_BIN" exec review --base "$base" -m "$model" --json \
         -c "model_reasoning_effort=$effort" --output-schema "$REVIEW_SCHEMA" \
-        -o "$verdict_file" ) >"$art/stream.jsonl" 2>"$art/codex.err"
+        -o "$verdict_file" ) </dev/null >"$art/stream.jsonl" 2>"$art/codex.err" &
+    CODEX_CHILD_PID=$!
   else
     ( cd "$repo" && "$CODEX_BIN" exec review --base "$base" -m "$model" --json \
-        --output-schema "$REVIEW_SCHEMA" -o "$verdict_file" ) >"$art/stream.jsonl" 2>"$art/codex.err"
+        --output-schema "$REVIEW_SCHEMA" -o "$verdict_file" ) </dev/null >"$art/stream.jsonl" 2>"$art/codex.err" &
+    CODEX_CHILD_PID=$!
   fi
-  rc=$?
+  wait "$CODEX_CHILD_PID"; rc=$?
+  CODEX_CHILD_PID=""
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 
@@ -614,13 +644,18 @@ cmd_resume() {
   if [[ -n "$effort" ]]; then
     printf '%s' "$task" | ( cd "$wt" && "$CODEX_BIN" exec resume "$thread_id" --json \
         -m "$model" -c "model_reasoning_effort=$effort" --skip-git-repo-check \
-        -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err"
+        -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err" &
+    CODEX_CHILD_PID=$!
   else
     printf '%s' "$task" | ( cd "$wt" && "$CODEX_BIN" exec resume "$thread_id" --json \
         -m "$model" --skip-git-repo-check \
-        -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err"
+        -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err" &
+    CODEX_CHILD_PID=$!
   fi
-  rc=${PIPESTATUS[1]}
+  # Backgrounded + waited so on_terminating_signal can reap codex; wait's status
+  # is the codex subshell's exit (== the old PIPESTATUS[1]).
+  wait "$CODEX_CHILD_PID"; rc=$?
+  CODEX_CHILD_PID=""
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 

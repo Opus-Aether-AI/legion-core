@@ -170,7 +170,20 @@ def shell_exports(state: dict[str, str]) -> str:
     return "\n".join(f"export {key}={shlex.quote(value)}" for key, value in mapping.items())
 
 
+def _restore_default_sigpipe() -> None:
+    """Die quietly (not with a BrokenPipeError traceback) when our stdout reader
+    goes away — e.g. a shell capture that is abandoned, or `… | head`. Only
+    meaningful as a CLI; guarded so importing this module never touches signals."""
+    try:
+        import signal
+
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ValueError, OSError):  # no SIGPIPE (Windows) / not main thread
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _restore_default_sigpipe()
     parser = argparse.ArgumentParser(prog="legion-state")
     parser.add_argument("--repo", default=os.getcwd())
     parser.add_argument("--json", action="store_true")

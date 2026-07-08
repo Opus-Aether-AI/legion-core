@@ -186,7 +186,19 @@ def resolve(table, archetype, models=None):
     return _resolve_model_refs(out, models)
 
 
+def _restore_default_sigpipe():
+    """Die quietly instead of raising BrokenPipeError when our stdout reader goes
+    away (abandoned shell capture, `… | head`). Guarded so an import is a no-op."""
+    try:
+        import signal
+
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ValueError, OSError):
+        pass
+
+
 def main(argv=None):
+    _restore_default_sigpipe()
     ap = argparse.ArgumentParser(description="Resolve a routing archetype.")
     ap.add_argument("archetype", nargs="?")
     ap.add_argument("--file", default=os.environ.get("LEGION_ROUTING_FILE", _DEFAULT_FILE))

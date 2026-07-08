@@ -298,15 +298,15 @@ commands. It passes only if direct mode can consume a plan command and validate
 command, route and fan out slices, apply code, review, validate, emit HTML
 reports, record validation-discovered learning, and run heal planning.
 
-Run the live-model proof when you want to verify the full product path:
+Run the Codex live proof when you want to verify the full product path:
 
 ```bash
 legion-doctor --repo . --strict-demo
-legion-bench run --suite legion-run-live --repo . --json --strict \
-  | tee /tmp/legion-run-live.json
+legion-bench run --suite legion-run-codex-live --repo . --json --strict \
+  | tee /tmp/legion-run-codex-live.json
 ```
 
-The live suite spends real Codex model calls, preserves your real `HOME` so
+The Codex live suite spends real Codex model calls, preserves your real `HOME` so
 Codex auth is available, and writes a temporary Python fixture repo. Expect it
 to take several minutes and consume real model credits. It is a separate suite
 so CI does not run it unless you explicitly ask for it.
@@ -315,7 +315,7 @@ The JSON output contains `html_artifacts`. Open the benchmark overview first,
 then the nested Legion reports:
 
 ```bash
-python3 - <<'PY' /tmp/legion-run-live.json
+python3 - <<'PY' /tmp/legion-run-codex-live.json
 import json, sys
 data = json.load(open(sys.argv[1]))
 for case, links in data.get("html_artifacts", {}).items():

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source_repo="${1:?usage: legion-run-direct-live.sh SOURCE_REPO}"
+source_repo="${1:?usage: legion-run-direct-codex-live.sh SOURCE_REPO}"
 workspace="${PWD}"
-root="$workspace/direct-run-live"
+root="$workspace/direct-run-codex-live"
 hook_bin="$root/bin"
 target_repo="$root/repo"
 state_root="${LEGION_STATE_ROOT:-$root/state}"
 stdout_path="$root/legion-run.stdout"
 stderr_path="$root/legion-run.stderr"
-result_path="$workspace/direct-run-live-result.json"
+result_path="$workspace/direct-run-codex-live-result.json"
 memory_before_path="$root/memory-before-legion-run.json"
 
 mkdir -p "$hook_bin" "$target_repo" "$state_root" "$(dirname "$result_path")"
@@ -25,13 +25,13 @@ export PATH="$hook_bin:$source_repo/legion-orchestrate/bin:$source_repo/legion-o
 
 if [ ! -d "$target_repo/.git" ]; then
   git -C "$target_repo" init -q
-  git -C "$target_repo" config user.email legion-run-live-bench@example.test
-  git -C "$target_repo" config user.name "Legion Run Live Bench"
+  git -C "$target_repo" config user.email legion-run-codex-live-bench@example.test
+  git -C "$target_repo" config user.name "Legion Run Codex Live Bench"
   mkdir -p "$target_repo/fieldops" "$target_repo/tests"
   cat > "$target_repo/README.md" <<'MD'
-# FieldOps Triage Live Fixture
+# FieldOps Triage Codex Live Fixture
 
-This fixture starts with an incomplete SLA triage module. The live benchmark task
+This fixture starts with an incomplete SLA triage module. The Codex-live benchmark task
 is to implement deterministic dispatch planning for facility maintenance tickets.
 MD
   cat > "$target_repo/fieldops/__init__.py" <<'PY'
@@ -44,17 +44,17 @@ PY
 
 
 def normalize_ticket(raw):
-    raise NotImplementedError("legion-run live benchmark should implement this")
+    raise NotImplementedError("legion-run Codex-live benchmark should implement this")
 
 
 def build_dispatch_plan(tickets):
-    raise NotImplementedError("legion-run live benchmark should implement this")
+    raise NotImplementedError("legion-run Codex-live benchmark should implement this")
 PY
   git -C "$target_repo" add -A
   git -C "$target_repo" commit -qm init
 fi
 
-cat > "$hook_bin/bench-live-plan" <<'SH'
+cat > "$hook_bin/bench-codex-live-plan" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 python3 - <<'PY'
@@ -121,7 +121,7 @@ print(json.dumps({"ok": True, "slices": len(slices)}, sort_keys=True))
 PY
 SH
 
-cat > "$hook_bin/bench-live-validate" <<'SH'
+cat > "$hook_bin/bench-codex-live-validate" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 python3 - <<'PY'
@@ -176,7 +176,7 @@ ok = (
 )
 print(json.dumps({
     "ok": ok,
-    "command": "bench-live-validate",
+    "command": "bench-codex-live-validate",
     "slice_count": len(slices),
     "phases": phases,
     "tests_passed": test_proc.returncode == 0,
@@ -189,15 +189,15 @@ print(json.dumps({
             "id": "fieldops-cold-chain-live-escalation",
             "source": "validation-feedback",
             "target_type": "heavy-task",
-            "target_name": "direct-live-plan-validate",
+            "target_name": "direct-codex-live-plan-validate",
             "severity": "medium",
             "summary": (
-                "Live validation discovered a reusable FieldOps invariant: cold-chain outage "
+                "Codex live validation discovered a reusable FieldOps invariant: cold-chain outage "
                 "keywords such as freezer down or product warming must override lower explicit "
                 "severity and produce a critical refrigeration dispatch with a 30-minute SLA."
             ),
             "evidence": {
-                "validator": "bench-live-validate",
+                "validator": "bench-codex-live-validate",
                 "smoke": "freezer-down medium severity -> critical refrigeration 30-minute SLA",
                 "passed": ok,
             },
@@ -216,10 +216,10 @@ chmod +x "$hook_bin"/*
 
 "$source_repo/legion-observability/bin/legion-self-learn" record \
   --logs "$LEGION_STATE_ROOT" \
-  --entity heavy-task:direct-live-plan-validate \
+  --entity heavy-task:direct-codex-live-plan-validate \
   --summary "Prior live direct legion-run benchmark hint must be loaded before planning." \
-  --source legion-run-live-benchmark \
-  --evidence "seeded by legion-run live benchmark" \
+  --source legion-run-codex-live-benchmark \
+  --evidence "seeded by legion-run Codex-live benchmark" \
   --json > "$root/prior-self-learn-record.json"
 
 "$source_repo/legion-observability/bin/legion-self-learn" run \
@@ -234,9 +234,9 @@ set +e
 legion-run \
   --repo "$target_repo" \
   --task "Implement FieldOps SLA triage: normalize tickets, infer priority from freezer-down/offline/leak keywords, assign dispatch trades and SLA deadlines, sort the dispatch queue, and cover it with unittest tests." \
-  --name direct-live-plan-validate \
-  --plan-command bench-live-plan \
-  --validate-command bench-live-validate \
+  --name direct-codex-live-plan-validate \
+  --plan-command bench-codex-live-plan \
+  --validate-command bench-codex-live-validate \
   --json > "$stdout_path" 2> "$stderr_path"
 run_status=$?
 set -e
@@ -292,7 +292,7 @@ learning_feedback = artifact("learning-feedback.json")
 self_learn = artifact("self-learn.json")
 memory = read_json(state_root / "self-learn" / "harness-memory.json")
 memory_before = read_json(memory_before_path)
-memory_key = "heavy-task:direct-live-plan-validate"
+memory_key = "heavy-task:direct-codex-live-plan-validate"
 memory_entry = memory.get("entities", {}).get(memory_key, {})
 memory_entry_before = memory_before.get("entities", {}).get(memory_key, {})
 proposal_ids = set(memory_entry.get("proposal_ids", []))
@@ -303,14 +303,14 @@ triage_path = target_repo / "fieldops" / "triage.py"
 test_path = target_repo / "tests" / "test_triage.py"
 triage_text = triage_path.read_text(encoding="utf-8") if triage_path.exists() else ""
 test_text = test_path.read_text(encoding="utf-8") if test_path.exists() else ""
-overview_path = result_path.with_name("legion-run-live-benchmark.html")
+overview_path = result_path.with_name("legion-run-codex-live-benchmark.html")
 run_report_path = run_dir / "legion-report.html"
 observability_path = run_dir / "legion-observability.html"
 artifact_manifest_path = run_dir / "artifact-manifest.json"
 span_rows = []
 for span_path in sorted((state_root / "spans").glob("*.jsonl")):
     span_rows.extend(read_jsonl(span_path))
-live_spans = [
+codex_spans = [
     row for row in span_rows
     if str(row.get("executor", "")).startswith("codex")
     and row.get("status") in {"ok", "over_budget"}
@@ -329,20 +329,20 @@ checks = {
     "required_artifacts_present": all(has_artifact(name) for name in summary.get("pipeline", {}).get("required_artifacts", [])),
     "all_stages_passed": bool(stage_status) and all(item.get("status") == "passed" for item in stage_status),
     "plan_command_used": artifact("plan-command.json").get("ok") is True,
-    "custom_live_slices_used": [item.get("id") for item in slices] == [
+    "custom_codex_slices_used": [item.get("id") for item in slices] == [
         "implement-fieldops-triage",
         "refactor-fieldops-gate",
     ],
     "routes_generated_for_all_slices": len(routes) == len(slices) and len(routes) > 0,
-    "live_slices_ran": (
+    "codex_slices_ran": (
         fanout.get("slices") == len(slices)
         and fanout.get("failed") == 0
         and len(fanout.get("results", [])) == len(slices)
         and any(item.get("model") for item in fanout.get("results", []))
     ),
-    "live_model_telemetry_recorded": len(live_spans) >= 2,
+    "codex_model_telemetry_recorded": len(codex_spans) >= 2,
     "review_ran": review.get("status") == "ok",
-    "validate_command_used": validation.get("command") == "bench-live-validate" and validation.get("ok") is True,
+    "validate_command_used": validation.get("command") == "bench-codex-live-validate" and validation.get("ok") is True,
     "coding_task_implemented": (
         validation.get("tests_passed") is True
         and validation.get("domain_smoke_passed") is True
@@ -356,7 +356,7 @@ checks = {
     ),
     "self_learning_memory_updated_by_validation_feedback": (
         bool(proposal_ids - proposal_ids_before)
-        and any("Live validation discovered a reusable FieldOps invariant" in str(hint) for hint in hints)
+        and any("Codex live validation discovered a reusable FieldOps invariant" in str(hint) for hint in hints)
         and any(hint not in hints_before for hint in hints)
         and self_learn.get("run", {}).get("summary", {}).get("outcomes", 0) >= 1
     ),
@@ -416,7 +416,7 @@ def render_overview():
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Legion Run Live Benchmark</title>
+  <title>Legion Run Codex Live Benchmark</title>
   <style>
     body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px; color: #111827; line-height: 1.5; }}
     h1, h2 {{ margin-bottom: 8px; }}
@@ -436,13 +436,13 @@ def render_overview():
   </style>
 </head>
 <body>
-  <h1>Legion Run Live Benchmark</h1>
-  <p class="subtle">This opt-in benchmark spends real model calls through <code>legion-run</code> direct mode.</p>
+  <h1>Legion Run Codex Live Benchmark</h1>
+  <p class="subtle">This opt-in benchmark spends real Codex model calls through <code>legion-run</code> direct mode.</p>
 
   <div class="grid">
     <div class="panel"><div class="metric">{esc("PASS" if all(checks.values()) else "FAIL")}</div><div>Overall result</div></div>
     <div class="panel"><div class="metric">{esc(len(slices))}</div><div>Planned slices</div></div>
-    <div class="panel"><div class="metric">{esc(len(live_spans))}</div><div>Live Codex spans</div></div>
+    <div class="panel"><div class="metric">{esc(len(codex_spans))}</div><div>Codex spans</div></div>
     <div class="panel"><div class="metric">{esc(learning_feedback.get("recorded", 0))}</div><div>Validation lessons recorded</div></div>
   </div>
 
@@ -452,10 +452,10 @@ def render_overview():
   <h2>Open The Evidence</h2>
   <ul>{link_items}</ul>
 
-  <h2>Live Model Evidence</h2>
+  <h2>Codex Live Evidence</h2>
   <details open><summary>fanout.json</summary>{pre(json_pretty(fanout))}</details>
   <details><summary>review.json</summary>{pre(json_pretty(review))}</details>
-  <details><summary>Codex spans</summary>{pre(json_pretty(live_spans))}</details>
+  <details><summary>Codex spans</summary>{pre(json_pretty(codex_spans))}</details>
 
   <h2>Lifecycle Stages</h2>
   <table><thead><tr><th>Stage</th><th>Status</th><th>Artifacts</th></tr></thead><tbody>{stage_rows}</tbody></table>
@@ -487,7 +487,7 @@ checks["html_reports_generated"] = (
     overview_path.exists()
     and run_report_path.exists()
     and observability_path.exists()
-    and "Live Model Evidence" in overview_path.read_text(encoding="utf-8")
+    and "Codex Live Evidence" in overview_path.read_text(encoding="utf-8")
 )
 overview_path.write_text(render_overview(), encoding="utf-8")
 
@@ -504,7 +504,7 @@ payload = {
     "run_dir": str(run_dir) if run_dir else "",
     "html_artifacts": html_artifacts,
     "checks": checks,
-    "live_span_count": len(live_spans),
+    "codex_span_count": len(codex_spans),
     "contract": summary,
     "stderr": stderr_path.read_text(encoding="utf-8")[-4000:] if stderr_path.exists() else "",
 }

@@ -1,19 +1,19 @@
 {
   "schema": "legion.bench.suite.v1",
-  "suite": "legion-run-live",
-  "description": "Opt-in live-model benchmark for the direct legion-run heavy-task path. This spends real model calls and preserves the user's HOME so Codex authentication is available.",
+  "suite": "legion-run-codex-live",
+  "description": "Opt-in Codex-live benchmark for the direct legion-run heavy-task path. This spends real Codex model calls and preserves the user's HOME so Codex authentication is available.",
   "cases": [
     {
-      "id": "task.legion-run-live-direct-plan-validate",
+      "id": "task.legion-run-codex-live-direct-plan-validate",
       "type": "task",
       "dimension": "orchestration-live",
-      "summary": "Direct legion-run mode should use live routed models to solve a FieldOps triage coding task, validate it, emit HTML evidence, and record validation-discovered learning.",
+      "summary": "Direct legion-run mode should use live routed Codex model calls to solve a FieldOps triage coding task, validate it, emit HTML evidence, and record validation-discovered learning.",
       "target_type": "command",
       "target_name": "legion-run",
       "preserve_home": true,
       "command": [
         "bash",
-        "{repo}/legion-observability/bench/adapters/legion-run-direct-live.sh",
+        "{repo}/legion-observability/bench/adapters/legion-run-direct-codex-live.sh",
         "{repo}"
       ],
       "timeout": 1200,
@@ -40,12 +40,12 @@
         },
         {
           "type": "stdout_json_field_equals",
-          "field": "checks.live_slices_ran",
+          "field": "checks.codex_slices_ran",
           "equals": true
         },
         {
           "type": "stdout_json_field_equals",
-          "field": "checks.live_model_telemetry_recorded",
+          "field": "checks.codex_model_telemetry_recorded",
           "equals": true
         },
         {
@@ -75,20 +75,20 @@
         },
         {
           "type": "file_exists",
-          "path": "{workspace}/direct-run-live-result.json"
+          "path": "{workspace}/direct-run-codex-live-result.json"
         },
         {
           "type": "file_exists",
-          "path": "{workspace}/legion-run-live-benchmark.html"
+          "path": "{workspace}/legion-run-codex-live-benchmark.html"
         },
         {
           "type": "file_contains",
-          "path": "{workspace}/legion-run-live-benchmark.html",
-          "text": "Live Model Evidence"
+          "path": "{workspace}/legion-run-codex-live-benchmark.html",
+          "text": "Codex Live Evidence"
         },
         {
           "type": "file_contains",
-          "path": "{workspace}/legion-run-live-benchmark.html",
+          "path": "{workspace}/legion-run-codex-live-benchmark.html",
           "text": "Validation-Discovered Learning"
         }
       ],

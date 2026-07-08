@@ -264,7 +264,9 @@ TOML
 }
 
 @test "doctor: router warns (exit 0) when nothing is listening" {
-  ROUTER_PORT=59999 run "$DOCTOR" --repo "$GOOD" --only router
+  # Neutralize any ambient ANTHROPIC_BASE_URL (set on machines that actually run
+  # the router) so this exercises the "nothing forces the proxy" path.
+  ANTHROPIC_BASE_URL= ROUTER_PORT=59999 run "$DOCTOR" --repo "$GOOD" --only router
   [ "$status" -eq 0 ]
   [[ "$output" == *WARN* ]]
 }
@@ -274,7 +276,10 @@ TOML
   mkdir -p "$home/.claude"
   printf '%s\n' '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:59999"}}' > "$home/.claude/settings.json"
 
-  HOME="$home" ROUTER_PORT=59999 run "$DOCTOR" --repo "$GOOD" --only router
+  # Clear any ambient ANTHROPIC_BASE_URL so the check reads it from settings.json
+  # (the env var takes precedence in the doctor) — otherwise this test is a no-op
+  # on machines where the developer runs the router.
+  HOME="$home" ROUTER_PORT=59999 ANTHROPIC_BASE_URL= run "$DOCTOR" --repo "$GOOD" --only router
   [ "$status" -eq 1 ]
   [[ "$output" == *"ANTHROPIC_BASE_URL=http://127.0.0.1:59999"* ]]
 }

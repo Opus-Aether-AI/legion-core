@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.14.0...v0.14.1) (2026-07-08)
+
+
+### Fixed
+
+* make legion-delegate robust under non-interactive stdio ([#82](https://github.com/Opus-Aether-AI/legion-core/issues/82)) ([fac6cf0](https://github.com/Opus-Aether-AI/legion-core/commit/fac6cf0de7946e49c9a83875842e5e0c17e15e25))
+
 ## [0.14.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.13.1...v0.14.0) (2026-07-08)
 
 

@@ -36,7 +36,7 @@ manually composing the lower-level commands. Use direct mode for one-off heavy
 work:
 
 ```bash
-legion-run --repo . --task "..." --plan-file ./PLAN.md --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" --json
+legion-run --repo . --task "..." --plan-file ./PLAN.md --plan-file ./ARCHITECTURE.md --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" --json
 ```
 
 Use plugin mode when the plan/validate/evaluate commands are reusable domain

@@ -20,10 +20,14 @@ legion-run \
   --task "Build the requested app change" \
   --name app-change \
   --plan-file ./PLAN.md \
+  --plan-file ./ARCHITECTURE.md \
   --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" \
   --evaluate-command "./scripts/eval-app-change" \
   --json
 ```
+
+Repeat `--plan-file` to combine product, architecture, migration, or eval notes.
+Each relative file path is resolved from `--repo` and merged into `plan.json`.
 
 Domain plugin mode:
 

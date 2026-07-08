@@ -166,10 +166,14 @@ legion-run \
   --task "Add organization invitations with tests and review" \
   --name org-invitations \
   --plan-file ./plans/org-invitations.md \
+  --plan-file ./plans/org-invitations-architecture.md \
   --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" \
   --evaluate-command "./scripts/eval-org-invitations" \
   --json
 ```
+
+Repeat `--plan-file` when the task needs multiple sources, such as a product
+plan plus architecture notes. Relative paths are resolved from `--repo`.
 
 Domain plugin mode:
 

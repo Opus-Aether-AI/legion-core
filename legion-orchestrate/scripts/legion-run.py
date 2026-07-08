@@ -262,10 +262,10 @@ def build_direct_runner(args: argparse.Namespace) -> dict[str, Any]:
         raise LegionRunError(f"unsupported pipeline profile: {profile}")
     name = _slug(args.name or args.task or "heavy-task")
     plan_command = str(args.plan_command or "").strip()
-    plan_file = str(args.plan_file or "").strip()
+    plan_files = [str(item).strip() for item in (args.plan_files or []) if str(item).strip()]
     validate_command = str(args.validate_command or "").strip()
     evaluate_command = str(args.evaluate_command or "").strip()
-    if not plan_command and not plan_file:
+    if not plan_command and not plan_files:
         raise LegionRunError("direct heavy-task mode requires --plan-command or --plan-file")
     if not validate_command:
         raise LegionRunError("direct heavy-task mode requires --validate-command")
@@ -283,7 +283,8 @@ def build_direct_runner(args: argparse.Namespace) -> dict[str, Any]:
             "validate": validate_command,
             "evaluate": evaluate_command,
         },
-        "plan_file": plan_file,
+        "plan_file": plan_files[0] if len(plan_files) == 1 else "",
+        "plan_files": plan_files,
     }
 
 
@@ -379,7 +380,7 @@ def default_tdd_slices(plan: dict[str, Any], plugin: dict[str, Any], task: str) 
         plan.get("planning_instruction"),
         "Build the requested app TDD style: write failing tests first, implement the minimum code to pass, then refactor after green.",
     )
-    context_files = _as_text_list(plan.get("context_files") or plan.get("plan_source"))
+    context_files = _as_text_list(plan.get("context_files") or plan.get("plan_sources") or plan.get("plan_source"))
     skills = _as_text_list(plan.get("required_skills") or plan.get("legion_code_skills"))
     gates = _as_text_list(plan.get("quality_gates"))
     eval_goal = _as_text(plan.get("eval_goal"), "the requested domain workflow works end to end")
@@ -491,28 +492,82 @@ def load_slices(path: Path) -> list[dict[str, Any]]:
     return slices
 
 
-def write_plan_from_file(plan_file: str, plan_path: Path, runner: dict[str, Any], task: str, base_dir: Path) -> dict[str, Any]:
+def _resolve_plan_source(plan_file: str, base_dir: Path) -> Path:
     source = Path(plan_file).expanduser()
     if not source.is_absolute():
         source = (base_dir / source).resolve()
     if not source.exists():
         raise LegionRunError(f"plan file not found: {source}")
-    text = source.read_text(encoding="utf-8", errors="replace")
-    if source.suffix.lower() == ".json":
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise LegionRunError(f"invalid plan JSON: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise LegionRunError("plan JSON must be an object")
+    return source
+
+
+def _extend_unique(items: list[str], value: Any) -> None:
+    for item in _as_text_list(value):
+        if item not in items:
+            items.append(item)
+
+
+def write_plan_from_files(plan_files: list[str], plan_path: Path, runner: dict[str, Any], task: str, base_dir: Path) -> dict[str, Any]:
+    sources = [_resolve_plan_source(plan_file, base_dir) for plan_file in plan_files]
+    if not sources:
+        raise LegionRunError("direct heavy-task mode requires --plan-command or --plan-file")
+
+    if len(sources) == 1:
+        source = sources[0]
+        text = source.read_text(encoding="utf-8", errors="replace")
+        if source.suffix.lower() == ".json":
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise LegionRunError(f"invalid plan JSON: {exc}") from exc
+            if not isinstance(payload, dict):
+                raise LegionRunError("plan JSON must be an object")
+        else:
+            payload = {
+                "schema": "legion.heavy-task.plan.v1",
+                "mode": "legion-generate-slices",
+                "task": task,
+                "planning_instruction": text.strip(),
+                "plan_source": str(source),
+            }
+        payload.setdefault("plan_source", str(source))
     else:
+        sections: list[str] = []
+        required_skills: list[str] = []
+        quality_gates: list[str] = []
+        eval_goals: list[str] = []
+        for source in sources:
+            text = source.read_text(encoding="utf-8", errors="replace")
+            body = text.strip()
+            if source.suffix.lower() == ".json":
+                try:
+                    json_payload = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise LegionRunError(f"invalid plan JSON: {exc}") from exc
+                if not isinstance(json_payload, dict):
+                    raise LegionRunError("plan JSON must be an object")
+                body = _as_text(json_payload.get("planning_instruction"), json.dumps(json_payload, indent=2, sort_keys=True))
+                _extend_unique(required_skills, json_payload.get("required_skills") or json_payload.get("legion_code_skills"))
+                _extend_unique(quality_gates, json_payload.get("quality_gates"))
+                eval_goal = _as_text(json_payload.get("eval_goal"))
+                if eval_goal and eval_goal not in eval_goals:
+                    eval_goals.append(eval_goal)
+            sections.append(f"### {source.name}\n{body}")
         payload = {
             "schema": "legion.heavy-task.plan.v1",
             "mode": "legion-generate-slices",
             "task": task,
-            "planning_instruction": text.strip(),
-            "plan_source": str(source),
+            "planning_instruction": "Use these plan files together:\n\n" + "\n\n".join(sections),
+            "plan_source": str(sources[0]),
+            "plan_sources": [str(source) for source in sources],
         }
+        if required_skills:
+            payload["required_skills"] = required_skills
+        if quality_gates:
+            payload["quality_gates"] = quality_gates
+        if eval_goals:
+            payload["eval_goal"] = " / ".join(eval_goals)
+
     payload.setdefault("schema", "legion.heavy-task.plan.v1")
     payload.setdefault("mode", "legion-generate-slices")
     payload.setdefault("task", task)
@@ -520,6 +575,10 @@ def write_plan_from_file(plan_file: str, plan_path: Path, runner: dict[str, Any]
     payload["profile"] = runner["pipeline"]["profile"]
     _write_json(plan_path, payload)
     return payload
+
+
+def write_plan_from_file(plan_file: str, plan_path: Path, runner: dict[str, Any], task: str, base_dir: Path) -> dict[str, Any]:
+    return write_plan_from_files([plan_file], plan_path, runner, task, base_dir)
 
 
 def normalize_plan_file(plan_path: Path, runner: dict[str, Any], task: str) -> dict[str, Any]:
@@ -817,9 +876,9 @@ def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) ->
         _set_stage_status(stages, "plan", "running")
         write_stage_status(run_dir, stages)
         plan_path = run_dir / "plan.json"
-        if runner.get("plan_file"):
-            write_plan_from_file(str(runner["plan_file"]), plan_path, runner, task, repo)
-            _write_json(run_dir / "plan-command.json", {"ok": True, "source": "plan-file", "path": runner["plan_file"]})
+        if runner.get("plan_files"):
+            write_plan_from_files(list(runner["plan_files"]), plan_path, runner, task, repo)
+            _write_json(run_dir / "plan-command.json", {"ok": True, "source": "plan-file", "paths": runner["plan_files"]})
         else:
             run_process([runner["commands"]["plan"]], env, repo, run_dir / "plan-command.json", shell=True)
             normalize_plan_file(plan_path, runner, task)
@@ -905,7 +964,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile", default="")
     parser.add_argument("--name", default="")
     parser.add_argument("--plan-command", "--plan", dest="plan_command", default="")
-    parser.add_argument("--plan-file", default="")
+    parser.add_argument("--plan-file", dest="plan_files", action="append", default=[])
     parser.add_argument("--validate-command", "--validate", dest="validate_command", default="")
     parser.add_argument("--evaluate-command", "--evaluate", dest="evaluate_command", default="")
     parser.add_argument("--repo", default=os.getcwd())

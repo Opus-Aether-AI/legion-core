@@ -369,6 +369,43 @@ SH
   jq -e 'select(.generated_by == "legion-run.default-tdd-planner")' "$run_dir/slices.jsonl" >/dev/null
 }
 
+@test "legion-run: direct mode accepts multiple repo-relative plan files" {
+  install_fake_pipeline_bins
+  printf 'Product plan: build invitations TDD style.\n' > "$REPO/PLAN.md"
+  printf 'Architecture notes: reuse existing auth boundaries.\n' > "$REPO/ARCH.md"
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"heavy-validate"}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":1,"total":1}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-*
+
+  run "$RUN" \
+    --repo "$REPO" \
+    --task "Use several repo plans" \
+    --name multi-plan \
+    --plan-file ./PLAN.md \
+    --plan-file ./ARCH.md \
+    --validate-command heavy-validate \
+    --evaluate-command heavy-eval \
+    --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  expected_plan="$(cd "$REPO" && pwd -P)/PLAN.md"
+  expected_arch="$(cd "$REPO" && pwd -P)/ARCH.md"
+  jq -e --arg p "$expected_plan" --arg a "$expected_arch" \
+    '.plan_sources == [$p, $a] and (.planning_instruction | contains("Product plan")) and (.planning_instruction | contains("Architecture notes"))' \
+    "$run_dir/plan.json"
+  jq -e --arg p "$expected_plan" --arg a "$expected_arch" \
+    'select((.task | contains($p)) and (.task | contains($a)))' "$run_dir/slices.jsonl" >/dev/null
+}
+
 @test "legion-run: failed fanout still emits partial report, learning, heal plan, and manifest" {
   install_fake_pipeline_bins
   cat > "$BATS_TEST_TMPDIR/bin/heavy-plan" <<'SH'

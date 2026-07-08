@@ -11,9 +11,15 @@
   <img alt="agents" src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20%C2%B7%20Cursor%20%C2%B7%20opencode-8a2be2">
 </p>
 
-> **legion-core** is the model-agnostic orchestration engine behind Legion:
-> routing, fan-out, review, observability, self-learning, healing, and the
-> `legion-run` heavy-task lifecycle.
+> **legion-core** is the model-agnostic orchestration engine under the hood of
+> an AI agent: **models, harnesses, loops, self-improving agents** — the stack,
+> not another wrapper. Routing, fan-out, review, observability, self-learning,
+> healing, and the `legion-run` heavy-task lifecycle.
+
+The parts that make an AI agent actually work aren't in a thread or a YouTube
+video — they're under the hood: the **models**, the **harnesses** they run in,
+the **loops** that verify and heal, and the **self-improving agents** built on
+top. legion-core is exactly that layer.
 
 Use it directly for major work, or build your own domain plugins on top of it.
 

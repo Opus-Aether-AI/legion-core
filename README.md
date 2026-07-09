@@ -298,6 +298,17 @@ commands. It passes only if direct mode can consume a plan command and validate
 command, route and fan out slices, apply code, review, validate, emit HTML
 reports, record validation-discovered learning, and run heal planning.
 
+The self-learning check is deliberately validation-led. The benchmark validator
+does more than return pass/fail: when it proves a reusable domain invariant, it
+emits `learning_feedback`. `legion-run` ingests that feedback, writes
+`learning-feedback.json`, runs `legion-self-learn`, updates durable harness
+memory, and makes the resulting hint available to future runs before planning.
+In this benchmark, the learned invariant is that cold-chain outage keywords such
+as freezer down or product warming must override lower explicit severity and
+produce a critical refrigeration dispatch with a 30-minute SLA.
+That proves the useful loop: delivery evidence becomes reusable operational
+memory without a human manually writing a runbook after the task.
+
 Run the Codex live proof when you want to verify the full product path:
 
 ```bash
@@ -328,7 +339,10 @@ PY
 Open the printed `benchmark_overview` file in a browser. It links to
 `legion-report.html`, `legion-observability.html`, the artifact manifest, the
 temporary fixture repo, live model fan-out evidence, validation output, and the
-self-learning memory update.
+self-learning memory update. In the overview, inspect
+**Validation-Discovered Learning** first; the raw proof is also in the nested
+`learning-feedback.json`, `self-learn.json`, and
+`self-learn/harness-memory.json` artifacts.
 
 ## More Docs
 

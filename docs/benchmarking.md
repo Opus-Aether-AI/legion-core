@@ -72,6 +72,7 @@ Start with small deterministic fixtures before adding live model runs:
 | `validation` | Did it run the right gates and reject bad output? | missing test, shellcheck warning, invalid skill frontmatter |
 | `learning-feedback` | Did user corrections/session logs become outcomes and hints? | wrong attribution, missed repo-specific instruction |
 | `cost-routing` | Did routing improve cost at equal quality? | cheap model pass, stronger review, low-credit fallback |
+| `legion-run` | Does direct `legion-run` with `--plan-command` and `--validate-command` execute the full heavy-task lifecycle on a real fixture coding task and turn validation-discovered feedback into memory? | FieldOps SLA triage implementation, unit tests, validation feedback, plan, route, fanout/apply, final review, validate, default eval, report, share, self-learning, heal-plan artifacts |
 
 Each case should include:
 
@@ -90,6 +91,8 @@ Implemented CLI:
 
 ```bash
 legion-bench run --suite core --repo . --json
+legion-bench run --suite legion-run --repo . --json --strict
+legion-bench run --suite legion-run-codex-live --repo . --json --strict
 legion-bench run --suite stable --repo . --json --strict
 legion-bench stable --suite stable --repo . --repeat 3 --strict
 legion-bench corpus --corpus local-smoke --repo . --json
@@ -99,6 +102,25 @@ legion-bench compare --baseline runs/base.json --candidate runs/candidate.json
 legion-bench gate --baseline runs/base.json --candidate runs/candidate.json
 legion-bench learning-lift --repo . --json
 ```
+
+For a demo-friendly `legion-run` proof, use `--suite legion-run`. The JSON output
+includes `html_artifacts` with a benchmark overview report plus the nested
+`legion-run` report and observability report.
+
+For an opt-in Codex live proof, first confirm local auth and then run the Codex live
+suite:
+
+```bash
+legion-doctor --repo . --strict-demo
+legion-bench run --suite legion-run-codex-live --repo . --json --strict \
+  | tee /tmp/legion-run-codex-live.json
+```
+
+`legion-run-codex-live` preserves the caller's real `HOME` for Codex authentication,
+spends real Codex model calls, and writes the same `html_artifacts` map. Expect several
+minutes of runtime and real model credits. Open the printed `benchmark_overview`
+HTML to inspect fan-out model evidence, validation results, self-learning
+updates, and links to the nested Legion reports.
 
 `run` writes a durable benchmark artifact under
 `~/.claude/logs/legion/bench/` with:

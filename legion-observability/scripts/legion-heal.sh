@@ -70,9 +70,18 @@ _slug() {  # repo-dir → owner/name from the origin remote URL
 }
 
 # Collect fixable findings as compact JSON lines on stdout.
+_doctor_for_repo() {  # repo  [doctor args...]
+  local repo="$1"; shift
+  if [[ -f "$repo/.claude-plugin/marketplace.json" ]]; then
+    LEGION_ROOT="$repo" "$DOCTOR" --repo "$repo" "$@"
+  else
+    "$DOCTOR" --repo "$repo" "$@"
+  fi
+}
+
 _findings() {  # repo  severity
   local repo="$1" sev="$2"
-  LEGION_ROOT="$repo" "$DOCTOR" --repo "$repo" --json 2>/dev/null \
+  _doctor_for_repo "$repo" --json 2>/dev/null \
     | jq -c --arg sev "$sev" '.[] | select(.severity == $sev)'
 }
 
@@ -149,7 +158,7 @@ heal_one() {
   fi
 
   # GATE — the finding's own check must now pass, and nothing else may break.
-  if ! LEGION_ROOT="$wt" "$DOCTOR" --repo "$wt" --only "$check" >/dev/null 2>&1; then
+  if ! _doctor_for_repo "$wt" --only "$check" >/dev/null 2>&1; then
     note "    gate failed: $check still red after fix"; _cleanup; echo rejected; return
   fi
   # …and it must not have passed by deleting the artifact it was meant to repair.

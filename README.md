@@ -287,20 +287,62 @@ Full copy-pasteable guide: [docs/domain-plugins.md](docs/domain-plugins.md).
 
 ## Prove It Works
 
-Run the single-task FieldOps benchmark before a demo or release:
+Run the deterministic FieldOps `legion-run` benchmark before a demo or release:
 
 ```bash
-legion-bench corpus \
-  --corpus fieldops-triage-e2e \
-  --repo . \
-  --mode legion-fanout-review \
-  --baseline legion-fanout-review \
-  --json --strict
+legion-bench run --suite legion-run --repo . --json --strict
 ```
 
-It passes only if Legion can route, fan out, apply code, review, evaluate, emit
-observability HTML, record self-learning data, run heal planning, and pass the
-nested core bench.
+That no-spend suite runs the real `legion-run` lifecycle with stubbed model
+commands. It passes only if direct mode can consume a plan command and validate
+command, route and fan out slices, apply code, review, validate, emit HTML
+reports, record validation-discovered learning, and run heal planning.
+
+The self-learning check is deliberately validation-led. The benchmark validator
+does more than return pass/fail: when it proves a reusable domain invariant, it
+emits `learning_feedback`. `legion-run` ingests that feedback, writes
+`learning-feedback.json`, runs `legion-self-learn`, updates durable harness
+memory, and makes the resulting hint available to future runs before planning.
+In this benchmark, the learned invariant is that cold-chain outage keywords such
+as freezer down or product warming must override lower explicit severity and
+produce a critical refrigeration dispatch with a 30-minute SLA.
+That proves the useful loop: delivery evidence becomes reusable operational
+memory without a human manually writing a runbook after the task.
+
+Run the Codex live proof when you want to verify the full product path:
+
+```bash
+legion-doctor --repo . --strict-demo
+legion-bench run --suite legion-run-codex-live --repo . --json --strict \
+  | tee /tmp/legion-run-codex-live.json
+```
+
+The Codex live suite spends real Codex model calls, preserves your real `HOME` so
+Codex auth is available, and writes a temporary Python fixture repo. Expect it
+to take several minutes and consume real model credits. It is a separate suite
+so CI does not run it unless you explicitly ask for it.
+
+The JSON output contains `html_artifacts`. Open the benchmark overview first,
+then the nested Legion reports:
+
+```bash
+python3 - <<'PY' /tmp/legion-run-codex-live.json
+import json, sys
+data = json.load(open(sys.argv[1]))
+for case, links in data.get("html_artifacts", {}).items():
+    print(case)
+    for name, path in links.items():
+        print(f"  {name}: {path}")
+PY
+```
+
+Open the printed `benchmark_overview` file in a browser. It links to
+`legion-report.html`, `legion-observability.html`, the artifact manifest, the
+temporary fixture repo, live model fan-out evidence, validation output, and the
+self-learning memory update. In the overview, inspect
+**Validation-Discovered Learning** first; the raw proof is also in the nested
+`learning-feedback.json`, `self-learn.json`, and
+`self-learn/harness-memory.json` artifacts.
 
 ## More Docs
 

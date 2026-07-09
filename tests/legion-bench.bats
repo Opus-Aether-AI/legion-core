@@ -54,6 +54,67 @@ setup() {
   ' <<<"$output" >/dev/null
 }
 
+@test "legion-bench: legion-run suite exercises direct plan/validate lifecycle" {
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" run --suite legion-run --repo "$ROOT" --json --strict
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .summary.ok == true
+    and .summary.metrics.cases == 1
+    and .summary.metrics.required_fail == 0
+    and .summary.metrics.task_cases == 1
+    and .summary.dimensions.orchestration.required_pass == 1
+    and .html_artifacts["task.legion-run-direct-plan-validate"].benchmark_overview
+    and .html_artifacts["task.legion-run-direct-plan-validate"].legion_observability
+  ' <<<"$output" >/dev/null
+}
+
+@test "legion-bench: task cases can preserve HOME for live auth" {
+  suite="$BATS_TEST_TMPDIR/preserve-home-suite.json"
+  real_home="$BATS_TEST_TMPDIR/real-home"
+  mkdir -p "$real_home"
+  cat > "$suite" <<JSON
+{
+  "schema": "legion.bench.suite.v1",
+  "suite": "preserve-home",
+  "cases": [
+    {
+      "id": "task.preserve-home",
+      "type": "task",
+      "preserve_home": true,
+      "command": [
+        "python3",
+        "-c",
+        "import json, os; print(json.dumps({'ok': True, 'home': os.environ['HOME']}))"
+      ],
+      "validators": [
+        {
+          "type": "stdout_json_field_equals",
+          "field": "home",
+          "equals": "$real_home"
+        }
+      ],
+      "required": true
+    }
+  ]
+}
+JSON
+
+  HOME="$real_home" \
+  LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
+  LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \
+    run "$BENCH" run --suite "$suite" --repo "$ROOT" --json --strict
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .summary.ok == true
+    and .summary.metrics.required_fail == 0
+    and .summary.metrics.task_pass == 1
+  ' <<<"$output" >/dev/null
+}
+
 @test "legion-bench: stable suite reports repeatable rollup" {
   LEGION_BENCH_DIR="$BATS_TEST_TMPDIR/bench" \
   LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans" \

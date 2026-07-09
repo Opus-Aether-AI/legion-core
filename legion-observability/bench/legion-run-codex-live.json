@@ -1,0 +1,98 @@
+{
+  "schema": "legion.bench.suite.v1",
+  "suite": "legion-run-codex-live",
+  "description": "Opt-in Codex-live benchmark for the direct legion-run heavy-task path. This spends real Codex model calls and preserves the user's HOME so Codex authentication is available.",
+  "cases": [
+    {
+      "id": "task.legion-run-codex-live-direct-plan-validate",
+      "type": "task",
+      "dimension": "orchestration-live",
+      "summary": "Direct legion-run mode should use live routed Codex model calls to solve a FieldOps triage coding task, validate it, emit HTML evidence, and record validation-discovered learning.",
+      "target_type": "command",
+      "target_name": "legion-run",
+      "preserve_home": true,
+      "command": [
+        "bash",
+        "{repo}/legion-observability/bench/adapters/legion-run-direct-codex-live.sh",
+        "{repo}"
+      ],
+      "timeout": 1200,
+      "validators": [
+        {
+          "type": "stdout_json_field_equals",
+          "field": "ok",
+          "equals": true
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "mode",
+          "equals": "direct"
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "profile",
+          "equals": "legion.heavy_task.v1"
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "checks.plan_command_used",
+          "equals": true
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "checks.codex_slices_ran",
+          "equals": true
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "checks.codex_model_telemetry_recorded",
+          "equals": true
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "checks.validate_command_used",
+          "equals": true
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "checks.coding_task_implemented",
+          "equals": true
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "checks.validation_feedback_recorded",
+          "equals": true
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "checks.self_learning_memory_updated_by_validation_feedback",
+          "equals": true
+        },
+        {
+          "type": "stdout_json_field_equals",
+          "field": "checks.html_reports_generated",
+          "equals": true
+        },
+        {
+          "type": "file_exists",
+          "path": "{workspace}/direct-run-codex-live-result.json"
+        },
+        {
+          "type": "file_exists",
+          "path": "{workspace}/legion-run-codex-live-benchmark.html"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/legion-run-codex-live-benchmark.html",
+          "text": "Codex Live Evidence"
+        },
+        {
+          "type": "file_contains",
+          "path": "{workspace}/legion-run-codex-live-benchmark.html",
+          "text": "Validation-Discovered Learning"
+        }
+      ],
+      "required": true
+    }
+  ]
+}

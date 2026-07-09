@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import html
 import json
 import os
@@ -61,6 +62,7 @@ PIPELINE_REQUIRED_ARTIFACTS = [
     "review.json",
     "validation.json",
     "eval.json",
+    "learning-feedback.json",
     "legion-report.json",
     "legion-report.html",
     "legion-observability.html",
@@ -80,7 +82,7 @@ PIPELINE_STAGE_ARTIFACTS = {
     "evaluate": ["eval.json"],
     "report": ["legion-report.json", "legion-report.html", "legion-observability.html"],
     "share": ["share.json"],
-    "self-learn": ["self-learn.json"],
+    "self-learn": ["learning-feedback.json", "self-learn.json"],
     "heal-plan": ["heal-plan.json"],
 }
 
@@ -183,6 +185,13 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+        handle.write("\n")
+
+
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text(
         "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
@@ -192,6 +201,22 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "plugin"
+
+
+def _stable_id(parts: list[Any]) -> str:
+    raw = json.dumps(parts, sort_keys=True, ensure_ascii=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _iso_utc() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _short(text: Any, limit: int = 500) -> str:
+    collapsed = " ".join(str(text or "").strip().split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 3].rstrip() + "..."
 
 
 def _manifest_candidates(repo: Path, plugin: str) -> list[Path]:
@@ -758,6 +783,99 @@ def best_effort_process(argv: list[str], env: dict[str, str], cwd: Path, artifac
         return payload
 
 
+def _feedback_items(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    raw = payload.get("learning_feedback")
+    if raw is None:
+        raw = payload.get("learning_outcomes")
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _feedback_outcome(
+    *,
+    item: dict[str, Any],
+    stage: str,
+    artifact_path: Path,
+    runner: dict[str, Any],
+    run_id: str,
+) -> dict[str, Any] | None:
+    summary = _short(item.get("summary") or item.get("lesson") or item.get("message"), 500)
+    if not summary:
+        return None
+    target_type = _short(item.get("target_type") or runner.get("target_type") or runner.get("mode", "runner"), 80)
+    target_name = _short(item.get("target_name") or runner["name"], 160)
+    source = _short(item.get("source") or f"legion-run:{stage}", 120)
+    severity = _short(item.get("severity") or "medium", 40)
+    if severity not in {"info", "low", "medium", "high", "critical"}:
+        severity = "medium"
+    evidence_raw = item.get("evidence")
+    if isinstance(evidence_raw, (dict, list)):
+        evidence = json.dumps(evidence_raw, sort_keys=True)
+    else:
+        evidence = str(evidence_raw or artifact_path)
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    metadata = {
+        **metadata,
+        "stage": stage,
+        "artifact": artifact_path.name,
+        "feedback_id": item.get("id") or "",
+    }
+    return {
+        "schema": "legion.outcome.v1",
+        "id": _stable_id([source, target_type, target_name, run_id, summary, evidence]),
+        "ts": _iso_utc(),
+        "source": source,
+        "target_type": target_type,
+        "target_name": target_name,
+        "severity": severity,
+        "summary": summary,
+        "evidence": _short(evidence, 1200),
+        "run_id": run_id,
+        "source_path": str(artifact_path),
+        "metadata": metadata,
+    }
+
+
+def record_learning_feedback(
+    *,
+    runner: dict[str, Any],
+    run_id: str,
+    run_dir: Path,
+    env: dict[str, str],
+    stage_payloads: dict[str, Any],
+) -> dict[str, Any]:
+    outcomes: list[dict[str, Any]] = []
+    for stage, payload in stage_payloads.items():
+        artifact_path = run_dir / ("validation.json" if stage == "validate" else f"{stage}.json")
+        for item in _feedback_items(payload):
+            outcome = _feedback_outcome(
+                item=item,
+                stage=stage,
+                artifact_path=artifact_path,
+                runner=runner,
+                run_id=run_id,
+            )
+            if outcome:
+                outcomes.append(outcome)
+
+    path = Path(env["LEGION_STATE_ROOT"]) / "self-learn" / "outcomes.jsonl"
+    for outcome in outcomes:
+        _append_jsonl(path, outcome)
+    payload = {
+        "schema": "legion.run.learning-feedback.v1",
+        "recorded": len(outcomes),
+        "outcomes_path": str(path),
+        "outcomes": outcomes,
+    }
+    _write_json(run_dir / "learning-feedback.json", payload)
+    return payload
+
+
 def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) -> int:
     state = legion_state.resolve_state(str(repo))
     run_id = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + f"-{_slug(runner['name'])}"
@@ -909,8 +1027,15 @@ def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) ->
 
         stage_run("fanout-apply", [_cmd("legion-fanout"), "--slices", str(slices_path), "--repo", str(repo), "--apply", "--json"], run_dir / "fanout.json")
         stage_run("review", [_cmd("legion-delegate"), "review", "--archetype", "final-review", "--repo", str(repo), "--base", "HEAD"], run_dir / "review.json")
-        stage_run("validate", [runner["commands"]["validate"]], run_dir / "validation.json", shell=True)
-        stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True)
+        validation_payload = stage_run("validate", [runner["commands"]["validate"]], run_dir / "validation.json", shell=True)
+        eval_payload = stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True)
+        record_learning_feedback(
+            runner=runner,
+            run_id=run_id,
+            run_dir=run_dir,
+            env=env,
+            stage_payloads={"validate": validation_payload, "eval": eval_payload},
+        )
         stage_run("report", [_cmd("legion-report"), "--trace", "latest", "--json"], run_dir / "legion-report.json")
         stage_run("share", [_cmd("legion-share"), "--window", "1d", "--json"], run_dir / "share.json")
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.14.1...v0.15.0) (2026-07-09)
+
+
+### Added
+
+* add legion-run direct benchmark ([#86](https://github.com/Opus-Aether-AI/legion-core/issues/86)) ([f572694](https://github.com/Opus-Aether-AI/legion-core/commit/f57269427ba8790b3d375e695b3a14a5cfdf90ee))
+
+
+### Documentation
+
+* **seo:** align messaging to "the AI-agent stack under the hood" + hermetic router tests ([#84](https://github.com/Opus-Aether-AI/legion-core/issues/84)) ([cd5200d](https://github.com/Opus-Aether-AI/legion-core/commit/cd5200dfefcf35fbea8b5ca2fe45ce055da91031))
+
 ## [0.14.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.14.0...v0.14.1) (2026-07-08)
 
 

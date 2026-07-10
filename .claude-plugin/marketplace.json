@@ -3,7 +3,7 @@
   "owner": {
     "name": "legion-core"
   },
-  "version": "0.14.1",
+  "version": "0.15.0",
   "metadata": {
     "description": "Legion Core — the model-agnostic orchestration engine under the hood of an AI agent: models, harnesses, loops, self-improving agents. The stack, not another wrapper. Ships scoped delegation, multi-model fan-out, telemetry/cost reporting, doctor/self-learn/heal loops, and cross-harness setup for Claude Code, Codex, Cursor, and opencode. One orchestrator, a legion of models.",
     "repository": "https://github.com/Opus-Aether-AI/legion-core"

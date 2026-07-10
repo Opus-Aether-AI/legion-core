@@ -1,14 +1,26 @@
-# Legion default model catalog.
+# Legion model catalog.
 #
-# This is the single source for active default model IDs. Runtime route policy,
-# runners, and benchmark adapters refer to these keys instead of embedding
-# provider model names in their own files.
+# Each key is a semantic MODEL ROLE that route policy (routing.toml) references
+# by name. Repoint a role at any provider model ID to switch a whole class of
+# tasks in one line; add roles as new tiers/providers show up. Routing should
+# reference these role keys, never a raw model ID, so a model swap lives here.
 
 [models]
-claude_orchestrator = "opus"
-claude_default = "opus"
-claude_sonnet = "claude-sonnet-5"
-codex_workhorse = "gpt-5.5"
-codex_review = "gpt-5.5"
-cursor_default = "composer-2.5"
-auto_tier_haiku = "claude-haiku-4-5"
+# ── Claude ─────────────────────────────────────────────────────────
+claude_orchestrator = "claude-fable-5"   # self / orchestration (fast agentic)
+claude_default      = "claude-fable-5"   # generic Claude
+claude_flagship     = "opus"             # deepest judgement — pick when needed
+claude_sonnet       = "claude-sonnet-5"  # balanced
+claude_fast         = "claude-haiku-4-5" # cheap / fast tier
+
+# ── OpenAI / Codex ─────────────────────────────────────────────────
+codex_workhorse     = "gpt-5.6-terra"    # bulk implementation (fast tier)
+codex_review        = "gpt-5.6-sol"      # reviews + hardest work (high-reasoning)
+codex_default       = "gpt-5.5"          # generic Codex — pick when unsure
+
+# ── Cursor (xAI Grok + in-house) ───────────────────────────────────
+cursor_default      = "grok-4.5"         # Cursor agent (Grok 4.5)
+cursor_composer     = "composer-2.5"     # Cursor in-house
+
+# ── Auto tiers ─────────────────────────────────────────────────────
+auto_tier_haiku     = "claude-haiku-4-5"

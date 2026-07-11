@@ -200,7 +200,8 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _slug(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "plugin"
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "plugin"
+    return slug[:80].strip("-") or "plugin"
 
 
 def _stable_id(parts: list[Any]) -> str:
@@ -375,6 +376,105 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _load_json_value(path: Path) -> Any:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _int_value(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return 0
+
+
+def _exit_code(payload: Any) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    return _int_value(payload.get("exit_code"))
+
+
+def _is_bad_status(value: Any) -> bool:
+    return str(value or "").strip().lower() in {
+        "fail",
+        "failed",
+        "failure",
+        "error",
+        "reject",
+        "rejected",
+        "request_changes",
+        "blocked",
+    }
+
+
+_BLOCKING_REVIEW_SEVERITIES = {"critical", "high", "medium"}
+_BLOCKING_REVIEW_MARKER = re.compile(r"\[(?:p0|p1|p2)\]", re.IGNORECASE)
+
+
+def _review_verdict_value(payload: dict[str, Any]) -> Any:
+    verdict = payload.get("verdict")
+    if isinstance(verdict, str):
+        text = verdict.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                decoded = json.loads(text)
+            except ValueError:
+                return verdict
+            if isinstance(decoded, dict):
+                return decoded
+    return verdict
+
+
+def _blocking_review_findings(verdict: Any) -> list[dict[str, Any]]:
+    findings = []
+    if isinstance(verdict, dict) and isinstance(verdict.get("findings"), list):
+        findings = [item for item in verdict["findings"] if isinstance(item, dict)]
+    return [
+        item
+        for item in findings
+        if str(item.get("severity") or "").strip().lower() in _BLOCKING_REVIEW_SEVERITIES
+    ]
+
+
+def _review_failure_reason(payload: dict[str, Any]) -> str:
+    if payload.get("ok") is False or _is_bad_status(payload.get("status")):
+        return "review command reported failure"
+    verdict = _review_verdict_value(payload)
+    if isinstance(verdict, dict):
+        decision = str(verdict.get("verdict") or "").strip().lower()
+        if _is_bad_status(decision):
+            return f"review verdict {decision}"
+        blocking = _blocking_review_findings(verdict)
+        if blocking:
+            first = _short(blocking[0].get("title") or blocking[0].get("detail") or "blocking finding", 160)
+            return f"review reported {len(blocking)} blocking finding(s): {first}"
+        return ""
+    text = str(verdict or "").strip()
+    if _is_bad_status(text):
+        return f"review verdict {text.lower()}"
+    if _BLOCKING_REVIEW_MARKER.search(text):
+        return "review reported blocking priority finding(s)"
+    return ""
+
+
+def _stage_artifact_path(run_dir: Path, stage: str) -> Path:
+    return run_dir / {
+        "validate": "validation.json",
+        "evaluate": "eval.json",
+        "eval": "eval.json",
+        "fanout-apply": "fanout.json",
+    }.get(stage, f"{stage}.json")
 
 
 def _as_text(value: Any, fallback: str = "") -> str:
@@ -796,6 +896,48 @@ def _feedback_items(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _split_entity(value: Any, *, default_type: str, default_name: str) -> tuple[str, str]:
+    text = str(value or "").strip()
+    if ":" in text:
+        target_type, target_name = text.split(":", 1)
+        target_type = _short(target_type, 80)
+        target_name = _short(target_name, 160)
+        if target_type and target_name:
+            return target_type, target_name
+    return _short(default_type, 80), _short(default_name, 160)
+
+
+def _learning_outcome(
+    *,
+    source: str,
+    target_type: str,
+    target_name: str,
+    severity: str,
+    summary: str,
+    evidence: str,
+    run_id: str,
+    source_path: Path,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_severity = _short(severity or "medium", 40)
+    if normalized_severity not in {"info", "low", "medium", "high", "critical"}:
+        normalized_severity = "medium"
+    return {
+        "schema": "legion.outcome.v1",
+        "id": _stable_id([source, target_type, target_name, run_id, summary, evidence]),
+        "ts": _iso_utc(),
+        "source": _short(source, 120),
+        "target_type": _short(target_type, 80),
+        "target_name": _short(target_name, 160),
+        "severity": normalized_severity,
+        "summary": _short(summary, 500),
+        "evidence": _short(evidence, 1200),
+        "run_id": run_id,
+        "source_path": str(source_path),
+        "metadata": metadata or {},
+    }
+
+
 def _feedback_outcome(
     *,
     item: dict[str, Any],
@@ -825,33 +967,247 @@ def _feedback_outcome(
         "artifact": artifact_path.name,
         "feedback_id": item.get("id") or "",
     }
-    return {
-        "schema": "legion.outcome.v1",
-        "id": _stable_id([source, target_type, target_name, run_id, summary, evidence]),
-        "ts": _iso_utc(),
-        "source": source,
-        "target_type": target_type,
-        "target_name": target_name,
-        "severity": severity,
-        "summary": summary,
-        "evidence": _short(evidence, 1200),
-        "run_id": run_id,
-        "source_path": str(artifact_path),
-        "metadata": metadata,
-    }
+    return _learning_outcome(
+        source=source,
+        target_type=target_type,
+        target_name=target_name,
+        severity=severity,
+        summary=summary,
+        evidence=evidence,
+        run_id=run_id,
+        source_path=artifact_path,
+        metadata=metadata,
+    )
 
 
-def record_learning_feedback(
+def validate_stage_payload(stage: str, payload: Any, artifact_path: Path) -> None:
+    """Fail on explicit semantic failure, even when a hook exits zero."""
+    if stage == "doctor":
+        fail_count = 0
+        if isinstance(payload, list):
+            fail_count = sum(1 for item in payload if isinstance(item, dict) and str(item.get("severity", "")).lower() == "fail")
+        elif isinstance(payload, dict):
+            fail_count = _int_value(payload.get("fail") or payload.get("failed") or payload.get("failures"))
+            if payload.get("ok") is False:
+                fail_count = max(fail_count, 1)
+        if fail_count:
+            raise LegionRunError(f"stage semantic failure ({artifact_path.name}): doctor reported {fail_count} fail(s)", 1)
+        return
+
+    if stage == "fanout-apply" and isinstance(payload, dict):
+        failed = _int_value(payload.get("failed") or payload.get("failures"))
+        conflicts = _int_value(payload.get("apply_conflicts") or payload.get("conflicts"))
+        if payload.get("ok") is False:
+            failed = max(failed, 1)
+        if failed or conflicts:
+            raise LegionRunError(
+                f"stage semantic failure ({artifact_path.name}): {failed} failed slice(s), {conflicts} apply conflict(s)",
+                1,
+            )
+        return
+
+    if stage in {"validate", "evaluate"} and isinstance(payload, dict):
+        if payload.get("ok") is False or payload.get("passed") is False or _is_bad_status(payload.get("status")):
+            raise LegionRunError(f"stage semantic failure ({artifact_path.name}): {stage} reported failure", 1)
+        return
+
+    if stage == "review" and isinstance(payload, dict):
+        if _review_failure_reason(payload):
+            raise LegionRunError(f"stage semantic failure ({artifact_path.name}): review requested changes", 1)
+
+
+def _doctor_learning_outcomes(
+    payload: Any,
+    *,
+    runner: dict[str, Any],
+    run_id: str,
+    artifact_path: Path,
+) -> list[dict[str, Any]]:
+    default_type = runner.get("target_type", runner.get("mode", "runner"))
+    default_name = runner["name"]
+    outcomes: list[dict[str, Any]] = []
+    items = payload if isinstance(payload, list) else []
+    if isinstance(payload, dict) and (payload.get("ok") is False or _int_value(payload.get("fail"))):
+        items = [
+            {
+                "severity": "fail",
+                "entity": payload.get("entity") or f"{default_type}:{default_name}",
+                "message": payload.get("message") or payload.get("error") or "legion-doctor reported a failing check.",
+                "check": payload.get("check") or "legion-doctor",
+            }
+        ]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or "").lower()
+        if severity not in {"fail", "failed", "error", "critical"}:
+            continue
+        target_type, target_name = _split_entity(
+            item.get("entity") or item.get("target"),
+            default_type=default_type,
+            default_name=default_name,
+        )
+        summary = _short(
+            item.get("message")
+            or item.get("summary")
+            or item.get("check")
+            or "legion-doctor reported a failing check.",
+            500,
+        )
+        outcomes.append(
+            _learning_outcome(
+                source="legion-run:doctor",
+                target_type=target_type,
+                target_name=target_name,
+                severity="high",
+                summary=summary,
+                evidence=json.dumps(item, sort_keys=True),
+                run_id=run_id,
+                source_path=artifact_path,
+                metadata={
+                    "stage": "doctor",
+                    "artifact": artifact_path.name,
+                    "doctor_check": item.get("check") or "",
+                },
+            )
+        )
+    return outcomes
+
+
+def _fanout_learning_outcomes(payload: Any, *, run_id: str, artifact_path: Path) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    failed = _int_value(payload.get("failed") or payload.get("failures"))
+    conflicts = _int_value(payload.get("apply_conflicts") or payload.get("conflicts"))
+    if payload.get("ok") is False:
+        failed = max(failed, 1)
+    if not failed and not conflicts:
+        return []
+    result_summaries = []
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") in {"failed", "error"} or item.get("error"):
+            result_summaries.append(
+                " ".join(str(bit) for bit in [item.get("id"), item.get("status"), item.get("error")] if bit)
+            )
+    details = "; ".join(result_summaries[:4])
+    summary = f"legion-fanout reported {failed} failed slice(s) and {conflicts} apply conflict(s)."
+    if details:
+        summary = f"{summary} {details}"
+    return [
+        _learning_outcome(
+            source="legion-run:fanout-apply",
+            target_type="command",
+            target_name="legion-fanout",
+            severity="high",
+            summary=summary,
+            evidence=json.dumps(payload, sort_keys=True),
+            run_id=run_id,
+            source_path=artifact_path,
+            metadata={
+                "stage": "fanout-apply",
+                "artifact": artifact_path.name,
+                "failed": failed,
+                "apply_conflicts": conflicts,
+            },
+        )
+    ]
+
+
+def _review_learning_outcomes(payload: Any, *, run_id: str, artifact_path: Path) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    reason = _review_failure_reason(payload)
+    if not reason:
+        return []
+    verdict = _review_verdict_value(payload)
+    detail = ""
+    if isinstance(verdict, dict):
+        summary = _short(verdict.get("summary"), 240)
+        blocking = _blocking_review_findings(verdict)
+        finding_titles = [
+            _short(item.get("title") or item.get("detail") or "blocking finding", 160)
+            for item in blocking[:3]
+        ]
+        detail = " ".join(part for part in [summary, "; ".join(finding_titles)] if part)
+    else:
+        detail = _short(verdict, 320)
+    summary = f"legion review gate failed: {reason}."
+    if detail:
+        summary = f"{summary} {detail}"
+    return [
+        _learning_outcome(
+            source="legion-run:review",
+            target_type="command",
+            target_name="legion-delegate",
+            severity="high",
+            summary=summary,
+            evidence=json.dumps(payload, sort_keys=True),
+            run_id=run_id,
+            source_path=artifact_path,
+            metadata={
+                "stage": "review",
+                "artifact": artifact_path.name,
+                "reason": reason,
+            },
+        )
+    ]
+
+
+def _terminal_failure_outcome(
     *,
     runner: dict[str, Any],
     run_id: str,
     run_dir: Path,
-    env: dict[str, str],
-    stage_payloads: dict[str, Any],
+    failed_stage: str,
+    message: str,
 ) -> dict[str, Any]:
+    return _learning_outcome(
+        source="legion-run:terminal",
+        target_type=runner.get("target_type", runner.get("mode", "runner")),
+        target_name=runner["name"],
+        severity="medium",
+        summary=f"legion-run failed at {failed_stage}: {message}",
+        evidence=str(run_dir),
+        run_id=run_id,
+        source_path=run_dir / "failure.json",
+        metadata={"stage": failed_stage, "artifact": "failure.json"},
+    )
+
+
+def _dedupe_learning_outcomes(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for outcome in outcomes:
+        oid = str(outcome.get("id") or "")
+        if not oid or oid in seen:
+            continue
+        seen.add(oid)
+        deduped.append(outcome)
+    return deduped
+
+
+def collect_learning_outcomes(
+    *,
+    runner: dict[str, Any],
+    run_id: str,
+    run_dir: Path,
+    stage_payloads: dict[str, Any] | None = None,
+    failed_stage: str = "",
+    failure_message: str = "",
+) -> list[dict[str, Any]]:
     outcomes: list[dict[str, Any]] = []
-    for stage, payload in stage_payloads.items():
-        artifact_path = run_dir / ("validation.json" if stage == "validate" else f"{stage}.json")
+    payloads = dict(stage_payloads or {})
+    for stage in ["validate", "evaluate"]:
+        if stage not in payloads:
+            payload = _load_json_value(_stage_artifact_path(run_dir, stage))
+            if payload is not None:
+                payloads[stage] = payload
+
+    for stage, payload in payloads.items():
+        artifact_path = _stage_artifact_path(run_dir, stage)
         for item in _feedback_items(payload):
             outcome = _feedback_outcome(
                 item=item,
@@ -863,6 +1219,68 @@ def record_learning_feedback(
             if outcome:
                 outcomes.append(outcome)
 
+    doctor_payload = _load_json_value(run_dir / "doctor.json")
+    if doctor_payload is not None:
+        outcomes.extend(
+            _doctor_learning_outcomes(
+                doctor_payload,
+                runner=runner,
+                run_id=run_id,
+                artifact_path=run_dir / "doctor.json",
+            )
+        )
+
+    fanout_payload = _load_json_value(run_dir / "fanout.json")
+    if fanout_payload is not None:
+        outcomes.extend(
+            _fanout_learning_outcomes(
+                fanout_payload,
+                run_id=run_id,
+                artifact_path=run_dir / "fanout.json",
+            )
+        )
+
+    review_payload = _load_json_value(run_dir / "review.json")
+    if review_payload is not None:
+        outcomes.extend(
+            _review_learning_outcomes(
+                review_payload,
+                run_id=run_id,
+                artifact_path=run_dir / "review.json",
+            )
+        )
+
+    if failed_stage and failure_message:
+        outcomes.append(
+            _terminal_failure_outcome(
+                runner=runner,
+                run_id=run_id,
+                run_dir=run_dir,
+                failed_stage=failed_stage,
+                message=failure_message,
+            )
+        )
+    return _dedupe_learning_outcomes(outcomes)
+
+
+def record_learning_feedback(
+    *,
+    runner: dict[str, Any],
+    run_id: str,
+    run_dir: Path,
+    env: dict[str, str],
+    stage_payloads: dict[str, Any] | None = None,
+    failed_stage: str = "",
+    failure_message: str = "",
+) -> dict[str, Any]:
+    outcomes = collect_learning_outcomes(
+        runner=runner,
+        run_id=run_id,
+        run_dir=run_dir,
+        stage_payloads=stage_payloads,
+        failed_stage=failed_stage,
+        failure_message=failure_message,
+    )
     path = Path(env["LEGION_STATE_ROOT"]) / "self-learn" / "outcomes.jsonl"
     for outcome in outcomes:
         _append_jsonl(path, outcome)
@@ -915,8 +1333,68 @@ def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) ->
         _set_stage_status(stages, stage, "running")
         write_stage_status(run_dir, stages)
         payload = run_process(argv, env, repo, artifact, shell=shell)
+        validate_stage_payload(stage, payload, artifact)
         _set_stage_status(stages, stage, "passed")
         write_stage_status(run_dir, stages)
+        return payload
+
+    def finalize_self_learning(
+        *,
+        summary_text: str,
+        strict: bool,
+        stage_payloads: dict[str, Any] | None = None,
+        failed_stage: str = "",
+        failure_message: str = "",
+    ) -> dict[str, Any]:
+        nonlocal current_stage
+        current_stage = "self-learn"
+        _set_stage_status(stages, "self-learn", "running")
+        write_stage_status(run_dir, stages)
+        feedback = record_learning_feedback(
+            runner=runner,
+            run_id=run_id,
+            run_dir=run_dir,
+            env=env,
+            stage_payloads=stage_payloads,
+            failed_stage=failed_stage,
+            failure_message=failure_message,
+        )
+        record = best_effort_process(
+            [
+                _cmd("legion-self-learn"),
+                "record",
+                "--entity",
+                f"{runner.get('target_type', 'runner')}:{runner['name']}",
+                "--summary",
+                summary_text,
+                "--source",
+                "legion-run",
+                "--evidence",
+                str(run_dir),
+                "--json",
+            ],
+            env,
+            repo,
+            run_dir / "self-learn-record.json",
+        )
+        learn = best_effort_process(
+            [_cmd("legion-self-learn"), "run", "--repo", str(repo), "--apply-memory", "--json"],
+            env,
+            repo,
+            run_dir / "self-learn-run.json",
+        )
+        payload = {"learning_feedback": feedback, "record": record, "run": learn}
+        _write_json(run_dir / "self-learn.json", payload)
+        failed = _exit_code(record) != 0 or _exit_code(learn) != 0
+        _set_stage_status(
+            stages,
+            "self-learn",
+            "failed" if failed else "passed",
+            "self-learning command failed" if failed else "",
+        )
+        write_stage_status(run_dir, stages)
+        if strict and failed:
+            raise LegionRunError("stage failed (self-learn.json): self-learning command failed", 1)
         return payload
 
     def finalize_success() -> dict[str, Any]:
@@ -948,26 +1426,28 @@ def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) ->
         _write_json(run_dir / "failure.json", failure)
         if not (run_dir / "legion-report.json").exists():
             best_effort_process([_cmd("legion-report"), "--trace", "latest", "--json"], env, repo, run_dir / "legion-report.json")
-        record = best_effort_process(
-            [
-                _cmd("legion-self-learn"),
-                "record",
-                "--entity",
-                f"{runner.get('target_type', 'runner')}:{runner['name']}",
-                "--summary",
-                f"legion-run failed at {failed_stage}: {exc}",
-                "--source",
-                "legion-run",
-                "--evidence",
-                str(run_dir),
-                "--json",
-            ],
-            env,
-            repo,
-            run_dir / "self-learn-record.json",
+        if failed_stage != "self-learn":
+            finalize_self_learning(
+                summary_text=f"legion-run failed at {failed_stage}: {exc}",
+                strict=False,
+                failed_stage=failed_stage,
+                failure_message=str(exc),
+            )
+        elif not (run_dir / "self-learn.json").exists():
+            _write_json(
+                run_dir / "self-learn.json",
+                {"record": {"ok": False, "error": str(exc)}, "run": {"ok": False, "error": str(exc)}},
+            )
+        _set_stage_status(stages, "heal-plan", "running")
+        write_stage_status(run_dir, stages)
+        heal = best_effort_process([_cmd("legion-heal"), "plan", "--repo", str(repo), "--json"], env, repo, run_dir / "heal-plan.json")
+        _set_stage_status(
+            stages,
+            "heal-plan",
+            "failed" if _exit_code(heal) != 0 else "passed",
+            "heal-plan command failed" if _exit_code(heal) != 0 else "",
         )
-        _write_json(run_dir / "self-learn.json", {"record": record, "run": {"skipped": True, "reason": "pipeline failed"}})
-        best_effort_process([_cmd("legion-heal"), "plan", "--repo", str(repo), "--json"], env, repo, run_dir / "heal-plan.json")
+        write_stage_status(run_dir, stages)
         summary = contract_payload(runner, repo, task)
         summary.update(
             {
@@ -1029,41 +1509,13 @@ def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) ->
         stage_run("review", [_cmd("legion-delegate"), "review", "--archetype", "final-review", "--repo", str(repo), "--base", "HEAD"], run_dir / "review.json")
         validation_payload = stage_run("validate", [runner["commands"]["validate"]], run_dir / "validation.json", shell=True)
         eval_payload = stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True)
-        record_learning_feedback(
-            runner=runner,
-            run_id=run_id,
-            run_dir=run_dir,
-            env=env,
-            stage_payloads={"validate": validation_payload, "eval": eval_payload},
-        )
         stage_run("report", [_cmd("legion-report"), "--trace", "latest", "--json"], run_dir / "legion-report.json")
         stage_run("share", [_cmd("legion-share"), "--window", "1d", "--json"], run_dir / "share.json")
-
-        current_stage = "self-learn"
-        _set_stage_status(stages, "self-learn", "running")
-        write_stage_status(run_dir, stages)
-        record = run_process(
-            [
-                _cmd("legion-self-learn"),
-                "record",
-                "--entity",
-                f"{runner.get('target_type', 'runner')}:{runner['name']}",
-                "--summary",
-                f"legion-run completed profile {profile}",
-                "--source",
-                "legion-run",
-                "--evidence",
-                str(run_dir),
-                "--json",
-            ],
-            env,
-            repo,
-            run_dir / "self-learn-record.json",
+        finalize_self_learning(
+            summary_text=f"legion-run completed profile {profile}",
+            strict=True,
+            stage_payloads={"validate": validation_payload, "evaluate": eval_payload},
         )
-        learn = run_process([_cmd("legion-self-learn"), "run", "--repo", str(repo), "--apply-memory", "--json"], env, repo, run_dir / "self-learn-run.json")
-        _write_json(run_dir / "self-learn.json", {"record": record, "run": learn})
-        _set_stage_status(stages, "self-learn", "passed")
-        write_stage_status(run_dir, stages)
 
         stage_run("heal-plan", [_cmd("legion-heal"), "plan", "--repo", str(repo), "--json"], run_dir / "heal-plan.json")
         summary = finalize_success()

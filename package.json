@@ -67,6 +67,7 @@
     "legion-observability/",
     "legion-code-intel/",
     "legion-orchestrate/",
+    "legion-run/",
     "legion-setup/",
     "legion-codex-mode/",
     "scripts/",

@@ -23,6 +23,24 @@ top. legion-core is exactly that layer.
 
 Use it directly for major work, or build your own domain plugins on top of it.
 
+## What Legion Embodies
+
+Legion is for teams that want AI coding work to be repeatable, inspectable, and
+improving over time.
+
+- **Same task, same contract:** every serious run follows the same lifecycle:
+  health checks, prior memory, plan, route, fan-out/apply, review, validation,
+  evaluation, reports, learning, and heal planning.
+- **Validation beats vibes:** model output is not treated as truth. Tests,
+  validators, evals, and review artifacts decide whether the run is good.
+- **Learning is shared:** when validation, doctor, fanout, review, or eval finds
+  a reusable lesson, Legion writes it into durable memory so future runs start
+  with that context.
+- **Healing is separate:** self-learning creates future hints. self-heal creates
+  repair plans. Applying source fixes remains explicit and gated.
+- **Model-agnostic by design:** Codex, Claude, Cursor, opencode, and future CLIs
+  can sit behind the same Legion execution contract.
+
 ## Quickstart
 
 Install once, then run Legion from any git repo. No repo-local config is needed;
@@ -55,8 +73,8 @@ Legion surface that gives you the proof you need.
 | One small coding task | `legion-delegate run` | Sends one scoped task to the routed executor and returns a metered diff. |
 | Review the current diff | `legion-delegate review` | Gets an independent structured review from the configured reviewer. |
 | A few independent slices | `legion-fanout` | Runs multiple slices in parallel, collects results, and can apply safe diffs. |
-| Bigger feature/refactor | `legion-orchestrate` | Agent playbook for decomposition, fan-out, cross-review, synthesis, and gates. |
-| Any heavy task with a plan and gates | `legion-run` direct mode | Runs doctor, prior hints, plan, route, fan-out/apply, review, validate, evaluate, report, share, learn, and heal. |
+| Bigger feature/refactor that needs decomposition strategy | `legion-orchestrate` | Agent playbook for decomposition, fan-out, cross-review, synthesis, and gates. |
+| Any heavy task with a plan and gates | `legion-run` direct mode or the `legion-run` skill | Runs doctor, prior hints, plan, route, fan-out/apply, review, validate, evaluate, report, share, learn, and heal. |
 | Reusable domain workflow | `legion-run` with a domain plugin | Same lifecycle, but the plan/validate/evaluate commands come from the plugin. |
 | Inspect what happened | `legion-report`, `legion-share` | Shows observability HTML, cost, latency, status, and work split. |
 | Teach Legion from a result | `legion-self-learn`, `legion-heal` | Records outcomes and plans repairs for failures. |
@@ -203,6 +221,12 @@ the same directory still contains `failure.json`, `partial-summary.json`,
 `artifact-manifest.json`, `legion-observability.html`, `self-learn.json`, and
 `heal-plan.json`.
 
+Failed runs still try to learn. `legion-run` harvests available artifacts such
+as `doctor.json`, `fanout.json`, `validation.json`, `eval.json`, and
+`failure.json`, writes `learning-feedback.json`, and attempts
+`legion-self-learn run --apply-memory`. That is the core product loop: failure
+evidence becomes future operating memory instead of being lost in a transcript.
+
 ## Build A Domain Plugin
 
 A domain plugin has one required machine surface and one optional agent surface:
@@ -278,7 +302,8 @@ Full copy-pasteable guide: [docs/domain-plugins.md](docs/domain-plugins.md).
 
 | Plugin | Gives you |
 |---|---|
-| **legion-orchestrate** | `legion-run` for heavy tasks/domain plugins plus `legion-fanout` for lower-level parallel delivery. |
+| **legion-orchestrate** | Fan-out orchestration playbook for decomposition, parallel delivery, cross-review, synthesis, and gates. |
+| **legion-run** | First-class cross-harness skill for running heavy tasks through the fixed plan/validate/evidence/learning lifecycle. |
 | **legion-router** | `legion-route`, `legion-delegate`, Codex/Cursor/Claude executors, worktrees, routing policy, and cost tables. |
 | **legion-observability** | `legion-doctor`, `legion-trace`, `legion-report`, `legion-share`, `legion-self-learn`, `legion-heal`, `legion-eval`, and `legion-bench`. |
 | **legion-code-intel** | Optional TypeScript/Pyright diagnostics and `legion.code-intel.v1` artifacts. |
@@ -318,9 +343,12 @@ legion-bench run --suite legion-run-codex-live --repo . --json --strict \
 ```
 
 The Codex live suite spends real Codex model calls, preserves your real `HOME` so
-Codex auth is available, and writes a temporary Python fixture repo. Expect it
-to take several minutes and consume real model credits. It is a separate suite
-so CI does not run it unless you explicitly ask for it.
+Codex auth is available, and writes a temporary Python fixture repo. It passes
+when Legion proves the live path: either the coding task completes through
+validation, or a review/validation gate blocks flawed model output and records
+the feedback into self-learning memory. Expect it to take 15-30 minutes and
+consume real model credits. It is a separate suite so CI does not run it unless
+you explicitly ask for it.
 
 The JSON output contains `html_artifacts`. Open the benchmark overview first,
 then the nested Legion reports:
@@ -340,7 +368,7 @@ Open the printed `benchmark_overview` file in a browser. It links to
 `legion-report.html`, `legion-observability.html`, the artifact manifest, the
 temporary fixture repo, live model fan-out evidence, validation output, and the
 self-learning memory update. In the overview, inspect
-**Validation-Discovered Learning** first; the raw proof is also in the nested
+**Validation And Review-Discovered Learning** first; the raw proof is also in the nested
 `learning-feedback.json`, `self-learn.json`, and
 `self-learn/harness-memory.json` artifacts.
 

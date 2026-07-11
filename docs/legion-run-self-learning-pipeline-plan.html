@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Legion Run Self-Learning Pipeline Plan</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --ink: #18212f;
+      --muted: #5e6878;
+      --line: #d9dee7;
+      --panel: #ffffff;
+      --panel-soft: #eef4f8;
+      --accent: #0f766e;
+      --accent-dark: #115e59;
+      --warn: #b45309;
+      --bad: #b91c1c;
+      --good: #15803d;
+      --code-bg: #111827;
+      --code-ink: #f9fafb;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    header {
+      background: #152331;
+      color: #f8fafc;
+      padding: 48px 24px 36px;
+    }
+
+    header .wrap,
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.15;
+      margin: 0;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      max-width: 900px;
+      font-size: 40px;
+      font-weight: 760;
+    }
+
+    h2 {
+      margin-top: 46px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+      font-size: 26px;
+    }
+
+    h3 {
+      margin-top: 28px;
+      font-size: 18px;
+    }
+
+    p {
+      margin: 12px 0 0;
+    }
+
+    .lede {
+      max-width: 920px;
+      margin-top: 18px;
+      color: #d7dee9;
+      font-size: 18px;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 5px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      border-radius: 6px;
+      color: #ecfeff;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    main {
+      padding: 28px 24px 60px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .span-4 {
+      grid-column: span 4;
+    }
+
+    .span-6 {
+      grid-column: span 6;
+    }
+
+    .span-8 {
+      grid-column: span 8;
+    }
+
+    .span-12 {
+      grid-column: span 12;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: #ecfdf5;
+      padding: 14px 16px;
+      margin-top: 16px;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: #fffbeb;
+    }
+
+    .callout.bad {
+      border-left-color: var(--bad);
+      background: #fef2f2;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 760;
+      text-transform: uppercase;
+    }
+
+    ul,
+    ol {
+      margin: 12px 0 0 22px;
+      padding: 0;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    code {
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: #e8edf3;
+      color: #172033;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.93em;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 14px 0 0;
+      padding: 14px;
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--code-ink);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+      color: inherit;
+    }
+
+    table {
+      width: 100%;
+      margin-top: 14px;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }
+
+    th {
+      background: #eef2f7;
+      color: #263244;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 2px 8px;
+      border-radius: 5px;
+      font-size: 12px;
+      font-weight: 760;
+      white-space: nowrap;
+    }
+
+    .status.good {
+      color: #14532d;
+      background: #dcfce7;
+    }
+
+    .status.warn {
+      color: #78350f;
+      background: #fef3c7;
+    }
+
+    .status.bad {
+      color: #7f1d1d;
+      background: #fee2e2;
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .stage {
+      min-height: 86px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .stage strong {
+      display: block;
+      font-size: 14px;
+    }
+
+    .stage span {
+      display: block;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .stage.must {
+      border-color: rgba(15, 118, 110, 0.45);
+      background: #f0fdfa;
+    }
+
+    .decision {
+      border: 1px solid #bddbd8;
+      background: #f0fdfa;
+    }
+
+    .toc {
+      margin-top: 18px;
+      padding: 16px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .toc a {
+      color: var(--accent-dark);
+      text-decoration: none;
+      font-weight: 650;
+    }
+
+    a {
+      color: var(--accent-dark);
+    }
+
+    footer {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0 24px 40px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 900px) {
+      h1 {
+        font-size: 30px;
+      }
+
+      .grid,
+      .pipeline {
+        display: block;
+      }
+
+      .card,
+      .stage {
+        margin-top: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Legion Run Self-Learning Pipeline Plan</h1>
+      <p class="lede">A generic plan to make Legion learn from every official run path, while keeping <code>legion-orchestrate</code> as its own orchestration playbook and making <code>legion-run</code> callable like the rest of Legion.</p>
+      <div class="meta">
+        <span class="pill">Scope: legion-core</span>
+        <span class="pill">Focus: terminal finalization</span>
+        <span class="pill">Memory: always attempted</span>
+        <span class="pill">Source mutation: opt-in</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="toc" aria-label="Table of contents">
+      <div class="label">Contents</div>
+      <ol>
+        <li><a href="#executive-summary">Executive Summary</a></li>
+        <li><a href="#implemented">Implemented in This Pass</a></li>
+        <li><a href="#diagnosis">Diagnosis</a></li>
+        <li><a href="#principles">First Principles</a></li>
+        <li><a href="#learn-vs-heal">Self-Learn vs Self-Heal</a></li>
+        <li><a href="#contract">Target Contract</a></li>
+        <li><a href="#architecture">Architecture Plan</a></li>
+        <li><a href="#callable">Make legion-run Callable</a></li>
+        <li><a href="#tests">Benchmark and Test Matrix</a></li>
+        <li><a href="#rollout">Rollout Plan</a></li>
+      </ol>
+    </section>
+
+    <section id="executive-summary">
+      <h2>Executive Summary</h2>
+      <div class="grid">
+        <article class="card span-4 decision">
+          <div class="label">Decision 1</div>
+          <h3>Keep legion-orchestrate separate</h3>
+          <p><code>legion-orchestrate</code> remains a playbook/skill for decomposition, fan-out, cross-review, synthesis, and judgement-heavy orchestration. It should not be collapsed into <code>legion-run</code>.</p>
+        </article>
+        <article class="card span-4 decision">
+          <div class="label">Decision 2</div>
+          <h3>Make legion-run the lifecycle command</h3>
+          <p><code>legion-run</code> is the fixed heavy-task lifecycle for work that needs proof: doctor, hints, plan, route, fan-out/apply, review, validation, evaluation, reports, share, learning, and heal planning.</p>
+        </article>
+        <article class="card span-4 decision">
+          <div class="label">Decision 3</div>
+          <h3>Learning must be terminal</h3>
+          <p>Self-learning cannot be just another late pipeline stage. It must be a terminal finalizer that runs on success, failure, timeout, interrupt, and uncaught exception.</p>
+        </article>
+      </div>
+
+      <div class="callout">
+        <strong>Core guarantee:</strong> every official Legion-controlled terminal path produces an audit artifact, extracts learnable outcomes, promotes them into hintable memory, or records why learning could not run.
+      </div>
+    </section>
+
+    <section id="implemented">
+      <h2>Implemented in This Pass</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Change</th>
+            <th>Status</th>
+            <th>Proof</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Bound direct-run slugs so task names do not create fragile filesystem paths.</td>
+            <td><span class="status good">implemented</span></td>
+            <td><code>_slug()</code> now returns a capped, stable slug.</td>
+          </tr>
+          <tr>
+            <td>Validate semantic stage payloads, not just process exit codes.</td>
+            <td><span class="status good">implemented</span></td>
+            <td>Fanout <code>failed &gt; 0</code>, doctor fail items, validation <code>ok:false</code>, eval <code>ok:false</code>, and rejecting reviews fail their stages.</td>
+          </tr>
+          <tr>
+            <td>Harvest learning outcomes from doctor, fanout, validation, eval, and terminal failure artifacts.</td>
+            <td><span class="status good">implemented</span></td>
+            <td><code>learning-feedback.json</code> now records entity-scoped outcomes even when the run fails before validation completes.</td>
+          </tr>
+          <tr>
+            <td>Run self-learning finalization on failed runs.</td>
+            <td><span class="status good">implemented</span></td>
+            <td>Failure paths now write <code>self-learn-run.json</code>, update <code>self-learn.json</code>, and attempt <code>legion-self-learn run --apply-memory</code>.</td>
+          </tr>
+          <tr>
+            <td>Keep heal planning as a separate final artifact.</td>
+            <td><span class="status good">implemented</span></td>
+            <td>Failure finalization marks <code>heal-plan</code> as attempted and writes <code>heal-plan.json</code>.</td>
+          </tr>
+          <tr>
+            <td>Test self-learning on bad paths.</td>
+            <td><span class="status good">implemented</span></td>
+            <td>Python unit tests cover payload validation and outcome recording. Bats tests cover doctor failure, fanout exit failure, fanout semantic failure, validation failure with feedback, and self-learning command failure.</td>
+          </tr>
+          <tr>
+            <td>Timeout, interrupt, and uncaught exception finalization.</td>
+            <td><span class="status warn">next pass</span></td>
+            <td>These are still explicit remaining work and are not claimed as done.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="diagnosis">
+      <h2>Diagnosis</h2>
+      <p>The session investigation found that the specific caveman failure was not the real root problem. It was a useful symptom. Doctor did detect the defect, but the learning loop did not promote that finding into durable memory.</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Observation</th>
+            <th>Meaning</th>
+            <th>Pipeline gap</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>doctor.json</code> contained a concrete entity finding such as <code>skill:caveman</code>.</td>
+            <td>The signal existed.</td>
+            <td>The signal was not harvested as a first-class outcome.</td>
+          </tr>
+          <tr>
+            <td><code>self-learn.json</code> recorded a coarse heavy-task failure.</td>
+            <td>The failure path did some recording.</td>
+            <td>Attribution was too broad and lost the underlying entity.</td>
+          </tr>
+          <tr>
+            <td><code>self-learn.json</code> had <code>run.skipped: true</code>.</td>
+            <td>Memory synthesis did not run on that failure path.</td>
+            <td>Raw outcomes were not promoted to <code>harness-memory.json</code>.</td>
+          </tr>
+          <tr>
+            <td><code>legion-fanout</code> can emit JSON with <code>failed &gt; 0</code> and still exit 0.</td>
+            <td>Exit status alone is not enough.</td>
+            <td>Stages need semantic validation of their output contracts.</td>
+          </tr>
+          <tr>
+            <td><code>subprocess.run()</code> calls have no timeout.</td>
+            <td>A child process can leave a run stuck at <code>running</code>.</td>
+            <td>No terminal finalizer runs for hangs.</td>
+          </tr>
+          <tr>
+            <td><code>execute()</code> catches only <code>LegionRunError</code>.</td>
+            <td>Python exceptions, interrupts, and some exits bypass normal finalization.</td>
+            <td>Bad-path coverage is incomplete.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout bad">
+        <strong>Why self-learn did not trigger on its own:</strong> the old model treated self-learning as a normal late stage. If the run failed before that stage, the failure handler recorded a coarse event and skipped memory application. That made the outcome visible as a file but invisible as a future hint.
+      </div>
+    </section>
+
+    <section id="principles">
+      <h2>First Principles</h2>
+      <div class="grid">
+        <article class="card span-6">
+          <div class="label">Feedback loop</div>
+          <h3>Learning is not logging</h3>
+          <p>A JSON artifact is only evidence. Self-learning requires a closed loop: signal, attribution, promotion, retrieval. If any step is missing, future runs do not improve.</p>
+          <ol>
+            <li><strong>Signal:</strong> a stage emits structured evidence.</li>
+            <li><strong>Attribution:</strong> evidence maps to an entity.</li>
+            <li><strong>Promotion:</strong> outcome becomes durable memory.</li>
+            <li><strong>Retrieval:</strong> future runs load memory as hints.</li>
+          </ol>
+        </article>
+        <article class="card span-6">
+          <div class="label">Safety</div>
+          <h3>Always learn, do not always patch</h3>
+          <p>Automatic durable memory is safe. Automatic source mutation is not. Legion should always record and apply memory. Source edits from self-learning should remain opt-in and scorecard-gated.</p>
+          <p>This keeps the system business-safe: failures become future guardrails without silently rewriting the toolchain.</p>
+        </article>
+      </div>
+
+      <div class="pipeline" aria-label="Learning pipeline">
+        <div class="stage must"><strong>Observe</strong><span>Stage artifacts, spans, stderr, validation JSON, doctor findings.</span></div>
+        <div class="stage must"><strong>Normalize</strong><span>Convert heterogeneous outputs to outcome records.</span></div>
+        <div class="stage must"><strong>Attribute</strong><span>Attach each outcome to plugin, skill, command, agent, tool, or run.</span></div>
+        <div class="stage must"><strong>Promote</strong><span>Run self-learning memory synthesis.</span></div>
+        <div class="stage must"><strong>Retrieve</strong><span>Next run reads hints before planning.</span></div>
+      </div>
+    </section>
+
+    <section id="learn-vs-heal">
+      <h2>Self-Learn vs Self-Heal</h2>
+      <p>These are separate loops and should stay separate in the product story.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Loop</th>
+            <th>Question it answers</th>
+            <th>Output</th>
+            <th>Default safety posture</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Self-learn</strong></td>
+            <td>What should future Legion runs remember before they start?</td>
+            <td><code>outcomes.jsonl</code>, <code>harness-memory.json</code>, hints, proposals.</td>
+            <td>Automatic memory is safe. Source mutation stays opt-in.</td>
+          </tr>
+          <tr>
+            <td><strong>Self-heal</strong></td>
+            <td>What repair should happen because this run failed or degraded?</td>
+            <td><code>heal-plan.json</code> and, in explicit heal mode, a candidate fix.</td>
+            <td>Planning is automatic. Applying source fixes should remain explicit and gated.</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout">
+        <strong>Business phrasing:</strong> self-learning reduces future developer parity by turning validated misses into shared operating memory. Self-healing reduces recovery time by producing a repair path when something breaks.
+      </div>
+    </section>
+
+    <section id="contract">
+      <h2>Target Contract</h2>
+      <p>The new contract should be explicit and testable. It should apply to <code>legion-run</code> and, later, any official command that starts a Legion-controlled run context.</p>
+
+      <pre><code>legion.run.finalization.v1
+
+For every terminal run:
+  - write failure.json or summary.json
+  - write stage-status.json
+  - write artifact-manifest.json
+  - write legion-observability.html
+  - extract learning outcomes from every available artifact
+  - append outcomes to self-learn/outcomes.jsonl
+  - run legion-self-learn run --apply-memory best-effort
+  - write self-learn.json with learning feedback + record + run + errors
+  - write heal-plan.json best-effort
+  - if learning fails, record that learning failed</code></pre>
+
+      <h3>What "always" means</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Term</th>
+            <th>Required behavior</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Always attempted</td>
+            <td>Every terminal path calls the finalizer. The finalizer attempts outcome extraction and memory application.</td>
+          </tr>
+          <tr>
+            <td>Always visible</td>
+            <td>If learning cannot run, the run still writes <code>self-learn.json</code> and explains the failure.</td>
+          </tr>
+          <tr>
+            <td>Always bounded</td>
+            <td>Learning finalization has a timeout and cannot hang the command forever.</td>
+          </tr>
+          <tr>
+            <td>Not always source-mutating</td>
+            <td>Memory is automatic. Source patching remains explicit with <code>--apply-source</code> or a controlled auto-heal mode.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="architecture">
+      <h2>Architecture Plan</h2>
+
+      <h3>1. Consolidate terminal finalization</h3>
+      <p>This pass introduced a single <code>legion-run</code> self-learning finalizer and artifact harvesters. A future cleanup can extract that into a shared module under <code>legion-orchestrate/scripts/</code> or <code>legion-observability/scripts/</code> if other commands need the same contract.</p>
+      <pre><code>class RunFinalizer:
+    def mark_stage_running(stage, artifacts): ...
+    def mark_stage_passed(stage, payload): ...
+    def mark_stage_failed(stage, error, payload=None): ...
+    def harvest_outcomes(): ...
+    def apply_memory(): ...
+    def write_reports(): ...
+    def finalize_success(): ...
+    def finalize_failure(error): ...
+    def finalize_interrupt(signal): ...
+    def finalize_uncaught_exception(exc): ...</code></pre>
+
+      <h3>2. Make learning outcome extraction artifact-driven</h3>
+      <p>Do not rely on validation/eval only. Extraction now covers the main <code>legion-run</code> artifacts, with additional adapters still useful for richer review and timeout evidence.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Artifact</th>
+            <th>Extracted outcome</th>
+            <th>Entity source</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>doctor.json</code></td>
+            <td>Each fail or high-risk warn becomes an outcome.</td>
+            <td>Use embedded <code>entity</code>, else <code>tool:legion-doctor</code>.</td>
+          </tr>
+          <tr>
+            <td><code>fanout.json</code></td>
+            <td>Failed slices, blocked dependencies, apply conflicts.</td>
+            <td>Slice archetype, target metadata, or <code>command:legion-fanout</code>.</td>
+          </tr>
+          <tr>
+            <td><code>review.json</code></td>
+            <td>Blocking findings and reviewer rejection.</td>
+            <td>Current pass validates rejecting review payloads. Rich finding extraction remains next work.</td>
+          </tr>
+          <tr>
+            <td><code>validation.json</code></td>
+            <td><code>learning_feedback</code>, failed gates, invariant discoveries.</td>
+            <td>Validator-provided target, else runner entity.</td>
+          </tr>
+          <tr>
+            <td><code>eval.json</code></td>
+            <td><code>learning_outcomes</code>, failed rubric dimensions.</td>
+            <td>Evaluator-provided target, else runner entity.</td>
+          </tr>
+          <tr>
+            <td><code>failure.json</code></td>
+            <td>Stage failure summary.</td>
+            <td>Runner entity.</td>
+          </tr>
+          <tr>
+            <td>Unhandled exception</td>
+            <td>Exception type, stage, stack summary.</td>
+            <td><span class="status warn">next pass</span> <code>command:legion-run</code> plus runner entity.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>3. Validate stage payload semantics</h3>
+      <p>Each stage needs both an exit-code check and a payload validator. Examples:</p>
+      <ul>
+        <li><code>doctor</code>: fail if any item has <code>severity == "fail"</code>.</li>
+        <li><code>fanout</code>: fail if <code>failed &gt; 0</code> or <code>apply_conflicts &gt; 0</code>.</li>
+        <li><code>review</code>: fail if verdict is reject/blocking.</li>
+        <li><code>validate</code>: fail if exit nonzero or JSON says <code>ok: false</code>.</li>
+        <li><code>evaluate</code>: fail if exit nonzero, <code>ok: false</code>, or score below configured threshold.</li>
+      </ul>
+
+      <h3>4. Add timeout and signal control</h3>
+      <p><span class="status warn">Next pass.</span> Replace plain <code>subprocess.run()</code> with a stage runner that supports timeout, process groups, and kill-on-cancel. A hung fanout or model CLI must finalize as a timeout, not leave <code>stage-status.json</code> at <code>running</code>.</p>
+
+      <h3>5. Catch all terminal paths</h3>
+      <p><span class="status warn">Next pass.</span> <code>legion-run</code> should catch and finalize:</p>
+      <ul>
+        <li><code>LegionRunError</code></li>
+        <li><code>subprocess.TimeoutExpired</code></li>
+        <li><code>KeyboardInterrupt</code></li>
+        <li><code>SystemExit</code> where practical</li>
+        <li>generic <code>Exception</code></li>
+      </ul>
+
+      <h3>6. Keep legion-orchestrate independent</h3>
+      <p><code>legion-orchestrate</code> remains its own skill/playbook. Its docs should say:</p>
+      <ul>
+        <li>Use <code>legion-run</code> when you want the guaranteed lifecycle and self-learning finalizer.</li>
+        <li>Use manual <code>legion-fanout</code> only for debugging, experimentation, or advanced orchestration.</li>
+        <li>When manual orchestration is used, emit explicit outcomes with <code>legion-self-learn record</code> or a future <code>legion-finalize</code> helper.</li>
+      </ul>
+    </section>
+
+    <section id="callable">
+      <h2>Make legion-run Callable Like Everything Else</h2>
+      <p>The CLI binary already exists, but the marketplace/skill surface should make it discoverable and invocable like <code>legion-orchestrate</code>, <code>legion-router</code>, and <code>legion-observability</code>.</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Surface</th>
+            <th>Required change</th>
+            <th>Status in current worktree</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>CLI bin</td>
+            <td>Expose <code>legion-run</code> in <code>package.json</code>.</td>
+            <td><span class="status good">already present</span></td>
+          </tr>
+          <tr>
+            <td>Top-level plugin/skill</td>
+            <td>Add <code>legion-run/SKILL.md</code>, README, and plugin manifest.</td>
+            <td><span class="status good">present in worktree</span></td>
+          </tr>
+          <tr>
+            <td>Marketplace</td>
+            <td>Add <code>legion-run</code> to <code>.claude-plugin/marketplace.json</code>.</td>
+            <td><span class="status good">present in worktree</span></td>
+          </tr>
+          <tr>
+            <td>Install/package</td>
+            <td>Include <code>legion-run/</code> in packaged files and symlinked skills.</td>
+            <td><span class="status good">present in worktree</span></td>
+          </tr>
+          <tr>
+            <td>Trigger evals</td>
+            <td>Add plugin/entity eval cases for "legion run", "plan and validate", and "validated self-learning".</td>
+            <td><span class="status good">present in worktree</span></td>
+          </tr>
+          <tr>
+            <td>Docs</td>
+            <td>Document direct mode and domain-plugin mode.</td>
+            <td><span class="status good">present in worktree</span></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Recommended public promise:</strong> call <code>legion-run</code> for any heavy coding task where the user wants a durable evidence folder, validation-led learning, and a future run that starts smarter.
+      </div>
+    </section>
+
+    <section id="tests">
+      <h2>Benchmark and Test Matrix</h2>
+      <p>The current deterministic benchmark proves the happy path. The missing benchmark is a bad-path matrix that proves self-learning finalization under failure.</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Case</th>
+            <th>Expected finalizer behavior</th>
+            <th>Must assert</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Doctor failure</td>
+            <td>Harvest each doctor finding as its own outcome.</td>
+            <td>Hints exist for the finding entity after memory application.</td>
+          </tr>
+          <tr>
+            <td>Plan command fails</td>
+            <td>Record runner failure and preserve plan stderr.</td>
+            <td><code>failure.json</code>, <code>self-learn-run.json</code>, and HTML exist.</td>
+          </tr>
+          <tr>
+            <td>Malformed plan or slices</td>
+            <td>Record parser/schema failure.</td>
+            <td>Outcome target is <code>command:legion-run</code> and runner entity.</td>
+          </tr>
+          <tr>
+            <td>Route failure</td>
+            <td>Record failed archetype and route stderr.</td>
+            <td>Memory hint references route/archetype problem.</td>
+          </tr>
+          <tr>
+            <td>Fanout JSON says failed but exits 0</td>
+            <td>Semantic validator fails the stage.</td>
+            <td><code>fanout-apply</code> marked failed and learning applied.</td>
+          </tr>
+          <tr>
+            <td>Fanout exits nonzero</td>
+            <td>Record stage failure and fanout payload.</td>
+            <td>Existing negative test upgraded to assert memory application.</td>
+          </tr>
+          <tr>
+            <td>Review rejects</td>
+            <td>Record reviewer findings.</td>
+            <td>Blocking findings visible in HTML and outcomes.</td>
+          </tr>
+          <tr>
+            <td>Validation fails with feedback</td>
+            <td>Record both failure and validator-provided lessons.</td>
+            <td>Validation feedback updates memory even when command exits 1.</td>
+          </tr>
+          <tr>
+            <td>Eval fails with outcomes</td>
+            <td>Record eval rubric failures and learning outcomes.</td>
+            <td>Eval-specific hints exist after finalization.</td>
+          </tr>
+          <tr>
+            <td>Report/share fails</td>
+            <td>Do not lose learning because observability failed.</td>
+            <td>Finalizer writes minimal fallback HTML.</td>
+          </tr>
+          <tr>
+            <td>Self-learn itself fails</td>
+            <td>Record a meta-outcome for learning failure.</td>
+            <td><code>self-learn.json</code> says learning failed, no silent pass.</td>
+          </tr>
+          <tr>
+            <td>Timeout</td>
+            <td>Kill child process, mark timeout, finalize learning.</td>
+            <td>No stuck <code>running</code> stage.</td>
+          </tr>
+          <tr>
+            <td>Interrupt</td>
+            <td>Finalize partial artifacts and exit nonzero.</td>
+            <td>Partial HTML and learning attempt exist.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Existing and next benchmark suite</h3>
+      <pre><code>legion-bench run --suite legion-run-bad-paths --repo . --json --strict</code></pre>
+      <p>The current test pass adds deterministic no-spend Bats coverage for the most important bad paths inside <code>tests/legion-run.bats</code>. A named benchmark suite can wrap those scenarios for public demo use. Each case should verify that memory was applied, not merely that <code>self-learn.json</code> exists.</p>
+    </section>
+
+    <section id="rollout">
+      <h2>Rollout Plan</h2>
+      <ol>
+        <li><strong>Land first-class <code>legion-run</code> surface.</strong> The current worktree includes the skill/docs/bin/package surface; keep it in the PR.</li>
+        <li><strong>Add finalizer module.</strong> Current pass consolidated <code>legion-run</code> finalization. Extract a shared module only when another command needs the same API.</li>
+        <li><strong>Add artifact outcome harvesters.</strong> Current pass covers doctor, fanout, validation, eval, and failure artifacts.</li>
+        <li><strong>Add semantic stage validators.</strong> Current pass makes stage pass/fail depend on output contracts, not exit code alone.</li>
+        <li><strong>Add timeouts and interrupt finalization.</strong> Prevent stuck runs from bypassing learning.</li>
+        <li><strong>Add bad-path benchmark suite.</strong> Fail the build if any official bad path skips memory application.</li>
+        <li><strong>Update docs.</strong> Document the exact guarantee: outcomes and durable memory are automatic; source mutation remains opt-in.</li>
+        <li><strong>Only then market it.</strong> The business story becomes defensible: Legion does not only run agents; it turns validation, review, and failure evidence into reusable operational memory.</li>
+      </ol>
+
+      <div class="callout warn">
+        <strong>Risk to avoid:</strong> do not claim "Legion self-improves on every run" unless the finalizer has tests for every terminal path. The accurate claim after this work is: "Legion attempts learning finalization on every official run and records why if it cannot."
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Artifact: <code>docs/legion-run-self-learning-pipeline-plan.html</code>. This file records the plan, shipped changes in this pass, and remaining work.</p>
+  </footer>
+</body>
+</html>

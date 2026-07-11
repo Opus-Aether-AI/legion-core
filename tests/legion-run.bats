@@ -177,7 +177,14 @@ set -euo pipefail
 case "$1" in
   hints) printf '{"schema":"legion.self-learning.hints.v1","entities":{}}\n' ;;
   record) printf '{"ok":true,"recorded":true}\n' ;;
-  run) printf '{"ok":true,"memory":true}\n' ;;
+  run)
+    memory_dir="${LEGION_STATE_ROOT:-$PWD/.legion}/self-learn"
+    mkdir -p "$memory_dir"
+    cat > "$memory_dir/harness-memory.json" <<'JSON'
+{"schema":"legion.self-learning.memory.v1","entities":{"test:applied":{"hints":["fake memory applied"]}},"processed_outcome_ids":[]}
+JSON
+    printf '{"ok":true,"memory":true,"applied_memory":true,"memory_path":"%s"}\n' "$memory_dir/harness-memory.json"
+    ;;
   *) printf '{"ok":true}\n' ;;
 esac
 SH
@@ -456,7 +463,245 @@ SH
   jq -e '.stages[] | select(.stage == "fanout-apply" and .status == "failed")' "$run_dir/stage-status.json"
   jq -e '.stages[] | select(.stage == "review" and .status == "skipped")' "$run_dir/stage-status.json"
   jq -e '.artifacts[] | select(.path == "fanout.json" and .exists == true)' "$run_dir/artifact-manifest.json"
-  jq -e '.record.ok == true or .record.recorded == true' "$run_dir/self-learn.json"
+  jq -e '(.record.ok == true or .record.recorded == true) and .run.applied_memory == true' "$run_dir/self-learn.json"
+  [ -s "$run_dir/self-learn-run.json" ]
+  jq -e '.stages[] | select(.stage == "self-learn" and .status == "passed")' "$run_dir/stage-status.json"
   grep -q "FAILED" "$run_dir/legion-observability.html"
   grep -q "simulated fanout failure" "$run_dir/legion-observability.html"
+}
+
+@test "legion-run: doctor failure records entity-scoped learning and applies memory" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-doctor" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+[{"check":"skill-frontmatter","severity":"fail","entity":"skill:caveman","message":"SKILL.md block-scalar description blanks line-based readers."}]
+JSON
+exit 1
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{"schema":"legion.heavy-task.plan.v1","mode":"legion-generate-slices","task":"$LEGION_TASK"}
+JSON
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"heavy-validate"}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":1,"total":1}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-* "$BATS_TEST_TMPDIR/bin/legion-doctor"
+
+  run "$RUN" \
+    --repo "$REPO" \
+    --task "Add billing export with tests and review" \
+    --name billing-export \
+    --plan-command heavy-plan \
+    --validate-command heavy-validate \
+    --evaluate-command heavy-eval \
+    --json
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "doctor"'
+  jq -e '.recorded >= 1' "$run_dir/learning-feedback.json"
+  jq -e '.outcomes[] | select(.source == "legion-run:doctor" and .target_type == "skill" and .target_name == "caveman" and (.summary | contains("block-scalar description")))' "$run_dir/learning-feedback.json"
+  jq -e '.run.applied_memory == true' "$run_dir/self-learn.json"
+  [ -s "$run_dir/self-learn-run.json" ]
+  jq -e '.stages[] | select(.stage == "self-learn" and .status == "passed")' "$run_dir/stage-status.json"
+}
+
+@test "legion-run: fanout semantic failure fails the stage and records learning even with exit zero" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{"schema":"legion.heavy-task.plan.v1","mode":"legion-generate-slices","task":"$LEGION_TASK"}
+JSON
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"heavy-validate"}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":1,"total":1}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{"ok":1,"slices":3,"failed":1,"applied":2,"apply_conflicts":0,"results":[{"status":"failed","id":"red-demo-flow-tests","error":"Playwright seed data setup never ran"}]}
+JSON
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-* "$BATS_TEST_TMPDIR/bin/legion-fanout"
+
+  run "$RUN" \
+    --repo "$REPO" \
+    --task "Add billing export with tests and review" \
+    --name billing-export \
+    --plan-command heavy-plan \
+    --validate-command heavy-validate \
+    --evaluate-command heavy-eval \
+    --json
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "fanout-apply"'
+  jq -e '.failed == 1 and .exit_code == 0' "$run_dir/fanout.json"
+  jq -e '.failed_stage == "fanout-apply" and (.message | contains("semantic failure"))' "$run_dir/failure.json"
+  jq -e '.outcomes[] | select(.source == "legion-run:fanout-apply" and .target_type == "command" and .target_name == "legion-fanout" and (.summary | contains("1 failed")))' "$run_dir/learning-feedback.json"
+  jq -e '.run.applied_memory == true' "$run_dir/self-learn.json"
+}
+
+@test "legion-run: validation failure records validator feedback before learning finalization" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{"schema":"legion.heavy-task.plan.v1","mode":"legion-generate-slices","task":"$LEGION_TASK"}
+JSON
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{"ok":false,"learning_feedback":[{"id":"missing-contract-test","source":"validation-feedback","target_type":"skill","target_name":"legion-run","severity":"high","summary":"Validation discovered that generated slices can pass without a contract test for billing export idempotency.","evidence":{"gate":"integration","missing":"idempotency contract"}}]}
+JSON
+exit 1
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":1,"total":1}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-*
+
+  run "$RUN" \
+    --repo "$REPO" \
+    --task "Add billing export with tests and review" \
+    --name billing-export \
+    --plan-command heavy-plan \
+    --validate-command heavy-validate \
+    --evaluate-command heavy-eval \
+    --json
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "validate"'
+  jq -e '.ok == false and .exit_code == 1' "$run_dir/validation.json"
+  jq -e '.recorded >= 1' "$run_dir/learning-feedback.json"
+  jq -e '.outcomes[] | select(.source == "validation-feedback" and .target_type == "skill" and .target_name == "legion-run" and (.summary | contains("idempotency")))' "$run_dir/learning-feedback.json"
+  jq -e '.run.applied_memory == true' "$run_dir/self-learn.json"
+  [ -s "$run_dir/self-learn-run.json" ]
+}
+
+@test "legion-run: review findings fail the gate and record learning" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{"schema":"legion.heavy-task.plan.v1","mode":"legion-generate-slices","task":"$LEGION_TASK"}
+JSON
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"heavy-validate"}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":1,"total":1}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{"status":"ok","model":"gpt-5.5","verdict":{"verdict":"request_changes","summary":"Review found a blocking cold-chain SLA regression.","findings":[{"severity":"high","title":"Include all cold-chain assets in outage escalation"}]}}
+JSON
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-* "$BATS_TEST_TMPDIR/bin/legion-delegate"
+
+  run "$RUN" \
+    --repo "$REPO" \
+    --task "Add billing export with tests and review" \
+    --name billing-export \
+    --plan-command heavy-plan \
+    --validate-command heavy-validate \
+    --evaluate-command heavy-eval \
+    --json
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "review"'
+  jq -e '.verdict.verdict == "request_changes"' "$run_dir/review.json"
+  jq -e '.outcomes[] | select(.source == "legion-run:review" and .target_type == "command" and .target_name == "legion-delegate" and (.summary | contains("request_changes")))' "$run_dir/learning-feedback.json"
+  jq -e '.run.applied_memory == true' "$run_dir/self-learn.json"
+  jq -e '.stages[] | select(.stage == "review" and .status == "failed")' "$run_dir/stage-status.json"
+  jq -e '.stages[] | select(.stage == "self-learn" and .status == "passed")' "$run_dir/stage-status.json"
+  [ -s "$run_dir/heal-plan.json" ]
+}
+
+@test "legion-run: self-learning command failure is visible and still leaves a heal plan" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$LEGION_RUN_PLAN_FILE" <<JSON
+{"schema":"legion.heavy-task.plan.v1","mode":"legion-generate-slices","task":"$LEGION_TASK"}
+JSON
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"heavy-validate"}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/heavy-eval" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"score":1,"total":1}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-self-learn" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  hints) printf '{"schema":"legion.self-learning.hints.v1","entities":{}}\n' ;;
+  record) printf '{"ok":true,"recorded":true}\n' ;;
+  run) printf '{"ok":false,"error":"memory write denied"}\n'; exit 1 ;;
+  *) printf '{"ok":true}\n' ;;
+esac
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-* "$BATS_TEST_TMPDIR/bin/legion-self-learn"
+
+  run "$RUN" \
+    --repo "$REPO" \
+    --task "Add billing export with tests and review" \
+    --name billing-export \
+    --plan-command heavy-plan \
+    --validate-command heavy-validate \
+    --evaluate-command heavy-eval \
+    --json
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "self-learn"'
+  jq -e '.run.exit_code == 1 and (.run.error | contains("memory write denied"))' "$run_dir/self-learn.json"
+  jq -e '.stages[] | select(.stage == "self-learn" and .status == "failed")' "$run_dir/stage-status.json"
+  jq -e '.stages[] | select(.stage == "heal-plan" and .status == "passed")' "$run_dir/stage-status.json"
+  [ -s "$run_dir/learning-feedback.json" ]
+  [ -s "$run_dir/heal-plan.json" ]
+  grep -q "self-learning command failed" "$run_dir/legion-observability.html"
 }

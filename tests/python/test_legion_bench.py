@@ -142,6 +142,63 @@ def test_load_suite_extends_core_cases():
     assert len(suite["cases"]) >= 43
 
 
+def test_resolve_suite_path_prefers_packaged_json_over_matching_directory():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+
+    path = bench.resolve_suite_path(repo, "legion-run")
+
+    assert os.path.isfile(path)
+    assert path.endswith(os.path.join("legion-observability", "bench", "legion-run.json"))
+
+
+def test_codex_live_adapter_validator_covers_review_discovered_edges():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    adapter = os.path.join(
+        repo,
+        "legion-observability",
+        "bench",
+        "adapters",
+        "legion-run-direct-codex-live.sh",
+    )
+    text = open(adapter, encoding="utf-8").read()
+
+    assert "Walk-in cooler" in text
+    assert "Refrigerator" in text
+    assert "Interior light failed" in text
+    assert "Walk-in entrance door" in text
+    assert "Emergency exit is blocked" in text
+    assert "Temperature rising. Product warming reported" in text
+    assert "Refrigerant leak detected" in text
+    assert 'tags=["freezer", "down"]' in text
+    assert 'tags=["down", "freezer"]' in text
+
+
+def test_codex_live_suite_validates_business_proof_not_only_green_path():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    suite = bench.load_suite(repo, "legion-run-codex-live")
+    validators = suite["cases"][0]["validators"]
+    case = suite["cases"][0]
+    fields = {
+        item.get("field")
+        for item in validators
+        if item.get("type") == "stdout_json_field_equals"
+    }
+    file_contains = {
+        item.get("text")
+        for item in validators
+        if item.get("type") == "file_contains"
+    }
+
+    assert case["timeout"] >= 2400
+    assert "checks.live_codex_pipeline_proved" in fields
+    assert "checks.quality_feedback_recorded" in fields
+    assert "checks.self_learning_memory_updated_by_feedback" in fields
+    assert "checks.business_proof_complete" in fields
+    assert "checks.validate_command_used" not in fields
+    assert "checks.coding_task_implemented" not in fields
+    assert "Validation And Review-Discovered Learning" in file_contains
+
+
 def test_load_corpus_reads_packaged_local_smoke():
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
     corpus = bench.load_corpus(repo, "local-smoke")
@@ -1056,3 +1113,57 @@ def test_write_run_artifacts_and_span(tmp_path):
     span = json.loads(open(span_path, encoding="utf-8").read())
     assert span["executor"] == "legion-bench"
     assert span["artifacts"]["bench_run"] == artifacts["run_path"]
+
+
+def test_write_run_artifacts_summarizes_nested_legion_run_learning(tmp_path):
+    logs = tmp_path / "workspace" / "logs"
+    run_dir = logs / "runs" / "legion-run" / "20260711T140238Z-direct"
+    run_dir.mkdir(parents=True)
+    (run_dir / "learning-feedback.json").write_text(
+        json.dumps({"recorded": 1, "outcomes_path": str(logs / "self-learn" / "outcomes.jsonl")}),
+        encoding="utf-8",
+    )
+    (run_dir / "self-learn.json").write_text(
+        json.dumps({
+            "run": {
+                "applied_memory": True,
+                "summary": {"outcomes": 4},
+                "memory_path": str(logs / "self-learn" / "harness-memory.json"),
+                "report_path": str(logs / "self-learn" / "reports" / "2026-07-11.json"),
+            },
+            "learning_feedback": {"recorded": 1},
+        }),
+        encoding="utf-8",
+    )
+    results = [
+        {
+            "schema": bench.CASE_RESULT_SCHEMA,
+            "id": "task.legion-run",
+            "type": "task",
+            "required": True,
+            "status": "pass",
+            "ok": True,
+            "metrics": {},
+            "details": {"logs": str(logs)},
+        }
+    ]
+    summary = {
+        "schema": bench.SUMMARY_SCHEMA,
+        "run_id": "bench-run",
+        "suite": "legion-run",
+        "generated_at": "2026-07-11T00:00:00Z",
+        "repo": str(tmp_path),
+        "commit": "abc123",
+        "ok": True,
+        "metrics": {"duration_ms": 5},
+    }
+
+    artifacts = bench.write_run_artifacts(str(tmp_path / "bench"), "bench-run", {}, results, summary)
+    run_payload = json.loads(open(artifacts["run_path"], encoding="utf-8").read())
+
+    nested = artifacts["legion_run_self_learning"]
+    assert nested["recorded_outcomes"] == 1
+    assert nested["applied_memory_runs"] == 1
+    assert nested["self_learn_summary_outcomes"] == 4
+    assert nested["cases"]["task.legion-run"]["runs"][0]["applied_memory"] is True
+    assert run_payload["artifacts"]["legion_run_self_learning"]["recorded_outcomes"] == 1

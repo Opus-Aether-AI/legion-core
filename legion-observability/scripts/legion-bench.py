@@ -237,11 +237,11 @@ def _git_commit(repo: str) -> str:
 
 def resolve_suite_path(repo: str, suite: str) -> str:
     expanded = os.path.abspath(os.path.expanduser(suite))
-    if os.path.exists(expanded):
+    if os.path.isfile(expanded):
         return expanded
     if os.path.sep in suite or suite.endswith(".json"):
         candidate = os.path.abspath(os.path.join(os.getcwd(), suite))
-        if os.path.exists(candidate):
+        if os.path.isfile(candidate):
             return candidate
     name = suite[:-5] if suite.endswith(".json") else suite
     candidate = os.path.join(repo, "legion-observability", "bench", f"{name}.json")
@@ -994,6 +994,73 @@ def collect_html_artifacts(results: list[dict[str, Any]]) -> dict[str, dict[str,
     return out
 
 
+def _int_field(payload: dict[str, Any], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    return 0
+
+
+def _maybe_json_file(path: str) -> dict[str, Any]:
+    try:
+        return _json_file(path)
+    except ValueError:
+        return {}
+
+
+def collect_legion_run_self_learning(results: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "cases": {},
+        "recorded_outcomes": 0,
+        "self_learn_runs": 0,
+        "applied_memory_runs": 0,
+        "self_learn_summary_outcomes": 0,
+    }
+    for result in results:
+        case_id = _text(result.get("id"))
+        details = _dict(result.get("details"))
+        logs = _text(details.get("logs"))
+        if not case_id or not logs:
+            continue
+        legion_run_root = os.path.join(logs, "runs", "legion-run")
+        if not os.path.isdir(legion_run_root):
+            continue
+        case_runs: list[dict[str, Any]] = []
+        for dirpath, _, filenames in os.walk(legion_run_root):
+            if "self-learn.json" not in filenames:
+                continue
+            self_learn_path = os.path.join(dirpath, "self-learn.json")
+            self_learn = _maybe_json_file(self_learn_path)
+            run = _dict(self_learn.get("run"))
+            run_summary = _dict(run.get("summary"))
+            feedback_path = os.path.join(dirpath, "learning-feedback.json")
+            feedback = _maybe_json_file(feedback_path)
+            recorded = _int_field(feedback, "recorded")
+            if not recorded:
+                recorded = _int_field(_dict(self_learn.get("learning_feedback")), "recorded")
+            applied_memory = bool(run.get("applied_memory"))
+            summary_outcomes = _int_field(run_summary, "outcomes")
+            summary["recorded_outcomes"] += recorded
+            summary["self_learn_runs"] += 1
+            summary["applied_memory_runs"] += 1 if applied_memory else 0
+            summary["self_learn_summary_outcomes"] += summary_outcomes
+            case_runs.append({
+                "run_dir": dirpath,
+                "self_learn": self_learn_path,
+                "learning_feedback": feedback_path if os.path.exists(feedback_path) else "",
+                "recorded_outcomes": recorded,
+                "applied_memory": applied_memory,
+                "self_learn_summary_outcomes": summary_outcomes,
+                "memory_path": _text(run.get("memory_path")),
+                "report_path": _text(run.get("report_path")),
+            })
+        if case_runs:
+            summary["cases"][case_id] = {"runs": sorted(case_runs, key=lambda item: item["run_dir"])}
+    return summary
+
+
 def write_run_artifacts(
     bench_dir: str,
     run_id: str,
@@ -1009,6 +1076,7 @@ def write_run_artifacts(
     run_path = os.path.join(run_dir, "run.json")
     latest_path = os.path.join(root, "latest.json")
     html_artifacts = collect_html_artifacts(results)
+    legion_run_self_learning = collect_legion_run_self_learning(results)
     with open(cases_path, "w", encoding="utf-8") as handle:
         for result in results:
             handle.write(json.dumps(result, sort_keys=True, ensure_ascii=False))
@@ -1029,6 +1097,7 @@ def write_run_artifacts(
             "summary": summary_path,
             "cases": cases_path,
             "html_artifacts": html_artifacts,
+            "legion_run_self_learning": legion_run_self_learning,
         },
     }
     _write_json(run_path, run_payload)
@@ -1042,6 +1111,7 @@ def write_run_artifacts(
             "summary_path": summary_path,
             "cases_path": cases_path,
             "html_artifacts": html_artifacts,
+            "legion_run_self_learning": legion_run_self_learning,
             "generated_at": summary.get("generated_at"),
         },
     )
@@ -1052,6 +1122,7 @@ def write_run_artifacts(
         "cases_path": cases_path,
         "latest_path": latest_path,
         "html_artifacts": html_artifacts,
+        "legion_run_self_learning": legion_run_self_learning,
     }
 
 

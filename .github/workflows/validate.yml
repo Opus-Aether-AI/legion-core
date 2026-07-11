@@ -72,7 +72,7 @@ jobs:
       - name: Legion engine plugins are vendored together
         run: |
           set -euo pipefail
-          required='["legion-router","legion-observability","legion-code-intel","legion-orchestrate","legion-setup","legion-codex-mode"]'
+          required='["legion-router","legion-observability","legion-code-intel","legion-orchestrate","legion-run","legion-setup","legion-codex-mode"]'
           missing=$(jq -r --argjson required "$required" '
             [.plugins[].name] as $names
             | $required[]

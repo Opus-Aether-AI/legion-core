@@ -1,6 +1,6 @@
 # legion-eval dataset — does each plugin trigger for the prompts it should?
 #
-# Calibrated to the legion-core skill surface (the 5 legion-* plugins). A domain
+# Calibrated to the legion-core skill surface. A domain
 # agent that builds on legion-core should extend this with cases for its own
 # plugins. Scored by the lexical proxy in legion-eval.py — a signal, not the model.
 #
@@ -23,6 +23,10 @@ cases:
   - prompt: "Decompose this and fan out the coding across models in parallel, then cross-model verify"
     expect: legion-orchestrate
     why: decompose/fan-out/parallel/cross-model verify is the orchestrator loop
+
+  - prompt: "Run this heavy coding task with Legion using plan and validate commands, then show validation-led learning"
+    expect: legion-run
+    why: plan/validate heavy-task execution with learning belongs to legion-run
 
   - prompt: "Install and update the legion marketplace and refresh the cross-harness skills"
     expect: legion-setup

@@ -35,6 +35,18 @@
       "required": true
     },
     {
+      "id": "eval.plugin.run",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Heavy-task lifecycle prompts should route to legion-run.",
+      "scope": "plugin",
+      "prompt": "Run this coding task with Legion using a plan file and validate command, then produce HTML evidence and validation-led self-learning.",
+      "expect_type": "plugin",
+      "expect": "legion-run",
+      "expect_not": "legion-orchestrate",
+      "required": true
+    },
+    {
       "id": "eval.plugin.codex-mode",
       "type": "eval",
       "dimension": "triggering",
@@ -77,6 +89,17 @@
       "prompt": "Fan out implementation slices across models in parallel, then cross-model verify and integrate the result.",
       "expect_type": "skill",
       "expect": "legion-orchestrate",
+      "required": true
+    },
+    {
+      "id": "eval.entity.skill-run",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Entity trigger should find the legion-run skill.",
+      "scope": "entity",
+      "prompt": "Use legion-run direct mode for this heavy task with plan and validate commands, validation artifacts, and self-learning memory.",
+      "expect_type": "skill",
+      "expect": "legion-run",
       "required": true
     },
     {

@@ -117,10 +117,12 @@ legion-bench run --suite legion-run-codex-live --repo . --json --strict \
 ```
 
 `legion-run-codex-live` preserves the caller's real `HOME` for Codex authentication,
-spends real Codex model calls, and writes the same `html_artifacts` map. Expect several
-minutes of runtime and real model credits. Open the printed `benchmark_overview`
-HTML to inspect fan-out model evidence, validation results, self-learning
-updates, and links to the nested Legion reports.
+spends real Codex model calls, and writes the same `html_artifacts` map. Expect 15-30
+minutes of runtime and real model credits. The live suite passes when Legion proves
+the lifecycle: a clean validation pass, or a quality-gate block that records
+review/validation feedback into self-learning memory. Open the printed
+`benchmark_overview` HTML to inspect fan-out model evidence, validation or review
+results, self-learning updates, and links to the nested Legion reports.
 
 `run` writes a durable benchmark artifact under
 `~/.claude/logs/legion/bench/` with:

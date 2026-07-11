@@ -1,6 +1,6 @@
 # Entity-level trigger scorecard for legion-core's self-learning loop.
 #
-# Calibrated to the legion-core entity surface — the 5 legion-* skills. legion-core
+# Calibrated to the legion-core entity surface — the legion-* skills. legion-core
 # ships no slash commands or sub-agents of its own (domain agents add those), so
 # every case here is a skill. Extend with command/agent cases when you build on top.
 cases:
@@ -23,6 +23,11 @@ cases:
     expect_type: skill
     expect: legion-orchestrate
     why: whole-goal fan-out + cross-verify + synthesize is the orchestrator
+
+  - prompt: "Run a major coding task through the legion-run lifecycle with a plan file, validate command, HTML evidence, and validation-led memory"
+    expect_type: skill
+    expect: legion-run
+    why: heavy-task execution through plan/validate/report/learn is the legion-run skill
 
   - prompt: "Install and update the marketplace and wire the Codex and Cursor bridges"
     expect_type: skill

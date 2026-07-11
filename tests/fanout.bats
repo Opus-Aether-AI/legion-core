@@ -81,7 +81,10 @@ SH
   run "$FANOUT" --task "$BATS_TEST_TMPDIR/task.md" --repo "$REPO" --json --max-concurrency 1
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.slices == 3 and .ok == 3 and .failed == 0'
-  echo "$output" | jq -e '[.results[].model] == ["gpt-5.5","gpt-5.5","gpt-5.5"]'
+  # Demo expands to two workhorse slices + one review slice; resolve the models
+  # from config so this survives default-model swaps.
+  echo "$output" | jq -e --arg w "$CODEX_WORKHORSE" --arg r "$CODEX_REVIEW" \
+    '[.results[].model] == [$w, $w, $r]'
 }
 
 @test "fanout: missing --slices exits 2" {

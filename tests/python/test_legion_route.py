@@ -38,7 +38,7 @@ def test_load_table_without_tomllib_uses_stdlib_fallback(monkeypatch):
     assert table["targets"]["codex_share"] == 0.5
     assert r["resolved"] is True
     assert r["executor"] == "codex"
-    assert r["model"] == "gpt-5.5"
+    assert r["model"] == "gpt-5.6-sol"
     assert r["sandbox"] == "read-only"
 
 
@@ -106,7 +106,7 @@ def test_model_ref_lookup_does_not_require_tomllib(monkeypatch, capsys):
     monkeypatch.setattr(lr, "tomllib", None)
 
     assert lr.main(["--model-ref", "cursor_default", "--models-file", MODELS_TABLE]) == 0
-    assert capsys.readouterr().out.strip() == "composer-2.5"
+    assert capsys.readouterr().out.strip() == "grok-4.5"
 
 
 def test_main_rejects_unknown_model_ref():

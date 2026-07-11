@@ -161,9 +161,9 @@ def test_load_spans_filters_wrong_schema_self_executor_and_missing_archetype(tmp
 def test_load_routing_without_tomllib_uses_stdlib_fallback(monkeypatch):
     monkeypatch.setattr(opt, "tomllib", None)
     routing = opt.load_routing(ROUTING)
-    assert routing["implement-feature"] == {"executor": "codex", "model": "gpt-5.5"}
-    assert routing["final-review"] == {"executor": "codex", "model": "gpt-5.5"}
-    assert routing["deep-reasoning"] == {"executor": "self", "model": "opus"}
+    assert routing["implement-feature"] == {"executor": "codex", "model": "gpt-5.6-terra"}
+    assert routing["final-review"] == {"executor": "codex", "model": "gpt-5.6-sol"}
+    assert routing["deep-reasoning"] == {"executor": "self", "model": "claude-fable-5"}
 
 
 def test_optimize_skips_self_routing_and_includes_stats_only_arch():

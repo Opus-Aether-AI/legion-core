@@ -84,6 +84,28 @@
       "license": "Apache-2.0"
     },
     {
+      "name": "legion-run",
+      "source": "./legion-run",
+      "description": "First-class Legion heavy-task runner skill. Invokes `legion-run` direct mode or domain-plugin mode to execute sizeable coding work through doctor, prior hints, planning, route/fan-out/apply, final review, validation/evaluation, HTML evidence, share accounting, validation-led self-learning, and heal planning.",
+      "version": "0.1.0",
+      "category": "agent-orchestration",
+      "keywords": [
+        "legion-run",
+        "heavy-task",
+        "validated-execution",
+        "domain-plugin",
+        "plan-validate",
+        "self-learning",
+        "evidence",
+        "legion"
+      ],
+      "author": {
+        "name": "legion-core"
+      },
+      "repository": "https://github.com/Opus-Aether-AI/legion-core",
+      "license": "Apache-2.0"
+    },
+    {
       "name": "legion-setup",
       "source": "./legion-setup",
       "description": "One skill to install AND update the Legion marketplace — no team hand-holding. First run installs marketplace plugins, cross-harness skills, Codex and Cursor bridges, shared CLIs, and daily refresh/self-learning; after that the same skill updates to latest. Ships `legion-setup`, `legion-codex-setup`, and `legion-cursor-setup`.",

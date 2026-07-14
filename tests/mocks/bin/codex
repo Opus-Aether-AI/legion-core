@@ -52,6 +52,11 @@ else
   # resume passes no -s (sandbox default read-only) but still edits the worktree.
   if [[ "$sandbox" == "workspace-write" || "$sandbox" == "danger-full-access" || $resume -eq 1 ]]; then
     printf 'mock-codex-change by %s\n' "$model" >> "$cd_dir/MOCK_CODEX_CHANGE.txt" 2>/dev/null || true
+    if [[ "${MOCK_CODEX_PYCACHE:-}" == "1" ]]; then
+      mkdir -p "$cd_dir/__pycache__" "$cd_dir/nested/__pycache__"
+      printf 'pyc' > "$cd_dir/__pycache__/mock.cpython-312.pyc"
+      printf 'pyc' > "$cd_dir/nested/__pycache__/mock.cpython-312.pyc"
+    fi
   fi
   printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"'"$msg"'"}}'
 fi

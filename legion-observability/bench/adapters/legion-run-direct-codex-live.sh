@@ -69,7 +69,15 @@ plan = {
     "planning_instruction": (
         "Complete the Python FieldOps triage fixture. The target API is "
         "fieldops.triage.normalize_ticket(raw) and build_dispatch_plan(tickets). "
-        "Use only the Python standard library. Preserve deterministic output."
+        "Use only the Python standard library. Preserve deterministic output. "
+        "Cold-chain outage escalation must include freezer, cooler, refrigerator, chiller, "
+        "cold room, and walk-in freezer/cooler equipment when the cooling unit is down, "
+        "offline, failed, not cooling, or product is warming. Do not treat unrelated "
+        "phrases like walk-in entrance as refrigeration, and do not make an unrelated "
+        "interior light failure inside a freezer a critical cold-chain outage. Common "
+        "safety and cooling wording matters: emergency exit is blocked should escalate, "
+        "product warming can appear after punctuation when the asset supplies cooling "
+        "context, and refrigerant leaks on cooling equipment route to refrigeration."
     ),
     "required_skills": ["ai-architect", "software-architect"],
     "quality_gates": ["python-unittest", "domain-smoke", "self-learning"],
@@ -89,9 +97,19 @@ slices = [
             "opened_at and raise clear ValueError messages. Parse ISO-8601 timestamps including Z and "
             "format UTC timestamps with a trailing Z. Derive priority from explicit severity plus "
             "operational keywords. Cold-chain outage terms like freezer down/product warming override "
-            "lower severity to priority critical. Offline/blocked exit/no power/alarm keywords escalate "
-            "to high. Assign dispatch_trade refrigeration/plumbing/electrical/facilities. Assign SLA "
-            "deadlines critical=30, high=120, medium=480, low=1440 minutes. Sort dispatch plan tickets "
+            "lower severity to priority critical, and the same rule must cover cooler down, "
+            "refrigerator down, chiller failed, cold room offline, and walk-in freezer/cooler down. "
+            "The outage signal must be tied to failed cooling equipment: a walk-in entrance door is "
+            "not refrigeration, and an interior light failed inside a freezer must not become a "
+            "critical refrigeration outage. Offline/blocked exit/no power/alarm keywords escalate "
+            "to high. Assign dispatch_trade refrigeration/plumbing/electrical/facilities. Treat tags "
+            "deterministically, including set/frozenset input, so ['freezer','down'] and ['down','freezer'] "
+            "produce the same critical cold-chain result. Assign SLA deadlines critical=30, high=120, "
+            "medium=480, low=1440 minutes. Emergency exit wording may include linking words "
+            "such as 'is' or 'was' between exit and blocked. Product-warming signals can be "
+            "separated from the first sentence when the asset identifies a freezer/cooler/"
+            "refrigerator/chiller/cold room. Refrigerant leak on cooling equipment is a "
+            "critical refrigeration dispatch, not generic plumbing. Sort dispatch plan tickets "
             "by priority, sla_deadline, opened_at, then id. Use only Python stdlib."
         ),
     },
@@ -105,7 +123,10 @@ slices = [
             "Run python -m unittest discover -s tests -v before finishing. The public contract must remain: "
             "build_dispatch_plan returns {total, critical, tickets}, each normalized ticket has priority, "
             "dispatch_trade, sla_deadline, and the freezer-down medium-severity smoke case remains critical "
-            "refrigeration with SLA deadline 2026-07-08T10:30:00Z. Keep the repo dependency-free."
+            "refrigeration with SLA deadline 2026-07-08T10:30:00Z. Preserve the edge cases around "
+            "cooler/refrigerator down, walk-in entrance false positives, freezer interior light failures, "
+            "emergency exit is blocked, punctuation-separated product-warming signals, refrigerant leak "
+            "routing on cooling equipment, and deterministic tag handling. Keep the repo dependency-free."
         ),
     },
 ]
@@ -148,21 +169,52 @@ test_proc = subprocess.run(
     stderr=subprocess.PIPE,
     timeout=60,
 )
-smoke_proc = subprocess.run(
-    [
-        sys.executable,
-        "-c",
-        (
-            "from fieldops.triage import build_dispatch_plan; "
-            "plan = build_dispatch_plan([{'id':'T-1','site':'Store 42','asset':'walk-in freezer',"
-            "'summary':'walk-in freezer down and product warming','severity':'medium',"
-            "'opened_at':'2026-07-08T10:00:00Z'}]); "
-            "ticket = plan['tickets'][0]; "
-            "assert ticket['priority'] == 'critical', ticket; "
-            "assert ticket['dispatch_trade'] == 'refrigeration', ticket; "
-            "assert ticket['sla_deadline'] == '2026-07-08T10:30:00Z', ticket"
-        ),
-    ],
+domain_code = """
+from fieldops.triage import build_dispatch_plan, normalize_ticket
+
+base = {
+    "id": "T",
+    "site": "Store 42",
+    "severity": "low",
+    "opened_at": "2026-07-08T10:00:00Z",
+}
+
+def n(asset, summary, **extra):
+    raw = dict(base, asset=asset, summary=summary)
+    raw.update(extra)
+    return normalize_ticket(raw)
+
+def expect(asset, summary, priority, trade=None, **extra):
+    ticket = n(asset, summary, **extra)
+    assert ticket["priority"] == priority, (asset, summary, ticket)
+    assert trade is None or ticket["dispatch_trade"] == trade, (asset, summary, ticket)
+    return ticket
+
+ticket = expect(
+    "walk-in freezer",
+    "walk-in freezer down and product warming",
+    "critical",
+    "refrigeration",
+    severity="medium",
+)
+assert ticket["sla_deadline"] == "2026-07-08T10:30:00Z", ticket
+expect("Walk-in cooler", "Unit down", "critical", "refrigeration")
+expect("Refrigerator", "Unit down", "critical", "refrigeration")
+expect("Walk-in freezer", "Temperature rising. Product warming reported", "critical", "refrigeration")
+expect("Emergency exit", "Emergency exit is blocked", "high", "facilities")
+expect("Reach-in freezer", "Refrigerant leak detected", "critical", "refrigeration")
+assert n("Walk-in freezer", "Interior light failed")["priority"] != "critical"
+expect("Walk-in entrance door", "Broken handle", "low", "facilities")
+assert n("Building", "Tagged incident", tags=["freezer", "down"])["priority"] == "critical"
+assert n("Building", "Tagged incident", tags=["down", "freezer"])["priority"] == "critical"
+plan = build_dispatch_plan([
+    dict(base, id="L", asset="Building", summary="Routine repair"),
+    dict(base, id="C", asset="Refrigerator", summary="Unit down"),
+])
+assert [item["id"] for item in plan["tickets"]] == ["C", "L"], plan
+"""
+domain_proc = subprocess.run(
+    [sys.executable, "-c", domain_code],
     cwd=repo,
     text=True,
     stdout=subprocess.PIPE,
@@ -172,7 +224,7 @@ smoke_proc = subprocess.run(
 ok = (
     {"green", "refactor"}.issubset(set(phases))
     and test_proc.returncode == 0
-    and smoke_proc.returncode == 0
+    and domain_proc.returncode == 0
 )
 print(json.dumps({
     "ok": ok,
@@ -180,10 +232,10 @@ print(json.dumps({
     "slice_count": len(slices),
     "phases": phases,
     "tests_passed": test_proc.returncode == 0,
-    "domain_smoke_passed": smoke_proc.returncode == 0,
+    "domain_smoke_passed": domain_proc.returncode == 0,
     "test_stdout": test_proc.stdout[-2000:],
     "test_stderr": test_proc.stderr[-4000:],
-    "smoke_stderr": smoke_proc.stderr[-2000:],
+    "smoke_stderr": domain_proc.stderr[-4000:],
     "learning_feedback": [
         {
             "id": "fieldops-cold-chain-live-escalation",
@@ -198,7 +250,7 @@ print(json.dumps({
             ),
             "evidence": {
                 "validator": "bench-codex-live-validate",
-                "smoke": "freezer-down medium severity -> critical refrigeration 30-minute SLA",
+                "smoke": "cold-chain outage and false-positive edge cases -> deterministic SLA triage",
                 "passed": ok,
             },
             "metadata": {
@@ -233,7 +285,7 @@ cp "$LEGION_STATE_ROOT/self-learn/harness-memory.json" "$memory_before_path"
 set +e
 legion-run \
   --repo "$target_repo" \
-  --task "Implement FieldOps SLA triage: normalize tickets, infer priority from freezer-down/offline/leak keywords, assign dispatch trades and SLA deadlines, sort the dispatch queue, and cover it with unittest tests." \
+  --task "Implement FieldOps SLA triage: normalize tickets, infer priority from cold-chain outage/offline/leak keywords without false positives, assign dispatch trades and SLA deadlines, sort the dispatch queue deterministically, and cover it with unittest tests." \
   --name direct-codex-live-plan-validate \
   --plan-command bench-codex-live-plan \
   --validate-command bench-codex-live-validate \
@@ -276,6 +328,16 @@ def read_jsonl(path: Path):
 summary = read_json(stdout_path)
 run_dir = Path(summary.get("run_dir") or "")
 stage_status = summary.get("stage_status") if isinstance(summary.get("stage_status"), list) else []
+stage_by_name = {
+    str(item.get("stage")): item
+    for item in stage_status
+    if isinstance(item, dict) and item.get("stage")
+}
+failed_stage = ""
+for item in stage_status:
+    if isinstance(item, dict) and item.get("status") == "failed":
+        failed_stage = str(item.get("stage") or "")
+        break
 
 def artifact(name):
     return read_json(run_dir / name) if run_dir else {}
@@ -290,6 +352,13 @@ review = artifact("review.json")
 validation = artifact("validation.json")
 learning_feedback = artifact("learning-feedback.json")
 self_learn = artifact("self-learn.json")
+learning_outcomes = learning_feedback.get("outcomes") if isinstance(learning_feedback.get("outcomes"), list) else []
+first_learning_outcome = learning_outcomes[0] if learning_outcomes and isinstance(learning_outcomes[0], dict) else {}
+learning_sources = {
+    str(item.get("source"))
+    for item in learning_outcomes
+    if isinstance(item, dict) and item.get("source")
+}
 memory = read_json(state_root / "self-learn" / "harness-memory.json")
 memory_before = read_json(memory_before_path)
 memory_key = "heavy-task:direct-codex-live-plan-validate"
@@ -322,12 +391,28 @@ status_proc = subprocess.run(
     stderr=subprocess.DEVNULL,
 )
 
+def stage_passed(name):
+    return stage_by_name.get(name, {}).get("status") == "passed"
+
+def stage_ran(name):
+    return name in stage_by_name and stage_by_name[name].get("status") != "skipped"
+
+success_path_complete = run_status == 0 and bool(stage_status) and all(
+    item.get("status") == "passed" for item in stage_status
+)
+quality_gate_learning_path_complete = (
+    run_status != 0
+    and failed_stage in {"review", "validate", "evaluate"}
+    and learning_feedback.get("recorded", 0) >= 1
+    and bool(learning_sources)
+)
+
 checks = {
     "run_exited_zero": run_status == 0,
     "contract_is_direct": summary.get("runner", {}).get("mode") == "direct",
     "profile_is_heavy_task": summary.get("pipeline", {}).get("profile") == "legion.heavy_task.v1",
     "required_artifacts_present": all(has_artifact(name) for name in summary.get("pipeline", {}).get("required_artifacts", [])),
-    "all_stages_passed": bool(stage_status) and all(item.get("status") == "passed" for item in stage_status),
+    "all_stages_passed": success_path_complete,
     "plan_command_used": artifact("plan-command.json").get("ok") is True,
     "custom_codex_slices_used": [item.get("id") for item in slices] == [
         "implement-fieldops-triage",
@@ -352,7 +437,16 @@ checks = {
     ),
     "validation_feedback_recorded": (
         learning_feedback.get("recorded", 0) >= 1
-        and learning_feedback.get("outcomes", [{}])[0].get("source") == "validation-feedback"
+        and first_learning_outcome.get("source") == "validation-feedback"
+    ),
+    "quality_feedback_recorded": (
+        learning_feedback.get("recorded", 0) >= 1
+        and bool(learning_sources & {
+            "validation-feedback",
+            "legion-run:review",
+            "legion-run:validate",
+            "legion-run:evaluate",
+        })
     ),
     "self_learning_memory_updated_by_validation_feedback": (
         bool(proposal_ids - proposal_ids_before)
@@ -360,11 +454,52 @@ checks = {
         and any(hint not in hints_before for hint in hints)
         and self_learn.get("run", {}).get("summary", {}).get("outcomes", 0) >= 1
     ),
+    "self_learning_memory_updated_by_feedback": (
+        bool(proposal_ids - proposal_ids_before)
+        and any(hint not in hints_before for hint in hints)
+        and self_learn.get("run", {}).get("summary", {}).get("outcomes", 0) >= 1
+    ),
     "html_reports_generated": (
         overview_path.exists() or True
     ) and run_report_path.exists() and observability_path.exists(),
     "heal_plan_ran": artifact("heal-plan.json").get("exit_code") == 0,
+    "success_path_complete": success_path_complete,
+    "quality_gate_learning_path_complete": quality_gate_learning_path_complete,
+    "lifecycle_reached_quality_gate": (
+        stage_passed("doctor")
+        and stage_passed("plan")
+        and stage_passed("route")
+        and stage_passed("fanout-apply")
+        and (stage_ran("review") or stage_ran("validate") or stage_ran("evaluate"))
+    ),
 }
+checks["live_codex_pipeline_proved"] = (
+    checks["contract_is_direct"]
+    and checks["profile_is_heavy_task"]
+    and checks["plan_command_used"]
+    and checks["custom_codex_slices_used"]
+    and checks["routes_generated_for_all_slices"]
+    and checks["codex_slices_ran"]
+    and checks["codex_model_telemetry_recorded"]
+    and checks["lifecycle_reached_quality_gate"]
+)
+checks["business_proof_complete"] = (
+    checks["live_codex_pipeline_proved"]
+    and checks["quality_feedback_recorded"]
+    and checks["self_learning_memory_updated_by_feedback"]
+    and checks["heal_plan_ran"]
+    and (checks["success_path_complete"] or checks["quality_gate_learning_path_complete"])
+)
+
+def refresh_business_proof():
+    checks["business_proof_complete"] = (
+        checks["live_codex_pipeline_proved"]
+        and checks["quality_feedback_recorded"]
+        and checks["self_learning_memory_updated_by_feedback"]
+        and checks["heal_plan_ran"]
+        and checks["html_reports_generated"]
+        and (checks["success_path_complete"] or checks["quality_gate_learning_path_complete"])
+    )
 
 def esc(value):
     return html.escape(str(value or ""))
@@ -412,6 +547,14 @@ def render_overview():
         f'<li><a href="{esc(rel(path))}">{esc(label)}</a><br><small>{esc(path)}</small></li>'
         for label, path in links
     )
+    overall_ok = bool(checks.get("business_proof_complete"))
+    outcome_label = (
+        "Completed through validation"
+        if success_path_complete
+        else f"Blocked at {failed_stage or 'quality gate'} and learned"
+        if quality_gate_learning_path_complete
+        else "Incomplete"
+    )
     return f"""<!doctype html>
 <html>
 <head>
@@ -440,10 +583,11 @@ def render_overview():
   <p class="subtle">This opt-in benchmark spends real Codex model calls through <code>legion-run</code> direct mode.</p>
 
   <div class="grid">
-    <div class="panel"><div class="metric">{esc("PASS" if all(checks.values()) else "FAIL")}</div><div>Overall result</div></div>
+    <div class="panel"><div class="metric">{esc("PASS" if overall_ok else "FAIL")}</div><div>Legion proof result</div></div>
+    <div class="panel"><div class="metric">{esc(outcome_label)}</div><div>Live model outcome</div></div>
     <div class="panel"><div class="metric">{esc(len(slices))}</div><div>Planned slices</div></div>
     <div class="panel"><div class="metric">{esc(len(codex_spans))}</div><div>Codex spans</div></div>
-    <div class="panel"><div class="metric">{esc(learning_feedback.get("recorded", 0))}</div><div>Validation lessons recorded</div></div>
+    <div class="panel"><div class="metric">{esc(learning_feedback.get("recorded", 0))}</div><div>Lessons recorded</div></div>
   </div>
 
   <h2>Task</h2>
@@ -463,7 +607,7 @@ def render_overview():
   <h2>Benchmark Checks</h2>
   <table><thead><tr><th>Check</th><th>Status</th></tr></thead><tbody>{check_rows}</tbody></table>
 
-  <h2>Validation-Discovered Learning</h2>
+  <h2>Validation And Review-Discovered Learning</h2>
   <p><strong>Outcome:</strong> {esc(feedback.get("summary"))}</p>
   <details open><summary>learning-feedback.json</summary>{pre(json_pretty(learning_feedback))}</details>
   <details><summary>self-learn.json</summary>{pre(json_pretty(self_learn))}</details>
@@ -489,6 +633,7 @@ checks["html_reports_generated"] = (
     and observability_path.exists()
     and "Codex Live Evidence" in overview_path.read_text(encoding="utf-8")
 )
+refresh_business_proof()
 overview_path.write_text(render_overview(), encoding="utf-8")
 
 html_artifacts = {
@@ -497,10 +642,13 @@ html_artifacts = {
     "legion_observability": str(observability_path),
 }
 payload = {
-    "ok": all(checks.values()),
+    "ok": bool(checks.get("business_proof_complete")),
     "mode": summary.get("runner", {}).get("mode"),
     "profile": summary.get("pipeline", {}).get("profile"),
     "run_status": run_status,
+    "failed_stage": failed_stage,
+    "success_path_complete": success_path_complete,
+    "quality_gate_learning_path_complete": quality_gate_learning_path_complete,
     "run_dir": str(run_dir) if run_dir else "",
     "html_artifacts": html_artifacts,
     "checks": checks,

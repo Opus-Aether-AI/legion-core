@@ -25,6 +25,8 @@ ACTIVE_DEFAULT_FILES = [
     "legion-orchestrate/README.md",
     "legion-orchestrate/SKILL.md",
     "legion-orchestrate/scripts/legion-fanout.sh",
+    "legion-run/README.md",
+    "legion-run/SKILL.md",
     "legion-router/README.md",
     "legion-router/SKILL.md",
     "legion-router/config/routing.toml",

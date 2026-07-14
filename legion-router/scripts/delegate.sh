@@ -345,6 +345,14 @@ require_git_repo() {
   git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repo: $1"
 }
 
+cleanup_generated_diff_noise() {
+  local target="$1"
+  # Test runs often create Python bytecode. Those files are generated artifacts,
+  # and plain `git diff` records .pyc additions as non-applicable binary entries.
+  find "$target" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+  find "$target" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
+}
+
 # ── run ──────────────────────────────────────────────────────────────
 cmd_run() {
   local model="" sandbox="" task="" repo="$PWD" base="HEAD" archetype="" effort=""
@@ -468,6 +476,7 @@ cmd_run() {
 
   local diff_rc=0
   if ! is_sandcastle_sandbox "$sandbox"; then
+    cleanup_generated_diff_noise "$wt"
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
     git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
   else
@@ -662,6 +671,7 @@ cmd_resume() {
   local usage cost diff_rc=0 status="ok"
   usage="$(codex_usage "$art/resume-stream.jsonl")"
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
+  cleanup_generated_diff_noise "$wt"
   git -C "$wt" add -A 2>/dev/null || diff_rc=1
   git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
   [[ "$rc" -ne 0 ]] && status="failed"

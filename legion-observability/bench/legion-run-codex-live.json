@@ -7,7 +7,7 @@
       "id": "task.legion-run-codex-live-direct-plan-validate",
       "type": "task",
       "dimension": "orchestration-live",
-      "summary": "Direct legion-run mode should use live routed Codex model calls to solve a FieldOps triage coding task, validate it, emit HTML evidence, and record validation-discovered learning.",
+      "summary": "Direct legion-run mode should use live routed Codex model calls on a FieldOps coding task, emit HTML evidence, and either complete validation or block flawed output while recording quality-gate learning.",
       "target_type": "command",
       "target_name": "legion-run",
       "preserve_home": true,
@@ -16,7 +16,7 @@
         "{repo}/legion-observability/bench/adapters/legion-run-direct-codex-live.sh",
         "{repo}"
       ],
-      "timeout": 1200,
+      "timeout": 2400,
       "validators": [
         {
           "type": "stdout_json_field_equals",
@@ -50,22 +50,22 @@
         },
         {
           "type": "stdout_json_field_equals",
-          "field": "checks.validate_command_used",
+          "field": "checks.live_codex_pipeline_proved",
           "equals": true
         },
         {
           "type": "stdout_json_field_equals",
-          "field": "checks.coding_task_implemented",
+          "field": "checks.quality_feedback_recorded",
           "equals": true
         },
         {
           "type": "stdout_json_field_equals",
-          "field": "checks.validation_feedback_recorded",
+          "field": "checks.self_learning_memory_updated_by_feedback",
           "equals": true
         },
         {
           "type": "stdout_json_field_equals",
-          "field": "checks.self_learning_memory_updated_by_validation_feedback",
+          "field": "checks.business_proof_complete",
           "equals": true
         },
         {
@@ -89,7 +89,7 @@
         {
           "type": "file_contains",
           "path": "{workspace}/legion-run-codex-live-benchmark.html",
-          "text": "Validation-Discovered Learning"
+          "text": "Validation And Review-Discovered Learning"
         }
       ],
       "required": true

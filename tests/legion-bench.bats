@@ -124,8 +124,8 @@ JSON
   jq -e '
     .ok == true
     and .metrics.iterations == 2
-    and .metrics.cases_per_iteration == 52
-    and .metrics.total_case_runs == 104
+    and .metrics.cases_per_iteration >= 52
+    and .metrics.total_case_runs == (.metrics.cases_per_iteration * .metrics.iterations)
     and .metrics.flake_count == 0
     and .dimensions["cli-contract"].pass_rate == 1
     and .dimensions.routing.pass_rate == 1

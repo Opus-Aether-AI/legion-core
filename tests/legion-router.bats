@@ -114,6 +114,17 @@ repos_file_for_repo() {
     [ "$output" = "codex" ]
 }
 
+@test "delegate run: filters generated Python bytecode from captured diffs" {
+    local repo; repo="$(make_test_repo pycache1)"
+    MOCK_CODEX_PYCACHE=1 run "$DELEGATE" run --model gpt-5.5 --task "run Python tests and edit code" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    [ -s "$diff" ]
+    ! grep -q "__pycache__" "$diff"
+    ! grep -q "\\.pyc" "$diff"
+}
+
 @test "delegate run: auto-emits an Opus baseline span for share measurement" {
     local repo; repo="$(make_test_repo share0)"
     run "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet

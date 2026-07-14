@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.15.0...v0.16.0) (2026-07-14)
+
+
+### Added
+
+* harden legion-run self-learning ([#88](https://github.com/Opus-Aether-AI/legion-core/issues/88)) ([87801c4](https://github.com/Opus-Aether-AI/legion-core/commit/87801c404d43ccf7d5a080533b472e1b48b4064b))
+
 ## [0.15.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.14.1...v0.15.0) (2026-07-09)
 
 

@@ -151,6 +151,50 @@
       "license": "Apache-2.0"
     },
     {
+      "name": "legion-opencode-mode",
+      "source": "./legion-opencode-mode",
+      "description": "The decision guide for an opencode-primary Legion session — the opencode counterpart of legion-codex-mode. When you drive Legion under opencode you do most of the work yourself; this skill tells you WHICH kind of task is worth handing to another model and to WHOM — Claude for deep architecture and polished frontend (with the impeccable skill), a workhorse model for bulk implementation, a different model for a second opinion — versus keeping it inline. Triggers on running Legion under opencode, on deep-design / frontend-polish / final-review judgement calls, or on 'ask claude' / 'get a second opinion' while working in opencode.",
+      "version": "0.1.0",
+      "category": "agent-orchestration",
+      "keywords": [
+        "opencode",
+        "multi-model",
+        "delegation",
+        "legion-delegate",
+        "routing",
+        "reverse-delegate",
+        "primary-harness",
+        "legion"
+      ],
+      "author": {
+        "name": "legion-core"
+      },
+      "repository": "https://github.com/Opus-Aether-AI/legion-core",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "legion-hermes-mode",
+      "source": "./legion-hermes-mode",
+      "description": "The metered-delegation guide for a hermes-primary Legion session. hermes is a long-running persona / messaging assistant / orchestrator — NOT a coding CLI — so when it needs code implemented, edited, tested, or reviewed it hands that work to a headless coding harness through METERED Legion CLIs (`legion-delegate run --executor …`, `legion-fanout`, `legion-run`) from its terminal tool, instead of a raw shell-out that leaves no telemetry. Triggers when hermes or one of its cron jobs / skills needs to build, fix, test, or review code, or on 'have hermes build/fix X'.",
+      "version": "0.1.0",
+      "category": "agent-orchestration",
+      "keywords": [
+        "hermes",
+        "multi-model",
+        "delegation",
+        "legion-delegate",
+        "routing",
+        "primary-harness",
+        "metering",
+        "legion"
+      ],
+      "author": {
+        "name": "legion-core"
+      },
+      "repository": "https://github.com/Opus-Aether-AI/legion-core",
+      "license": "Apache-2.0"
+    },
+    {
       "name": "legion-code-intel",
       "source": "./legion-code-intel",
       "description": "Optional Legion code-intelligence diagnostics. Runs repo-native TypeScript and Pyright checks, filters changed-file diagnostics, emits legion.code-intel.v1 artifacts, and can append legion.span.v1 telemetry for benchmarkable pre-PR gates without making LSP servers a core dependency.",

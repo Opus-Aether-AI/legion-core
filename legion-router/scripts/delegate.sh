@@ -70,7 +70,21 @@ cleanup_sandbox_dev_on_exit() {
   sandbox_teardown "$SANDBOX_DEV_PID_TO_TEARDOWN" || true
   SANDBOX_DEV_PID_TO_TEARDOWN=""
 }
-trap cleanup_sandbox_dev_on_exit EXIT
+# Worktree leak guard: cmd_run registers its worktree here right after creating
+# it, so the EXIT trap removes it (+ its legion/delegate-* branch) even if the
+# run crashes or is killed before the inline cleanup. The happy path clears
+# LEGION_WT_PATH after its own removal, making this a no-op; --keep sets
+# LEGION_WT_KEEP=1 so the worktree is retained.
+LEGION_WT_PATH=""; LEGION_WT_BRANCH=""; LEGION_WT_REPO=""; LEGION_WT_KEEP=0
+cleanup_worktree_on_exit() {
+  [[ "$LEGION_WT_KEEP" == "1" ]] && return 0
+  [[ -n "$LEGION_WT_PATH" && -n "$LEGION_WT_REPO" ]] || return 0
+  git -C "$LEGION_WT_REPO" worktree remove --force "$LEGION_WT_PATH" >/dev/null 2>&1 || rm -rf "$LEGION_WT_PATH"
+  [[ -n "$LEGION_WT_BRANCH" ]] && git -C "$LEGION_WT_REPO" branch -D "$LEGION_WT_BRANCH" >/dev/null 2>&1 || true
+  git -C "$LEGION_WT_REPO" worktree prune >/dev/null 2>&1 || true
+  LEGION_WT_PATH=""
+}
+trap 'cleanup_sandbox_dev_on_exit; cleanup_worktree_on_exit' EXIT
 
 # codex is launched in the background and immediately waited on, so a terminating
 # signal to this wrapper interrupts the `wait` and runs this handler — otherwise a
@@ -312,7 +326,28 @@ write_run_state() {
       printf '{"repo_root":%s,"seen_at":"%s"}\n' "$(jq -Rn --arg r "$repo" '$r')" "$now" >> "$LEGION_REPOS_FILE"
     fi
   } 2>/dev/null || true
+  case "$phase" in ok|failed|error|over_budget|cancelled) prune_run_registry ;; esac
   return 0
+}
+
+# The global run registry is intentionally NON-purgeable (Console/handoff needs
+# runs discoverable even after `cleanup --purge`), but it previously grew without
+# bound (WS6: 1400+ records). Opportunistically drop only TERMINAL records older
+# than the retention window (default 30d, LEGION_REGISTRY_RETAIN_DAYS) so recent
+# and still-running runs stay discoverable. Best-effort and cheap: runs once per
+# terminal transition, and re-confirms the phase before deleting.
+prune_run_registry() {
+  local retain_days="${LEGION_REGISTRY_RETAIN_DAYS:-30}"
+  [[ "$retain_days" =~ ^[0-9]+$ ]] || retain_days=30
+  [[ "$retain_days" -gt 0 && -d "$LEGION_REGISTRY_DIR" ]] || return 0
+  local f phase
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    phase="$(jq -r '.lifecycle.phase // ""' "$f" 2>/dev/null)"
+    case "$phase" in
+      ok|failed|error|over_budget|cancelled) rm -f "$f" 2>/dev/null ;;
+    esac
+  done < <(find "$LEGION_REGISTRY_DIR" -maxdepth 1 -name '*.json' -type f -mtime +"$retain_days" 2>/dev/null)
 }
 
 # ingest_usage <model> <upstream> <status> <usage_json> <cost_usd>  (best-effort)
@@ -419,6 +454,9 @@ cmd_run() {
   local branch="legion/delegate-$RUN_ID"
   note "→ worktree $wt (branch $branch, base $base)"
   git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" || die "worktree add failed"
+  # Register for EXIT-trap cleanup so a crash/kill before the inline removal
+  # below does not orphan the worktree + branch (WS6 worktree-leak guard).
+  LEGION_WT_PATH="$wt"; LEGION_WT_BRANCH="$branch"; LEGION_WT_REPO="$repo"; LEGION_WT_KEEP="$keep"
   local sandbox_dev_pid=""
   if ! is_sandcastle_sandbox "$sandbox"; then
     sandbox_dev_pid="$(LEGION_SANDBOX_ARTIFACT_DIR="$art" LEGION_SANDBOX_QUIET="${QUIET:-0}" sandbox_setup "$wt" "$repo" "$untrusted" || true)"
@@ -528,6 +566,7 @@ cmd_run() {
     git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
     git -C "$repo" worktree prune >/dev/null 2>&1 || true
     wt_report="(removed; rerun with --keep to retain the worktree)"
+    LEGION_WT_PATH=""   # removed here; stop the EXIT trap from retrying
   fi
 
   jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \

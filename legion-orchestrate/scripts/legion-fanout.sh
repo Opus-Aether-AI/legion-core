@@ -73,14 +73,14 @@ write_queued_record() {
 }
 MAXC="${LEGION_MAX_CONCURRENCY:-4}"
 
-slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; json=0
+slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; json=0 ; keep_slices=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slices) slices_src="$2"; shift 2 ;;
     --task) task_src="$2"; shift 2 ;;
     --repo) repo="$2"; shift 2 ;;
     --max-concurrency) MAXC="$2"; shift 2 ;;
-    --keep) shift ;; # accepted for compatibility; delegated slices are always kept
+    --keep) keep_slices=1; shift ;; # retain slice worktrees after apply (default: reclaim them)
     --apply) apply="1"; shift ;;
     --json) json=1; shift ;; # output is already JSON; accepted for roadmap compatibility
     -h|--help) echo "usage: legion-fanout (--slices <file|-> | --task <file|->) [--repo DIR] [--max-concurrency N] [--keep] [--apply] [--json]"; exit 0 ;;
@@ -292,6 +292,25 @@ teardown_integration_base() {
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
 }
 
+# Slices are delegated with --keep so their diffs survive until the sequential
+# apply barrier. Once apply is done the worktrees are disposable (the diffs live
+# under .legion/runs/<rid>), so reclaim exactly this fan-out's slice worktrees —
+# not a blanket `cleanup --all`, which would disturb concurrent runs. --keep on
+# the fan-out retains them for inspection.
+cleanup_slice_worktrees() {
+  [[ "$keep_slices" == "1" ]] && return 0
+  local i rid swt
+  for ((i = 1; i <= n; i++)); do
+    rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
+    [[ -n "$rid" ]] || continue
+    swt="$repo/.legion/worktrees/$rid"
+    [[ -d "$swt" ]] || continue
+    git -C "$repo" worktree remove --force "$swt" >/dev/null 2>&1 || rm -rf "$swt"
+    git -C "$repo" branch -D "legion/delegate-$rid" >/dev/null 2>&1 || true
+  done
+  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+}
+
 mark_blocked() {
   local i="$1" blocked_by_json="$2"
   jq -cn --argjson blocked_by "$blocked_by_json" \
@@ -444,6 +463,7 @@ if [[ "$has_dependencies" == "true" ]]; then
   apply_conflicts=$((apply_conflicts + integration_conflicts))
   teardown_integration_base
 fi
+cleanup_slice_worktrees
 
 # Root span for the fan-out itself, so the delegate spans form a tree under it.
 # Best-effort: telemetry is observability, never block the run on it.

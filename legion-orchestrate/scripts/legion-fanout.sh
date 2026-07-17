@@ -49,6 +49,9 @@ resolve_optional_legion_cmd() {
 LEGION_DELEGATE="${LEGION_DELEGATE:-$(resolve_legion_cmd legion-delegate "$_self/../../legion-router/bin/legion-delegate")}"
 LEGION_ROUTE="${LEGION_ROUTE:-$(resolve_legion_cmd legion-route "$_self/../../legion-router/bin/legion-route")}"
 LEGION_TELEMETRY="${LEGION_TELEMETRY:-$(resolve_optional_legion_cmd legion-trace "$_self/../../legion-observability/bin/legion-trace")}"
+# The harness driving this fan-out (Claude by default) — `self` slices come back
+# for it to run inline. Harness-generic: not hardcoded to Opus.
+FANOUT_PRIMARY="$("$LEGION_ROUTE" --primary 2>/dev/null || echo primary)"
 _state_lib="$_self/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1091
@@ -255,7 +258,7 @@ launch_slice() {
     ex="$(jq -r '.executor // ""' "$route_out" 2>/dev/null || echo "")"
     if [[ "$ex" == "self" ]]; then
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
-      jq -cn --arg a "$arch" --arg t "$task" '{status:"inline",archetype:$a,task:$t,note:"Opus should do this inline"}' > "$work/slice-$i.out"
+      jq -cn --arg a "$arch" --arg t "$task" --arg p "$FANOUT_PRIMARY" '{status:"inline",archetype:$a,task:$t,note:($p + " (primary) does this inline")}' > "$work/slice-$i.out"
       return
     fi
   fi

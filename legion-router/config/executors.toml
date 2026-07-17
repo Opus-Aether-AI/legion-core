@@ -1,0 +1,58 @@
+# Legion executor registry — the harnesses Legion can run work through.
+#
+# Legion is harness-SYMMETRIC: any executor whose `kind` includes "primary" can
+# be the operator's PRIMARY harness (the one driving the session) and delegate
+# scoped work to any *coding* executor via
+#
+#   legion-delegate run --executor <name> --task "…"
+#
+# `self` in routing.toml is not listed here — it is a sentinel meaning "whoever
+# is primary does this inline" and resolves to `legion-route --primary`.
+#
+# Fields:
+#   kind      space-separated capabilities:
+#               primary — can drive a session and delegate to others
+#               coding  — can be handed a scoped task and return a result/diff
+#   adapter   CLI implementing the Legion runner contract
+#             (`<adapter> run --repo … --task … [--model …] …`). Empty for
+#             primary-only executors that produce no code diff.
+#   contract  the adapter's I/O shape, consumed by legion-delegate's dispatcher:
+#               native — handled inline by legion-delegate itself (codex)
+#               diff   — worktree + diff producer, full arg set
+#                        (--archetype/--model/--sandbox/--base/--apply/--keep)
+#               prompt — prompt executor, returns text; args: --task/--model/--repo
+#               ""     — primary-only, no coding adapter
+#   model_ref default model role (see models.toml); empty for primary-only.
+
+[executors.claude]
+kind = "primary coding"
+adapter = "legion-claude"
+contract = "prompt"
+model_ref = "claude_default"
+
+[executors.codex]
+kind = "primary coding"
+adapter = "legion-delegate"
+contract = "native"
+model_ref = "codex_workhorse"
+
+[executors.cursor]
+kind = "coding"
+adapter = "legion-cursor"
+contract = "diff"
+model_ref = "cursor_default"
+
+[executors.opencode]
+kind = "primary coding"
+adapter = "legion-opencode"
+contract = "diff"
+model_ref = "opencode_default"
+
+# hermes is a persona/orchestrator (long-running assistant), not a headless
+# coding CLI: it can be PRIMARY and delegate to the coding executors above, but
+# it is never a delegation *target* — there is no scoped task→diff contract.
+[executors.hermes]
+kind = "primary"
+adapter = ""
+contract = ""
+model_ref = ""

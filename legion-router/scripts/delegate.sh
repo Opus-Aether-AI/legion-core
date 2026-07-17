@@ -37,6 +37,9 @@ source "$_self_dir/lib/cost.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/model-config.sh
 source "$_self_dir/lib/model-config.sh"
+
+# shellcheck source=lib/primary.sh
+source "$_self_dir/lib/primary.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/sandbox-setup.sh
 source "$_self_dir/lib/sandbox-setup.sh"
@@ -213,24 +216,38 @@ scan_task_text() {
 }
 
 # ── Telemetry + metering ─────────────────────────────────────────────
-LEGION_OPUS_BASELINE_EMITTED=0
+LEGION_PRIMARY_BASELINE_EMITTED=0
 
-emit_opus_baseline_span() {
+# Synthetic "what the PRIMARY would have cost inline" span, so share accounting
+# can see the delegated-vs-primary split. Harness-generic: the primary is
+# whoever is driving the session (legion_primary). Back-compat: a Claude primary
+# still emits the historical `opus-baseline` label + `synthetic_opus_baseline`
+# marker that legion-share / legion-aggregate and their tests key on; other
+# primaries emit `<primary>-baseline`. Toggle: LEGION_AUTO_PRIMARY_BASELINE
+# (legacy alias LEGION_AUTO_OPUS_BASELINE), default on.
+emit_primary_baseline_span() {
   local delegated_executor="$1" delegated_model="$2" delegated_task="$3"
-  [[ "${LEGION_AUTO_OPUS_BASELINE:-1}" == "1" ]] || return 0
-  [[ "$LEGION_OPUS_BASELINE_EMITTED" == "0" ]] || return 0
+  [[ "${LEGION_AUTO_PRIMARY_BASELINE:-${LEGION_AUTO_OPUS_BASELINE:-1}}" == "1" ]] || return 0
+  [[ "$LEGION_PRIMARY_BASELINE_EMITTED" == "0" ]] || return 0
   # A parent orchestrator, such as legion-fanout, already emits the root span.
   [[ -z "${LEGION_PARENT_ID:-}" ]] || return 0
   [[ -n "${RUN_ID:-}" ]] || return 0
+  local primary; primary="$(legion_primary 2>/dev/null || echo claude)"
+  # No counterfactual when the primary IS the executor we delegated to.
+  [[ "$primary" == "$delegated_executor" ]] && return 0
 
-  LEGION_OPUS_BASELINE_EMITTED=1
+  LEGION_PRIMARY_BASELINE_EMITTED=1
+  # Historical label for a Claude primary is "opus-baseline"; keep it so existing
+  # reports/tests/spans stay valid. Generalize for any other primary.
+  local label; case "$primary" in claude) label="opus-baseline" ;; *) label="${primary}-baseline" ;; esac
   mkdir -p "$LEGION_TELEMETRY_DIR"
-  local baseline_run="${RUN_ID}-opus-baseline"
+  local baseline_run="${RUN_ID}-${label}"
   local trace_id="${LEGION_TRACE_ID:-$RUN_ID}"
   jq -cn \
     --arg schema "legion.span.v1" --arg ts "$(_now)" \
     --arg run_id "$baseline_run" --arg trace_id "$trace_id" \
-    --arg executor "opus-baseline" --arg model "opus-baseline" --arg archetype "${archetype:-}" \
+    --arg executor "$label" --arg model "$label" --arg archetype "${archetype:-}" \
+    --arg primary "$primary" \
     --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
     --arg task "legion-delegate orchestration baseline" \
     --arg delegated_task "$delegated_task" \
@@ -242,7 +259,7 @@ emit_opus_baseline_span() {
      target_type:(if $target_type=="" then null else $target_type end),
      target_name:(if $target_name=="" then null else $target_name end),
      duration_ms:0, cost_usd:0, tokens:{},
-     artifacts:{synthetic_opus_baseline:true,
+     artifacts:{synthetic_opus_baseline:true, synthetic_primary_baseline:true, primary:$primary,
                 delegated_run_id:$delegated_run_id,
                 delegated_executor:$delegated_executor,
                 delegated_model:$delegated_model,
@@ -255,7 +272,7 @@ emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
   mkdir -p "$LEGION_TELEMETRY_DIR"
   case "$executor" in
-    codex*) [[ "$status" == "ok" ]] && emit_opus_baseline_span "$executor" "$model" "$task" ;;
+    codex*) [[ "$status" == "ok" ]] && emit_primary_baseline_span "$executor" "$model" "$task" ;;
   esac
   # Trace context: a parent orchestrator (e.g. legion-fanout) exports
   # LEGION_TRACE_ID + LEGION_PARENT_ID so sibling delegate spans hang under one
@@ -388,15 +405,56 @@ cleanup_generated_diff_noise() {
   find "$target" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
 }
 
+# Dispatch a scoped run to a non-codex executor's adapter (the Legion runner
+# contract: `<adapter> run --repo … --task … [--model …] …`). Reads the adapter
+# and its I/O contract from executors.toml via legion-route, builds the right
+# argument set, and execs it so the adapter's JSON result + exit code become
+# ours. Runs in cmd_run's dynamic scope (repo/task/archetype/sandbox/base/
+# do_apply/keep/explicit_model). Never returns.
+dispatch_adapter() {
+  local ex="$1" info adapter contract model_ref adapter_bin use_model
+  info="$(python3 "$ROUTE_BIN" --executor-info "$ex" 2>/dev/null)" \
+    || die "unknown executor '$ex' — not in executors.toml (see legion-route --list-executors)"
+  adapter="$(jq -r '.adapter // ""' <<<"$info")"
+  contract="$(jq -r '.contract // ""' <<<"$info")"
+  model_ref="$(jq -r '.model_ref // ""' <<<"$info")"
+  [[ -n "$adapter" && -n "$contract" && "$contract" != "native" ]] \
+    || die "executor '$ex' is primary-only — it can drive a session but cannot be delegated a coding task."
+  adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
+  [[ -x "$adapter_bin" ]] || die "executor '$ex' adapter '$adapter' not found on PATH or in bin/ — build/install it first."
+  # Model: an explicit --model wins; otherwise the executor's OWN default role
+  # (never the archetype's model, which may name a model this harness can't run).
+  use_model="$explicit_model"
+  [[ -n "$use_model" || -z "$model_ref" ]] || use_model="$(legion_model_ref "$model_ref" 2>/dev/null || true)"
+  local -a aargs=(run --repo "$repo" --task "$task")
+  [[ -n "$use_model" ]] && aargs+=(--model "$use_model")
+  [[ "${QUIET:-0}" == "1" ]] && aargs+=(--quiet)
+  case "$contract" in
+    diff)     # worktree + diff producers (cursor, opencode): full arg set
+      [[ -n "$archetype" ]] && aargs+=(--archetype "$archetype")
+      [[ -n "$sandbox" ]] && aargs+=(--sandbox "$sandbox")
+      [[ "$base" != "HEAD" ]] && aargs+=(--base "$base")
+      [[ "$do_apply" == "1" ]] && aargs+=(--apply)
+      [[ "$keep" == "1" ]] && aargs+=(--keep)
+      ;;
+    prompt) : ;;   # prompt executors (claude): task/model/repo only
+    *) die "executor '$ex' has an unknown contract '$contract' in executors.toml." ;;
+  esac
+  note "→ dispatch to $ex via $adapter${use_model:+ -m $use_model}"
+  exec "$adapter_bin" "${aargs[@]}"
+}
+
 # ── run ──────────────────────────────────────────────────────────────
 cmd_run() {
   local model="" sandbox="" task="" repo="$PWD" base="HEAD" archetype="" effort=""
   local budget=0 do_apply=0 keep=0 preset_run_id=""
   local untrusted=0
+  local forced_executor="" explicit_model=""
   [[ "${LEGION_UNTRUSTED:-0}" == "1" ]] && untrusted=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --model) model="$2"; shift 2 ;;
+      --model) model="$2"; explicit_model="$2"; shift 2 ;;
+      --executor) forced_executor="$2"; shift 2 ;;   # force a specific harness (symmetric reverse-delegate)
       --run-id) preset_run_id="$2"; shift 2 ;;   # adopt a preallocated id (fanout queued records)
       --sandbox) sandbox="$2"; shift 2 ;;
       --archetype) archetype="$2"; shift 2 ;;
@@ -433,9 +491,20 @@ cmd_run() {
       fi ;;
     codex|gpt)    # GPT low -> refuse to delegate to a depleted provider (escape: LEGION_FORCE_DELEGATE=1)
       [[ "${LEGION_FORCE_DELEGATE:-}" == "1" ]] || \
-        die "LEGION_LOW_CREDIT=$LEGION_LOW_CREDIT: GPT/codex credits low — Opus should run this inline, not delegate. (set LEGION_FORCE_DELEGATE=1 to override)" ;;
+        die "LEGION_LOW_CREDIT=$LEGION_LOW_CREDIT: GPT/codex credits low — the primary ($(legion_primary)) should run this inline, not delegate. (set LEGION_FORCE_DELEGATE=1 to override)" ;;
   esac
-  [[ "$r_exec" == "self" ]] && die "archetype '$archetype' routes to executor=self — Opus should do this inline, not delegate."
+  # --executor forces a specific harness (symmetric reverse-delegate: any primary
+  # can hand work to any other harness); otherwise the archetype's routed executor stands.
+  [[ -n "$forced_executor" ]] && r_exec="$forced_executor"
+  # Dispatch by executor. `self` is the primary's own inline work (never delegated);
+  # codex (or an unclassified task) uses the native codex path below; any other
+  # registered coding executor runs through its adapter.
+  case "$r_exec" in
+    self)
+      die "executor=self — the primary harness ($(legion_primary)) does this inline, not via legion-delegate. (use --executor <name> to force a specific harness)" ;;
+    ""|codex) : ;;
+    *) dispatch_adapter "$r_exec" ;;   # execs the adapter and never returns
+  esac
   [[ -n "$sandbox" ]] || sandbox="workspace-write"
   [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
   [[ -n "$model" ]] || die "run: --model or --archetype required"
@@ -808,9 +877,11 @@ main() {
     apply)   cmd_apply "$@" ;;
     cleanup) cmd_cleanup "$@" ;;
     -h|--help|help|"") cat >&2 <<'EOF'
-legion-delegate — delegate a scoped task to an external model agent (Codex / GPT-5.x)
+legion-delegate — delegate a scoped task to an external model agent (Codex by
+default; any registered executor via --executor)
 
-  run      [--archetype A | --model M] [--sandbox read-only|workspace-write|docker|podman|vercel]
+  run      [--archetype A | --model M] [--executor codex|cursor|claude|opencode]
+           [--sandbox read-only|workspace-write|docker|podman|vercel]
            [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
            [--base REF] [--budget-tokens N] [--apply] [--keep] [--untrusted]
   review   [--archetype A | --model M] --base BRANCH [--repo DIR] [--reasoning-effort E]
@@ -823,6 +894,7 @@ legion-delegate — delegate a scoped task to an external model agent (Codex / G
             reclaims --keep'd/resume worktrees + branches; --purge also drops run artifacts)
 
 --archetype resolves model/sandbox/effort from routing.toml + models.toml. List them: legion-route --list
+--executor forces a specific harness (symmetric reverse-delegate). List them: legion-route --list-executors
 EOF
       [[ "$cmd" == "" ]] && exit 2 || exit 0 ;;
     *) die "unknown command '$cmd' (run|review|resume|apply|cleanup)" ;;

@@ -7,22 +7,27 @@
 # self-corrected by `legion-share`. Resolved by `legion-route <archetype>`,
 # consumed by `legion-delegate --archetype`.
 #
-#   executor          self (Claude inline) | codex (delegate to a GPT model)
+#   executor          self (the PRIMARY harness runs it inline) | a registered
+#                     executor name in executors.toml (codex | cursor | opencode | claude)
 #   model_ref         key in models.toml
 #   sandbox           read-only | workspace-write
 #   reasoning_effort  low | medium | high | xhigh
 #   fallback_refs     model_ref keys to try on quota/rate-limit before failing
 #
 # EFFORT POLICY: codex ALWAYS runs at xhigh — quality over speed; on a
-# subscription the marginal cost is flat, so there's no reason to skimp. Claude
-# orchestration also runs at xhigh minimum. Every archetype below is xhigh;
-# legion-delegate also defaults effort to xhigh when none is given.
+# subscription the marginal cost is flat, so there's no reason to skimp. The
+# primary's orchestration also runs at xhigh minimum. Every archetype below is
+# xhigh; legion-delegate also defaults effort to xhigh when none is given.
+#
+# `self` archetypes below stay with the PRIMARY harness (whoever is driving the
+# session, resolved by `legion-route --primary`). `model_ref` on a self archetype
+# is the Claude-primary default; a non-Claude primary runs its own model inline.
 
 [targets]
 codex_share = 0.5          # floor: >= 50% of delegatable work to codex (the policy below exceeds it)
 
 [defaults]
-executor = "self"          # an unclassified task: Opus decides (it should classify into an archetype)
+executor = "self"          # an unclassified task: the primary decides (it should classify into an archetype)
 model_ref = "claude_orchestrator"
 sandbox = "workspace-write"
 reasoning_effort = "xhigh"
@@ -33,19 +38,19 @@ fallback_refs = []
 executor = "self"
 model_ref = "claude_orchestrator"
 reasoning_effort = "xhigh"
-note = "Plan / decompose / coordinate / integrate — the orchestration itself stays on Claude."
+note = "Plan / decompose / coordinate / integrate — the orchestration itself stays with the primary harness."
 
 [archetypes.architecture-decision]
 executor = "self"
 model_ref = "claude_orchestrator"
 reasoning_effort = "xhigh"
-note = "MAKING a design/architecture/tradeoff decision — keep on Claude; review can use the Codex review role."
+note = "MAKING a design/architecture/tradeoff decision — keep on the primary; review can use the Codex review role."
 
 [archetypes.deep-reasoning]
 executor = "self"
 model_ref = "claude_orchestrator"
 reasoning_effort = "xhigh"
-note = "High-judgement reasoning — keep on Claude, do NOT delegate."
+note = "High-judgement reasoning — keep on the primary, do NOT delegate."
 
 # ── Codex implementation path ────────────────────────────────────────
 [archetypes.implement-feature]
@@ -66,7 +71,7 @@ note = "A fully-specced feature slice — the default home for real coding."
 executor = "self"
 model_ref = "claude_orchestrator"
 reasoning_effort = "xhigh"
-note = "Layout / component structure / design intent stays on Claude (impeccable shape->craft). Frontend quality is taste, not throughput."
+note = "Layout / component structure / design intent stays with the primary (impeccable shape->craft). Frontend quality is taste, not throughput."
 
 [archetypes.frontend-polish]
 executor = "codex"
@@ -168,7 +173,7 @@ executor = "codex"
 model_ref = "codex_review"
 sandbox = "read-only"
 reasoning_effort = "xhigh"
-note = "A different model reviews a diff Opus wrote — diversity catches what self-review misses."
+note = "A different model reviews a diff the primary wrote — diversity catches what self-review misses."
 
 [archetypes.cross-model-tiebreak]
 executor = "codex"

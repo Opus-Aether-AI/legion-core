@@ -22,5 +22,9 @@ codex_default       = "gpt-5.5"          # generic Codex — pick when unsure
 cursor_default      = "grok-4.5"         # Cursor agent (Grok 4.5)
 cursor_composer     = "composer-2.5"     # Cursor in-house
 
+# ── opencode (open-source harness; provider/model form) ────────────
+opencode_default    = "minimax/MiniMax-M2"          # opencode headless default
+opencode_review     = "github-copilot/claude-opus-4.8"  # opencode reviewer tier
+
 # ── Auto tiers ─────────────────────────────────────────────────────
 auto_tier_haiku     = "claude-haiku-4-5"

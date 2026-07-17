@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Mock opencode CLI. Emits a schema-accurate `--format json` JSONL EVENT STREAM
+# (message.updated carrying AssistantMessage {cost, tokens:{input,output,
+# reasoning,cache:{read,write}}}, message.part.updated text, session.idle) so the
+# legion-opencode adapter's stream parsing can be tested deterministically.
+
+set -euo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'opencode %s\n' "$*" >> "$MOCK_CALL_LOG"
+
+model="fixture/opencode-model"
+agent=""
+task=""
+# positional after `run`
+[[ "${1:-}" == "run" ]] && shift
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -m|--model) model="$2"; shift 2 ;;
+    --agent) agent="$2"; shift 2 ;;
+    --variant) shift 2 ;;
+    --format) shift 2 ;;
+    --format=*) shift ;;
+    *) task="$1"; shift ;;
+  esac
+done
+
+if [[ "${MOCK_OPENCODE_FAIL:-0}" == "1" ]]; then
+  printf 'mock opencode forced failure\n' >&2
+  exit 4
+fi
+
+# Write a change unless running the non-writing plan agent (mirrors read-only).
+if [[ "$agent" != "plan" || "${MOCK_OPENCODE_WRITE_IN_PLAN:-0}" == "1" ]]; then
+  printf 'mock-opencode-change by %s\n' "$model" >> MOCK_OPENCODE_CHANGE.txt
+fi
+
+provider="${model%%/*}"
+modelid="${model#*/}"
+
+# Two streaming updates for one message id (take last state), plus a second
+# assistant message id (sum across ids), plus text parts and session.idle.
+cat <<EOF
+{"type":"message.updated","properties":{"info":{"id":"u1","role":"user"}}}
+{"type":"message.updated","properties":{"info":{"id":"a1","role":"assistant","providerID":"$provider","modelID":"$modelid","cost":0.002,"tokens":{"input":100,"output":10,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text","text":"partial"}}}
+{"type":"message.updated","properties":{"info":{"id":"a1","role":"assistant","providerID":"$provider","modelID":"$modelid","cost":0.005,"tokens":{"input":200,"output":50,"reasoning":5,"cache":{"read":20,"write":30}}}}}
+{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text","text":"OPENCODE_OK_OUTPUT"}}}
+{"type":"message.updated","properties":{"info":{"id":"a2","role":"assistant","providerID":"$provider","modelID":"$modelid","cost":0.002,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+{"type":"session.idle","properties":{}}
+EOF

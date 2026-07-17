@@ -19,6 +19,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "legion-observability", "scripts"))
+try:
+    import legion_state  # noqa: E402
+except ModuleNotFoundError:  # code-intel can ship without the observability plugin
+    legion_state = None
+
 
 RESULT_SCHEMA = "legion.code-intel.v1"
 SPAN_SCHEMA = "legion.span.v1"
@@ -486,7 +493,9 @@ def run_diagnostics(args: argparse.Namespace) -> int:
             handle.write("\n")
         payload["output_path"] = output_path
     if args.emit_span:
-        telemetry_dir = args.telemetry_dir or os.environ.get("LEGION_TELEMETRY_DIR") or "~/.claude/logs/legion/spans"
+        _default_spans = (os.path.join(legion_state.default_log_root(), "spans")
+                          if legion_state else "~/.claude/logs/legion/spans")
+        telemetry_dir = args.telemetry_dir or os.environ.get("LEGION_TELEMETRY_DIR") or _default_spans
         payload["span_path"] = _emit_span(payload, telemetry_dir)
 
     if args.json:

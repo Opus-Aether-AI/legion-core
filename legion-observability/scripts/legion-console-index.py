@@ -20,7 +20,10 @@ TOKEN_FIELDS = (
     "output_tokens",
     "reasoning_output_tokens",
 )
-DEFAULT_ROOT = os.path.expanduser("~/.claude/logs/legion")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import legion_state  # noqa: E402
+
+DEFAULT_ROOT = legion_state.default_log_root()
 
 
 def _num(value: Any) -> float:

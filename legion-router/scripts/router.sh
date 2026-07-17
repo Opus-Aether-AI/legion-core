@@ -18,7 +18,10 @@ set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WRAPPER_PATH="$PLUGIN_DIR/scripts/router-wrapper.sh"
-LOG_DIR="${LEGION_LOG_DIR:-$HOME/.claude/logs/legion}"
+# Harness-neutral global log root (back-compat: an existing ~/.claude/logs/legion
+# is kept, so this is a no-op on established Claude installs).
+_legion_state_py="$PLUGIN_DIR/../legion-observability/scripts/legion_state.py"
+LOG_DIR="${LEGION_LOG_DIR:-$(python3 "$_legion_state_py" --log-root 2>/dev/null || echo "$HOME/.claude/logs/legion")}"
 LOG_FILE="$LOG_DIR/router.log"
 ERR_FILE="$LOG_DIR/router.err.log"
 

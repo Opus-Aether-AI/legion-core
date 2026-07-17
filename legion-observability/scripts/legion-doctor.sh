@@ -288,6 +288,22 @@ check_codex() {
   fi
 }
 
+check_opencode() {
+  # opencode is an optional executor; pin $HOME/.opencode/bin first (a stray
+  # OpenWork build on PATH is a different binary — see legion-opencode.sh).
+  local oc="${OPENCODE_BIN:-}"
+  [[ -n "$oc" && -x "$oc" ]] || oc="$HOME/.opencode/bin/opencode"
+  if [[ -x "$oc" ]] || command -v opencode >/dev/null 2>&1; then
+    if [[ -f "$HOME/.local/share/opencode/auth.json" ]]; then
+      pass "opencode present + authenticated"
+    else
+      warn "opencode present but no auth (~/.local/share/opencode/auth.json missing) — opencode delegation will fail"
+    fi
+  else
+    warn "opencode CLI not found — opencode delegation unavailable (optional)"
+  fi
+}
+
 check_route_smoke() {
   local route; route="$(resolve_legion_cmd legion-route "$LEGION_ROOT/legion-router/bin/legion-route")" || {
     fail "legion-route not found" "plugin:legion-router"; return; }
@@ -538,6 +554,7 @@ run_one() {
     costs)              check_costs ;;
     telemetry-schema)   check_telemetry_schema ;;
     codex)              check_codex ;;
+    opencode)           check_opencode ;;
     route-smoke)        check_route_smoke ;;
     delegate-smoke)     check_delegate_smoke ;;
     state-root)         check_state_root ;;
@@ -554,7 +571,7 @@ run_one() {
 if [[ -n "$ONLY" ]]; then
   run_one "$ONLY"
 else
-  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs telemetry-schema codex router; do
+  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs telemetry-schema codex opencode router; do
     run_one "$c"
   done
   if [[ "$STRICT_DEMO" == "1" ]]; then

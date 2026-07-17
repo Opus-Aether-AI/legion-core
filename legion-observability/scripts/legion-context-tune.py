@@ -16,9 +16,12 @@ import sys
 from collections import defaultdict
 from typing import Iterable, Mapping, Sequence, TypedDict
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import legion_state  # noqa: E402
+
 HANDOFF_SCHEMA = "legion.handoff.v1"
-DEFAULT_RECORDS_GLOB = "~/.claude/logs/legion/handoff/*.jsonl"
-DEFAULT_POLICY_PATH = "~/.claude/logs/legion/context-policy.json"
+DEFAULT_RECORDS_GLOB = os.path.join(legion_state.default_log_root(), "handoff", "*.jsonl")
+DEFAULT_POLICY_PATH = os.path.join(legion_state.default_log_root(), "context-policy.json")
 
 CONT_OK = 0.8
 W_FORCED = 10.0

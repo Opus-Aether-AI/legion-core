@@ -15,10 +15,13 @@ import argparse
 import importlib.util
 import json
 import os
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+import legion_state  # noqa: E402
 
 
 def _load_indexer():
@@ -183,8 +186,8 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--interval", type=float, default=1.5)
-    ap.add_argument("--registry", default=os.path.expanduser("~/.claude/logs/legion/registry"))
-    ap.add_argument("--spans", default=os.path.expanduser("~/.claude/logs/legion/spans"))
+    ap.add_argument("--registry", default=os.path.join(legion_state.default_log_root(), "registry"))
+    ap.add_argument("--spans", default=os.path.join(legion_state.default_log_root(), "spans"))
     ap.add_argument("--repo", default=os.path.abspath(os.path.join(_HERE, "..", "..")),
                     help="marketplace repo root for the inventory catalog")
     ap.add_argument("--control-sock", default=os.path.expanduser("~/.claude/legion/console.sock"),

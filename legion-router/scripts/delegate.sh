@@ -38,6 +38,7 @@ source "$_self_dir/lib/cost.sh"
 # shellcheck source=lib/model-config.sh
 source "$_self_dir/lib/model-config.sh"
 
+# shellcheck disable=SC1091
 # shellcheck source=lib/primary.sh
 source "$_self_dir/lib/primary.sh"
 # shellcheck disable=SC1091
@@ -233,8 +234,9 @@ emit_primary_baseline_span() {
   [[ -z "${LEGION_PARENT_ID:-}" ]] || return 0
   [[ -n "${RUN_ID:-}" ]] || return 0
   local primary; primary="$(legion_primary 2>/dev/null || echo claude)"
-  # No counterfactual when the primary IS the executor we delegated to.
-  [[ "$primary" == "$delegated_executor" ]] && return 0
+  # No counterfactual when the primary IS the executor we delegated to. Match the
+  # executor FAMILY so a codex primary also skips codex-review / codex-resume.
+  [[ "${delegated_executor%%-*}" == "$primary" ]] && return 0
 
   LEGION_PRIMARY_BASELINE_EMITTED=1
   # Historical label for a Claude primary is "opus-baseline"; keep it so existing
@@ -479,6 +481,10 @@ cmd_run() {
     [[ -n "$sandbox" ]] || sandbox="$r_sandbox"
     [[ -n "$effort" ]]  || effort="$r_effort"
   fi
+  # --executor forces a specific harness (symmetric reverse-delegate: any primary
+  # can hand work to any other harness). Apply it BEFORE the low-credit bias and the
+  # dispatch below so both see the final resolved target.
+  [[ -n "$forced_executor" ]] && r_exec="$forced_executor"
   # Low-credit bias — steer away from the depleted provider (self-handle low credits).
   case "${LEGION_LOW_CREDIT:-}" in
     claude)       # Claude low -> prefer GPT, even for normally-self work
@@ -489,13 +495,22 @@ cmd_run() {
         # always surface the substitution (even under --quiet) so it's never silent.
         printf '⚠ LEGION_LOW_CREDIT=claude: delegating a normally-self task to GPT (%s)\n' "$model" >&2
       fi ;;
-    codex|gpt)    # GPT low -> refuse to delegate to a depleted provider (escape: LEGION_FORCE_DELEGATE=1)
-      [[ "${LEGION_FORCE_DELEGATE:-}" == "1" ]] || \
-        die "LEGION_LOW_CREDIT=$LEGION_LOW_CREDIT: GPT/codex credits low — the primary ($(legion_primary)) should run this inline, not delegate. (set LEGION_FORCE_DELEGATE=1 to override)" ;;
+    codex|gpt)    # GPT low -> refuse ONLY when the actual target IS the depleted codex path;
+                  # a --executor pivot to another harness (cursor/opencode/claude) is the point.
+      case "$r_exec" in
+        ""|codex)
+          [[ "${LEGION_FORCE_DELEGATE:-}" == "1" ]] || \
+            die "LEGION_LOW_CREDIT=$LEGION_LOW_CREDIT: GPT/codex credits low — the primary ($(legion_primary)) should run this inline, not delegate. (set LEGION_FORCE_DELEGATE=1 to override)" ;;
+      esac ;;
   esac
-  # --executor forces a specific harness (symmetric reverse-delegate: any primary
-  # can hand work to any other harness); otherwise the archetype's routed executor stands.
-  [[ -n "$forced_executor" ]] && r_exec="$forced_executor"
+  # Materialize the task (stdin), default+validate the sandbox, and run the safety
+  # scan BEFORE dispatch, so an adapter path (cursor/opencode/claude) gets a real
+  # task, a sane sandbox, and the same injection tripwire the native codex path gets.
+  [[ -n "$sandbox" ]] || sandbox="workspace-write"
+  validate_sandbox "$sandbox"
+  [[ -n "$task" ]] || task="$(cat)"        # read from stdin if not given
+  [[ -n "$task" ]] || die "run: empty task"
+  [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   # Dispatch by executor. `self` is the primary's own inline work (never delegated);
   # codex (or an unclassified task) uses the native codex path below; any other
   # registered coding executor runs through its adapter.
@@ -505,13 +520,8 @@ cmd_run() {
     ""|codex) : ;;
     *) dispatch_adapter "$r_exec" ;;   # execs the adapter and never returns
   esac
-  [[ -n "$sandbox" ]] || sandbox="workspace-write"
   [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
   [[ -n "$model" ]] || die "run: --model or --archetype required"
-  validate_sandbox "$sandbox"
-  [[ -n "$task" ]] || task="$(cat)"        # read from stdin if not given
-  [[ -n "$task" ]] || die "run: empty task"
-  [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
 
   RUN_ID="${preset_run_id:-$(_run_id)}"

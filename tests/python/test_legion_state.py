@@ -73,3 +73,33 @@ def test_resolve_state_honors_repo_config(tmp_path, monkeypatch):
     assert resolved["source"] == "config"
     assert resolved["state_root"] == str(repo / ".legion" / "local-state")
     assert resolved["reports_dir"] == str(repo / ".legion" / "local-reports")
+
+
+def test_default_log_root_resolution_order(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    base = {"HOME": str(home)}
+
+    # 1. explicit LEGION_LOG_ROOT wins
+    assert state.default_log_root({**base, "LEGION_LOG_ROOT": str(tmp_path / "explicit")}) == str(tmp_path / "explicit")
+    # 2. XDG_STATE_HOME/legion next
+    assert state.default_log_root({**base, "XDG_STATE_HOME": str(tmp_path / "xdg")}) == str(tmp_path / "xdg" / "legion")
+    # 3. fresh install (no ~/.claude/logs/legion) -> neutral ~/.legion/logs
+    assert state.default_log_root(base) == str(home / ".legion" / "logs")
+    # 4. LEGION_HOME override
+    assert state.default_log_root({**base, "LEGION_HOME": str(tmp_path / "lh")}) == str(tmp_path / "lh" / "logs")
+    # 5. an EXISTING ~/.claude/logs/legion is kept (back-compat)
+    legacy = home / ".claude" / "logs" / "legion"
+    legacy.mkdir(parents=True)
+    assert state.default_log_root(base) == str(legacy)
+
+
+def test_default_log_root_is_hermetic_wrt_passed_env(tmp_path, monkeypatch):
+    # A passed env must drive the result, not the process HOME (regression guard:
+    # os.path.expanduser used to re-consult os.environ for HOME-derived paths).
+    monkeypatch.setenv("HOME", str(tmp_path / "process-home"))
+    fake = tmp_path / "fakehome"
+    fake.mkdir()
+    got = state.default_log_root({"HOME": str(fake)})
+    assert got == str(fake / ".legion" / "logs")
+    assert "process-home" not in got

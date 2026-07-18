@@ -51,12 +51,16 @@ def default_log_root(env: dict[str, str] | None = None) -> str:
     xdg = env.get("XDG_STATE_HOME")
     if xdg:
         return _abs(os.path.join(xdg, "legion"))
-    home = env.get("HOME", "~")
-    legacy = _abs(os.path.join(home, ".claude", "logs", "legion"))
+    # Resolve HOME once from the given env (only falling back to the process home
+    # when env has no HOME), then build the HOME-derived paths by plain join +
+    # abspath — NOT _abs/expanduser, which would re-consult os.environ and make
+    # the result depend on the process env instead of the passed `env`.
+    home = env.get("HOME") or os.path.expanduser("~")
+    legacy = os.path.abspath(os.path.join(home, ".claude", "logs", "legion"))
     if os.path.isdir(legacy):
         return legacy
-    legion_home = env.get("LEGION_HOME", os.path.join(home, ".legion"))
-    return _abs(os.path.join(legion_home, "logs"))
+    legion_home = env.get("LEGION_HOME") or os.path.join(home, ".legion")
+    return os.path.abspath(os.path.join(legion_home, "logs"))
 
 
 def _abs(path: str, base: str | None = None) -> str:

@@ -21,7 +21,11 @@ WRAPPER_PATH="$PLUGIN_DIR/scripts/router-wrapper.sh"
 # Harness-neutral global log root (back-compat: an existing ~/.claude/logs/legion
 # is kept, so this is a no-op on established Claude installs).
 _legion_state_py="$PLUGIN_DIR/../legion-observability/scripts/legion_state.py"
-LOG_DIR="${LEGION_LOG_DIR:-$(python3 "$_legion_state_py" --log-root 2>/dev/null || echo "$HOME/.claude/logs/legion")}"
+# If python can't resolve the root, mirror default_log_root's back-compat choice
+# (existing ~/.claude/logs/legion, else the neutral root) rather than hardcoding
+# the legacy path — otherwise a fresh machine reads/writes to divergent roots.
+_legion_log_fallback() { [ -d "$HOME/.claude/logs/legion" ] && printf '%s' "$HOME/.claude/logs/legion" || printf '%s' "${LEGION_LOG_ROOT:-$HOME/.legion/logs}"; }
+LOG_DIR="${LEGION_LOG_DIR:-$(python3 "$_legion_state_py" --log-root 2>/dev/null || _legion_log_fallback)}"
 LOG_FILE="$LOG_DIR/router.log"
 ERR_FILE="$LOG_DIR/router.err.log"
 

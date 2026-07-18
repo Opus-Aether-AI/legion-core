@@ -489,7 +489,7 @@
       "command": [
         "bash",
         "-lc",
-        "_bd=$(mktemp -d); trap 'rm -rf \"$_bd\"' EXIT; LEGION_BENCH_DIR=$_bd/bench LEGION_TELEMETRY_DIR=$_bd/spans {repo}/legion-observability/bin/legion-bench corpus --corpus local-smoke --repo {repo} --json > {workspace}/corpus.json && jq -r '.summary.comparisons[\"control-baseline..control-candidate\"].delta_pct_points, .summary.comparisons[\"control-baseline..control-candidate\"].reliable' {workspace}/corpus.json > {workspace}/corpus-check.txt"
+        "_bd=$(mktemp -d); trap 'rm -rf \"$_bd\"' EXIT INT TERM; LEGION_BENCH_DIR=$_bd/bench LEGION_TELEMETRY_DIR=$_bd/spans {repo}/legion-observability/bin/legion-bench corpus --corpus local-smoke --repo {repo} --json > {workspace}/corpus.json && jq -r '.summary.comparisons[\"control-baseline..control-candidate\"].delta_pct_points, .summary.comparisons[\"control-baseline..control-candidate\"].reliable' {workspace}/corpus.json > {workspace}/corpus-check.txt"
       ],
       "validators": [
         {

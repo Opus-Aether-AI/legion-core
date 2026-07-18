@@ -70,6 +70,22 @@ make_test_repo() {
     [ ! -f "$repo/MOCK_OPENCODE_CHANGE.txt" ]
 }
 
+@test "legion-opencode: read-only .opencode/plans write is not treated as an edit" {
+    local repo; repo="$(make_test_repo plan1)"
+    MOCK_OPENCODE_WRITE_PLAN_FILE=1 run "$LEGION_OPENCODE" run --task "plan it" \
+        --repo "$repo" --sandbox read-only --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+}
+
+@test "legion-opencode: a stray non-JSON stdout line does not zero the metering" {
+    local repo; repo="$(make_test_repo stray1)"
+    MOCK_OPENCODE_STRAY_STDOUT=1 run "$LEGION_OPENCODE" run --task "x" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.cost_usd == 0.007 and .usage.output_tokens == 55'
+    echo "$output" | jq -e '.result == "OPENCODE_OK_OUTPUT"'
+}
+
 @test "legion-opencode: --apply applies the captured diff to the repo" {
     local repo; repo="$(make_test_repo app1)"
     run "$LEGION_OPENCODE" run --task "edit" --repo "$repo" --apply --quiet

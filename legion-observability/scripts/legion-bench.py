@@ -1073,6 +1073,12 @@ def _prune_bench_runs(root: str, keep: int) -> None:
     Each bench run persists its per-case workspaces (multi-MB), and previously
     nothing ever pruned them, so the bench dir grew without bound (WS6). Keep a
     bounded, most-recent window; override the count with LEGION_BENCH_RETAIN_RUNS.
+
+    Best-effort and concurrency-safe: mtimes are read defensively (a dir that
+    vanishes mid-prune never raises out of here), and any run touched within a
+    grace window (LEGION_BENCH_PRUNE_GRACE_SEC, default 300s) is retained so a
+    CONCURRENT in-progress run sharing this bench dir is never deleted out from
+    under it.
     """
     if keep <= 0:
         return
@@ -1087,8 +1093,22 @@ def _prune_bench_runs(root: str, keep: int) -> None:
         return
     if len(run_dirs) <= keep:
         return
-    run_dirs.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+
+    def _mtime(path: str) -> float:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    try:
+        grace = float(os.environ.get("LEGION_BENCH_PRUNE_GRACE_SEC", "300"))
+    except ValueError:
+        grace = 300.0
+    now = time.time()
+    run_dirs.sort(key=_mtime, reverse=True)
     for stale in run_dirs[keep:]:
+        if grace > 0 and (now - _mtime(stale)) < grace:
+            continue  # still fresh — could be a concurrent run mid-write
         shutil.rmtree(stale, ignore_errors=True)
 
 

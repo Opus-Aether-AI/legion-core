@@ -94,16 +94,24 @@ emit_span() {
 # A message streams as many message.updated events sharing one id; take the LAST
 # state per id (group_by(.id)|map(.[-1])) then SUM across distinct assistant
 # messages so a multi-turn run is metered correctly (never per-event double-count).
+# Relies on opencode emitting ascending (chronological) message + part ids, so
+# .[-1] per id is the final state — opencode guarantees this (Identifier.ascending).
+# Tolerant of stray non-JSON stdout lines (e.g. a plugin's console.log poisoning
+# the stream): each line is parsed with `fromjson?`, so one bad line costs at most
+# that event, not the whole run's cost/result/token metering.
 parse_opencode_output() {
   local file="$1" out
-  out="$(jq -s -c '
-    ([.[] | select(.type=="message.updated" and (.properties.info.role? == "assistant"))
-       | .properties.info] | group_by(.id) | map(.[-1])) as $msgs
-    | ([.[] | select(.type=="message.part.updated" and (.properties.part.type? == "text"))]
-       | group_by(.properties.part.id) | map(.[-1].properties.part.text) | join("\n")) as $text
+  out="$(jq -s -R -c '
+    [ splits("\n") | select(length > 0) | fromjson? ] as $events
+    | ([ $events[] | select(.type=="message.updated" and (.properties.info.role? == "assistant"))
+         | .properties.info ] | group_by(.id) | map(.[-1])) as $msgs
+    | ([ $events[] | select(.type=="message.part.updated" and (.properties.part.type? == "text")) ]
+         | group_by(.properties.part.id) | map(.[-1].properties.part.text) | join("\n")) as $text
     | {
         cost:  ([$msgs[].cost] | add // 0),
-        model: ($msgs | last | if . == null then "" else ((.providerID // "") + "/" + (.modelID // "")) end),
+        model: ($msgs | last
+                 | if . == null or ((.providerID // "") == "") or ((.modelID // "") == "") then ""
+                   else (.providerID + "/" + .modelID) end),
         usage: {
           input_tokens:                ([$msgs[].tokens.input]       | add // 0),
           output_tokens:               ([$msgs[].tokens.output]      | add // 0),
@@ -188,11 +196,30 @@ cmd_run() {
   [[ -n "$actual_model" && "$actual_model" != "/" ]] || actual_model="$model"
   result="$(jq -r '.result // ""' <<<"$parsed" 2>/dev/null || printf '')"
 
+  # opencode omits `cost` for models it can't price (custom / some local providers).
+  # When the precomputed cost is 0 but tokens were used, fall back to Legion's own
+  # cost table so the span isn't metered at $0 (mirrors legion-cursor.sh).
+  if awk -v c="$cost" 'BEGIN{exit !((c+0)==0)}'; then
+    local _in _out _cr _cw
+    _in="$(jq -r '.input_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
+    _out="$(jq -r '.output_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
+    _cr="$(jq -r '.cache_read_input_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
+    _cw="$(jq -r '.cache_creation_input_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
+    if [[ "$_in" != "0" || "$_out" != "0" ]]; then
+      cost="$(cost_for_model "$actual_model" "$_in" "$_out" "$_cr" "$_cw" 2>/dev/null || echo 0)"
+    fi
+  fi
+
   git -C "$wt" add -A 2>/dev/null || diff_rc=1
   git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
   [[ "$rc" -ne 0 ]] && status="failed"
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
-  if [[ "$sandbox" == "read-only" && -s "$art/diff.patch" && "$status" == "ok" ]]; then
+  # Reject a read-only run only if it changed files OUTSIDE .opencode/plans/.
+  # opencode's (experimental) plan mode writes its plan there via the write tool;
+  # that's the plan output, not an edit to the target repo, so it must not trip the
+  # no-write backstop. The default plan agent writes nothing at all.
+  if [[ "$sandbox" == "read-only" && "$status" == "ok" ]] \
+     && ! git -C "$wt" diff --cached --quiet -- . ':!.opencode/plans' 2>/dev/null; then
     status="error"
     [[ -n "$result" ]] && result="${result}"$'\n'
     result="${result}opencode produced file changes during a read-only run; refusing to apply or report ok."

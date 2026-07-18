@@ -33,8 +33,18 @@ if [[ "$agent" != "plan" || "${MOCK_OPENCODE_WRITE_IN_PLAN:-0}" == "1" ]]; then
   printf 'mock-opencode-change by %s\n' "$model" >> MOCK_OPENCODE_CHANGE.txt
 fi
 
+# Experimental plan mode writes its plan under .opencode/plans/ (output, not an edit).
+if [[ "${MOCK_OPENCODE_WRITE_PLAN_FILE:-0}" == "1" ]]; then
+  mkdir -p .opencode/plans
+  printf '# plan by %s\n' "$model" >> .opencode/plans/plan.md
+fi
+
 provider="${model%%/*}"
 modelid="${model#*/}"
+
+# Emit a stray non-JSON stdout line (e.g. a plugin console.log) to prove the
+# adapter's tolerant parse skips it instead of zeroing the whole run's metering.
+[[ "${MOCK_OPENCODE_STRAY_STDOUT:-0}" == "1" ]] && printf 'plugin: hello from console.log (not json)\n'
 
 # Two streaming updates for one message id (take last state), plus a second
 # assistant message id (sum across ids), plus text parts and session.idle.

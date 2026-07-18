@@ -303,7 +303,7 @@ teardown_integration_base() {
 cleanup_slice_worktrees() {
   [[ "$keep_slices" == "1" ]] && return 0
   local i rid swt
-  for ((i = 1; i <= n; i++)); do
+  for ((i = 0; i < n; i++)); do    # slices are 0-indexed (slice-0 … slice-(n-1))
     rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
     [[ -n "$rid" ]] || continue
     swt="$repo/.legion/worktrees/$rid"

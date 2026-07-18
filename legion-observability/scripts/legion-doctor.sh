@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
     --strict-demo) STRICT_DEMO=1; shift ;;
     --record-failures) RECORD_FAILURES=1; shift ;;
     --json) JSON=1; shift ;;
-    -h|--help) echo "usage: legion-doctor [--repo DIR] [--strict-demo] [--record-failures] [--json] [--only marketplace-schema|plugins|frontmatter|descriptions|mcp|bridges|costs|telemetry-schema|codex|router|route-smoke|delegate-smoke|state-root|test-tools|domain-plugin]"; exit 0 ;;
+    -h|--help) echo "usage: legion-doctor [--repo DIR] [--strict-demo] [--record-failures] [--json] [--only marketplace-schema|plugins|frontmatter|descriptions|mcp|bridges|costs|telemetry-schema|codex|opencode|router|route-smoke|delegate-smoke|state-root|test-tools|domain-plugin]"; exit 0 ;;
     *) echo "legion-doctor: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
@@ -294,7 +294,7 @@ check_opencode() {
   local oc="${OPENCODE_BIN:-}"
   [[ -n "$oc" && -x "$oc" ]] || oc="$HOME/.opencode/bin/opencode"
   if [[ -x "$oc" ]] || command -v opencode >/dev/null 2>&1; then
-    if [[ -f "$HOME/.local/share/opencode/auth.json" ]]; then
+    if [[ -f "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" ]]; then
       pass "opencode present + authenticated"
     else
       warn "opencode present but no auth (~/.local/share/opencode/auth.json missing) — opencode delegation will fail"

@@ -124,7 +124,7 @@ cmd_verify() {
   oc_bin="$(opencode_bin)"
   if [[ -n "$oc_bin" ]]; then
     dim "  ok opencode CLI present ($oc_bin)"
-    if [[ -f "$HOME/.local/share/opencode/auth.json" ]]; then
+    if [[ -f "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" ]]; then
       dim "  ok opencode auth present"
     else
       yellow "  opencode present but no auth (~/.local/share/opencode/auth.json) - run: opencode auth login"; ok=1

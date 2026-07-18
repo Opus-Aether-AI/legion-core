@@ -18,6 +18,10 @@ setup_test_env() {
     export CODEX_COMMANDS_DIR="$HOME/.codex/commands"
     export FAKE_CRONTAB_FILE="$HOME/.fake-crontab"
     export MOCK_CALL_LOG="$TEST_TMPDIR/mock-calls.log"
+    # Pin the primary harness so baseline-span / primary-resolution assertions are
+    # deterministic no matter which harness the suite runs under (a Codex/opencode
+    # session would otherwise flip the resolved primary and its baseline label).
+    export LEGION_PRIMARY=claude
     # Independent fixture for the curl/gh API mocks — survives even when tests
     # delete the source clone (e.g., "fetch_plugins falls back to raw GitHub")
     export MOCK_GH_FIXTURE="$TEST_TMPDIR/mock-gh-marketplace.json"

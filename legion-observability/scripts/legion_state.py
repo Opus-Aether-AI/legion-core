@@ -33,6 +33,36 @@ STATE_KEYS = {
 }
 
 
+def default_log_root(env: dict[str, str] | None = None) -> str:
+    """Harness-neutral GLOBAL log/telemetry root for the cross-repo tools
+    (router, console, activity, aggregate).
+
+    Legion began Claude-primary and wrote under ~/.claude/logs/legion — a Claude
+    Code directory. To be harness-generic without stranding an existing install's
+    history, resolve in this order:
+      $LEGION_LOG_ROOT  ->  $XDG_STATE_HOME/legion  ->  an EXISTING
+      ~/.claude/logs/legion (back-compat)  ->  $LEGION_HOME/logs (default
+      ~/.legion/logs, so a non-Claude primary never writes into ~/.claude).
+    """
+    env = os.environ if env is None else env
+    explicit = env.get("LEGION_LOG_ROOT")
+    if explicit:
+        return _abs(explicit)
+    xdg = env.get("XDG_STATE_HOME")
+    if xdg:
+        return _abs(os.path.join(xdg, "legion"))
+    # Resolve HOME once from the given env (only falling back to the process home
+    # when env has no HOME), then build the HOME-derived paths by plain join +
+    # abspath — NOT _abs/expanduser, which would re-consult os.environ and make
+    # the result depend on the process env instead of the passed `env`.
+    home = env.get("HOME") or os.path.expanduser("~")
+    legacy = os.path.abspath(os.path.join(home, ".claude", "logs", "legion"))
+    if os.path.isdir(legacy):
+        return legacy
+    legion_home = env.get("LEGION_HOME") or os.path.join(home, ".legion")
+    return os.path.abspath(os.path.join(legion_home, "logs"))
+
+
 def _abs(path: str, base: str | None = None) -> str:
     expanded = os.path.expanduser(os.path.expandvars(path))
     if not os.path.isabs(expanded):
@@ -189,7 +219,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--shell", action="store_true")
     parser.add_argument("--field", default="")
+    parser.add_argument("--log-root", action="store_true",
+                        help="print the harness-neutral global log root and exit")
     args = parser.parse_args(argv)
+
+    if args.log_root:
+        print(default_log_root())
+        return 0
 
     resolved = resolve_state(args.repo)
     if args.shell:

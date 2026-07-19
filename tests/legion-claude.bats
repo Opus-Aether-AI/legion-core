@@ -36,6 +36,16 @@ make_test_repo() {
     [ "$output" = "claude" ]
 }
 
+@test "legion-claude: passes --effort/--append-system-prompt/--dangerously-skip-permissions through to claude" {
+    local repo; repo="$(make_test_repo passthru)"
+    run "$LEGION_CLAUDE" run --task "do it" --repo "$repo" \
+        --effort high --append-system-prompt "be safe" --dangerously-skip-permissions --quiet
+    [ "$status" -eq 0 ]
+    assert_mock_called claude "--effort high"
+    assert_mock_called claude "--append-system-prompt be safe"
+    assert_mock_called claude "--dangerously-skip-permissions"
+}
+
 @test "legion-claude: usage limit falls back to codex" {
     local repo; repo="$(make_test_repo fb1)"
     MOCK_CLAUDE_LIMIT=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet

@@ -26,10 +26,51 @@ except ModuleNotFoundError:  # pragma: no cover - py<3.11
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "config")
 _DEFAULT_FILE = os.path.join(_CONFIG_DIR, "routing.toml")
 _DEFAULT_MODELS_FILE = os.path.join(_CONFIG_DIR, "models.toml")
+_DEFAULT_EXECUTORS_FILE = os.path.join(_CONFIG_DIR, "executors.toml")
 
 
 class RouteConfigError(ValueError):
     pass
+
+
+def resolve_primary(env=None):
+    """Resolve the operator's PRIMARY harness — the one for which a `self`-routed
+    archetype means "do it inline". Legion is harness-symmetric, so this is NOT
+    hardcoded to Claude/Opus. Keep in lockstep with lib/primary.sh.
+    """
+    env = os.environ if env is None else env
+    explicit = env.get("LEGION_PRIMARY")
+    if explicit:
+        return explicit
+    if env.get("CLAUDECODE") or env.get("CLAUDE_CODE_ENTRYPOINT"):
+        return "claude"
+    if env.get("CODEX_SANDBOX") or env.get("CODEX_HOME") or env.get("CODEX_THREAD_ID"):
+        return "codex"
+    if env.get("OPENCODE") or env.get("OPENCODE_BIN") or env.get("OPENCODE_SERVER"):
+        return "opencode"
+    if env.get("HERMES_HOME") or env.get("HERMES_SESSION_ID"):
+        return "hermes"
+    if env.get("CURSOR_AGENT") or env.get("CURSOR_TRACE_ID"):
+        return "cursor"
+    return "claude"
+
+
+def load_executors(path=None):
+    execs_path = path or os.environ.get("LEGION_EXECUTORS_FILE", _DEFAULT_EXECUTORS_FILE)
+    table = load_table(execs_path)
+    execs = table.get("executors", table)
+    if not isinstance(execs, dict):
+        raise RouteConfigError("executors.toml must contain an [executors] table")
+    return execs
+
+
+def executor_info(execs, name):
+    info = execs.get(name)
+    if not isinstance(info, dict):
+        raise RouteConfigError(f"unknown executor '{name}'")
+    out = dict(info)
+    out["name"] = name
+    return out
 
 
 def _strip_inline_comment(line):
@@ -207,8 +248,22 @@ def main(argv=None):
     ap.add_argument("--task", default="", help="optional task text hint; accepted for demo/runbook compatibility")
     ap.add_argument("--list-models", action="store_true")
     ap.add_argument("--model-ref")
+    ap.add_argument("--primary", action="store_true", help="print the resolved primary harness and exit")
+    ap.add_argument("--executors-file", default=os.environ.get("LEGION_EXECUTORS_FILE", _DEFAULT_EXECUTORS_FILE))
+    ap.add_argument("--executor-info", metavar="NAME", help="print the registry entry for one executor as JSON")
+    ap.add_argument("--list-executors", action="store_true")
     a = ap.parse_args(argv)
+    if a.primary:
+        print(resolve_primary())
+        return 0
     try:
+        if a.list_executors or a.executor_info:
+            execs = load_executors(a.executors_file)
+            if a.list_executors:
+                print(json.dumps(sorted(execs.keys())))
+                return 0
+            print(json.dumps(executor_info(execs, a.executor_info)))
+            return 0
         models = load_models(a.models_file)
         if a.model_ref:
             print(resolve_model_ref(models, a.model_ref))

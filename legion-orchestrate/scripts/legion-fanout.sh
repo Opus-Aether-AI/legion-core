@@ -49,6 +49,9 @@ resolve_optional_legion_cmd() {
 LEGION_DELEGATE="${LEGION_DELEGATE:-$(resolve_legion_cmd legion-delegate "$_self/../../legion-router/bin/legion-delegate")}"
 LEGION_ROUTE="${LEGION_ROUTE:-$(resolve_legion_cmd legion-route "$_self/../../legion-router/bin/legion-route")}"
 LEGION_TELEMETRY="${LEGION_TELEMETRY:-$(resolve_optional_legion_cmd legion-trace "$_self/../../legion-observability/bin/legion-trace")}"
+# The harness driving this fan-out (Claude by default) — `self` slices come back
+# for it to run inline. Harness-generic: not hardcoded to Opus.
+FANOUT_PRIMARY="$("$LEGION_ROUTE" --primary 2>/dev/null || echo primary)"
 _state_lib="$_self/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1091
@@ -73,14 +76,14 @@ write_queued_record() {
 }
 MAXC="${LEGION_MAX_CONCURRENCY:-4}"
 
-slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; json=0
+slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; json=0 ; keep_slices=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slices) slices_src="$2"; shift 2 ;;
     --task) task_src="$2"; shift 2 ;;
     --repo) repo="$2"; shift 2 ;;
     --max-concurrency) MAXC="$2"; shift 2 ;;
-    --keep) shift ;; # accepted for compatibility; delegated slices are always kept
+    --keep) keep_slices=1; shift ;; # retain slice worktrees after apply (default: reclaim them)
     --apply) apply="1"; shift ;;
     --json) json=1; shift ;; # output is already JSON; accepted for roadmap compatibility
     -h|--help) echo "usage: legion-fanout (--slices <file|-> | --task <file|->) [--repo DIR] [--max-concurrency N] [--keep] [--apply] [--json]"; exit 0 ;;
@@ -255,7 +258,7 @@ launch_slice() {
     ex="$(jq -r '.executor // ""' "$route_out" 2>/dev/null || echo "")"
     if [[ "$ex" == "self" ]]; then
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
-      jq -cn --arg a "$arch" --arg t "$task" '{status:"inline",archetype:$a,task:$t,note:"Opus should do this inline"}' > "$work/slice-$i.out"
+      jq -cn --arg a "$arch" --arg t "$task" --arg p "$FANOUT_PRIMARY" '{status:"inline",archetype:$a,task:$t,note:($p + " (primary) does this inline")}' > "$work/slice-$i.out"
       return
     fi
   fi
@@ -289,6 +292,25 @@ setup_integration_base() {
 teardown_integration_base() {
   [[ -n "$integration_wt" && -d "$integration_wt" ]] && git -C "$repo" worktree remove --force "$integration_wt" >/dev/null 2>&1 || true
   [[ -n "$integration_branch" ]] && git -C "$repo" branch -D "$integration_branch" >/dev/null 2>&1 || true
+  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+}
+
+# Slices are delegated with --keep so their diffs survive until the sequential
+# apply barrier. Once apply is done the worktrees are disposable (the diffs live
+# under .legion/runs/<rid>), so reclaim exactly this fan-out's slice worktrees —
+# not a blanket `cleanup --all`, which would disturb concurrent runs. --keep on
+# the fan-out retains them for inspection.
+cleanup_slice_worktrees() {
+  [[ "$keep_slices" == "1" ]] && return 0
+  local i rid swt
+  for ((i = 0; i < n; i++)); do    # slices are 0-indexed (slice-0 … slice-(n-1))
+    rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
+    [[ -n "$rid" ]] || continue
+    swt="$repo/.legion/worktrees/$rid"
+    [[ -d "$swt" ]] || continue
+    git -C "$repo" worktree remove --force "$swt" >/dev/null 2>&1 || rm -rf "$swt"
+    git -C "$repo" branch -D "legion/delegate-$rid" >/dev/null 2>&1 || true
+  done
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
 }
 
@@ -444,6 +466,7 @@ if [[ "$has_dependencies" == "true" ]]; then
   apply_conflicts=$((apply_conflicts + integration_conflicts))
   teardown_integration_base
 fi
+cleanup_slice_worktrees
 
 # Root span for the fan-out itself, so the delegate spans form a tree under it.
 # Best-effort: telemetry is observability, never block the run on it.

@@ -10,6 +10,7 @@ import json
 import math
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -744,6 +745,10 @@ def run_task_case(case: dict[str, Any], repo: str, run_dir: str) -> dict[str, An
     env.update({
         "HOME": real_home if case.get("preserve_home") is True else home,
         "PYTHONUNBUFFERED": "1",
+        # HOME points into the per-case workspace; without this the system
+        # Python recompiles the entire stdlib as .pyc under
+        # $HOME/Library/Caches, exploding the workspace on disk (see WS6).
+        "PYTHONDONTWRITEBYTECODE": "1",
     })
     env.update({key: str(value) for key, value in _dict(_render(case.get("env"), context)).items()})
     cwd = _text(_render(case.get("cwd") or "{workspace}", context))
@@ -1061,6 +1066,52 @@ def collect_legion_run_self_learning(results: list[dict[str, Any]]) -> dict[str,
     return summary
 
 
+def _prune_bench_runs(root: str, keep: int) -> None:
+    """Retain only the most recent ``keep`` bench run directories under
+    ``root/runs``.
+
+    Each bench run persists its per-case workspaces (multi-MB), and previously
+    nothing ever pruned them, so the bench dir grew without bound (WS6). Keep a
+    bounded, most-recent window; override the count with LEGION_BENCH_RETAIN_RUNS.
+
+    Best-effort and concurrency-safe: mtimes are read defensively (a dir that
+    vanishes mid-prune never raises out of here), and any run touched within a
+    grace window (LEGION_BENCH_PRUNE_GRACE_SEC, default 300s) is retained so a
+    CONCURRENT in-progress run sharing this bench dir is never deleted out from
+    under it.
+    """
+    if keep <= 0:
+        return
+    runs_root = os.path.join(root, "runs")
+    try:
+        run_dirs = [
+            os.path.join(runs_root, name)
+            for name in os.listdir(runs_root)
+            if os.path.isdir(os.path.join(runs_root, name))
+        ]
+    except OSError:
+        return
+    if len(run_dirs) <= keep:
+        return
+
+    def _mtime(path: str) -> float:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    try:
+        grace = float(os.environ.get("LEGION_BENCH_PRUNE_GRACE_SEC", "300"))
+    except ValueError:
+        grace = 300.0
+    now = time.time()
+    run_dirs.sort(key=_mtime, reverse=True)
+    for stale in run_dirs[keep:]:
+        if grace > 0 and (now - _mtime(stale)) < grace:
+            continue  # still fresh — could be a concurrent run mid-write
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 def write_run_artifacts(
     bench_dir: str,
     run_id: str,
@@ -1115,6 +1166,11 @@ def write_run_artifacts(
             "generated_at": summary.get("generated_at"),
         },
     )
+    try:
+        keep = int(os.environ.get("LEGION_BENCH_RETAIN_RUNS", "10"))
+    except ValueError:
+        keep = 10
+    _prune_bench_runs(root, keep)
     return {
         "run_dir": run_dir,
         "run_path": run_path,
@@ -1579,6 +1635,8 @@ def learning_lift_payload(args: argparse.Namespace) -> dict[str, Any]:
     env.update({
         "HOME": home,
         "PYTHONUNBUFFERED": "1",
+        # See WS6 note in run_task_case: keep the fake HOME free of stdlib .pyc.
+        "PYTHONDONTWRITEBYTECODE": "1",
     })
     suite = {
         "schema": SUITE_SCHEMA,
@@ -2097,6 +2155,8 @@ def run_corpus_case_mode(
         "LEGION_BENCH_TASK_FILE": task_file,
         "LEGION_BENCH_CASE_FILE": case_file,
         "PYTHONUNBUFFERED": "1",
+        # See WS6 note in run_task_case: keep the fake HOME free of stdlib .pyc.
+        "PYTHONDONTWRITEBYTECODE": "1",
     })
     env.update({key: str(value) for key, value in _dict(_render(mode.get("env"), context)).items()})
     env.update({key: str(value) for key, value in _dict(_render(case.get("env"), context)).items()})

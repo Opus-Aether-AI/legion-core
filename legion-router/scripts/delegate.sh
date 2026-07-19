@@ -37,6 +37,10 @@ source "$_self_dir/lib/cost.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/model-config.sh
 source "$_self_dir/lib/model-config.sh"
+
+# shellcheck disable=SC1091
+# shellcheck source=lib/primary.sh
+source "$_self_dir/lib/primary.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/sandbox-setup.sh
 source "$_self_dir/lib/sandbox-setup.sh"
@@ -70,7 +74,21 @@ cleanup_sandbox_dev_on_exit() {
   sandbox_teardown "$SANDBOX_DEV_PID_TO_TEARDOWN" || true
   SANDBOX_DEV_PID_TO_TEARDOWN=""
 }
-trap cleanup_sandbox_dev_on_exit EXIT
+# Worktree leak guard: cmd_run registers its worktree here right after creating
+# it, so the EXIT trap removes it (+ its legion/delegate-* branch) even if the
+# run crashes or is killed before the inline cleanup. The happy path clears
+# LEGION_WT_PATH after its own removal, making this a no-op; --keep sets
+# LEGION_WT_KEEP=1 so the worktree is retained.
+LEGION_WT_PATH=""; LEGION_WT_BRANCH=""; LEGION_WT_REPO=""; LEGION_WT_KEEP=0
+cleanup_worktree_on_exit() {
+  [[ "$LEGION_WT_KEEP" == "1" ]] && return 0
+  [[ -n "$LEGION_WT_PATH" && -n "$LEGION_WT_REPO" ]] || return 0
+  git -C "$LEGION_WT_REPO" worktree remove --force "$LEGION_WT_PATH" >/dev/null 2>&1 || rm -rf "$LEGION_WT_PATH"
+  [[ -n "$LEGION_WT_BRANCH" ]] && git -C "$LEGION_WT_REPO" branch -D "$LEGION_WT_BRANCH" >/dev/null 2>&1 || true
+  git -C "$LEGION_WT_REPO" worktree prune >/dev/null 2>&1 || true
+  LEGION_WT_PATH=""
+}
+trap 'cleanup_sandbox_dev_on_exit; cleanup_worktree_on_exit' EXIT
 
 # codex is launched in the background and immediately waited on, so a terminating
 # signal to this wrapper interrupts the `wait` and runs this handler — otherwise a
@@ -199,24 +217,39 @@ scan_task_text() {
 }
 
 # ── Telemetry + metering ─────────────────────────────────────────────
-LEGION_OPUS_BASELINE_EMITTED=0
+LEGION_PRIMARY_BASELINE_EMITTED=0
 
-emit_opus_baseline_span() {
+# Synthetic "what the PRIMARY would have cost inline" span, so share accounting
+# can see the delegated-vs-primary split. Harness-generic: the primary is
+# whoever is driving the session (legion_primary). Back-compat: a Claude primary
+# still emits the historical `opus-baseline` label + `synthetic_opus_baseline`
+# marker that legion-share / legion-aggregate and their tests key on; other
+# primaries emit `<primary>-baseline`. Toggle: LEGION_AUTO_PRIMARY_BASELINE
+# (legacy alias LEGION_AUTO_OPUS_BASELINE), default on.
+emit_primary_baseline_span() {
   local delegated_executor="$1" delegated_model="$2" delegated_task="$3"
-  [[ "${LEGION_AUTO_OPUS_BASELINE:-1}" == "1" ]] || return 0
-  [[ "$LEGION_OPUS_BASELINE_EMITTED" == "0" ]] || return 0
+  [[ "${LEGION_AUTO_PRIMARY_BASELINE:-${LEGION_AUTO_OPUS_BASELINE:-1}}" == "1" ]] || return 0
+  [[ "$LEGION_PRIMARY_BASELINE_EMITTED" == "0" ]] || return 0
   # A parent orchestrator, such as legion-fanout, already emits the root span.
   [[ -z "${LEGION_PARENT_ID:-}" ]] || return 0
   [[ -n "${RUN_ID:-}" ]] || return 0
+  local primary; primary="$(legion_primary 2>/dev/null || echo claude)"
+  # No counterfactual when the primary IS the executor we delegated to. Match the
+  # executor FAMILY so a codex primary also skips codex-review / codex-resume.
+  [[ "${delegated_executor%%-*}" == "$primary" ]] && return 0
 
-  LEGION_OPUS_BASELINE_EMITTED=1
+  LEGION_PRIMARY_BASELINE_EMITTED=1
+  # Historical label for a Claude primary is "opus-baseline"; keep it so existing
+  # reports/tests/spans stay valid. Generalize for any other primary.
+  local label; case "$primary" in claude) label="opus-baseline" ;; *) label="${primary}-baseline" ;; esac
   mkdir -p "$LEGION_TELEMETRY_DIR"
-  local baseline_run="${RUN_ID}-opus-baseline"
+  local baseline_run="${RUN_ID}-${label}"
   local trace_id="${LEGION_TRACE_ID:-$RUN_ID}"
   jq -cn \
     --arg schema "legion.span.v1" --arg ts "$(_now)" \
     --arg run_id "$baseline_run" --arg trace_id "$trace_id" \
-    --arg executor "opus-baseline" --arg model "opus-baseline" --arg archetype "${archetype:-}" \
+    --arg executor "$label" --arg model "$label" --arg archetype "${archetype:-}" \
+    --arg primary "$primary" \
     --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
     --arg task "legion-delegate orchestration baseline" \
     --arg delegated_task "$delegated_task" \
@@ -228,7 +261,7 @@ emit_opus_baseline_span() {
      target_type:(if $target_type=="" then null else $target_type end),
      target_name:(if $target_name=="" then null else $target_name end),
      duration_ms:0, cost_usd:0, tokens:{},
-     artifacts:{synthetic_opus_baseline:true,
+     artifacts:{synthetic_opus_baseline:true, synthetic_primary_baseline:true, primary:$primary,
                 delegated_run_id:$delegated_run_id,
                 delegated_executor:$delegated_executor,
                 delegated_model:$delegated_model,
@@ -241,7 +274,7 @@ emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
   mkdir -p "$LEGION_TELEMETRY_DIR"
   case "$executor" in
-    codex*) [[ "$status" == "ok" ]] && emit_opus_baseline_span "$executor" "$model" "$task" ;;
+    codex*) [[ "$status" == "ok" ]] && emit_primary_baseline_span "$executor" "$model" "$task" ;;
   esac
   # Trace context: a parent orchestrator (e.g. legion-fanout) exports
   # LEGION_TRACE_ID + LEGION_PARENT_ID so sibling delegate spans hang under one
@@ -312,7 +345,28 @@ write_run_state() {
       printf '{"repo_root":%s,"seen_at":"%s"}\n' "$(jq -Rn --arg r "$repo" '$r')" "$now" >> "$LEGION_REPOS_FILE"
     fi
   } 2>/dev/null || true
+  case "$phase" in ok|failed|error|over_budget|cancelled) prune_run_registry ;; esac
   return 0
+}
+
+# The global run registry is intentionally NON-purgeable (Console/handoff needs
+# runs discoverable even after `cleanup --purge`), but it previously grew without
+# bound (WS6: 1400+ records). Opportunistically drop only TERMINAL records older
+# than the retention window (default 30d, LEGION_REGISTRY_RETAIN_DAYS) so recent
+# and still-running runs stay discoverable. Best-effort and cheap: runs once per
+# terminal transition, and re-confirms the phase before deleting.
+prune_run_registry() {
+  local retain_days="${LEGION_REGISTRY_RETAIN_DAYS:-30}"
+  [[ "$retain_days" =~ ^[0-9]+$ ]] || retain_days=30
+  [[ "$retain_days" -gt 0 && -d "$LEGION_REGISTRY_DIR" ]] || return 0
+  local f phase
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    phase="$(jq -r '.lifecycle.phase // ""' "$f" 2>/dev/null)"
+    case "$phase" in
+      ok|failed|error|over_budget|cancelled) rm -f "$f" 2>/dev/null ;;
+    esac
+  done < <(find "$LEGION_REGISTRY_DIR" -maxdepth 1 -name '*.json' -type f -mtime +"$retain_days" 2>/dev/null)
 }
 
 # ingest_usage <model> <upstream> <status> <usage_json> <cost_usd>  (best-effort)
@@ -353,15 +407,62 @@ cleanup_generated_diff_noise() {
   find "$target" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
 }
 
+# Dispatch a scoped run to a non-codex executor's adapter (the Legion runner
+# contract: `<adapter> run --repo … --task … [--model …] …`). Reads the adapter
+# and its I/O contract from executors.toml via legion-route, builds the right
+# argument set, and execs it so the adapter's JSON result + exit code become
+# ours. Runs in cmd_run's dynamic scope (repo/task/archetype/sandbox/base/
+# do_apply/keep/explicit_model). Never returns.
+dispatch_adapter() {
+  local ex="$1" info adapter contract model_ref adapter_bin use_model
+  info="$(python3 "$ROUTE_BIN" --executor-info "$ex" 2>/dev/null)" \
+    || die "unknown executor '$ex' — not in executors.toml (see legion-route --list-executors)"
+  adapter="$(jq -r '.adapter // ""' <<<"$info")"
+  contract="$(jq -r '.contract // ""' <<<"$info")"
+  model_ref="$(jq -r '.model_ref // ""' <<<"$info")"
+  [[ -n "$adapter" && -n "$contract" && "$contract" != "native" ]] \
+    || die "executor '$ex' is primary-only — it can drive a session but cannot be delegated a coding task."
+  adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
+  [[ -x "$adapter_bin" ]] || die "executor '$ex' adapter '$adapter' not found on PATH or in bin/ — build/install it first."
+  # Model priority: explicit --model  >  the archetype's resolved model (ONLY when
+  # the archetype routed here — not a forced --executor, whose archetype model may
+  # name a model this harness can't run)  >  the executor's own default role. This
+  # lets one executor serve multiple per-archetype models (e.g. the claude executor
+  # runs Opus for frontend-polish but Fable for frontend-review).
+  use_model="$explicit_model"
+  [[ -n "$use_model" || -n "$forced_executor" || -z "$model" ]] || use_model="$model"
+  [[ -n "$use_model" || -z "$model_ref" ]] || use_model="$(legion_model_ref "$model_ref" 2>/dev/null || true)"
+  local -a aargs=(run --repo "$repo" --task "$task")
+  [[ -n "$use_model" ]] && aargs+=(--model "$use_model")
+  [[ "${QUIET:-0}" == "1" ]] && aargs+=(--quiet)
+  case "$contract" in
+    diff)     # worktree + diff producers (cursor, opencode): full arg set
+      [[ -n "$archetype" ]] && aargs+=(--archetype "$archetype")
+      [[ -n "$sandbox" ]] && aargs+=(--sandbox "$sandbox")
+      [[ "$base" != "HEAD" ]] && aargs+=(--base "$base")
+      [[ "$do_apply" == "1" ]] && aargs+=(--apply)
+      [[ "$keep" == "1" ]] && aargs+=(--keep)
+      ;;
+    prompt)   # prompt executors (claude): task/model/repo + effort passthrough
+      [[ -n "$effort" ]] && aargs+=(--effort "$effort")
+      ;;
+    *) die "executor '$ex' has an unknown contract '$contract' in executors.toml." ;;
+  esac
+  note "→ dispatch to $ex via $adapter${use_model:+ -m $use_model}"
+  exec "$adapter_bin" "${aargs[@]}"
+}
+
 # ── run ──────────────────────────────────────────────────────────────
 cmd_run() {
   local model="" sandbox="" task="" repo="$PWD" base="HEAD" archetype="" effort=""
   local budget=0 do_apply=0 keep=0 preset_run_id=""
   local untrusted=0
+  local forced_executor="" explicit_model=""
   [[ "${LEGION_UNTRUSTED:-0}" == "1" ]] && untrusted=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --model) model="$2"; shift 2 ;;
+      --model) model="$2"; explicit_model="$2"; shift 2 ;;
+      --executor) forced_executor="$2"; shift 2 ;;   # force a specific harness (symmetric reverse-delegate)
       --run-id) preset_run_id="$2"; shift 2 ;;   # adopt a preallocated id (fanout queued records)
       --sandbox) sandbox="$2"; shift 2 ;;
       --archetype) archetype="$2"; shift 2 ;;
@@ -386,6 +487,10 @@ cmd_run() {
     [[ -n "$sandbox" ]] || sandbox="$r_sandbox"
     [[ -n "$effort" ]]  || effort="$r_effort"
   fi
+  # --executor forces a specific harness (symmetric reverse-delegate: any primary
+  # can hand work to any other harness). Apply it BEFORE the low-credit bias and the
+  # dispatch below so both see the final resolved target.
+  [[ -n "$forced_executor" ]] && r_exec="$forced_executor"
   # Low-credit bias — steer away from the depleted provider (self-handle low credits).
   case "${LEGION_LOW_CREDIT:-}" in
     claude)       # Claude low -> prefer GPT, even for normally-self work
@@ -396,18 +501,33 @@ cmd_run() {
         # always surface the substitution (even under --quiet) so it's never silent.
         printf '⚠ LEGION_LOW_CREDIT=claude: delegating a normally-self task to GPT (%s)\n' "$model" >&2
       fi ;;
-    codex|gpt)    # GPT low -> refuse to delegate to a depleted provider (escape: LEGION_FORCE_DELEGATE=1)
-      [[ "${LEGION_FORCE_DELEGATE:-}" == "1" ]] || \
-        die "LEGION_LOW_CREDIT=$LEGION_LOW_CREDIT: GPT/codex credits low — Opus should run this inline, not delegate. (set LEGION_FORCE_DELEGATE=1 to override)" ;;
+    codex|gpt)    # GPT low -> refuse ONLY when the actual target IS the depleted codex path;
+                  # a --executor pivot to another harness (cursor/opencode/claude) is the point.
+      case "$r_exec" in
+        ""|codex)
+          [[ "${LEGION_FORCE_DELEGATE:-}" == "1" ]] || \
+            die "LEGION_LOW_CREDIT=$LEGION_LOW_CREDIT: GPT/codex credits low — the primary ($(legion_primary)) should run this inline, not delegate. (set LEGION_FORCE_DELEGATE=1 to override)" ;;
+      esac ;;
   esac
-  [[ "$r_exec" == "self" ]] && die "archetype '$archetype' routes to executor=self — Opus should do this inline, not delegate."
+  # Materialize the task (stdin), default+validate the sandbox, and run the safety
+  # scan BEFORE dispatch, so an adapter path (cursor/opencode/claude) gets a real
+  # task, a sane sandbox, and the same injection tripwire the native codex path gets.
   [[ -n "$sandbox" ]] || sandbox="workspace-write"
-  [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
-  [[ -n "$model" ]] || die "run: --model or --archetype required"
   validate_sandbox "$sandbox"
   [[ -n "$task" ]] || task="$(cat)"        # read from stdin if not given
   [[ -n "$task" ]] || die "run: empty task"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
+  # Dispatch by executor. `self` is the primary's own inline work (never delegated);
+  # codex (or an unclassified task) uses the native codex path below; any other
+  # registered coding executor runs through its adapter.
+  case "$r_exec" in
+    self)
+      die "executor=self — the primary harness ($(legion_primary)) does this inline, not via legion-delegate. (use --executor <name> to force a specific harness)" ;;
+    ""|codex) : ;;
+    *) dispatch_adapter "$r_exec" ;;   # execs the adapter and never returns
+  esac
+  [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
+  [[ -n "$model" ]] || die "run: --model or --archetype required"
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
 
   RUN_ID="${preset_run_id:-$(_run_id)}"
@@ -419,6 +539,9 @@ cmd_run() {
   local branch="legion/delegate-$RUN_ID"
   note "→ worktree $wt (branch $branch, base $base)"
   git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" || die "worktree add failed"
+  # Register for EXIT-trap cleanup so a crash/kill before the inline removal
+  # below does not orphan the worktree + branch (WS6 worktree-leak guard).
+  LEGION_WT_PATH="$wt"; LEGION_WT_BRANCH="$branch"; LEGION_WT_REPO="$repo"; LEGION_WT_KEEP="$keep"
   local sandbox_dev_pid=""
   if ! is_sandcastle_sandbox "$sandbox"; then
     sandbox_dev_pid="$(LEGION_SANDBOX_ARTIFACT_DIR="$art" LEGION_SANDBOX_QUIET="${QUIET:-0}" sandbox_setup "$wt" "$repo" "$untrusted" || true)"
@@ -528,6 +651,7 @@ cmd_run() {
     git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
     git -C "$repo" worktree prune >/dev/null 2>&1 || true
     wt_report="(removed; rerun with --keep to retain the worktree)"
+    LEGION_WT_PATH=""   # removed here; stop the EXIT trap from retrying
   fi
 
   jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \
@@ -769,9 +893,11 @@ main() {
     apply)   cmd_apply "$@" ;;
     cleanup) cmd_cleanup "$@" ;;
     -h|--help|help|"") cat >&2 <<'EOF'
-legion-delegate — delegate a scoped task to an external model agent (Codex / GPT-5.x)
+legion-delegate — delegate a scoped task to an external model agent (Codex by
+default; any registered executor via --executor)
 
-  run      [--archetype A | --model M] [--sandbox read-only|workspace-write|docker|podman|vercel]
+  run      [--archetype A | --model M] [--executor codex|cursor|claude|opencode]
+           [--sandbox read-only|workspace-write|docker|podman|vercel]
            [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
            [--base REF] [--budget-tokens N] [--apply] [--keep] [--untrusted]
   review   [--archetype A | --model M] --base BRANCH [--repo DIR] [--reasoning-effort E]
@@ -784,6 +910,7 @@ legion-delegate — delegate a scoped task to an external model agent (Codex / G
             reclaims --keep'd/resume worktrees + branches; --purge also drops run artifacts)
 
 --archetype resolves model/sandbox/effort from routing.toml + models.toml. List them: legion-route --list
+--executor forces a specific harness (symmetric reverse-delegate). List them: legion-route --list-executors
 EOF
       [[ "$cmd" == "" ]] && exit 2 || exit 0 ;;
     *) die "unknown command '$cmd' (run|review|resume|apply|cleanup)" ;;

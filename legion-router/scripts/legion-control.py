@@ -22,6 +22,10 @@ import struct
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "legion-observability", "scripts"))
+import legion_state  # noqa: E402
+
 
 VERBS = (
     "verbs.list",
@@ -37,7 +41,12 @@ SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 MODE_RE = re.compile(r"^(?:old mode|new mode|deleted file mode|new file mode|mode) ([0-7]{6})$")
 INDEX_MODE_RE = re.compile(r"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+(?: [0-7]{6})?$")
 MAX_REQUEST_BYTES = 64 * 1024
-ALLOWED_RUN_ROOTS = (os.path.expanduser("~/.claude/logs/legion"),)
+# Allow the harness-neutral log root alongside the historical Claude path so the
+# Console can read runs from either (deduped when they resolve to the same dir).
+ALLOWED_RUN_ROOTS = tuple(dict.fromkeys((
+    os.path.expanduser("~/.claude/logs/legion"),
+    legion_state.default_log_root(),
+)))
 
 
 def _nofollow_flags():
@@ -793,11 +802,11 @@ def _default_sock_path():
 
 
 def _default_registry_dir():
-    return os.path.expanduser("~/.claude/logs/legion/registry")
+    return os.path.join(legion_state.default_log_root(), "registry")
 
 
 def _default_audit_dir():
-    return os.path.expanduser("~/.claude/logs/legion/audit")
+    return os.path.join(legion_state.default_log_root(), "audit")
 
 
 def _check_socket_dir(sock_path):

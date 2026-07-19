@@ -35,13 +35,13 @@
       "id": "route.frontend-review",
       "type": "route",
       "dimension": "routing",
-      "summary": "Frontend review should use the strong read-only Codex route.",
+      "summary": "Frontend review runs on Fable via Claude Code (verify-by-screenshot, a different Claude lens than the Opus polish), read-only. Claude models never go through Cursor.",
       "archetype": "frontend-review",
       "expect": {
-        "executor": "codex",
-        "model_ref": "codex_review",
+        "executor": "claude",
+        "model_ref": "claude_default",
         "sandbox": "read-only",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "high"
       },
       "required": true
     },
@@ -49,13 +49,13 @@
       "id": "route.docs-edit",
       "type": "route",
       "dimension": "routing",
-      "summary": "Docs edits should use the configured Codex workhorse route.",
+      "summary": "Docs edits use the Codex workhorse (GPT-5.6) at max effort.",
       "archetype": "docs-edit",
       "expect": {
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },

@@ -1,0 +1,20 @@
+{
+  "name": "legion-opencode-mode",
+  "description": "The decision guide for an opencode-primary Legion session: you are opencode doing most of the work yourself, and this skill tells you WHICH kind of task is worth handing to another model and to WHOM — Claude for deep architecture and polished frontend (with the impeccable skill), a workhorse model for bulk implementation, a different model for a second opinion — versus keeping it inline. The opencode counterpart of legion-codex-mode (Codex-primary) and legion-router (Claude-primary).",
+  "version": "0.1.0",
+  "author": {
+    "name": "legion-core"
+  },
+  "homepage": "https://github.com/Opus-Aether-AI/legion-core/tree/main/legion-opencode-mode",
+  "license": "UNLICENSED",
+  "keywords": [
+    "opencode",
+    "multi-model",
+    "delegation",
+    "legion-delegate",
+    "routing",
+    "reverse-delegate",
+    "primary-harness",
+    "legion"
+  ]
+}

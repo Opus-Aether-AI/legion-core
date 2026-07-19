@@ -37,8 +37,13 @@ PATH_KEYS = {
     "target_path",
 }
 GENERIC_PATH_KEYS = {"source", "target"}
-DEFAULT_ROOT = os.path.expanduser("~/.claude/logs/legion")
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import legion_state  # noqa: E402
+
+# Harness-neutral global log root (back-compat: an existing ~/.claude/logs/legion
+# is still used, so this is a no-op on established Claude installs).
+DEFAULT_ROOT = legion_state.default_log_root()
 
 
 def _num(value: Any) -> float:
@@ -507,7 +512,7 @@ def build_activity(
     """Build a full activity snapshot for the Legion Console."""
     costs = load_costs(costs_path)
     if spans_dir is None:
-        spans_dir = os.path.expanduser("~/.claude/logs/legion/spans")
+        spans_dir = os.path.join(DEFAULT_ROOT, "spans")
     span_costs = load_span_costs(spans_dir)
     runs = [
         enrich_run(record, _resolve_run_dir(record, runs_root), costs, span_costs)

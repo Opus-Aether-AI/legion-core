@@ -11,6 +11,9 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import legion_state  # noqa: E402
+
 
 def percentile(values, p):
     if not values:
@@ -48,8 +51,12 @@ def _num(x):
 
 
 def _is_synthetic_opus_baseline(span):
+    # Accept both the historical Claude-primary marker and the harness-generic
+    # `synthetic_primary_baseline` so any primary's baseline is excluded.
     artifacts = span.get("artifacts") or {}
-    return isinstance(artifacts, dict) and artifacts.get("synthetic_opus_baseline") is True
+    if not isinstance(artifacts, dict):
+        return False
+    return artifacts.get("synthetic_opus_baseline") is True or artifacts.get("synthetic_primary_baseline") is True
 
 
 def _valid_spans(spans):
@@ -114,7 +121,7 @@ def main(argv=None):
     ap.add_argument("--by", default="executor", choices=["executor", "model", "status"])
     ap.add_argument("--trace", default="", help="trace id to include, or latest")
     ap.add_argument("--dir", default=os.environ.get(
-        "LEGION_TELEMETRY_DIR", os.path.expanduser("~/.claude/logs/legion/spans")))
+        "LEGION_TELEMETRY_DIR", os.path.join(legion_state.default_log_root(), "spans")))
     a = ap.parse_args(argv)
     paths = a.paths or sorted(glob.glob(os.path.join(a.dir, "*.jsonl")))
     print(json.dumps(aggregate(load(paths), a.by, a.trace), indent=2))

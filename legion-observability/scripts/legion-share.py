@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""legion-share — measure the codex-vs-Opus work split and drive it toward target.
+"""legion-share — measure the codex-vs-primary work split and drive it toward target.
 
-Reads legion.span.v1 telemetry (both codex delegations AND Opus self-work, which Opus
-logs via `legion-trace emit --executor opus ...`), computes codex's share, and compares
-it to the target (routing.toml [targets].codex_share, or $LEGION_TARGET_CODEX_SHARE,
-default 0.5).
+Reads legion.span.v1 telemetry (both codex delegations AND the primary's self-work,
+logged via `legion-trace emit` / the synthetic primary baseline), computes codex's
+share, and compares it to the target (routing.toml [targets].codex_share, or
+$LEGION_TARGET_CODEX_SHARE, default 0.5).
+
+Framing note: this controller is codex-vs-primary (the primary is whoever drives
+the session; historically Opus). It stays valid for a non-codex primary; a full
+N-executor share controller (per-executor targets) is a follow-up.
 
   legion-share            # JSON report: share by runs + tokens, per-model, status
   legion-share --window 7d --json
@@ -90,8 +94,14 @@ def _out_tokens(s):
 
 
 def is_synthetic_opus_baseline(s):
+    # A delegate run emits a synthetic "what the PRIMARY would have cost" span.
+    # Harness-generic: a Claude primary carries the historical
+    # `synthetic_opus_baseline` marker; any primary also carries the generic
+    # `synthetic_primary_baseline`. Accept either so old and new spans both filter.
     artifacts = s.get("artifacts") or {}
-    return isinstance(artifacts, dict) and artifacts.get("synthetic_opus_baseline") is True
+    if not isinstance(artifacts, dict):
+        return False
+    return artifacts.get("synthetic_opus_baseline") is True or artifacts.get("synthetic_primary_baseline") is True
 
 
 def compute(spans):

@@ -48,7 +48,9 @@ bench_emit_span() {
   [[ -n "$usage_json" ]] || usage_json='{}'
 
   {
-    local telemetry_dir="${LEGION_TELEMETRY_DIR:-$HOME/.claude/logs/legion/spans}"
+    local _log_root
+    _log_root="$(python3 "$_bench_span_dir/../../scripts/legion_state.py" --log-root 2>/dev/null || { [ -d "$HOME/.claude/logs/legion" ] && printf '%s' "$HOME/.claude/logs/legion" || printf '%s' "${LEGION_LOG_ROOT:-$HOME/.legion/logs}"; })"
+    local telemetry_dir="${LEGION_TELEMETRY_DIR:-$_log_root/spans}"
     local telemetry_day
     local run_id="${LEGION_BENCH_RUN_ID:-${RUN_ID:-}}"
     local tokens='{}'

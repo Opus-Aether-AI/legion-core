@@ -36,6 +36,14 @@ cases:
     expect: legion-codex-mode
     why: Codex-primary routing brain is the legion-codex-mode skill
 
+  - prompt: "opencode-primary session: which tasks are worth handing to another model versus keeping them inline in opencode"
+    expect: legion-opencode-mode
+    why: opencode-primary decision guide is the legion-opencode-mode skill
+
+  - prompt: "hermes is driving and needs code built and reviewed — hand it to a coding harness from hermes's terminal tool with telemetry"
+    expect: legion-hermes-mode
+    why: hermes-primary metered-delegation guide is the legion-hermes-mode skill
+
   # ── anti-trigger (must NOT mis-route) ────────────────────────────────
   - prompt: "Show me the telemetry dashboard of cost and latency per model"
     expect: legion-observability

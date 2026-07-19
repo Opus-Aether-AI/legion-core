@@ -147,6 +147,7 @@ cmd_run() {
   local allow_fallback=1 tmpdir="" out_file="" err_file="" artifacts="{}"
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
+  local effort="" append_sys="" skip_perms=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -156,6 +157,9 @@ cmd_run() {
       --quiet) QUIET=1; shift ;;
       --no-fallback) allow_fallback=0; shift ;;
       --fallback-model) fallback_model="$2"; shift 2 ;;
+      --effort) effort="$2"; shift 2 ;;                       # reasoning effort passthrough
+      --append-system-prompt) append_sys="$2"; shift 2 ;;     # extra system prompt passthrough
+      --dangerously-skip-permissions) skip_perms=1; shift ;;  # autonomous headless runs (opt-in)
       *) die "run: unknown arg '$1'" ;;
     esac
   done
@@ -195,10 +199,14 @@ cmd_run() {
     return 1
   fi
 
-  note "→ claude -p --model $model"
+  local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
+  [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
+  [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
+  [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
+  note "→ ${claude_cmd[*]}"
   start_ms="$(date +%s000)"
   set +e
-  printf '%s' "$task" | "$CLAUDE_BIN" -p --output-format json --model "$model" >"$out_file" 2>"$err_file"
+  printf '%s' "$task" | "${claude_cmd[@]}" >"$out_file" 2>"$err_file"
   rc=${PIPESTATUS[1]}
   set -e
   end_ms="$(date +%s000)"
@@ -255,11 +263,13 @@ usage() {
 legion-claude — delegate a scoped task to Claude headless, with fallback to Codex.
 
 Usage:
-  legion-claude run --task "TASK" [--model MODEL] [--repo DIR]
+  legion-claude run --task "TASK" [--model MODEL] [--repo DIR] [--effort LEVEL]
+                    [--append-system-prompt TEXT] [--dangerously-skip-permissions]
                     [--quiet] [--no-fallback] [--fallback-model MODEL]
-  legion-claude run [--model MODEL] [--repo DIR] [--quiet]
-                    [--no-fallback] [--fallback-model MODEL] < task.txt
+  legion-claude run [--model MODEL] [--repo DIR] [...] < task.txt
 
+--effort / --append-system-prompt / --dangerously-skip-permissions pass through to
+`claude -p` (skip-permissions is for autonomous headless/cron runs — opt-in).
 Defaults resolve from legion-router/config/models.toml.
 EOF
 }

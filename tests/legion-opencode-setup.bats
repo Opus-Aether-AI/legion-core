@@ -75,10 +75,13 @@ _mkt_with_mcp() {  # $1 = marketplace dir
   [ "$status" -eq 0 ]
 }
 
-@test "opencode setup verify: reports missing MCP and available skills" {
+@test "opencode setup verify: reports a declared-but-unregistered MCP and available skills" {
   local mkt="$BATS_TEST_TMPDIR/mkt"; _mkt_with_mcp "$mkt"
+  # opencode.json exists but has no servers yet, so verify names the missing one
+  # (an absent config file instead reports the missing config path — that path is
+  # covered implicitly; here we want the deterministic per-server message).
+  printf '%s\n' '{"$schema":"https://opencode.ai/config.json","mcp":{}}' > "$OPENCODE_CONFIG"
   LEGION_MARKETPLACE_ROOT="$mkt" run "$SETUP_SH" verify
-  # dummy MCP declared but not yet registered -> non-zero, with a clear hint
   [ "$status" -ne 0 ]
   [[ "$output" == *"missing MCP dummy"* ]]
   [[ "$output" == *"skills available to opencode"* ]]

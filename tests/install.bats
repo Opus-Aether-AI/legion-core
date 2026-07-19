@@ -255,6 +255,25 @@ SH
     if grep -F "opencode-setup" "$MOCK_CALL_LOG"; then false; fi
 }
 
+@test "install records opencode setup warnings to self-learning" {
+    mkdir -p "$SOURCE_CLONE/legion-setup/bin" "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup" <<'SH'
+#!/usr/bin/env bash
+printf 'opencode-setup %s\n' "$*" >> "$MOCK_CALL_LOG"
+exit 1
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-self-learn" <<'SH'
+#!/usr/bin/env bash
+printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup" "$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
+
+    run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"opencode setup reported warnings"* ]]
+    grep -qF "Installer opencode setup reported warnings." "$MOCK_CALL_LOG"
+}
+
 @test "source clone with local edits: install fetches but skips reset" {
     bash "$INSTALL_SH" --refresh-symlinks   # establish clone
     # Hand-edit a tracked file in the source clone

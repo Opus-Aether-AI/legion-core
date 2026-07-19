@@ -38,7 +38,7 @@ def test_load_table_without_tomllib_uses_stdlib_fallback(monkeypatch):
     assert table["targets"]["codex_share"] == 0.5
     assert r["resolved"] is True
     assert r["executor"] == "codex"
-    assert r["model"] == "gpt-5.6-sol"
+    assert r["model"] == "gpt-5.6-terra"
     assert r["sandbox"] == "read-only"
 
 
@@ -194,12 +194,12 @@ def test_effort_policy_fable_high_gpt_max_grok_high():
         assert r["executor"] == "cursor" and r["reasoning_effort"] == "high", (a, r)
 
 
-def test_hard_and_review_use_top_gpt_sol():
+def test_hard_and_review_use_top_gpt_terra():
     t, m = table(), models()
-    sol = lr.resolve_model_ref(m, "codex_review")
-    assert sol == "gpt-5.6-sol"
+    terra = lr.resolve_model_ref(m, "codex_review")
+    assert terra == "gpt-5.6-terra"
     for a in ("hard-bug", "final-review", "security-review"):
-        assert lr.resolve(t, a, m)["model"] == sol, a
+        assert lr.resolve(t, a, m)["model"] == terra, a
 
 
 def test_cheap_bulk_uses_cheapest_gpt_tier():

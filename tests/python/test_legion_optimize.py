@@ -162,7 +162,7 @@ def test_load_routing_without_tomllib_uses_stdlib_fallback(monkeypatch):
     monkeypatch.setattr(opt, "tomllib", None)
     routing = opt.load_routing(ROUTING)
     assert routing["implement-feature"] == {"executor": "codex", "model": "gpt-5.6-terra"}
-    assert routing["final-review"] == {"executor": "codex", "model": "gpt-5.6-sol"}
+    assert routing["final-review"] == {"executor": "codex", "model": "gpt-5.6-terra"}
     assert routing["deep-reasoning"] == {"executor": "self", "model": "claude-fable-5"}
 
 

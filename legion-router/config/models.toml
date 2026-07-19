@@ -4,27 +4,28 @@
 # by name. Repoint a role at any provider model ID to switch a whole class of
 # tasks in one line; add roles as new tiers/providers show up. Routing should
 # reference these role keys, never a raw model ID, so a model swap lives here.
+#
+# Catalog policy: three families only — Anthropic Fable, OpenAI GPT-5.6, xAI Grok.
+# (opus / sonnet / haiku / composer removed; Kimi deferred until it's routable via
+# Cursor.) EFFORT: Fable runs at `high` (barely improves past that, and cost
+# doubles); GPT-5.6 runs at `max` (its real ceiling above xhigh — terra drops from
+# 70% to 60% SWE without it); Grok tops out at `high` (its ceiling, no xhigh/max).
+# The effort per archetype lives in routing.toml.
 
 [models]
-# ── Claude ─────────────────────────────────────────────────────────
-claude_orchestrator = "claude-fable-5"   # self / orchestration (fast agentic)
-claude_default      = "claude-fable-5"   # generic Claude
-claude_flagship     = "opus"             # deepest judgement — pick when needed
-claude_sonnet       = "claude-sonnet-5"  # balanced
-claude_fast         = "claude-haiku-4-5" # cheap / fast tier
+# ── Anthropic Fable — the PRIMARY / orchestrator (frontier reasoner) ──
+claude_orchestrator = "claude-fable-5"   # self: orchestration / architecture / deep reasoning (run at high)
+claude_default      = "claude-fable-5"   # generic Claude / reverse-delegate target
 
-# ── OpenAI / Codex ─────────────────────────────────────────────────
-codex_workhorse     = "gpt-5.6-terra"    # bulk implementation (fast tier)
-codex_review        = "gpt-5.6-sol"      # reviews + hardest work (high-reasoning)
-codex_default       = "gpt-5.5"          # generic Codex — pick when unsure
+# ── OpenAI GPT-5.6 (Codex) — run at max ────────────────────────────
+codex_workhorse     = "gpt-5.6-terra"    # bulk implementation (the workhorse; needs max to shine)
+codex_review        = "gpt-5.6-sol"      # review + hardest work (top coder: 73% SWE @ max)
+codex_cheap         = "gpt-5.6-luna"     # cheap-bulk / boilerplate (cheapest functional GPT @ max)
+codex_default       = "gpt-5.6-terra"    # generic Codex
 
-# ── Cursor (xAI Grok + in-house) ───────────────────────────────────
-cursor_default      = "grok-4.5"         # Cursor agent (Grok 4.5)
-cursor_composer     = "composer-2.5"     # Cursor in-house
+# ── xAI Grok 4.5 (Cursor) — frontend + independent second opinion ──
+# Effort is encoded in the Cursor model id; `-high` is Grok's ceiling (no xhigh).
+cursor_default      = "cursor-grok-4.5-high"
 
-# ── opencode (open-source harness; provider/model form) ────────────
-opencode_default    = "minimax/MiniMax-M2"          # opencode headless default
-opencode_review     = "github-copilot/claude-opus-4.8"  # opencode reviewer tier
-
-# ── Auto tiers ─────────────────────────────────────────────────────
-auto_tier_haiku     = "claude-haiku-4-5"
+# ── opencode (harness kept; in-family GPT default for explicit --executor opencode) ──
+opencode_default    = "github-copilot/gpt-5.4"

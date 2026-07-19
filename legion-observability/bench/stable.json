@@ -133,7 +133,7 @@
       "expect": {
         "executor": "self",
         "model_ref": "claude_orchestrator",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "high"
       },
       "required": true
     },
@@ -146,7 +146,7 @@
       "expect": {
         "executor": "self",
         "model_ref": "claude_orchestrator",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "high"
       },
       "required": true
     },
@@ -159,7 +159,7 @@
       "expect": {
         "executor": "self",
         "model_ref": "claude_orchestrator",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "high"
       },
       "required": true
     },
@@ -173,7 +173,7 @@
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -186,7 +186,7 @@
       "expect": {
         "executor": "self",
         "model_ref": "claude_orchestrator",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "high"
       },
       "required": true
     },
@@ -197,10 +197,10 @@
       "summary": "Frontend polish uses configured Codex workspace-write.",
       "archetype": "frontend-polish",
       "expect": {
-        "executor": "codex",
-        "model_ref": "codex_workhorse",
+        "executor": "cursor",
+        "model_ref": "cursor_default",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "high"
       },
       "required": true
     },
@@ -214,7 +214,7 @@
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -228,7 +228,7 @@
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -242,7 +242,7 @@
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -256,7 +256,7 @@
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -270,7 +270,7 @@
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -282,9 +282,9 @@
       "archetype": "cheap-bulk",
       "expect": {
         "executor": "codex",
-        "model_ref": "codex_workhorse",
+        "model_ref": "codex_cheap",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -296,9 +296,9 @@
       "archetype": "boilerplate",
       "expect": {
         "executor": "codex",
-        "model_ref": "codex_workhorse",
+        "model_ref": "codex_cheap",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -312,7 +312,7 @@
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -326,7 +326,7 @@
         "executor": "codex",
         "model_ref": "codex_review",
         "sandbox": "read-only",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -337,10 +337,10 @@
       "summary": "Second opinion review uses configured Codex read-only.",
       "archetype": "second-opinion-review",
       "expect": {
-        "executor": "codex",
-        "model_ref": "codex_review",
+        "executor": "cursor",
+        "model_ref": "cursor_default",
         "sandbox": "read-only",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "high"
       },
       "required": true
     },
@@ -351,10 +351,10 @@
       "summary": "Cross-model tiebreak uses configured Codex read-only.",
       "archetype": "cross-model-tiebreak",
       "expect": {
-        "executor": "codex",
-        "model_ref": "codex_review",
+        "executor": "cursor",
+        "model_ref": "cursor_default",
         "sandbox": "read-only",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "high"
       },
       "required": true
     },
@@ -368,7 +368,7 @@
         "executor": "codex",
         "model_ref": "codex_review",
         "sandbox": "read-only",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -380,9 +380,9 @@
       "archetype": "hard-bug",
       "expect": {
         "executor": "codex",
-        "model_ref": "codex_workhorse",
+        "model_ref": "codex_review",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -396,7 +396,7 @@
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },

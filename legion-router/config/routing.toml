@@ -11,88 +11,92 @@
 #                     executor name in executors.toml (codex | cursor | opencode | claude)
 #   model_ref         key in models.toml
 #   sandbox           read-only | workspace-write
-#   reasoning_effort  low | medium | high | xhigh
+#   reasoning_effort  low | medium | high | xhigh | max
 #   fallback_refs     model_ref keys to try on quota/rate-limit before failing
 #
-# EFFORT POLICY: codex ALWAYS runs at xhigh — quality over speed; on a
-# subscription the marginal cost is flat, so there's no reason to skimp. The
-# primary's orchestration also runs at xhigh minimum. Every archetype below is
-# xhigh; legion-delegate also defaults effort to xhigh when none is given.
+# EFFORT POLICY (three families: Fable / GPT-5.6 / Grok 4.5):
+#   - self (Fable):        `high`  — barely improves past high and cost ~doubles.
+#   - codex (GPT-5.6):     `max`   — its real ceiling above xhigh; terra drops
+#                                    70%->60% SWE without it, so bulk/review/cheap
+#                                    all run at max.
+#   - cursor (Grok 4.5):   `high`  — Grok's ceiling (no xhigh/max); effort is also
+#                                    encoded in the model id (cursor-grok-4.5-high).
+# Each harness translates the level to its own mechanism (codex
+# `-c model_reasoning_effort`; cursor via the model id; claude `--effort`).
 #
-# `self` archetypes below stay with the PRIMARY harness (whoever is driving the
-# session, resolved by `legion-route --primary`). `model_ref` on a self archetype
-# is the Claude-primary default; a non-Claude primary runs its own model inline.
+# `self` archetypes stay with the PRIMARY harness (whoever is driving the session,
+# resolved by `legion-route --primary`). `model_ref` on a self archetype is the
+# Claude-primary default (Fable); a non-Claude primary runs its own model inline.
 
 [targets]
-codex_share = 0.5          # floor: >= 50% of delegatable work to codex (the policy below exceeds it)
+codex_share = 0.5          # floor: >= 50% of delegatable work to codex
 
 [defaults]
 executor = "self"          # an unclassified task: the primary decides (it should classify into an archetype)
 model_ref = "claude_orchestrator"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "high"
 fallback_refs = []
 
-# ── Claude orchestrates (self) — judgement, not bulk execution ───────
+# ── Fable orchestrates (self) — judgement, not bulk execution (at high) ──
 [archetypes.orchestrate]
 executor = "self"
 model_ref = "claude_orchestrator"
-reasoning_effort = "xhigh"
-note = "Plan / decompose / coordinate / integrate — the orchestration itself stays with the primary harness."
+reasoning_effort = "high"
+note = "Plan / decompose / coordinate / integrate — the orchestration itself stays with the primary harness (Fable)."
 
 [archetypes.architecture-decision]
 executor = "self"
 model_ref = "claude_orchestrator"
-reasoning_effort = "xhigh"
-note = "MAKING a design/architecture/tradeoff decision — keep on the primary; review can use the Codex review role."
+reasoning_effort = "high"
+note = "MAKING a design/architecture/tradeoff decision — keep on the primary (Fable); review can use the Codex review role."
 
 [archetypes.deep-reasoning]
 executor = "self"
 model_ref = "claude_orchestrator"
-reasoning_effort = "xhigh"
-note = "High-judgement reasoning — keep on the primary, do NOT delegate."
+reasoning_effort = "high"
+note = "High-judgement reasoning — keep on the primary (Fable), do NOT delegate."
 
-# ── Codex implementation path ────────────────────────────────────────
+# ── GPT-5.6 (Codex) implementation path — run at max ─────────────────
 [archetypes.implement-feature]
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
-note = "A fully-specced feature slice — the default home for real coding."
+note = "A fully-specced feature slice — the default home for real coding (gpt-5.6-terra @ max = 70% SWE)."
 
 # ── Frontend: correctness is VISUAL, so it routes by TASTE, not bulk coding ──
 # A rendered UI can't be verified from a diff (the reviewer can't see the pixels),
-# so frontend leans on Claude judgement + Codex review and
-# is verified by SCREENSHOT (browser-patterns visual-regression), not diff-reading.
-# Pairs with the `impeccable` skill (shape -> craft -> polish). See
-# docs/frontend-workflow.md.
+# so frontend leans on the primary's judgement + a Cursor pass, verified by
+# SCREENSHOT (browser-patterns visual-regression), not diff-reading. Pairs with the
+# `impeccable` skill (shape -> craft -> polish). See docs/frontend-workflow.md.
 [archetypes.frontend-implement]
 executor = "self"
 model_ref = "claude_orchestrator"
-reasoning_effort = "xhigh"
-note = "Layout / component structure / design intent stays with the primary (impeccable shape->craft). Frontend quality is taste, not throughput."
+reasoning_effort = "high"
+note = "Layout / component structure / design intent stays with the primary (Fable; impeccable shape->craft). Frontend quality is taste, not throughput."
 
 [archetypes.frontend-polish]
-executor = "codex"
-model_ref = "codex_workhorse"
+executor = "cursor"
+model_ref = "cursor_default"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "high"
 fallback_refs = []
-note = "The polish / a11y / responsive pass uses the configured Codex workhorse."
+note = "The polish / a11y / responsive pass runs on Grok 4.5 in Cursor (Cursor-native, fast, token-efficient)."
 
 [archetypes.frontend-review]
-executor = "codex"
-model_ref = "codex_review"
+executor = "cursor"
+model_ref = "cursor_default"
 sandbox = "read-only"
-reasoning_effort = "xhigh"
-note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. The configured Codex reviewer signs off."
+reasoning_effort = "high"
+note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Grok 4.5 in Cursor signs off."
 
 [archetypes.write-tests]
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
 note = "Author unit/integration tests for a described surface."
 
@@ -100,7 +104,7 @@ note = "Author unit/integration tests for a described surface."
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
 note = "A reproducible, well-scoped bug fix (deep/tricky ones -> hard-bug)."
 
@@ -108,7 +112,7 @@ note = "A reproducible, well-scoped bug fix (deep/tricky ones -> hard-bug)."
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
 note = "Restructure a module/file with characterization intact."
 
@@ -116,7 +120,7 @@ note = "Restructure a module/file with characterization intact."
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
 note = "Wide, low-judgement edits across many files."
 
@@ -124,83 +128,83 @@ note = "Wide, low-judgement edits across many files."
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
-note = "Independent, fully-specified modules generated while Claude coordinates."
+note = "Independent, fully-specified modules generated while the primary coordinates."
 
 [archetypes.cheap-bulk]
 executor = "codex"
-model_ref = "codex_workhorse"
+model_ref = "codex_cheap"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
-note = "Throughput-oriented work still uses the best Codex model, at xhigh effort."
+note = "Cheap throughput on the cheapest functional GPT tier (gpt-5.6-luna @ max = 67% SWE, ~$3/task; luna craters below high, so still run at max)."
 
 [archetypes.docs-edit]
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
 note = "Docs / comments / changelog edits."
 
 [archetypes.boilerplate]
 executor = "codex"
-model_ref = "codex_workhorse"
+model_ref = "codex_cheap"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
-note = "Scaffolding, config, repetitive plumbing."
+note = "Scaffolding, config, repetitive plumbing — cheapest functional GPT tier (gpt-5.6-luna)."
 
 [archetypes.migration]
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
 note = "Codemod / dependency / API migration across the codebase."
 
-# ── Codex review + hard/critical work ────────────────────────────────
+# ── Review + hard/critical work (GPT-5.6 Sol @ max = 73% SWE, top coder) ──
 [archetypes.final-review]
 executor = "codex"
 model_ref = "codex_review"
 sandbox = "read-only"
-reasoning_effort = "xhigh"
-note = "The final review before merge — always get the configured Codex review sign-off."
+reasoning_effort = "max"
+note = "The final review before merge — gpt-5.6-sol @ max."
 
 [archetypes.second-opinion-review]
-executor = "codex"
-model_ref = "codex_review"
+executor = "cursor"
+model_ref = "cursor_default"
 sandbox = "read-only"
-reasoning_effort = "xhigh"
-note = "A different model reviews a diff the primary wrote — diversity catches what self-review misses."
+reasoning_effort = "high"
+note = "A DIFFERENT lineage (Grok 4.5) reviews a diff the primary/GPT wrote — cross-model diversity catches what same-model review misses."
 
 [archetypes.cross-model-tiebreak]
-executor = "codex"
-model_ref = "codex_review"
+executor = "cursor"
+model_ref = "cursor_default"
 sandbox = "read-only"
-reasoning_effort = "xhigh"
-note = "Break a tie between two plausible approaches with an independent verdict."
+reasoning_effort = "high"
+note = "Break a tie between two plausible approaches with an independent Grok verdict (a different family than the primary/codex)."
 
 [archetypes.security-review]
 executor = "codex"
 model_ref = "codex_review"
 sandbox = "read-only"
-reasoning_effort = "xhigh"
-note = "Adversarial security review of a change (auth/secrets/input surfaces)."
+reasoning_effort = "max"
+note = "Adversarial security review — gpt-5.6-sol @ max (auth/secrets/input surfaces)."
 
 [archetypes.hard-bug]
 executor = "codex"
-model_ref = "codex_workhorse"
+model_ref = "codex_review"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
-note = "A deep/tricky bug needing the strongest model."
+note = "A deep/tricky bug needing the strongest coder — gpt-5.6-sol @ max (73% SWE)."
 
 [archetypes.perf-optimization]
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "xhigh"
+reasoning_effort = "max"
 fallback_refs = []
 note = "Latency/throughput optimization with measured tradeoffs."

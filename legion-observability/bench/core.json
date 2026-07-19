@@ -35,13 +35,13 @@
       "id": "route.frontend-review",
       "type": "route",
       "dimension": "routing",
-      "summary": "Frontend review should use the strong read-only Codex route.",
+      "summary": "Frontend review runs on Grok 4.5 in Cursor (Cursor-native, verify-by-screenshot), read-only.",
       "archetype": "frontend-review",
       "expect": {
-        "executor": "codex",
-        "model_ref": "codex_review",
+        "executor": "cursor",
+        "model_ref": "cursor_default",
         "sandbox": "read-only",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "high"
       },
       "required": true
     },
@@ -49,13 +49,13 @@
       "id": "route.docs-edit",
       "type": "route",
       "dimension": "routing",
-      "summary": "Docs edits should use the configured Codex workhorse route.",
+      "summary": "Docs edits use the Codex workhorse (GPT-5.6) at max effort.",
       "archetype": "docs-edit",
       "expect": {
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "xhigh"
+        "reasoning_effort": "max"
       },
       "required": true
     },

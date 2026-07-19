@@ -21,9 +21,9 @@ claude_orchestrator = "claude-fable-5"   # self: orchestration / architecture / 
 claude_default      = "claude-fable-5"   # generic Claude / reverse-delegate target / frontend review (Fable)
 claude_opus         = "claude-opus-4-8"  # FRONTEND polish only — Opus on Claude Code (run at high thinking)
 
-# ── OpenAI GPT-5.6 (Codex) — run at max ────────────────────────────
+# ── OpenAI GPT-5.6 (Codex) — run at max. Catalog: terra + luna ONLY (sol dropped). ──
 codex_workhorse     = "gpt-5.6-terra"    # bulk implementation (the workhorse; needs max to shine)
-codex_review        = "gpt-5.6-sol"      # review + hardest work (top coder: 73% SWE @ max)
+codex_review        = "gpt-5.6-terra"    # review + hardest work — terra at max (sol dropped from catalog)
 codex_cheap         = "gpt-5.6-luna"     # cheap-bulk / boilerplate (cheapest functional GPT @ max)
 codex_default       = "gpt-5.6-terra"    # generic Codex
 

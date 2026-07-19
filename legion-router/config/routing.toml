@@ -164,13 +164,13 @@ reasoning_effort = "max"
 fallback_refs = []
 note = "Codemod / dependency / API migration across the codebase."
 
-# ── Review + hard/critical work (GPT-5.6 Sol @ max = 73% SWE, top coder) ──
+# ── Review + hard/critical work (GPT-5.6 Terra @ max) ──
 [archetypes.final-review]
 executor = "codex"
 model_ref = "codex_review"
 sandbox = "read-only"
 reasoning_effort = "max"
-note = "The final review before merge — gpt-5.6-sol @ max."
+note = "The final review before merge — gpt-5.6-terra @ max."
 
 [archetypes.second-opinion-review]
 executor = "cursor"
@@ -191,7 +191,7 @@ executor = "codex"
 model_ref = "codex_review"
 sandbox = "read-only"
 reasoning_effort = "max"
-note = "Adversarial security review — gpt-5.6-sol @ max (auth/secrets/input surfaces)."
+note = "Adversarial security review — gpt-5.6-terra @ max (auth/secrets/input surfaces)."
 
 [archetypes.hard-bug]
 executor = "codex"
@@ -199,7 +199,7 @@ model_ref = "codex_review"
 sandbox = "workspace-write"
 reasoning_effort = "max"
 fallback_refs = []
-note = "A deep/tricky bug needing the strongest coder — gpt-5.6-sol @ max (73% SWE)."
+note = "A deep/tricky bug needing the strongest coder — gpt-5.6-terra @ max."
 
 [archetypes.perf-optimization]
 executor = "codex"

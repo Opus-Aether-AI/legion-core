@@ -8,8 +8,8 @@
 # Catalog policy: Anthropic Fable + Opus, OpenAI GPT-5.6, xAI Grok. Opus is scoped
 # to FRONTEND (Opus + Fable are the best Claude frontend combo) and runs on CLAUDE
 # CODE (the `claude` executor), never piped through Cursor. Cursor hosts ONLY its
-# native non-Claude models (Grok). (sonnet / haiku / composer removed; Kimi
-# deferred until it's routable via Cursor.)
+# native non-Claude models (Grok + Composer, kept available). (sonnet / haiku
+# removed; Kimi deferred until it's routable via Cursor.)
 # EFFORT: Fable runs at `high` (barely improves past that, and cost
 # doubles); GPT-5.6 runs at `max` (its real ceiling above xhigh — terra drops from
 # 70% to 60% SWE without it); Grok tops out at `high` (its ceiling, no xhigh/max).
@@ -32,6 +32,7 @@ codex_default       = "gpt-5.6-terra"    # generic Codex
 # Claude primary / GPT codex). Cursor never hosts Claude models — those run on
 # Claude Code (claude_opus / claude_default above).
 cursor_default      = "cursor-grok-4.5-high"          # Grok's ceiling (no xhigh)
+cursor_composer     = "composer-2.5"                  # Cursor in-house; kept available but UNROUTED (no archetype)
 
 # ── opencode (harness kept; in-family GPT default for explicit --executor opencode) ──
 opencode_default    = "github-copilot/gpt-5.4"

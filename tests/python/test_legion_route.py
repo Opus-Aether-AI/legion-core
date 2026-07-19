@@ -127,22 +127,23 @@ def test_main_requires_archetype_or_list():
     assert lr.main(["--file", TABLE, "--models-file", MODELS_TABLE]) == 2
 
 
-# ── new-catalog policy: Fable / Opus / GPT-5.6 / Grok ────────────────────
+# ── new-catalog policy: Fable / Opus / GPT-5.6 / Grok / Composer ──────────
 # Opus is admitted but scoped to FRONTEND only (claude_opus, on Claude Code);
 # it must never leak into another role, and Cursor never hosts a Claude model.
-_ALLOWED_FAMILIES = ("claude-fable", "claude-opus", "gpt-", "grok-")
-_FORBIDDEN_MODELS = ("sonnet", "haiku", "composer", "minimax", "kimi",
+# Composer (Cursor in-house) is kept available but unrouted.
+_ALLOWED_FAMILIES = ("claude-fable", "claude-opus", "gpt-", "grok-", "composer")
+_FORBIDDEN_MODELS = ("sonnet", "haiku", "minimax", "kimi",
                      "gemini", "glm", "muse", "nemotron", "qwen")
 
 
-def test_catalog_is_only_fable_opus_gpt_grok():
+def test_catalog_is_only_fable_opus_gpt_grok_composer():
     m = models()
     assert m, "models.toml must have a [models] table"
     for role, model in m.items():
         low = model.lower()
-        assert not any(bad in low for bad in _FORBIDDEN_MODELS), f"{role}={model} is not Fable/Opus/GPT/Grok"
+        assert not any(bad in low for bad in _FORBIDDEN_MODELS), f"{role}={model} is not an allowed model"
         assert any(fam in low for fam in _ALLOWED_FAMILIES), f"{role}={model} is not an allowed family"
-    for gone in ("claude_flagship", "claude_sonnet", "claude_fast", "cursor_composer", "auto_tier_haiku"):
+    for gone in ("claude_flagship", "claude_sonnet", "claude_fast", "auto_tier_haiku"):
         assert gone not in m, f"removed role {gone} is still present"
 
 
@@ -158,13 +159,23 @@ def test_opus_is_scoped_to_the_claude_frontend_polish_role_only():
 
 def test_cursor_hosts_only_native_non_claude_models():
     # Cursor never hosts Claude models — those run on Claude Code. Every cursor_*
-    # role must be a Cursor-native model (Grok today), never claude/opus/fable.
+    # role must be a Cursor-native model (Grok / Composer today), never claude/opus/fable.
     m = models()
     for role, model in m.items():
         if role.startswith("cursor_"):
             low = model.lower()
             assert "claude" not in low and "opus" not in low and "fable" not in low, (
                 f"{role}={model} routes a Claude model through Cursor")
+
+
+def test_composer_is_kept_available_but_unrouted():
+    # Composer (Cursor in-house) stays in the catalog so it's available, but is
+    # deliberately not assigned to any archetype yet.
+    t, m = table(), models()
+    assert m.get("cursor_composer") == "composer-2.5", "cursor_composer must stay in the catalog"
+    for name in t.get("archetypes", {}):
+        r = lr.resolve(t, name, m)
+        assert r["model_ref"] != "cursor_composer", f"{name} routes to composer, but it should be unrouted"
 
 
 def test_effort_policy_fable_high_gpt_max_grok_high():

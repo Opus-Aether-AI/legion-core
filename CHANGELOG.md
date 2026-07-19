@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.17.0...v0.17.1) (2026-07-19)
+
+
+### Fixed
+
+* **install:** read plugin list after clone sync + auto-wire opencode ([#94](https://github.com/Opus-Aether-AI/legion-core/issues/94)) ([a219049](https://github.com/Opus-Aether-AI/legion-core/commit/a219049466a308dbf4013b45682a1ed625c35411))
+
 ## [0.17.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.16.0...v0.17.0) (2026-07-19)
 
 

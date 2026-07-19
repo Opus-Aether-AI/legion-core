@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.16.0...v0.17.0) (2026-07-19)
+
+
+### Added
+
+* harness-generic core — opencode/hermes, frontend Opus/Fable routing, storage fixes ([#91](https://github.com/Opus-Aether-AI/legion-core/issues/91)) ([d9619af](https://github.com/Opus-Aether-AI/legion-core/commit/d9619affb8ae80a64a23a56d69f5727a8899f6b6))
+
 ## [0.16.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.15.0...v0.16.0) (2026-07-14)
 
 

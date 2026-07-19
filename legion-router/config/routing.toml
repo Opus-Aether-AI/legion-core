@@ -78,19 +78,19 @@ reasoning_effort = "high"
 note = "Layout / component structure / design intent stays with the primary (Fable; impeccable shape->craft). Frontend quality is taste, not throughput."
 
 [archetypes.frontend-polish]
-executor = "cursor"
-model_ref = "cursor_default"
+executor = "claude"
+model_ref = "claude_opus"
 sandbox = "workspace-write"
 reasoning_effort = "high"
 fallback_refs = []
-note = "The polish / a11y / responsive pass runs on Grok 4.5 in Cursor (Cursor-native, fast, token-efficient)."
+note = "The polish / a11y / responsive / motion pass runs on OPUS via Claude Code (Opus + impeccable = the best frontend craft combo), verified by screenshot. Claude models run on Claude Code, never Cursor."
 
 [archetypes.frontend-review]
-executor = "cursor"
-model_ref = "cursor_default"
+executor = "claude"
+model_ref = "claude_default"
 sandbox = "read-only"
 reasoning_effort = "high"
-note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Grok 4.5 in Cursor signs off."
+note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. FABLE on Claude Code signs off (a different Claude lens than the Opus polish)."
 
 [archetypes.write-tests]
 executor = "codex"

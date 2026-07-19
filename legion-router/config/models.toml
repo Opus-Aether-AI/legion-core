@@ -5,17 +5,21 @@
 # tasks in one line; add roles as new tiers/providers show up. Routing should
 # reference these role keys, never a raw model ID, so a model swap lives here.
 #
-# Catalog policy: three families only — Anthropic Fable, OpenAI GPT-5.6, xAI Grok.
-# (opus / sonnet / haiku / composer removed; Kimi deferred until it's routable via
-# Cursor.) EFFORT: Fable runs at `high` (barely improves past that, and cost
+# Catalog policy: Anthropic Fable + Opus, OpenAI GPT-5.6, xAI Grok. Opus is scoped
+# to FRONTEND (Opus + Fable are the best Claude frontend combo) and runs on CLAUDE
+# CODE (the `claude` executor), never piped through Cursor. Cursor hosts ONLY its
+# native non-Claude models (Grok). (sonnet / haiku / composer removed; Kimi
+# deferred until it's routable via Cursor.)
+# EFFORT: Fable runs at `high` (barely improves past that, and cost
 # doubles); GPT-5.6 runs at `max` (its real ceiling above xhigh — terra drops from
 # 70% to 60% SWE without it); Grok tops out at `high` (its ceiling, no xhigh/max).
 # The effort per archetype lives in routing.toml.
 
 [models]
-# ── Anthropic Fable — the PRIMARY / orchestrator (frontier reasoner) ──
+# ── Anthropic Claude on CLAUDE CODE (the `claude` executor / self) ──
 claude_orchestrator = "claude-fable-5"   # self: orchestration / architecture / deep reasoning (run at high)
-claude_default      = "claude-fable-5"   # generic Claude / reverse-delegate target
+claude_default      = "claude-fable-5"   # generic Claude / reverse-delegate target / frontend review (Fable)
+claude_opus         = "claude-opus-4-8"  # FRONTEND polish only — Opus on Claude Code (run at high thinking)
 
 # ── OpenAI GPT-5.6 (Codex) — run at max ────────────────────────────
 codex_workhorse     = "gpt-5.6-terra"    # bulk implementation (the workhorse; needs max to shine)
@@ -23,9 +27,11 @@ codex_review        = "gpt-5.6-sol"      # review + hardest work (top coder: 73%
 codex_cheap         = "gpt-5.6-luna"     # cheap-bulk / boilerplate (cheapest functional GPT @ max)
 codex_default       = "gpt-5.6-terra"    # generic Codex
 
-# ── xAI Grok 4.5 (Cursor) — frontend + independent second opinion ──
-# Effort is encoded in the Cursor model id; `-high` is Grok's ceiling (no xhigh).
-cursor_default      = "cursor-grok-4.5-high"
+# ── Cursor harness roles (Cursor-native models ONLY; effort encoded in the id) ──
+# Grok 4.5 for independent second-opinion / tie-break (a different lineage than the
+# Claude primary / GPT codex). Cursor never hosts Claude models — those run on
+# Claude Code (claude_opus / claude_default above).
+cursor_default      = "cursor-grok-4.5-high"          # Grok's ceiling (no xhigh)
 
 # ── opencode (harness kept; in-family GPT default for explicit --executor opencode) ──
 opencode_default    = "github-copilot/gpt-5.4"

@@ -194,11 +194,11 @@
       "id": "route.frontend-polish",
       "type": "route",
       "dimension": "routing",
-      "summary": "Frontend polish uses configured Codex workspace-write.",
+      "summary": "Frontend polish runs on Opus via Claude Code (best frontend-craft combo), workspace-write. Claude models never go through Cursor.",
       "archetype": "frontend-polish",
       "expect": {
-        "executor": "cursor",
-        "model_ref": "cursor_default",
+        "executor": "claude",
+        "model_ref": "claude_opus",
         "sandbox": "workspace-write",
         "reasoning_effort": "high"
       },

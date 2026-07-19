@@ -424,9 +424,13 @@ dispatch_adapter() {
     || die "executor '$ex' is primary-only — it can drive a session but cannot be delegated a coding task."
   adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
   [[ -x "$adapter_bin" ]] || die "executor '$ex' adapter '$adapter' not found on PATH or in bin/ — build/install it first."
-  # Model: an explicit --model wins; otherwise the executor's OWN default role
-  # (never the archetype's model, which may name a model this harness can't run).
+  # Model priority: explicit --model  >  the archetype's resolved model (ONLY when
+  # the archetype routed here — not a forced --executor, whose archetype model may
+  # name a model this harness can't run)  >  the executor's own default role. This
+  # lets one executor serve multiple per-archetype models (e.g. the claude executor
+  # runs Opus for frontend-polish but Fable for frontend-review).
   use_model="$explicit_model"
+  [[ -n "$use_model" || -n "$forced_executor" || -z "$model" ]] || use_model="$model"
   [[ -n "$use_model" || -z "$model_ref" ]] || use_model="$(legion_model_ref "$model_ref" 2>/dev/null || true)"
   local -a aargs=(run --repo "$repo" --task "$task")
   [[ -n "$use_model" ]] && aargs+=(--model "$use_model")
@@ -439,7 +443,9 @@ dispatch_adapter() {
       [[ "$do_apply" == "1" ]] && aargs+=(--apply)
       [[ "$keep" == "1" ]] && aargs+=(--keep)
       ;;
-    prompt) : ;;   # prompt executors (claude): task/model/repo only
+    prompt)   # prompt executors (claude): task/model/repo + effort passthrough
+      [[ -n "$effort" ]] && aargs+=(--effort "$effort")
+      ;;
     *) die "executor '$ex' has an unknown contract '$contract' in executors.toml." ;;
   esac
   note "→ dispatch to $ex via $adapter${use_model:+ -m $use_model}"

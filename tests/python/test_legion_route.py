@@ -77,16 +77,20 @@ def test_frontend_implement_stays_on_claude_not_bulk_coder():
     assert r["model"] == lr.resolve_model_ref(model_table, "claude_orchestrator")
 
 
-def test_frontend_runs_on_grok_in_cursor():
-    # Frontend is taste + verified-by-screenshot, so the polish/review pass runs on
-    # Grok 4.5 in Cursor (Cursor-native), not the bulk coder.
+def test_frontend_runs_on_opus_and_fable_on_claude_code():
+    # Frontend is taste + verified-by-screenshot: Opus polishes, Fable reviews (the
+    # best Claude combo). Claude models run on CLAUDE CODE (the `claude` executor),
+    # never piped through Cursor. Not Grok, not the bulk coder.
     route_table = table()
     model_table = models()
     polish = lr.resolve(route_table, "frontend-polish", model_table)
     review = lr.resolve(route_table, "frontend-review", model_table)
-    assert polish["executor"] == "cursor"
-    assert polish["model"] == lr.resolve_model_ref(model_table, "cursor_default")
-    assert review["executor"] == "cursor"
+    assert polish["executor"] == "claude"
+    assert polish["model_ref"] == "claude_opus"
+    assert "opus" in polish["model"]
+    assert review["executor"] == "claude"
+    assert review["model_ref"] == "claude_default"
+    assert "fable" in review["model"]
     assert review["sandbox"] == "read-only"        # verify by screenshot, no edits
 
 
@@ -123,21 +127,44 @@ def test_main_requires_archetype_or_list():
     assert lr.main(["--file", TABLE, "--models-file", MODELS_TABLE]) == 2
 
 
-# ── new-catalog policy: Fable / GPT-5.6 / Grok only ──────────────────────
-_ALLOWED_FAMILIES = ("claude-fable", "gpt-", "grok-")
-_FORBIDDEN_MODELS = ("opus", "sonnet", "haiku", "composer", "minimax", "kimi",
+# ── new-catalog policy: Fable / Opus / GPT-5.6 / Grok ────────────────────
+# Opus is admitted but scoped to FRONTEND only (claude_opus, on Claude Code);
+# it must never leak into another role, and Cursor never hosts a Claude model.
+_ALLOWED_FAMILIES = ("claude-fable", "claude-opus", "gpt-", "grok-")
+_FORBIDDEN_MODELS = ("sonnet", "haiku", "composer", "minimax", "kimi",
                      "gemini", "glm", "muse", "nemotron", "qwen")
 
 
-def test_catalog_is_only_fable_gpt_grok():
+def test_catalog_is_only_fable_opus_gpt_grok():
     m = models()
     assert m, "models.toml must have a [models] table"
     for role, model in m.items():
         low = model.lower()
-        assert not any(bad in low for bad in _FORBIDDEN_MODELS), f"{role}={model} is not Fable/GPT/Grok"
+        assert not any(bad in low for bad in _FORBIDDEN_MODELS), f"{role}={model} is not Fable/Opus/GPT/Grok"
         assert any(fam in low for fam in _ALLOWED_FAMILIES), f"{role}={model} is not an allowed family"
     for gone in ("claude_flagship", "claude_sonnet", "claude_fast", "cursor_composer", "auto_tier_haiku"):
         assert gone not in m, f"removed role {gone} is still present"
+
+
+def test_opus_is_scoped_to_the_claude_frontend_polish_role_only():
+    # Opus is re-admitted ONLY for the frontend polish role, and it runs on Claude
+    # Code (claude_opus), never Cursor. It must not appear in orchestrator / codex /
+    # opencode / default / cursor roles.
+    m = models()
+    for role, model in m.items():
+        if "opus" in model.lower():
+            assert role == "claude_opus", f"opus leaked into non-frontend role {role}={model}"
+
+
+def test_cursor_hosts_only_native_non_claude_models():
+    # Cursor never hosts Claude models — those run on Claude Code. Every cursor_*
+    # role must be a Cursor-native model (Grok today), never claude/opus/fable.
+    m = models()
+    for role, model in m.items():
+        if role.startswith("cursor_"):
+            low = model.lower()
+            assert "claude" not in low and "opus" not in low and "fable" not in low, (
+                f"{role}={model} routes a Claude model through Cursor")
 
 
 def test_effort_policy_fable_high_gpt_max_grok_high():
@@ -148,7 +175,10 @@ def test_effort_policy_fable_high_gpt_max_grok_high():
     for a in ("implement-feature", "fix-bug", "cheap-bulk", "hard-bug", "final-review", "security-review"):
         r = lr.resolve(t, a, m)
         assert r["executor"] == "codex" and r["reasoning_effort"] == "max", (a, r)
-    for a in ("frontend-polish", "frontend-review", "second-opinion-review", "cross-model-tiebreak"):
+    for a in ("frontend-polish", "frontend-review"):   # Claude models on Claude Code
+        r = lr.resolve(t, a, m)
+        assert r["executor"] == "claude" and r["reasoning_effort"] == "high", (a, r)
+    for a in ("second-opinion-review", "cross-model-tiebreak"):   # Grok on Cursor
         r = lr.resolve(t, a, m)
         assert r["executor"] == "cursor" and r["reasoning_effort"] == "high", (a, r)
 

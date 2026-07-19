@@ -35,11 +35,11 @@
       "id": "route.frontend-review",
       "type": "route",
       "dimension": "routing",
-      "summary": "Frontend review runs on Grok 4.5 in Cursor (Cursor-native, verify-by-screenshot), read-only.",
+      "summary": "Frontend review runs on Fable via Claude Code (verify-by-screenshot, a different Claude lens than the Opus polish), read-only. Claude models never go through Cursor.",
       "archetype": "frontend-review",
       "expect": {
-        "executor": "cursor",
-        "model_ref": "cursor_default",
+        "executor": "claude",
+        "model_ref": "claude_default",
         "sandbox": "read-only",
         "reasoning_effort": "high"
       },

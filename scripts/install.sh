@@ -18,6 +18,7 @@
 #   --no-codex-skills     Skip ~/.codex/skills/<name> symlinks (Codex-skill mirror)
 #                         (alias: --no-codex-commands, kept for back-compat)
 #   --no-cursor           Skip Cursor MCP/subagent bridge setup
+#   --no-opencode         Skip opencode MCP bridge setup
 #   --cron                Install daily refresh cron entry (default: off)
 #   --no-cron             Skip daily refresh cron entry
 #   --cron-hour=N         Hour of day for refresh cron (default: 9)
@@ -73,6 +74,7 @@ DO_CLAUDE=1
 DO_CROSS_HARNESS=1
 DO_CODEX_SKILLS=1
 DO_CURSOR=1
+DO_OPENCODE=1
 DO_CRON=0
 [ "${LEGION_INSTALL_CRON:-0}" = "1" ] && DO_CRON=1
 CRON_HOUR=9
@@ -85,6 +87,7 @@ for arg in "$@"; do
         --no-codex-skills)   DO_CODEX_SKILLS=0 ;;
         --no-codex-commands) DO_CODEX_SKILLS=0 ;;  # deprecated alias, kept for back-compat
         --no-cursor)         DO_CURSOR=0 ;;
+        --no-opencode)       DO_OPENCODE=0 ;;
         --cron)              DO_CRON=1 ;;
         --no-cron)           DO_CRON=0 ;;
         --cron-hour=*)       CRON_HOUR="${arg#--cron-hour=}" ;;
@@ -539,6 +542,27 @@ setup_cursor_native() {
         }
 }
 
+setup_opencode() {
+    [ "$DO_OPENCODE" = "1" ] || return 0
+    [ "$DO_CROSS_HARNESS" = "1" ] || { dim "opencode setup requires cross-harness setup — skipping."; return 0; }
+
+    local setup="$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup"
+    [ -x "$setup" ] || { dim "  · legion-opencode-setup not present — skipping (opencode reads ~/.agents/skills passively)."; return 0; }
+
+    bold ""
+    bold "opencode setup (MCP bridge + readiness)"
+    LEGION_MARKETPLACE_ROOT="$SOURCE_CLONE" AGENTS_HOME="$AGENTS_HOME" "$setup" all || \
+        {
+            yellow "  · opencode setup reported warnings; run: legion-opencode-setup verify"
+            local learn="${SOURCE_CLONE}/legion-observability/bin/legion-self-learn"
+            if [ -x "$learn" ]; then
+                "$learn" record --entity plugin:legion-setup \
+                    --summary "Installer opencode setup reported warnings." \
+                    --severity high --source "install.sh" --evidence "legion-opencode-setup all returned nonzero" >/dev/null 2>&1 || true
+            fi
+        }
+}
+
 # ── Cron: daily refresh ──────────────────────────────────────────────
 CRON_TAG="# legion-core-refresh"
 
@@ -620,10 +644,14 @@ preflight
 case "$MODE" in
     all)
         add_marketplace
-        PLUGINS=(); while IFS= read -r line; do PLUGINS+=("$line"); done < <(list_all)
+        # Sync the source clone FIRST, then read the plugin list from it — otherwise
+        # list_all reads the pre-upgrade marketplace.json and misses plugins added in
+        # the new release (e.g. legion-opencode-mode / legion-hermes-mode in 0.17.0).
         setup_cross_harness
         setup_codex_skills
         setup_cursor_native
+        setup_opencode
+        PLUGINS=(); while IFS= read -r line; do PLUGINS+=("$line"); done < <(list_all)
         install_many "${PLUGINS[@]}"
         setup_cron
         ;;
@@ -632,6 +660,7 @@ case "$MODE" in
         setup_cross_harness
         setup_codex_skills
         setup_cursor_native
+        setup_opencode
         install_many legion-router legion-observability
         setup_cron
         ;;
@@ -641,6 +670,7 @@ case "$MODE" in
         setup_cross_harness
         setup_codex_skills
         setup_cursor_native
+        setup_opencode
         install_one "$MODE"
         setup_cron
         ;;

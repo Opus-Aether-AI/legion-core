@@ -228,6 +228,52 @@ SH
     if grep -F "cursor-setup" "$MOCK_CALL_LOG"; then false; fi
 }
 
+@test "install invokes opencode setup when available" {
+    mkdir -p "$SOURCE_CLONE/legion-setup/bin"
+    cat > "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup" <<'SH'
+#!/usr/bin/env bash
+printf 'opencode-setup %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup"
+
+    run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"opencode setup"* ]]
+    grep -qF "opencode-setup all" "$MOCK_CALL_LOG"
+}
+
+@test "--no-opencode skips opencode setup" {
+    mkdir -p "$SOURCE_CLONE/legion-setup/bin"
+    cat > "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup" <<'SH'
+#!/usr/bin/env bash
+printf 'opencode-setup %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup"
+
+    run bash "$INSTALL_SH" all --no-claude --no-cron --no-opencode
+    [ "$status" -eq 0 ]
+    if grep -F "opencode-setup" "$MOCK_CALL_LOG"; then false; fi
+}
+
+@test "install records opencode setup warnings to self-learning" {
+    mkdir -p "$SOURCE_CLONE/legion-setup/bin" "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup" <<'SH'
+#!/usr/bin/env bash
+printf 'opencode-setup %s\n' "$*" >> "$MOCK_CALL_LOG"
+exit 1
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-self-learn" <<'SH'
+#!/usr/bin/env bash
+printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup" "$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
+
+    run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"opencode setup reported warnings"* ]]
+    grep -qF "Installer opencode setup reported warnings." "$MOCK_CALL_LOG"
+}
+
 @test "source clone with local edits: install fetches but skips reset" {
     bash "$INSTALL_SH" --refresh-symlinks   # establish clone
     # Hand-edit a tracked file in the source clone

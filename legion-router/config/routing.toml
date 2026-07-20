@@ -15,10 +15,9 @@
 #   fallback_refs     model_ref keys to try on quota/rate-limit before failing
 #
 # EFFORT POLICY (three families: Fable / GPT-5.6 / Grok 4.5):
-#   - self (Fable):        `high`  — barely improves past high and cost ~doubles.
-#   - codex (GPT-5.6):     `max`   — its real ceiling above xhigh; terra drops
-#                                    70%->60% SWE without it, so bulk/review/cheap
-#                                    all run at max.
+#   - self (Fable):        `high` for intent, design, and merge judgement.
+#   - codex (GPT-5.6):     `low`/`medium` for bounded work, `high` for scoped
+#                           implementation, and `max` only for hard/persistent work.
 #   - cursor (Grok 4.5):   `high`  — Grok's ceiling (no xhigh/max); effort is also
 #                                    encoded in the model id (cursor-grok-4.5-high).
 # Each harness translates the level to its own mechanism (codex
@@ -57,14 +56,21 @@ model_ref = "claude_orchestrator"
 reasoning_effort = "high"
 note = "High-judgement reasoning — keep on the primary (Fable), do NOT delegate."
 
-# ── GPT-5.6 (Codex) implementation path — run at max ─────────────────
+# ── GPT-5.6 (Codex) execution path — effort follows task risk ─────────
 [archetypes.implement-feature]
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "max"
+reasoning_effort = "high"
 fallback_refs = []
-note = "A fully-specced feature slice — the default home for real coding (gpt-5.6-terra @ max = 70% SWE)."
+note = "A fully-specced, bounded feature slice. Escalate only hard or persistent work to max."
+
+[archetypes.scout]
+executor = "codex"
+model_ref = "codex_cheap"
+sandbox = "read-only"
+reasoning_effort = "low"
+note = "Fast repository/system investigation: find evidence, do not mutate."
 
 # ── Frontend: correctness is VISUAL, so it routes by TASTE, not bulk coding ──
 # A rendered UI can't be verified from a diff (the reviewer can't see the pixels),
@@ -96,7 +102,7 @@ note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by readin
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "max"
+reasoning_effort = "medium"
 fallback_refs = []
 note = "Author unit/integration tests for a described surface."
 
@@ -104,7 +110,7 @@ note = "Author unit/integration tests for a described surface."
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "max"
+reasoning_effort = "high"
 fallback_refs = []
 note = "A reproducible, well-scoped bug fix (deep/tricky ones -> hard-bug)."
 
@@ -112,7 +118,7 @@ note = "A reproducible, well-scoped bug fix (deep/tricky ones -> hard-bug)."
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "max"
+reasoning_effort = "high"
 fallback_refs = []
 note = "Restructure a module/file with characterization intact."
 
@@ -120,7 +126,7 @@ note = "Restructure a module/file with characterization intact."
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "max"
+reasoning_effort = "medium"
 fallback_refs = []
 note = "Wide, low-judgement edits across many files."
 
@@ -136,41 +142,41 @@ note = "Independent, fully-specified modules generated while the primary coordin
 executor = "codex"
 model_ref = "codex_cheap"
 sandbox = "workspace-write"
-reasoning_effort = "max"
+reasoning_effort = "low"
 fallback_refs = []
-note = "Cheap throughput on the cheapest functional GPT tier (gpt-5.6-luna @ max = 67% SWE, ~$3/task; luna craters below high, so still run at max)."
+note = "Cheap bounded throughput; use only for mechanical, reversible work."
 
 [archetypes.docs-edit]
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "max"
+reasoning_effort = "low"
 fallback_refs = []
-note = "Docs / comments / changelog edits."
+note = "Docs / comments / changelog edits; bounded and reversible."
 
 [archetypes.boilerplate]
 executor = "codex"
 model_ref = "codex_cheap"
 sandbox = "workspace-write"
-reasoning_effort = "max"
+reasoning_effort = "low"
 fallback_refs = []
-note = "Scaffolding, config, repetitive plumbing — cheapest functional GPT tier (gpt-5.6-luna)."
+note = "Scaffolding, config, repetitive plumbing — require a narrow file scope."
 
 [archetypes.migration]
 executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
-reasoning_effort = "max"
+reasoning_effort = "high"
 fallback_refs = []
 note = "Codemod / dependency / API migration across the codebase."
 
-# ── Review + hard/critical work (GPT-5.6 Sol @ max = 73% SWE, top coder) ──
+# ── Cross-model judgement; max is reserved for hard execution ──────────
 [archetypes.final-review]
-executor = "codex"
-model_ref = "codex_review"
+executor = "claude"
+model_ref = "claude_default"
 sandbox = "read-only"
-reasoning_effort = "max"
-note = "The final review before merge — gpt-5.6-sol @ max."
+reasoning_effort = "high"
+note = "Final merge judgement and simplification pass — Fable reviews Codex output from an independent lens."
 
 [archetypes.second-opinion-review]
 executor = "cursor"

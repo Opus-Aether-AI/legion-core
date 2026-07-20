@@ -1,15 +1,15 @@
 # legion-orchestrate
 
-Legion's dynamic **multi-model** orchestrator — the ultracode loop, but Claude conducts while the configured Codex workhorse does the bulk of coding in parallel and the configured Codex reviewer verifies.
+Legion's dynamic **multi-model** orchestrator — the ultracode loop, but Claude conducts while the configured Codex workhorse does the bulk of coding in parallel and independent Fable review verifies.
 
-> Decompose → fan out (configured Codex, parallel) → cross-model verify (configured reviewer) → synthesize → gate.
+> Decompose → fan out (configured Codex, parallel) → cross-model verify (independent Fable) → synthesize → gate.
 
 ## `legion-run`
 
 Run any heavy task through the fixed Legion lifecycle. Use direct mode for
 one-off feature/app/refactor work, or use an installed domain plugin when you
 want the same workflow every time: doctor, self-learn hints, plan,
-route, fan-out/apply, final review, validation, evaluation, observability HTML,
+route, fan-out/apply, deterministic validation, final review, evaluation, observability HTML,
 share accounting, self-learn, and heal planning.
 
 Direct mode:
@@ -21,6 +21,7 @@ legion-run \
   --name app-change \
   --plan-file ./PLAN.md \
   --plan-file ./ARCHITECTURE.md \
+  --slices-file ./slices.jsonl \
   --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" \
   --evaluate-command "./scripts/eval-app-change" \
   --json
@@ -28,6 +29,8 @@ legion-run \
 
 Repeat `--plan-file` to combine product, architecture, migration, or eval notes.
 Each relative file path is resolved from `--repo` and merged into `plan.json`.
+Provide the matching explicit queue with `--slices-file`, or use a plan command
+that writes `$LEGION_RUN_SLICES_FILE`.
 
 Domain plugin mode:
 
@@ -63,10 +66,12 @@ per-repo setup.
 `legion.full_app.v1` remains supported for existing app-builder plugins, but
 new plugins should use `legion.heavy_task.v1`.
 
-The `plan` command must write `plan.json`. It may also write `slices.jsonl` for
-full control. If it only writes a brief plan with `mode =
-"legion-generate-slices"`, `legion-run` generates a compact default TDD slice
-set from that brief and records it as `slices.jsonl` in the run directory.
+The `plan` command must write `plan.json` and `slices.jsonl`. The plan owns the
+work queue; Core executes it and retains the evidence. The old generic TDD
+slice generator is available only through the explicit
+`--allow-generated-slices` compatibility flag. External stages are bounded by
+`--stage-timeout-seconds` (default 1800); timeout or cancellation writes a
+terminal receipt and stops the stage's owned process group.
 
 ## `legion-fanout`
 
@@ -86,7 +91,7 @@ printf '%s\n' \
 
 ## The playbook + ultracode mode
 
-`SKILL.md` is the orchestration playbook (decompose → fan out → cross-model verify → synthesize → gate). `LEGION_ULTRACODE=1` goes maximally exhaustive: wide fan-out, multi-vote verify (configured Codex reviewer **and** Claude must approve), loop-until-dry — all metered, kept ≥50% codex via `legion-share`.
+`SKILL.md` is the orchestration playbook (decompose → fan out → cross-model verify → synthesize → gate). `LEGION_ULTRACODE=1` goes maximally exhaustive: wide fan-out, multi-vote verify (independent Fable reviewer **and** the primary engineer must approve), loop-until-dry — all metered, kept ≥50% codex via `legion-share`.
 
 ## Depends on
 

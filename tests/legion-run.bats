@@ -156,6 +156,11 @@ SH
 set -euo pipefail
 printf '{"status":"ok","model":"gpt-5.5","verdict":"ok"}\n'
 SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-claude" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"status":"ok","model":"claude-fable-5","result":"{\\"verdict\\":\\"approve\\",\\"summary\\":\\"independent review passed\\",\\"findings\\":[]}"}\n'
+SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-doctor" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -213,7 +218,7 @@ SH
   json="$(printf '%s' "$output" | json_from_output)"
   echo "$json" | jq -e '.plugin.name == "fieldops"'
   echo "$json" | jq -e '.pipeline.profile == "legion.full_app.v1"'
-  echo "$json" | jq -e '.pipeline.stages == ["doctor","self-learn-hints","plan","route","fanout-apply","review","validate","evaluate","report","share","self-learn","heal-plan"]'
+  echo "$json" | jq -e '.pipeline.stages == ["doctor","self-learn-hints","plan","route","fanout-apply","validate","review","evaluate","report","share","self-learn","heal-plan"]'
   echo "$json" | jq -e '.pipeline.required_artifacts | index("legion-report.html") and index("fanout.json") and index("heal-plan.json") and index("artifact-manifest.json")'
 }
 
@@ -264,7 +269,7 @@ SH
   chmod +x "$BATS_TEST_TMPDIR/bin/fieldops-plan"
   manifest="$(make_plugin)"
 
-  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build FieldOps AI Dispatch" --json
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build FieldOps AI Dispatch" --allow-generated-slices --json
   [ "$status" -eq 0 ]
   json="$(printf '%s' "$output" | json_from_output)"
   run_dir="$(echo "$json" | jq -r '.run_dir')"
@@ -274,6 +279,65 @@ SH
   jq -e 'select(.phase == "green" and .archetype == "implement-feature")' "$run_dir/slices.jsonl" >/dev/null
   jq -e 'select(.phase == "refactor" and .archetype == "refactor-module")' "$run_dir/slices.jsonl" >/dev/null
   grep -q "generated_by" "$run_dir/slices.jsonl"
+}
+
+@test "legion-run: requires an explicit slice contract unless compatibility is requested" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/fieldops-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"schema":"legion.plugin.plan.v1","plugin":"%s","task":"%s"}\n' "$LEGION_PLUGIN_NAME" "$LEGION_TASK" > "$LEGION_RUN_PLAN_FILE"
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/fieldops-plan"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build FieldOps AI Dispatch" --json
+  [ "$status" -eq 2 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "plan"'
+  jq -e '.stages[] | select(.stage == "plan" and .status == "failed")' "$run_dir/stage-status.json"
+  jq -e '(.message | contains("explicit slices"))' "$run_dir/failure.json"
+}
+
+@test "legion-run: timeout creates a terminal stage receipt and cleans the child group" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+sleep 5
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-fanout"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --stage-timeout-seconds 1 --json
+  [ "$status" -eq 124 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "fanout-apply"'
+  jq -e '.status == "timed_out" and .exit_code == 124 and .timeout_seconds == 1' "$run_dir/fanout.json"
+  jq -e '.stages[] | select(.stage == "fanout-apply" and .status == "failed")' "$run_dir/stage-status.json"
+  jq -e '.stages[] | select(.stage == "review" and .status == "skipped")' "$run_dir/stage-status.json"
+}
+
+@test "legion-run: dispatches final review through the resolved Claude route" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  final-review) printf '{"executor":"claude","model":"claude-fable-5","reasoning_effort":"high","resolved":true}\n' ;;
+  *) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}\n' ;;
+esac
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-route"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  jq -e '.model == "claude-fable-5" and (.result | contains("approve"))' "$run_dir/review.json"
 }
 
 @test "legion-run: installed-style plugin directory works through manifest and bin hooks" {
@@ -327,6 +391,7 @@ SH
     --repo "$REPO" \
     --task "Add billing export with tests and review" \
     --name billing-export \
+    --allow-generated-slices \
     --plan-command heavy-plan \
     --validate-command heavy-validate \
     --evaluate-command heavy-eval \
@@ -364,6 +429,7 @@ SH
     --repo "$REPO" \
     --task "Use the repo plan" \
     --name repo-plan \
+    --allow-generated-slices \
     --plan-file ./PLAN.md \
     --validate-command heavy-validate \
     --evaluate-command heavy-eval \
@@ -396,6 +462,7 @@ SH
     --repo "$REPO" \
     --task "Use several repo plans" \
     --name multi-plan \
+    --allow-generated-slices \
     --plan-file ./PLAN.md \
     --plan-file ./ARCH.md \
     --validate-command heavy-validate \
@@ -444,6 +511,7 @@ SH
     --repo "$REPO" \
     --task "Add billing export with tests and review" \
     --name billing-export \
+    --allow-generated-slices \
     --plan-command heavy-plan \
     --validate-command heavy-validate \
     --evaluate-command heavy-eval \
@@ -503,6 +571,7 @@ SH
     --repo "$REPO" \
     --task "Add billing export with tests and review" \
     --name billing-export \
+    --allow-generated-slices \
     --plan-command heavy-plan \
     --validate-command heavy-validate \
     --evaluate-command heavy-eval \
@@ -550,6 +619,7 @@ SH
     --repo "$REPO" \
     --task "Add billing export with tests and review" \
     --name billing-export \
+    --allow-generated-slices \
     --plan-command heavy-plan \
     --validate-command heavy-validate \
     --evaluate-command heavy-eval \
@@ -592,6 +662,7 @@ SH
     --repo "$REPO" \
     --task "Add billing export with tests and review" \
     --name billing-export \
+    --allow-generated-slices \
     --plan-command heavy-plan \
     --validate-command heavy-validate \
     --evaluate-command heavy-eval \
@@ -639,6 +710,7 @@ SH
     --repo "$REPO" \
     --task "Add billing export with tests and review" \
     --name billing-export \
+    --allow-generated-slices \
     --plan-command heavy-plan \
     --validate-command heavy-validate \
     --evaluate-command heavy-eval \
@@ -690,6 +762,7 @@ SH
     --repo "$REPO" \
     --task "Add billing export with tests and review" \
     --name billing-export \
+    --allow-generated-slices \
     --plan-command heavy-plan \
     --validate-command heavy-validate \
     --evaluate-command heavy-eval \

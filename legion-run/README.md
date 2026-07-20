@@ -11,8 +11,8 @@ Use it for substantial work that needs an auditable execution contract:
 - doctor and prior self-learning hints
 - planning from a plan file, plan command, or domain plugin
 - route and fan-out/apply
-- final review
-- validation and optional evaluation
+- deterministic validation
+- final review and optional evaluation
 - HTML/JSON evidence
 - share accounting
 - validation-led self-learning
@@ -26,8 +26,8 @@ Use it for substantial work that needs an auditable execution contract:
 2. load prior lessons;
 3. plan the work;
 4. route and fan out slices;
-5. review the result;
-6. run validation and evals;
+5. run deterministic validation;
+6. review the result and run evals;
 7. write HTML/JSON evidence;
 8. turn reusable findings into future memory;
 9. write a heal plan when something breaks.
@@ -46,6 +46,7 @@ legion-run \
   --task "Add organization invitations with tests and review" \
   --name org-invitations \
   --plan-file ./plans/org-invitations.md \
+  --slices-file ./plans/org-invitations.slices.jsonl \
   --validate-command "npm test && npm run build && printf '{\"ok\":true}\\n'" \
   --evaluate-command "./scripts/eval-org-invitations" \
   --json

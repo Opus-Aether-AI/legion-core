@@ -205,13 +205,14 @@ import json
 import sys
 
 archetype = sys.argv[1]
-sandbox = "read-only" if archetype == "final-review" else "workspace-write"
+is_final_review = archetype == "final-review"
+sandbox = "read-only" if is_final_review else "workspace-write"
 print(json.dumps({
-    "executor": "codex",
-    "model": "gpt-5.5",
-    "model_ref": "codex_workhorse",
+    "executor": "claude" if is_final_review else "codex",
+    "model": "claude-fable-5" if is_final_review else "gpt-5.5",
+    "model_ref": "claude_default" if is_final_review else "codex_workhorse",
     "sandbox": sandbox,
-    "reasoning_effort": "xhigh",
+    "reasoning_effort": "high" if is_final_review else "xhigh",
     "resolved": True,
 }, sort_keys=True))
 PY
@@ -478,6 +479,13 @@ printf 'delegate-review\n' >> "$LEGION_RUN_BENCH_CALL_LOG"
 printf '{"status":"ok","verdict":"approved","model":"gpt-5.5","findings":[]}\n'
 SH
 
+cat > "$fake_bin/legion-claude" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'claude-review\n' >> "$LEGION_RUN_BENCH_CALL_LOG"
+printf '{"status":"ok","model":"claude-fable-5","result":"{\\"verdict\\":\\"approve\\",\\"summary\\":\\"independent review approved\\",\\"findings\\":[]}"}\n'
+SH
+
 cat > "$fake_bin/legion-report" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -522,6 +530,7 @@ legion-run \
   --repo "$target_repo" \
   --task "Implement FieldOps SLA triage: normalize tickets, infer priority from freezer-down/offline/leak keywords, assign dispatch trades and SLA deadlines, sort the dispatch queue, and cover it with unittest tests." \
   --name direct-plan-validate \
+  --allow-generated-slices \
   --plan-command bench-plan \
   --validate-command bench-validate \
   --json > "$stdout_path" 2> "$stderr_path"
@@ -622,7 +631,10 @@ checks = {
     ),
     "routes_generated_for_all_slices": len(routes) == len(slices) and len(routes) > 0,
     "fanout_apply_ran": "fanout-apply" in calls and fanout.get("failed") == 0,
-    "final_review_ran": "delegate-review" in calls and artifact("review.json").get("verdict") == "approved",
+    "final_review_ran": (
+        "claude-review" in calls
+        and "approve" in str(artifact("review.json").get("result", ""))
+    ),
     "validate_command_used": (
         "validate-command" in calls
         and validation.get("command") == "bench-validate"
@@ -671,8 +683,8 @@ checks = {
         "doctor",
         "plan-command",
         "fanout-apply",
-        "delegate-review",
         "validate-command",
+        "claude-review",
         "report",
         "share",
         "heal-plan",

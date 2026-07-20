@@ -20,7 +20,7 @@ Legion is a team. Play each model to its strength:
 - **Claude = orchestrate** — plan, decompose, decide, **verify**, integrate. Claude is the *conductor*, not the bulk coder. (archetypes: `orchestrate`, `architecture-decision`, `deep-reasoning`)
 - **Codex workhorse = implementation + review** — do **most of the coding** and final review: implementation, tests, refactors, bulk edits, migrations, boilerplate, hard/critical/risky work, and cross-model verification. The concrete model ID resolves from `config/models.toml`.
 
-**The rule:** codex should do **≥50% of delegatable work** (`routing.toml [targets].codex_share`). Concretely — when you have an implementation task, **delegate by archetype by default** rather than coding it yourself; reserve your own cycles for orchestration + judgement, and route the **final review to the configured Codex reviewer**.
+**The rule:** codex should do **≥50% of delegatable work** (`routing.toml [targets].codex_share`). Concretely — when you have an implementation task, **delegate by archetype by default** rather than coding it yourself; reserve your own cycles for orchestration + judgement, and route the **final review to the independent Fable reviewer**.
 
 **Make it measurable (the controller loop):**
 1. When you do a task **yourself**, log it: `legion-trace emit --executor opus --model "$(legion-route --model-ref claude_orchestrator)" --status ok` (so the split has a denominator).
@@ -68,9 +68,10 @@ Run `legion-route --list` for the full set. Grouped by role:
 | Role | Archetypes | → model |
 |---|---|---|
 | **Claude orchestrates (self)** | `orchestrate`, `architecture-decision`, `deep-reasoning` | `claude_orchestrator` — **refuses to delegate** |
-| **Codex implementation/review path** | `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `final-review`, `second-opinion-review`, `cross-model-tiebreak`, `security-review`, `hard-bug`, `perf-optimization` | `codex_workhorse` / `codex_review` |
+| **Codex execution path** | `scout`, `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `security-review`, `hard-bug`, `perf-optimization` | `codex_workhorse` / `codex_review` |
+| **Fable merge judgement** | `final-review` | `claude_default` |
 
-So: most coding + final review + hard/critical → Codex roles from `models.toml`; orchestration + judgement → you keep it (delegating it is refused).
+So: most coding and hard/critical execution → Codex roles from `models.toml`; final merge judgement → independent Fable; orchestration → you keep it (delegating it is refused).
 
 ## Commands
 
@@ -99,7 +100,12 @@ legion-delegate apply   --run <RUN_ID> --repo .
 legion-delegate cleanup --run <RUN_ID> --repo .
 ```
 
-Reasoning effort (via codex `-c model_reasoning_effort`): **codex always runs at `xhigh`** — every archetype is xhigh and `legion-delegate` defaults to xhigh when unset (on a subscription the marginal cost is flat, so favor quality). Claude orchestration runs at **xhigh minimum** (dynamic higher if a task needs it). `review` returns a schema-valid verdict (`schema/review-verdict.schema.json`) so you can weigh Codex findings against your own programmatically.
+Reasoning effort (via codex `-c model_reasoning_effort`) is chosen by archetype:
+use `low`/`medium` for bounded investigation and mechanical work, `high` for a
+scoped implementation, and `max` only for a declared hard or persistent slice.
+Claude runs at `high` for intent, design, and final merge judgement. `review`
+returns a schema-valid Codex verdict; the final workflow review may also route
+to Fable for independent simplification judgement.
 
 ## Credit / quota resilience (self-healing)
 

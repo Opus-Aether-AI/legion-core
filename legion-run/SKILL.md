@@ -9,8 +9,8 @@ description: Use to execute a substantial coding task through `legion-run`'s enf
 
 Use this skill when the user wants Legion to **run** a coding task end to end,
 not only decompose it. `legion-run` is the fixed execution contract for serious
-work: doctor, self-learn hints, plan, route, fan-out/apply, final review,
-validation, evaluation, observability HTML, share accounting, self-learn, and
+work: doctor, self-learn hints, plan, route, fan-out/apply, deterministic
+validation, final review, evaluation, observability HTML, share accounting, self-learn, and
 heal planning.
 
 Prefer this over manually composing `legion-fanout`, `legion-delegate`,
@@ -26,8 +26,9 @@ plan and validation command:
 legion-run \
   --repo . \
   --task "Build the requested change" \
-  --name requested-change \
-  --plan-file /tmp/legion-run-plan.md \
+   --name requested-change \
+   --plan-file /tmp/legion-run-plan.md \
+   --slices-file /tmp/legion-run-slices.jsonl \
   --validate-command "npm test && npm run build && printf '{\"ok\":true}\n'" \
   --json
 ```
@@ -48,7 +49,8 @@ legion-run \
 1. Identify the target repo. Default to the current working directory.
 2. Inspect the repo's normal validation commands before choosing a gate.
 3. Create or reuse a concise plan file. Markdown is accepted; `legion-run`
-   converts it into `plan.json` and generates default TDD slices when needed.
+   converts it into `plan.json`. Serious workflows also emit explicit
+   `slices.jsonl`; `--allow-generated-slices` is a legacy migration escape hatch.
 4. Choose a validation command that returns nonzero on failure and, when useful,
    prints JSON with `learning_feedback` or `learning_outcomes`.
 5. Run `legion-run --repo <repo> --task <task> --plan-file <file>
@@ -100,8 +102,9 @@ evaluate = "example-evaluate"
 ```
 
 The plugin's commands are executables, not skills. They may be shell, Python,
-Node, or private company CLIs. The plan command writes `plan.json` and may also
-write `slices.jsonl` for exact control.
+Node, or private company CLIs. The plan command writes `plan.json` and
+`slices.jsonl` for the explicit work queue. Use `--stage-timeout-seconds` to
+bound external stages; Core records a terminal receipt on timeout or cancellation.
 
 ## Completion criteria
 

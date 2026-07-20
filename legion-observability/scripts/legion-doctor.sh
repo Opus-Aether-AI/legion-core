@@ -331,7 +331,7 @@ check_route_smoke() {
         }
         ;;
       final-review)
-        jq -e '.executor == "codex" and .sandbox == "read-only"' <<<"$out" >/dev/null 2>&1 || {
+        jq -e '.executor == "claude" and .model_ref == "claude_default" and .sandbox == "read-only"' <<<"$out" >/dev/null 2>&1 || {
           fail "legion-route final-review resolved to unexpected route: $out" "plugin:legion-router"
           bad=1
         }

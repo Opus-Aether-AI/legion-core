@@ -71,7 +71,7 @@ Run `legion-route --list` for the full set. Grouped by role:
 | **Codex execution path** | `scout`, `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `security-review`, `hard-bug`, `perf-optimization` | `codex_workhorse` / `codex_review` |
 | **Fable merge judgement** | `final-review` | `claude_default` |
 
-So: most coding + final review + hard/critical → Codex roles from `models.toml`; orchestration + judgement → you keep it (delegating it is refused).
+So: most coding and hard/critical execution → Codex roles from `models.toml`; final merge judgement → independent Fable; orchestration → you keep it (delegating it is refused).
 
 ## Commands
 

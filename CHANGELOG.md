@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.17.1...v0.18.0) (2026-07-20)
+
+
+### Added
+
+* **orchestrate:** enforce explicit ADW lifecycle ([#96](https://github.com/Opus-Aether-AI/legion-core/issues/96)) ([9e9ddce](https://github.com/Opus-Aether-AI/legion-core/commit/9e9ddce6dfb22634a1937cf9f9c44768a1d694bb))
+
 ## [0.17.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.17.0...v0.17.1) (2026-07-19)
 
 

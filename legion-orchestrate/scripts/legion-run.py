@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -44,8 +45,8 @@ PIPELINE_STAGES = [
     "plan",
     "route",
     "fanout-apply",
-    "review",
     "validate",
+    "review",
     "evaluate",
     "report",
     "share",
@@ -77,8 +78,8 @@ PIPELINE_STAGE_ARTIFACTS = {
     "plan": ["plan.json", "slices.jsonl"],
     "route": ["routes.json"],
     "fanout-apply": ["fanout.json"],
-    "review": ["review.json"],
     "validate": ["validation.json"],
+    "review": ["review.json"],
     "evaluate": ["eval.json"],
     "report": ["legion-report.json", "legion-report.html", "legion-observability.html"],
     "share": ["share.json"],
@@ -94,6 +95,7 @@ COMMAND_FALLBACKS = {
     "legion-heal": ROOT / "legion-observability" / "bin" / "legion-heal",
     "legion-route": ROOT / "legion-router" / "bin" / "legion-route",
     "legion-delegate": ROOT / "legion-router" / "bin" / "legion-delegate",
+    "legion-claude": ROOT / "legion-router" / "bin" / "legion-claude",
     "legion-fanout": ROOT / "legion-orchestrate" / "bin" / "legion-fanout",
 }
 
@@ -289,6 +291,7 @@ def build_direct_runner(args: argparse.Namespace) -> dict[str, Any]:
     name = _slug(args.name or args.task or "heavy-task")
     plan_command = str(args.plan_command or "").strip()
     plan_files = [str(item).strip() for item in (args.plan_files or []) if str(item).strip()]
+    slices_file = str(args.slices_file or "").strip()
     validate_command = str(args.validate_command or "").strip()
     evaluate_command = str(args.evaluate_command or "").strip()
     if not plan_command and not plan_files:
@@ -311,6 +314,7 @@ def build_direct_runner(args: argparse.Namespace) -> dict[str, Any]:
         },
         "plan_file": plan_files[0] if len(plan_files) == 1 else "",
         "plan_files": plan_files,
+        "slices_file": slices_file,
     }
 
 
@@ -337,31 +341,62 @@ def contract_payload(runner: dict[str, Any], repo: Path, task: str) -> dict[str,
     }
 
 
-def run_process(argv: list[str], env: dict[str, str], cwd: Path, artifact: Path, *, shell: bool = False) -> Any:
-    if shell:
-        proc = subprocess.run(
-            argv[0],
-            shell=True,
-            cwd=str(cwd),
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    else:
-        proc = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    payload = _json_or_text(proc.stdout)
+def run_process(
+    argv: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    artifact: Path,
+    *,
+    shell: bool = False,
+    timeout_seconds: int = 1800,
+) -> Any:
+    """Run one stage and always leave a machine-readable terminal receipt.
+
+    A stage owns its process group.  On timeout we terminate that group rather
+    than leaving an executor, its MCP transport, or a shell child behind.
+    """
+    command: str | list[str] = argv[0] if shell else argv
+    proc = subprocess.Popen(
+        command,
+        shell=shell,
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate()
+        payload = {
+            "ok": False,
+            "status": "timed_out",
+            "exit_code": 124,
+            "timeout_seconds": timeout_seconds,
+            "command": argv,
+            "stdout": _short(stdout or exc.stdout or "", 2000),
+            "stderr": _short(stderr or exc.stderr or "", 2000),
+        }
+        _write_json(artifact, payload)
+        raise LegionRunError(f"stage timed out ({artifact.name}) after {timeout_seconds}s", 124)
+    payload = _json_or_text(stdout)
     if isinstance(payload, dict):
         payload.setdefault("exit_code", proc.returncode)
-        if proc.stderr.strip():
-            payload.setdefault("stderr", proc.stderr.strip())
+        if stderr.strip():
+            payload.setdefault("stderr", stderr.strip())
     _write_json(artifact, payload)
     if proc.returncode != 0:
         raise LegionRunError(f"stage failed ({artifact.name}): exit {proc.returncode}", 1)
@@ -423,7 +458,7 @@ _BLOCKING_REVIEW_MARKER = re.compile(r"\[(?:p0|p1|p2)\]", re.IGNORECASE)
 
 
 def _review_verdict_value(payload: dict[str, Any]) -> Any:
-    verdict = payload.get("verdict")
+    verdict = payload.get("verdict", payload.get("result"))
     if isinstance(verdict, str):
         text = verdict.strip()
         if text.startswith("{") and text.endswith("}"):
@@ -590,9 +625,21 @@ def has_jsonl_rows(path: Path) -> bool:
     return any(line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines())
 
 
-def ensure_slices(path: Path, plan_path: Path, plugin: dict[str, Any], task: str) -> None:
+def ensure_slices(
+    path: Path,
+    plan_path: Path,
+    plugin: dict[str, Any],
+    task: str,
+    *,
+    allow_generated_slices: bool,
+) -> None:
     if has_jsonl_rows(path):
         return
+    if not allow_generated_slices:
+        raise LegionRunError(
+            "plan did not create slices.jsonl; serious workflows must provide explicit slices "
+            "(use --allow-generated-slices only for the legacy compatibility path)",
+        )
     plan = _load_json_object(plan_path)
     slices = default_tdd_slices(plan, plugin, task)
     _write_jsonl(path, slices)
@@ -615,6 +662,14 @@ def load_slices(path: Path) -> list[dict[str, Any]]:
     if not slices:
         raise LegionRunError("plan produced no slices")
     return slices
+
+
+def copy_explicit_slices(source_value: str, destination: Path, base_dir: Path) -> None:
+    """Copy a direct-mode work queue into the run directory without interpreting it."""
+    source = _resolve_plan_source(source_value, base_dir)
+    if source == destination:
+        return
+    shutil.copyfile(source, destination)
 
 
 def _resolve_plan_source(plan_file: str, base_dir: Path) -> Path:
@@ -1294,7 +1349,15 @@ def record_learning_feedback(
     return payload
 
 
-def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) -> int:
+def execute(
+    runner: dict[str, Any],
+    repo: Path,
+    task: str,
+    json_output: bool,
+    *,
+    stage_timeout_seconds: int,
+    allow_generated_slices: bool,
+) -> int:
     state = legion_state.resolve_state(str(repo))
     run_id = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + f"-{_slug(runner['name'])}"
     run_dir = Path(state["state_root"]) / "runs" / "legion-run" / run_id
@@ -1332,7 +1395,14 @@ def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) ->
         current_stage = stage
         _set_stage_status(stages, stage, "running")
         write_stage_status(run_dir, stages)
-        payload = run_process(argv, env, repo, artifact, shell=shell)
+        payload = run_process(
+            argv,
+            env,
+            repo,
+            artifact,
+            shell=shell,
+            timeout_seconds=stage_timeout_seconds,
+        )
         validate_stage_payload(stage, payload, artifact)
         _set_stage_status(stages, stage, "passed")
         write_stage_status(run_dir, stages)
@@ -1478,10 +1548,25 @@ def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) ->
             write_plan_from_files(list(runner["plan_files"]), plan_path, runner, task, repo)
             _write_json(run_dir / "plan-command.json", {"ok": True, "source": "plan-file", "paths": runner["plan_files"]})
         else:
-            run_process([runner["commands"]["plan"]], env, repo, run_dir / "plan-command.json", shell=True)
+            run_process(
+                [runner["commands"]["plan"]],
+                env,
+                repo,
+                run_dir / "plan-command.json",
+                shell=True,
+                timeout_seconds=stage_timeout_seconds,
+            )
             normalize_plan_file(plan_path, runner, task)
         slices_path = run_dir / "slices.jsonl"
-        ensure_slices(slices_path, plan_path, runner, task)
+        if runner.get("slices_file"):
+            copy_explicit_slices(str(runner["slices_file"]), slices_path, repo)
+        ensure_slices(
+            slices_path,
+            plan_path,
+            runner,
+            task,
+            allow_generated_slices=allow_generated_slices,
+        )
         slices = load_slices(slices_path)
         _set_stage_status(stages, "plan", "passed")
         write_stage_status(run_dir, stages)
@@ -1499,6 +1584,7 @@ def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) ->
                 env,
                 repo,
                 run_dir / f"route-{len(routes)}.json",
+                timeout_seconds=stage_timeout_seconds,
             )
             routes.append({"slice": item, "route": route})
         _write_json(run_dir / "routes.json", {"routes": routes})
@@ -1506,8 +1592,26 @@ def execute(runner: dict[str, Any], repo: Path, task: str, json_output: bool) ->
         write_stage_status(run_dir, stages)
 
         stage_run("fanout-apply", [_cmd("legion-fanout"), "--slices", str(slices_path), "--repo", str(repo), "--apply", "--json"], run_dir / "fanout.json")
-        stage_run("review", [_cmd("legion-delegate"), "review", "--archetype", "final-review", "--repo", str(repo), "--base", "HEAD"], run_dir / "review.json")
         validation_payload = stage_run("validate", [runner["commands"]["validate"]], run_dir / "validation.json", shell=True)
+        review_route = run_process(
+            [_cmd("legion-route"), "final-review", "--task", "independent final review"],
+            env,
+            repo,
+            run_dir / "review-route.json",
+            timeout_seconds=stage_timeout_seconds,
+        )
+        review_executor = str(review_route.get("executor") if isinstance(review_route, dict) else "")
+        if review_executor == "claude":
+            review_task = (
+                "Review the current repository diff against HEAD after deterministic validation. "
+                "Return one JSON object only: {\"verdict\":\"approve|request_changes\","
+                "\"summary\":string,\"findings\":[{\"severity\":\"critical|high|medium|low\","
+                "\"title\":string,\"detail\":string}]}. Focus on correctness, unnecessary complexity, "
+                "and spec adherence."
+            )
+            stage_run("review", [_cmd("legion-claude"), "run", "--repo", str(repo), "--model", str(review_route.get("model") or ""), "--effort", str(review_route.get("reasoning_effort") or "high"), "--no-fallback", "--task", review_task], run_dir / "review.json")
+        else:
+            stage_run("review", [_cmd("legion-delegate"), "review", "--archetype", "final-review", "--repo", str(repo), "--base", "HEAD"], run_dir / "review.json")
         eval_payload = stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True)
         stage_run("report", [_cmd("legion-report"), "--trace", "latest", "--json"], run_dir / "legion-report.json")
         stage_run("share", [_cmd("legion-share"), "--window", "1d", "--json"], run_dir / "share.json")
@@ -1542,14 +1646,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--name", default="")
     parser.add_argument("--plan-command", "--plan", dest="plan_command", default="")
     parser.add_argument("--plan-file", dest="plan_files", action="append", default=[])
+    parser.add_argument(
+        "--slices-file",
+        default="",
+        help="repo-relative or absolute JSONL work queue for direct mode",
+    )
     parser.add_argument("--validate-command", "--validate", dest="validate_command", default="")
     parser.add_argument("--evaluate-command", "--evaluate", dest="evaluate_command", default="")
+    parser.add_argument(
+        "--stage-timeout-seconds",
+        type=int,
+        default=1800,
+        help="maximum duration for each external lifecycle stage (default: 1800)",
+    )
+    parser.add_argument(
+        "--allow-generated-slices",
+        action="store_true",
+        help="enable legacy generic slices when the plan provider does not emit slices.jsonl",
+    )
     parser.add_argument("--repo", default=os.getcwd())
     parser.add_argument("--task", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+
+    def _cancel(signum: int, _frame: Any) -> None:
+        raise LegionRunError(f"run cancelled by {signal.Signals(signum).name}", 130)
+
+    signal.signal(signal.SIGTERM, _cancel)
+    signal.signal(signal.SIGINT, _cancel)
     try:
         repo = Path(args.repo).expanduser().resolve()
         if args.plugin or args.plugin_manifest:
@@ -1566,10 +1694,22 @@ def main(argv: list[str] | None = None) -> int:
                 for stage in PIPELINE_STAGES:
                     print(f"- {stage}")
             return 0
-        return execute(runner, repo, args.task, args.json)
+        if args.stage_timeout_seconds < 1:
+            raise LegionRunError("--stage-timeout-seconds must be at least 1")
+        return execute(
+            runner,
+            repo,
+            args.task,
+            args.json,
+            stage_timeout_seconds=args.stage_timeout_seconds,
+            allow_generated_slices=args.allow_generated_slices,
+        )
     except LegionRunError as exc:
         print(f"legion-run: {exc}", file=sys.stderr)
         return exc.code
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
 
 
 if __name__ == "__main__":

@@ -371,7 +371,7 @@ repos_file_for_repo() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e --arg model "$CODEX_WORKHORSE" '.model == $model'
   assert_mock_called codex "exec --json -m $CODEX_WORKHORSE -s workspace-write"
-  assert_mock_called codex "model_reasoning_effort=max"
+  assert_mock_called codex "model_reasoning_effort=medium"
 }
 
 @test "delegate run: explicit --model overrides --archetype" {
@@ -390,10 +390,11 @@ repos_file_for_repo() {
 
 @test "delegate review: --archetype gives configured reviewer + structured verdict via --output-schema" {
   # `delegate review` is the codex structured-verdict flow -> use a codex review
-  # archetype (final-review). Cross-lineage archetypes (second-opinion/tiebreak)
+  # archetype (security-review). Final-review routes to Fable through legion-run.
+  # Cross-lineage archetypes (second-opinion/tiebreak)
   # route to Cursor and run via `--executor cursor`, not this codex path.
   local repo; repo="$(make_test_repo arch4)"
-  run "$DELEGATE" review --archetype final-review --base main --repo "$repo" --quiet
+  run "$DELEGATE" review --archetype security-review --base main --repo "$repo" --quiet
   [ "$status" -eq 0 ]
   echo "$output" | jq -e --arg model "$CODEX_REVIEW" '.model == $model and .verdict.verdict == "approve" and (.verdict.summary | type == "string")'
   assert_mock_called codex "exec review --base main -m $CODEX_REVIEW"
@@ -492,7 +493,7 @@ repos_file_for_repo() {
 
 @test "delegate review: passes a clean reasoning effort (no 5-field pipe leak)" {
     local repo; repo="$(make_test_repo rev5)"
-    run "$DELEGATE" review --archetype final-review --base main --repo "$repo" --quiet
+    run "$DELEGATE" review --archetype security-review --base main --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     assert_mock_called codex "model_reasoning_effort=max"
     ! grep -qE 'model_reasoning_effort=[a-z]+\|' "$MOCK_CALL_LOG"

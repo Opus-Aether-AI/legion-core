@@ -63,7 +63,8 @@ building a new runner profile.
    Codex slices run in parallel worktrees; `self` slices come back `status:"inline"` for you to do. You stay free to coordinate.
 4. **Cross-model verify** (configured Codex reviewer) — for each returned diff, get an independent structured verdict:
    ```bash
-   legion-delegate review --archetype final-review --base <branch>
+   legion-run resolves `final-review` through its configured executor; do not
+   invoke the Codex-only `legion-delegate review` command for that archetype.
    ```
    Reconcile its findings against your own. **Always get the configured reviewer sign-off before merge.**
 5. **Synthesize** (Claude) — apply the verified diffs (`legion-delegate apply --run <id>`), resolve conflicts, integrate.

@@ -68,7 +68,8 @@ Run `legion-route --list` for the full set. Grouped by role:
 | Role | Archetypes | → model |
 |---|---|---|
 | **Claude orchestrates (self)** | `orchestrate`, `architecture-decision`, `deep-reasoning` | `claude_orchestrator` — **refuses to delegate** |
-| **Codex implementation/review path** | `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `final-review`, `second-opinion-review`, `cross-model-tiebreak`, `security-review`, `hard-bug`, `perf-optimization` | `codex_workhorse` / `codex_review` |
+| **Codex execution path** | `scout`, `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `security-review`, `hard-bug`, `perf-optimization` | `codex_workhorse` / `codex_review` |
+| **Fable merge judgement** | `final-review` | `claude_default` |
 
 So: most coding + final review + hard/critical → Codex roles from `models.toml`; orchestration + judgement → you keep it (delegating it is refused).
 
@@ -99,7 +100,12 @@ legion-delegate apply   --run <RUN_ID> --repo .
 legion-delegate cleanup --run <RUN_ID> --repo .
 ```
 
-Reasoning effort (via codex `-c model_reasoning_effort`): **codex always runs at `xhigh`** — every archetype is xhigh and `legion-delegate` defaults to xhigh when unset (on a subscription the marginal cost is flat, so favor quality). Claude orchestration runs at **xhigh minimum** (dynamic higher if a task needs it). `review` returns a schema-valid verdict (`schema/review-verdict.schema.json`) so you can weigh Codex findings against your own programmatically.
+Reasoning effort (via codex `-c model_reasoning_effort`) is chosen by archetype:
+use `low`/`medium` for bounded investigation and mechanical work, `high` for a
+scoped implementation, and `max` only for a declared hard or persistent slice.
+Claude runs at `high` for intent, design, and final merge judgement. `review`
+returns a schema-valid Codex verdict; the final workflow review may also route
+to Fable for independent simplification judgement.
 
 ## Credit / quota resilience (self-healing)
 

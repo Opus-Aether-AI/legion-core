@@ -27,7 +27,7 @@ def test_resolve_known_archetype():
     assert r["model_ref"] == "codex_workhorse"
     assert r["model"] == lr.resolve_model_ref(model_table, "codex_workhorse")
     assert r["sandbox"] == "workspace-write"
-    assert r["reasoning_effort"] == "max"   # GPT-5.6 runs at max
+    assert r["reasoning_effort"] == "medium"   # bounded mechanical work stays cheap
     assert r["resolved"] is True
 
 
@@ -37,8 +37,8 @@ def test_load_table_without_tomllib_uses_stdlib_fallback(monkeypatch):
     r = lr.resolve(table, "final-review")
     assert table["targets"]["codex_share"] == 0.5
     assert r["resolved"] is True
-    assert r["executor"] == "codex"
-    assert r["model"] == "gpt-5.6-sol"
+    assert r["executor"] == "claude"
+    assert r["model"] == "claude-fable-5"
     assert r["sandbox"] == "read-only"
 
 
@@ -178,14 +178,25 @@ def test_composer_is_kept_available_but_unrouted():
         assert r["model_ref"] != "cursor_composer", f"{name} routes to composer, but it should be unrouted"
 
 
-def test_effort_policy_fable_high_gpt_max_grok_high():
+def test_effort_policy_uses_tiered_codex_and_independent_final_review():
     t, m = table(), models()
     for a in ("orchestrate", "architecture-decision", "deep-reasoning", "frontend-implement"):
         r = lr.resolve(t, a, m)
         assert r["executor"] == "self" and r["reasoning_effort"] == "high", (a, r)
-    for a in ("implement-feature", "fix-bug", "cheap-bulk", "hard-bug", "final-review", "security-review"):
+    for a in ("implement-feature", "fix-bug"):
+        r = lr.resolve(t, a, m)
+        assert r["executor"] == "codex" and r["reasoning_effort"] == "high", (a, r)
+    for a in ("hard-bug", "security-review"):
         r = lr.resolve(t, a, m)
         assert r["executor"] == "codex" and r["reasoning_effort"] == "max", (a, r)
+    for a in ("scout", "cheap-bulk", "docs-edit", "boilerplate"):
+        r = lr.resolve(t, a, m)
+        assert r["executor"] == "codex" and r["reasoning_effort"] == "low", (a, r)
+    assert lr.resolve(t, "scout", m)["sandbox"] == "read-only"
+    for a in ("write-tests", "bulk-mechanical-edit"):
+        assert lr.resolve(t, a, m)["reasoning_effort"] == "medium", a
+    review = lr.resolve(t, "final-review", m)
+    assert review["executor"] == "claude" and review["model_ref"] == "claude_default" and review["reasoning_effort"] == "high"
     for a in ("frontend-polish", "frontend-review"):   # Claude models on Claude Code
         r = lr.resolve(t, a, m)
         assert r["executor"] == "claude" and r["reasoning_effort"] == "high", (a, r)
@@ -194,12 +205,13 @@ def test_effort_policy_fable_high_gpt_max_grok_high():
         assert r["executor"] == "cursor" and r["reasoning_effort"] == "high", (a, r)
 
 
-def test_hard_and_review_use_top_gpt_sol():
+def test_hard_and_security_review_use_top_gpt_sol_but_final_review_uses_fable():
     t, m = table(), models()
     sol = lr.resolve_model_ref(m, "codex_review")
     assert sol == "gpt-5.6-sol"
-    for a in ("hard-bug", "final-review", "security-review"):
+    for a in ("hard-bug", "security-review"):
         assert lr.resolve(t, a, m)["model"] == sol, a
+    assert lr.resolve(t, "final-review", m)["model"] == "claude-fable-5"
 
 
 def test_cheap_bulk_uses_cheapest_gpt_tier():

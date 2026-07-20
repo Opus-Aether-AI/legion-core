@@ -10,9 +10,9 @@
 # CODE (the `claude` executor), never piped through Cursor. Cursor hosts ONLY its
 # native non-Claude models (Grok + Composer, kept available). (sonnet / haiku
 # removed; Kimi deferred until it's routable via Cursor.)
-# EFFORT: Fable runs at `high` (barely improves past that, and cost
-# doubles); GPT-5.6 runs at `max` (its real ceiling above xhigh — terra drops from
-# 70% to 60% SWE without it); Grok tops out at `high` (its ceiling, no xhigh/max).
+# EFFORT: Fable runs at `high` for judgement. GPT-5.6 is tiered: low/medium
+# for bounded work, high for scoped implementation, max only for hard or
+# persistent slices. Grok tops out at `high`.
 # The effort per archetype lives in routing.toml.
 
 [models]
@@ -22,9 +22,9 @@ claude_default      = "claude-fable-5"   # generic Claude / reverse-delegate tar
 claude_opus         = "claude-opus-4-8"  # FRONTEND polish only — Opus on Claude Code (run at high thinking)
 
 # ── OpenAI GPT-5.6 (Codex) — run at max ────────────────────────────
-codex_workhorse     = "gpt-5.6-terra"    # bulk implementation (the workhorse; needs max to shine)
-codex_review        = "gpt-5.6-sol"      # review + hardest work (top coder: 73% SWE @ max)
-codex_cheap         = "gpt-5.6-luna"     # cheap-bulk / boilerplate (cheapest functional GPT @ max)
+codex_workhorse     = "gpt-5.6-terra"    # persistent scoped implementation
+codex_review        = "gpt-5.6-sol"      # technical second opinion / hard execution
+codex_cheap         = "gpt-5.6-luna"     # bounded search, boilerplate, mechanical edits
 codex_default       = "gpt-5.6-terra"    # generic Codex
 
 # ── Cursor harness roles (Cursor-native models ONLY; effort encoded in the id) ──

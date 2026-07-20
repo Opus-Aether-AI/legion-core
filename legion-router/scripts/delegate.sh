@@ -685,6 +685,7 @@ cmd_review() {
     local r_exec r_model r_sandbox r_effort
     local _r_fb
     IFS='|' read -r r_exec r_model r_sandbox r_effort _r_fb <<< "$(resolve_archetype "$archetype")"
+    [[ "$r_exec" == "codex" ]] || die "review archetype '$archetype' routes to executor=$r_exec; invoke its executor-specific review adapter"
     [[ -n "$model" ]]  || model="$r_model"
     [[ -n "$effort" ]] || effort="$r_effort"
   fi

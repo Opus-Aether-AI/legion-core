@@ -4,7 +4,7 @@ A domain plugin lets you sell Legion Core to a specific software business
 without baking that business logic into the core engine.
 
 Legion Core handles routing, fan-out, review, reports, memory, and repair.
-Your plugin handles reusable domain language, planning briefs or exact slices,
+Your plugin handles reusable domain language, plans with exact slices,
 validation, and evals.
 
 You do not need a domain plugin for every big task. Use `legion-run` direct mode
@@ -16,7 +16,7 @@ want the same domain workflow reused across many repos or customer demos.
 ```text
 Skill file      -> optional agent instructions for Codex/Claude/Cursor
 Manifest        -> tells legion-run which executable hooks to call
-Plan hook       -> writes plan.json; slices.jsonl is optional
+Plan hook       -> writes plan.json and slices.jsonl
 Validate hook   -> runs app gates after code is applied
 Evaluate hook   -> scores whether the domain goal was met
 legion-run      -> enforces the heavy-task lifecycle around those hooks
@@ -111,16 +111,16 @@ plugin may ask the agent to use:
 
 The plan hook always writes `plan.json` using `$LEGION_RUN_PLAN_FILE`.
 
-It has two modes:
+It has one production mode and one migration escape hatch:
 
 | Mode | Use when |
 |---|---|
-| Brief-only | You want the plugin to describe the domain and TDD policy, then let Legion Core generate the slices. |
-| Exact slices | You want the plugin to fully control the work queue by also writing `$LEGION_RUN_SLICES_FILE`. |
+| Explicit slices | The plugin writes the executable work queue to `$LEGION_RUN_SLICES_FILE`. |
+| Legacy generated slices | An operator may pass `--allow-generated-slices` while migrating an old brief-only plan. |
 
-### Brief-only plan
+### Legacy brief-only plan
 
-This is the recommended starting point for app-builder plugins.
+This is supported only while migrating an existing app-builder plugin.
 
 Example `bin/support-plan`:
 
@@ -143,8 +143,9 @@ cat > "$LEGION_RUN_PLAN_FILE" <<JSON
 JSON
 ```
 
-If the hook does not create `slices.jsonl`, `legion-run` generates a compact
-default TDD work queue and records it as `slices.jsonl` in the run directory.
+If the hook does not create `slices.jsonl`, `legion-run` fails the plan stage.
+An operator may pass `--allow-generated-slices` to request the old generic TDD
+queue explicitly during migration; product workflows must not rely on it.
 
 ### Exact slices
 

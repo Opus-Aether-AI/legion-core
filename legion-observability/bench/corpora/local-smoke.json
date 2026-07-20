@@ -85,7 +85,7 @@
           "type": "json_file_field_equals",
           "path": "{workspace}/route.json",
           "field": "model_ref",
-          "equals": "codex_review"
+          "equals": "claude_default"
         },
         {
           "type": "json_file_field_equals",

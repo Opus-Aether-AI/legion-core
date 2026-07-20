@@ -20,7 +20,7 @@ Legion is a team. Play each model to its strength:
 - **Claude = orchestrate** — plan, decompose, decide, **verify**, integrate. Claude is the *conductor*, not the bulk coder. (archetypes: `orchestrate`, `architecture-decision`, `deep-reasoning`)
 - **Codex workhorse = implementation + review** — do **most of the coding** and final review: implementation, tests, refactors, bulk edits, migrations, boilerplate, hard/critical/risky work, and cross-model verification. The concrete model ID resolves from `config/models.toml`.
 
-**The rule:** codex should do **≥50% of delegatable work** (`routing.toml [targets].codex_share`). Concretely — when you have an implementation task, **delegate by archetype by default** rather than coding it yourself; reserve your own cycles for orchestration + judgement, and route the **final review to the configured Codex reviewer**.
+**The rule:** codex should do **≥50% of delegatable work** (`routing.toml [targets].codex_share`). Concretely — when you have an implementation task, **delegate by archetype by default** rather than coding it yourself; reserve your own cycles for orchestration + judgement, and route the **final review to the independent Fable reviewer**.
 
 **Make it measurable (the controller loop):**
 1. When you do a task **yourself**, log it: `legion-trace emit --executor opus --model "$(legion-route --model-ref claude_orchestrator)" --status ok` (so the split has a denominator).

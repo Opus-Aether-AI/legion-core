@@ -2,12 +2,12 @@
 name: legion-orchestrate
 kind: procedure
 # disable-model-invocation intentionally false: cross-harness orchestrator entrypoint
-description: Use to deliver a multi-step coding goal with Legion's dynamic multi-model orchestration — decompose the goal, fan out implementation slices to the configured Codex workhorse in parallel, cross-model verify with the configured Codex reviewer, synthesize, and gate. The multi-model version of ultracode/Workflow orchestration. Triggers on "orchestrate with legion", "fan out", "ultracode", "build this with legion", parallel multi-model delivery, or any sizeable feature/refactor you want delivered with codex doing the bulk.
+description: Use to deliver a multi-step coding goal with Legion's dynamic multi-model orchestration — decompose the goal, fan out implementation slices to the configured Codex workhorse in parallel, cross-model verify with the independent Fable reviewer, synthesize, and gate. The multi-model version of ultracode/Workflow orchestration. Triggers on "orchestrate with legion", "fan out", "ultracode", "build this with legion", parallel multi-model delivery, or any sizeable feature/refactor you want delivered with codex doing the bulk.
 ---
 
 # Legion Orchestrate — dynamic multi-model delivery (ultracode for a legion of models)
 
-The Claude "ultracode" loop (decompose → fan out → adversarially verify → synthesize → gate), but **executor-aware**: Claude conducts, the configured Codex workhorse does the bulk of coding in parallel, the configured Codex reviewer verifies, all metered and kept at ≥50% codex ([[project_legion_marketplace]]).
+The Claude "ultracode" loop (decompose → fan out → adversarially verify → synthesize → gate), but **executor-aware**: Claude conducts, the configured Codex workhorse does the bulk of coding in parallel, and Fable provides the independent final judgement, all metered and kept at ≥50% codex ([[project_legion_marketplace]]).
 
 ## Preflight
 
@@ -61,7 +61,7 @@ building a new runner profile.
    #   {"archetype":"implement-feature","task":"...self-contained spec..."}
    ```
    Codex slices run in parallel worktrees; `self` slices come back `status:"inline"` for you to do. You stay free to coordinate.
-4. **Cross-model verify** (configured Codex reviewer) — for each returned diff, get an independent structured verdict:
+4. **Cross-model verify** (independent Fable reviewer) — for each returned diff, get an independent structured verdict:
    ```bash
    legion-run resolves `final-review` through its configured executor; do not
    invoke the Codex-only `legion-delegate review` command for that archetype.
@@ -74,7 +74,7 @@ building a new runner profile.
 
 Go maximally exhaustive:
 - **More parallelism** — decompose finer; fan out widely (`--max-concurrency` up).
-- **Multi-vote verify** — a diff is accepted only if **the configured Codex reviewer *and* Claude** both approve (run `final-review` + your own review; disagreement → `cross-model-tiebreak`).
+- **Multi-vote verify** — a diff is accepted only if **the independent Fable reviewer and the primary engineer** both approve (run `final-review` + your own review; disagreement → `cross-model-tiebreak`).
 - **Loop-until-dry** — re-run review fan-out until two consecutive passes surface nothing new.
 - Everything metered; check `legion-share` to confirm codex carried ≥50%.
 

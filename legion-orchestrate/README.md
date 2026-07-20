@@ -1,8 +1,8 @@
 # legion-orchestrate
 
-Legion's dynamic **multi-model** orchestrator — the ultracode loop, but Claude conducts while the configured Codex workhorse does the bulk of coding in parallel and the configured Codex reviewer verifies.
+Legion's dynamic **multi-model** orchestrator — the ultracode loop, but Claude conducts while the configured Codex workhorse does the bulk of coding in parallel and independent Fable review verifies.
 
-> Decompose → fan out (configured Codex, parallel) → cross-model verify (configured reviewer) → synthesize → gate.
+> Decompose → fan out (configured Codex, parallel) → cross-model verify (independent Fable) → synthesize → gate.
 
 ## `legion-run`
 
@@ -91,7 +91,7 @@ printf '%s\n' \
 
 ## The playbook + ultracode mode
 
-`SKILL.md` is the orchestration playbook (decompose → fan out → cross-model verify → synthesize → gate). `LEGION_ULTRACODE=1` goes maximally exhaustive: wide fan-out, multi-vote verify (configured Codex reviewer **and** Claude must approve), loop-until-dry — all metered, kept ≥50% codex via `legion-share`.
+`SKILL.md` is the orchestration playbook (decompose → fan out → cross-model verify → synthesize → gate). `LEGION_ULTRACODE=1` goes maximally exhaustive: wide fan-out, multi-vote verify (independent Fable reviewer **and** the primary engineer must approve), loop-until-dry — all metered, kept ≥50% codex via `legion-share`.
 
 ## Depends on
 

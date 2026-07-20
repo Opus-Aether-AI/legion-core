@@ -49,13 +49,13 @@
       "id": "route.docs-edit",
       "type": "route",
       "dimension": "routing",
-      "summary": "Docs edits use the Codex workhorse (GPT-5.6) at max effort.",
+      "summary": "Docs edits use the Codex workhorse at low effort.",
       "archetype": "docs-edit",
       "expect": {
         "executor": "codex",
         "model_ref": "codex_workhorse",
         "sandbox": "workspace-write",
-        "reasoning_effort": "max"
+        "reasoning_effort": "low"
       },
       "required": true
     },

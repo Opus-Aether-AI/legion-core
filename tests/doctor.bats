@@ -124,7 +124,7 @@ _make_good() {
 #!/bin/sh
 case "$1" in
   implement-feature) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}' ;;
-  final-review) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"read-only","resolved":true}' ;;
+  final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"claude-fable-5","sandbox":"read-only","resolved":true}' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -164,7 +164,7 @@ EOF
 #!/bin/sh
 case "$1" in
   implement-feature) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}' ;;
-  final-review) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"read-only","resolved":true}' ;;
+  final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"claude-fable-5","sandbox":"read-only","resolved":true}' ;;
   *) exit 2 ;;
 esac
 EOF

@@ -14,12 +14,12 @@
 #   reasoning_effort  low | medium | high | xhigh | max
 #   fallback_refs     model_ref keys to try on quota/rate-limit before failing
 #
-# EFFORT POLICY (three families: Fable / GPT-5.6 / Grok 4.5):
-#   - self (Fable):        `high` for intent, design, and merge judgement.
-#   - codex (GPT-5.6):     `low`/`medium` for bounded work, `high` for scoped
+# EFFORT POLICY (the configured Claude, Codex, and Cursor roles):
+#   - self:                `high` for intent, design, and merge judgement.
+#   - codex:               `low`/`medium` for bounded work, `high` for scoped
 #                           implementation, and `max` only for hard/persistent work.
-#   - cursor (Grok 4.5):   `high`  — Grok's ceiling (no xhigh/max); effort is also
-#                                    encoded in the model id (cursor-grok-4.5-high).
+#   - cursor:              `high`  — the configured Cursor role's ceiling; effort
+#                            can also be encoded in its catalog value.
 # Each harness translates the level to its own mechanism (codex
 # `-c model_reasoning_effort`; cursor via the model id; claude `--effort`).
 #
@@ -56,7 +56,7 @@ model_ref = "claude_orchestrator"
 reasoning_effort = "high"
 note = "High-judgement reasoning — keep on the primary (Fable), do NOT delegate."
 
-# ── GPT-5.6 (Codex) execution path — effort follows task risk ─────────
+# ── Codex execution path — effort follows task risk ─────────────────────
 [archetypes.implement-feature]
 executor = "codex"
 model_ref = "codex_workhorse"
@@ -183,7 +183,7 @@ executor = "cursor"
 model_ref = "cursor_default"
 sandbox = "read-only"
 reasoning_effort = "high"
-note = "A DIFFERENT lineage (Grok 4.5) reviews a diff the primary/GPT wrote — cross-model diversity catches what same-model review misses."
+note = "A different configured Cursor lineage reviews a diff the primary Codex role wrote — cross-model diversity catches what same-model review misses."
 
 [archetypes.cross-model-tiebreak]
 executor = "cursor"
@@ -197,7 +197,7 @@ executor = "codex"
 model_ref = "codex_review"
 sandbox = "read-only"
 reasoning_effort = "max"
-note = "Adversarial security review — gpt-5.6-sol @ max (auth/secrets/input surfaces)."
+note = "Adversarial security review — use the codex_review ref at max (auth/secrets/input surfaces)."
 
 [archetypes.hard-bug]
 executor = "codex"
@@ -205,7 +205,7 @@ model_ref = "codex_review"
 sandbox = "workspace-write"
 reasoning_effort = "max"
 fallback_refs = []
-note = "A deep/tricky bug needing the strongest coder — gpt-5.6-sol @ max (73% SWE)."
+note = "A deep/tricky bug needing the strongest coder — use the codex_review ref at max."
 
 [archetypes.perf-optimization]
 executor = "codex"

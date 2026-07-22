@@ -83,7 +83,7 @@ def _costs_payload():
     return {
         "models": [
             {
-                "match": "gpt-5.4",
+                "match": "test-model-alpha",
                 "input": 2.0,
                 "output": 10.0,
                 "cache_read": 0.5,
@@ -122,7 +122,7 @@ def test_cost_for_bills_cached_tokens_at_cache_read_and_falls_back_to_default(tm
     _write_json(costs_path, _costs_payload())
     costs = activity.load_costs(str(costs_path))
 
-    known = activity.cost_for("GPT-5.4", _usage(), costs)
+    known = activity.cost_for("test-model-alpha", _usage(), costs)
     unknown = activity.cost_for("mystery-model", _usage(), costs)
 
     assert known == 0.00345
@@ -156,7 +156,7 @@ def test_run_cost_uses_stream_and_resume_stream_usage_not_spans(tmp_path):
     )
 
     costs = activity.load_costs(str(costs_path))
-    cost = activity.run_cost(str(run_dir), "gpt-5.4", costs)
+    cost = activity.run_cost(str(run_dir), "test-model-alpha", costs)
 
     assert cost == 0.003995
     assert cost > 0.0
@@ -166,7 +166,7 @@ def test_enrich_run_falls_back_to_span_cost_when_stream_is_gone():
     # The stream (repo .legion/runs) is ephemeral and gets cleaned; the span
     # (~/.claude/logs/legion/spans) is durable. When there's no stream, cost must
     # come from the span so a finished run still shows its real cost (the $0 fix).
-    rec = {"run_id": "gone", "model": "gpt-5.4", "lifecycle": {"phase": "ok"}}
+    rec = {"run_id": "gone", "model": "test-model-alpha", "lifecycle": {"phase": "ok"}}
     enriched = activity.enrich_run(rec, "", _costs_payload(), span_costs={"gone": 0.4242})
     assert enriched["cost_usd"] == 0.4242  # from the durable span, stream absent
 
@@ -248,7 +248,7 @@ def test_build_activity_uses_registry_records_and_run_root(tmp_path):
         {
             "schema": "legion.run-state.v1",
             "run_id": "run-1",
-            "model": "gpt-5.4",
+            "model": "test-model-alpha",
             "archetype": "implement-feature",
             "worktree_dir": "/repo/.legion/worktrees/a",
             "branch": "main",

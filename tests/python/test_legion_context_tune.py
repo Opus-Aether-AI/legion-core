@@ -14,7 +14,7 @@ def _record(
     fill_pct,
     *,
     schema="legion.handoff.v1",
-    model="gpt-5.4",
+    model="test-model-alpha",
     context_class="main",
     runner_type="default",
     ts="2026-06-15T00:00:00Z",

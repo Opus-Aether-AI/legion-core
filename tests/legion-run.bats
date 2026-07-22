@@ -139,10 +139,10 @@ SH
 #!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
-  implement-feature) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}\n' ;;
-  write-tests) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}\n' ;;
-  refactor-module) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}\n' ;;
-  final-review) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"read-only","resolved":true}\n' ;;
+  implement-feature) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
+  write-tests) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
+  refactor-module) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
+  final-review) printf '{"executor":"codex","model":"test-model-beta","sandbox":"read-only","resolved":true}\n' ;;
   *) exit 2 ;;
 esac
 SH
@@ -154,12 +154,12 @@ SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '{"status":"ok","model":"gpt-5.5","verdict":"ok"}\n'
+printf '{"status":"ok","model":"test-model-beta","verdict":"ok"}\n'
 SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-claude" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '{"status":"ok","model":"claude-fable-5","result":"{\\"verdict\\":\\"approve\\",\\"summary\\":\\"independent review passed\\",\\"findings\\":[]}"}\n'
+printf '{"status":"ok","model":"test-model-claude","result":"{\\"verdict\\":\\"approve\\",\\"summary\\":\\"independent review passed\\",\\"findings\\":[]}"}\n'
 SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-doctor" <<'SH'
 #!/usr/bin/env bash
@@ -326,8 +326,8 @@ SH
 #!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
-  final-review) printf '{"executor":"claude","model":"claude-fable-5","reasoning_effort":"high","resolved":true}\n' ;;
-  *) printf '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}\n' ;;
+  final-review) printf '{"executor":"claude","model":"test-model-claude","reasoning_effort":"high","resolved":true}\n' ;;
+  *) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
 esac
 SH
   chmod +x "$BATS_TEST_TMPDIR/bin/legion-route"
@@ -337,7 +337,7 @@ SH
   [ "$status" -eq 0 ]
   json="$(printf '%s' "$output" | json_from_output)"
   run_dir="$(echo "$json" | jq -r '.run_dir')"
-  jq -e '.model == "claude-fable-5" and (.result | contains("approve"))' "$run_dir/review.json"
+  jq -e '.model == "test-model-claude" and (.result | contains("approve"))' "$run_dir/review.json"
 }
 
 @test "legion-run: installed-style plugin directory works through manifest and bin hooks" {
@@ -701,7 +701,7 @@ SH
 #!/usr/bin/env bash
 set -euo pipefail
 cat <<'JSON'
-{"status":"ok","model":"gpt-5.5","verdict":{"verdict":"request_changes","summary":"Review found a blocking cold-chain SLA regression.","findings":[{"severity":"high","title":"Include all cold-chain assets in outage escalation"}]}}
+{"status":"ok","model":"test-model-beta","verdict":{"verdict":"request_changes","summary":"Review found a blocking cold-chain SLA regression.","findings":[{"severity":"high","title":"Include all cold-chain assets in outage escalation"}]}}
 JSON
 SH
   chmod +x "$BATS_TEST_TMPDIR/bin"/heavy-* "$BATS_TEST_TMPDIR/bin/legion-delegate"

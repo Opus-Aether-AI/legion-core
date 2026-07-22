@@ -140,7 +140,7 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
 
 ## Cost note
 
-GPT-5.x via Codex uses ChatGPT-subscription auth, which reports token counts but **no per-token price** — so GPT cost defaults to `$0` (token-count parity, not dollar). Set real prices in `config/costs.json` (or `LEGION_COSTS_FILE`) if you have API billing.
+The configured Codex role may use subscription auth, which reports token counts but **no per-token price** — so its cost can default to `$0` (token-count parity, not dollar). Set real prices in `config/costs.json` (or `LEGION_COSTS_FILE`) if you have API billing.
 
 ## Routing proxy (optional, opt-in)
 

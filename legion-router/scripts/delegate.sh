@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# legion-delegate — hand a scoped task to an external model agent (Codex / GPT-5.x)
+# legion-delegate — hand a scoped task to an external model agent (Codex)
 # and bring back a verified, metered diff.
 #
 # The honest model: `codex exec` is an autonomous agent (task -> edits), not a chat

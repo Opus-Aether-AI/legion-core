@@ -104,8 +104,8 @@ make_test_repo() {
 
 @test "legion-opencode: --model overrides the default" {
     local repo; repo="$(make_test_repo model1)"
-    run "$LEGION_OPENCODE" run --task "x" --repo "$repo" --model github-copilot/gpt-5.6 --quiet
+    run "$LEGION_OPENCODE" run --task "x" --repo "$repo" --model test-model-opencode --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e '.model == "github-copilot/gpt-5.6"'
-    assert_mock_called opencode "-m github-copilot/gpt-5.6"
+    echo "$output" | jq -e '.model == "test-model-opencode"'
+    assert_mock_called opencode "-m test-model-opencode"
 }

@@ -1,4 +1,5 @@
 import os
+import re
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -41,26 +42,56 @@ ACTIVE_DEFAULT_FILES = [
 
 
 def test_active_default_guidance_uses_model_refs():
-    needles = [
-        "gpt-" + "5.5",
-        "gpt-" + "5.4",
-        "composer-" + "2.5",
-        "claude-haiku-" + "4-5",
-        "claude-" + "opus",
-        "claude-sonnet-" + "4",
-        "sonnet " + "4.6",
-        "model = " + '"opus"',
-        "model=" + '"opus"',
-        "--model " + "opus",
-        "CLAUDE_MODEL=" + "opus",
-    ]
+    concrete_model = _concrete_model_pattern()
     offenders = []
     for rel in ACTIVE_DEFAULT_FILES:
         path = os.path.join(ROOT, rel)
         with open(path, encoding="utf-8") as handle:
             text = handle.read()
-        for needle in needles:
-            if needle in text:
-                offenders.append(f"{rel}: {needle}")
+        if match := concrete_model.search(text):
+            offenders.append(f"{rel}: {match.group(0)}")
+
+    assert offenders == []
+
+
+def _concrete_model_pattern():
+    return re.compile(
+        r"\b(?:gpt-\d+(?:\.\d+)+(?:[-_][a-z0-9.]+)*"
+        r"|claude[-_][a-z0-9.-]*\d[a-z0-9.-]*"
+        r"|o\d+(?:[-_][a-z0-9.]+)?"
+        r"|(?:cursor[-_])?(?:composer|grok)[-_]?\d[a-z0-9._-]*"
+        r"|github-copilot/gpt-\d+(?:\.\d+)*"
+        r"|minimax[-_/][a-z0-9.-]*\d[a-z0-9.-]*)\b",
+        re.IGNORECASE,
+    )
+
+
+def test_only_model_and_cost_catalogs_contain_concrete_model_ids():
+    pattern = _concrete_model_pattern()
+    allowed = {
+        "legion-router/config/models.toml",
+        "legion-router/config/costs.json",
+    }
+    offenders = []
+    for base, dirs, files in os.walk(ROOT):
+        rel_base = os.path.relpath(base, ROOT)
+        dirs[:] = [directory for directory in dirs if directory not in {".git", ".venv", "node_modules"}]
+        if rel_base == "docs/benchmarks" or rel_base.startswith("docs/benchmarks/"):
+            dirs[:] = []
+            continue
+        for name in files:
+            rel = os.path.normpath(os.path.join(rel_base, name))
+            if rel.startswith("./"):
+                rel = rel[2:]
+            if rel in allowed or name.startswith("CHANGELOG") or "lock" in name.lower():
+                continue
+            path = os.path.join(base, name)
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    text = handle.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if match := pattern.search(text):
+                offenders.append(f"{rel}: {match.group(0)}")
 
     assert offenders == []

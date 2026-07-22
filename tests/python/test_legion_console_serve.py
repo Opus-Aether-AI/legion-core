@@ -29,7 +29,7 @@ def test_snapshot_path_returns_valid_shape(tmp_path):
     reg.mkdir()
     spans.mkdir()
     (reg / "r.json").write_text(json.dumps({
-        "schema": "legion.run-state.v1", "run_id": "r", "model": "gpt-5.4",
+        "schema": "legion.run-state.v1", "run_id": "r", "model": "test-model-alpha",
         "run_dir": str(tmp_path / "runs" / "r"), "worktree_dir": str(tmp_path / "wt"),
         "process": {"pid": 0, "pgid": 0, "started_at": "2026-06-15T12:00:00Z"},
         "lifecycle": {"phase": "ok", "started_at": "2026-06-15T12:00:00Z",
@@ -38,4 +38,4 @@ def test_snapshot_path_returns_valid_shape(tmp_path):
     srv.CFG.update(registry=str(reg), spans=str(spans))
     snap = srv.snapshot()
     assert "runs" in snap and "aggregates" in snap and "traces" in snap
-    assert snap["aggregates"]["by_model"]["gpt-5.4"]["runs"] == 1
+    assert snap["aggregates"]["by_model"]["test-model-alpha"]["runs"] == 1

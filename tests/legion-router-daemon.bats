@@ -50,9 +50,9 @@ teardown() {
   echo "$output" | jq -e '.minimaxTokenSet == false'
 }
 
-@test "router: /ingest folds a codex gpt-5.4 run into stats with cost" {
+@test "router: /ingest folds a codex test-model-alpha run into stats with cost" {
   run curl -s -X POST "http://127.0.0.1:$PORT/ingest" \
-    -d '{"model":"gpt-5.4","upstream":"codex","usage":{"input_tokens":89124,"cached_input_tokens":71552,"output_tokens":806,"reasoning_output_tokens":214}}'
+    -d '{"model":"test-model-alpha","upstream":"codex","usage":{"input_tokens":89124,"cached_input_tokens":71552,"output_tokens":806,"reasoning_output_tokens":214}}'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.ok == true'
   echo "$output" | jq -e '.costUsd == 0.077118'
@@ -60,13 +60,13 @@ teardown() {
   run curl -s "http://127.0.0.1:$PORT/stats"
   echo "$output" | jq -e '.totalCostUsd == 0.077118'
   echo "$output" | jq -e '.byUpstream.codex.costUsd == 0.077118'
-  echo "$output" | jq -e '.byModel["gpt-5.4"].inputTokens == 17572'   # billed = 89124 - 71552 cached
-  echo "$output" | jq -e '.byModel["gpt-5.4"].outputTokens == 1020'   # 806 + 214 reasoning
+  echo "$output" | jq -e '.byModel["test-model-alpha"].inputTokens == 17572'   # billed = 89124 - 71552 cached
+  echo "$output" | jq -e '.byModel["test-model-alpha"].outputTokens == 1020'   # 806 + 214 reasoning
 }
 
 @test "router: explicit cost_usd in the record is used verbatim" {
   run curl -s -X POST "http://127.0.0.1:$PORT/ingest" \
-    -d '{"model":"gpt-5.5","upstream":"codex","cost_usd":1.2345,"usage":{"input_tokens":10,"output_tokens":5}}'
+    -d '{"model":"test-model-beta","upstream":"codex","cost_usd":1.2345,"usage":{"input_tokens":10,"output_tokens":5}}'
   echo "$output" | jq -e '.costUsd == 1.2345'
 }
 
@@ -79,9 +79,9 @@ teardown() {
 
 @test "router: malformed /ingest numbers do not poison stats (NaN guard)" {
   curl -s -X POST "http://127.0.0.1:$PORT/ingest" \
-    -d '{"model":"gpt-5.4","usage":{"input_tokens":"oops","output_tokens":{}}}' >/dev/null
+    -d '{"model":"test-model-alpha","usage":{"input_tokens":"oops","output_tokens":{}}}' >/dev/null
   curl -s -X POST "http://127.0.0.1:$PORT/ingest" \
-    -d '{"model":"gpt-5.4","usage":{"input_tokens":100,"output_tokens":10}}' >/dev/null
+    -d '{"model":"test-model-alpha","usage":{"input_tokens":100,"output_tokens":10}}' >/dev/null
   run curl -s "http://127.0.0.1:$PORT/stats"
   echo "$output" | jq -e '.totalInputTokens == 100'             # garbage coerced to 0
   echo "$output" | jq -e '(.totalCostUsd | type) == "number"'   # never NaN/null
@@ -90,13 +90,13 @@ teardown() {
 
 @test "router: negative cost_usd is rejected and recomputed, not trusted" {
   run curl -s -X POST "http://127.0.0.1:$PORT/ingest" \
-    -d '{"model":"gpt-5.4","cost_usd":-999,"usage":{"input_tokens":100,"output_tokens":10}}'
+    -d '{"model":"test-model-alpha","cost_usd":-999,"usage":{"input_tokens":100,"output_tokens":10}}'
   echo "$output" | jq -e '.costUsd >= 0'
 }
 
 @test "router: /stats reset clears counters" {
   curl -s -X POST "http://127.0.0.1:$PORT/ingest" \
-    -d '{"model":"gpt-5.4","upstream":"codex","usage":{"input_tokens":100,"output_tokens":10}}' >/dev/null
+    -d '{"model":"test-model-alpha","upstream":"codex","usage":{"input_tokens":100,"output_tokens":10}}' >/dev/null
   run curl -s "http://127.0.0.1:$PORT/stats?reset=true"
   echo "$output" | jq -e '.totalRequests >= 1'
   run curl -s "http://127.0.0.1:$PORT/stats"

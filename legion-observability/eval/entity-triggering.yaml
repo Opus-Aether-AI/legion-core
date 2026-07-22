@@ -14,7 +14,7 @@ cases:
     expect: legion-observability
     why: observability telemetry and self-learning hints belong to the observability skill
 
-  - prompt: "Delegate a scoped task to GPT-5 or Cursor in an isolated worktree and return a verified diff"
+  - prompt: "Delegate a scoped task to the configured Codex or Cursor role in an isolated worktree and return a verified diff"
     expect_type: skill
     expect: legion-router
     why: scoped model delegation with a verified diff is the router

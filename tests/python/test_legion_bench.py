@@ -310,8 +310,8 @@ def test_fieldops_pipeline_report_renderer_embeds_full_artifact_trail(tmp_path):
             {"check": "codex", "severity": "pass", "message": "codex present"},
             {"check": "router", "severity": "warn", "message": "optional router"},
         ],
-        "route-implement.json": {"resolved": True, "executor": "codex", "model": "gpt-5.5", "sandbox": "workspace-write"},
-        "route-review.json": {"resolved": True, "executor": "codex-review", "model": "gpt-5.5"},
+        "route-implement.json": {"resolved": True, "executor": "codex", "model": "test-model-beta", "sandbox": "workspace-write"},
+        "route-review.json": {"resolved": True, "executor": "codex-review", "model": "test-model-beta"},
         "fanout.json": {
             "slices": 1,
             "ok": 1,
@@ -320,7 +320,7 @@ def test_fieldops_pipeline_report_renderer_embeds_full_artifact_trail(tmp_path):
             "apply_conflicts": 0,
             "results": [{"diff_path": str(diff)}],
         },
-        "review.json": {"status": "ok", "model": "gpt-5.5", "verdict": "Looks good."},
+        "review.json": {"status": "ok", "model": "test-model-beta", "verdict": "Looks good."},
         "score.json": {"passed": True, "score": 7, "total": 7, "failures": {}},
         "legion-report.json": {
             "groups": {"codex": {"count": 1, "ok": 1, "success_rate": 1.0, "cost_usd": 0.1, "p50_ms": 10, "p95_ms": 10}},
@@ -772,14 +772,14 @@ def test_span_totals_roll_up_by_model(tmp_path):
         "\n".join([
             json.dumps({
                 "schema": "legion.span.v1",
-                "model": "composer-2.5",
+                "model": "test-model-composer",
                 "cost_usd": 0,
                 "duration_ms": 10,
                 "tokens": {"input_tokens": 100, "output_tokens": 20},
             }),
             json.dumps({
                 "schema": "legion.span.v1",
-                "model": "gpt-5.5",
+                "model": "test-model-beta",
                 "cost_usd": 0.5,
                 "duration_ms": 30,
                 "tokens": {"total_tokens": 90},
@@ -793,8 +793,8 @@ def test_span_totals_roll_up_by_model(tmp_path):
 
     assert totals["span_count"] == 2
     assert totals["tokens"] == 210
-    assert totals["models"]["composer-2.5"]["tokens"] == 120
-    assert totals["models"]["gpt-5.5"]["cost_usd"] == 0.5
+    assert totals["models"]["test-model-composer"]["tokens"] == 120
+    assert totals["models"]["test-model-beta"]["cost_usd"] == 0.5
 
 
 def test_learning_lift_payload_scores_before_after_memory(tmp_path):
@@ -1018,7 +1018,7 @@ def test_render_corpus_markdown_includes_paired_table():
                     "tokens": 0,
                     "span_count": 1,
                     "models": {
-                        "gpt-5.5": {
+                        "test-model-beta": {
                             "span_count": 1,
                             "cost_usd": 0,
                             "tokens": 0,
@@ -1040,7 +1040,7 @@ def test_render_corpus_markdown_includes_paired_table():
                     "tokens": 0,
                     "span_count": 1,
                     "models": {
-                        "composer-2.5": {
+                        "test-model-composer": {
                             "span_count": 1,
                             "cost_usd": 0,
                             "tokens": 0,
@@ -1074,7 +1074,7 @@ def test_render_corpus_markdown_includes_paired_table():
     assert "Mode Results" in markdown
     assert "| Mode | Pass | Blocked | Case-runs |" in markdown
     assert "Model Metering" in markdown
-    assert "`composer-2.5`" in markdown
+    assert "`test-model-composer`" in markdown
     assert "Candidate paired wins" in markdown
     assert "`base..cand`" in markdown
 

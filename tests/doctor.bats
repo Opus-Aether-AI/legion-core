@@ -123,8 +123,8 @@ _make_good() {
   cat > "$fake/legion-route" <<'EOF'
 #!/bin/sh
 case "$1" in
-  implement-feature) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}' ;;
-  final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"claude-fable-5","sandbox":"read-only","resolved":true}' ;;
+  implement-feature) printf '%s\n' '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}' ;;
+  final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"test-model-claude","sandbox":"read-only","resolved":true}' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -152,7 +152,10 @@ EOF
 }
 
 @test "doctor: state-root auto-resolves when LEGION_STATE_ROOT is missing" {
-  HOME="$BATS_TEST_TMPDIR/home" LEGION_STATE_ROOT= LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only state-root
+  HOME="$BATS_TEST_TMPDIR/home" \
+    LEGION_STATE_ROOT= LEGION_TELEMETRY_DIR= LEGION_REGISTRY_DIR= \
+    LEGION_REPOS_FILE= LEGION_BENCH_DIR= LEGION_REPORTS_DIR= \
+    LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only state-root
   [ "$status" -eq 0 ]
   [[ "$output" == *"Legion state root centralizes"* ]]
   [[ "$output" == *".legion/projects"* ]]
@@ -163,8 +166,8 @@ EOF
   cat > "$fake/legion-route" <<'EOF'
 #!/bin/sh
 case "$1" in
-  implement-feature) printf '%s\n' '{"executor":"codex","model":"gpt-5.5","sandbox":"workspace-write","resolved":true}' ;;
-  final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"claude-fable-5","sandbox":"read-only","resolved":true}' ;;
+  implement-feature) printf '%s\n' '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}' ;;
+  final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"test-model-claude","sandbox":"read-only","resolved":true}' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -189,6 +192,7 @@ EOF
     LEGION_REGISTRY_DIR= \
     LEGION_REPOS_FILE= \
     LEGION_BENCH_DIR= \
+    LEGION_REPORTS_DIR= \
     run "$DOCTOR" --repo "$GOOD" --strict-demo --json
   [ "$status" -eq 0 ]
   echo "$output" | tail -n 1 | jq -e '[.[].check] | index("route-smoke") and index("delegate-smoke") and index("state-root") and index("test-tools")'

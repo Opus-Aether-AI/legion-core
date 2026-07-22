@@ -266,7 +266,7 @@ Usage:
                       [--base REF] [--sandbox read-only|workspace-write] [--apply] [--keep] [--quiet]
   legion-opencode run [--repo DIR] < task.txt
 
-Model is provider/model (e.g. minimax/MiniMax-M2); default resolves from
+Model is provider/model; the default resolves from
 legion-router/config/models.toml (opencode_default). Set OPENCODE_BIN to override
 the binary; Legion pins $HOME/.opencode/bin/opencode first. LEGION_OPENCODE_VARIANT
 sets the reasoning variant (high|max|minimal).

@@ -38,7 +38,7 @@ def test_load_table_without_tomllib_uses_stdlib_fallback(monkeypatch):
     assert table["targets"]["codex_share"] == 0.5
     assert r["resolved"] is True
     assert r["executor"] == "claude"
-    assert r["model"] == "claude-fable-5"
+    assert r["model"] == lr.resolve_model_ref(models(), "claude_default")
     assert r["sandbox"] == "read-only"
 
 
@@ -116,7 +116,7 @@ def test_model_ref_lookup_does_not_require_tomllib(monkeypatch, capsys):
     monkeypatch.setattr(lr, "tomllib", None)
 
     assert lr.main(["--model-ref", "cursor_default", "--models-file", MODELS_TABLE]) == 0
-    assert capsys.readouterr().out.strip() == "cursor-grok-4.5-high"
+    assert capsys.readouterr().out.strip() == lr.resolve_model_ref(models(), "cursor_default")
 
 
 def test_main_rejects_unknown_model_ref():
@@ -127,7 +127,7 @@ def test_main_requires_archetype_or_list():
     assert lr.main(["--file", TABLE, "--models-file", MODELS_TABLE]) == 2
 
 
-# ── new-catalog policy: Fable / Opus / GPT-5.6 / Grok / Composer ──────────
+# ── catalog policy: configured Claude, Codex, and Cursor roles ────────────
 # Opus is admitted but scoped to FRONTEND only (claude_opus, on Claude Code);
 # it must never leak into another role, and Cursor never hosts a Claude model.
 # Composer (Cursor in-house) is kept available but unrouted.
@@ -172,7 +172,7 @@ def test_composer_is_kept_available_but_unrouted():
     # Composer (Cursor in-house) stays in the catalog so it's available, but is
     # deliberately not assigned to any archetype yet.
     t, m = table(), models()
-    assert m.get("cursor_composer") == "composer-2.5", "cursor_composer must stay in the catalog"
+    assert m.get("cursor_composer"), "cursor_composer must stay in the catalog"
     for name in t.get("archetypes", {}):
         r = lr.resolve(t, name, m)
         assert r["model_ref"] != "cursor_composer", f"{name} routes to composer, but it should be unrouted"
@@ -205,17 +205,17 @@ def test_effort_policy_uses_tiered_codex_and_independent_final_review():
         assert r["executor"] == "cursor" and r["reasoning_effort"] == "high", (a, r)
 
 
-def test_hard_and_security_review_use_top_gpt_sol_but_final_review_uses_fable():
+def test_hard_and_security_review_use_codex_review_but_final_review_uses_claude_default():
     t, m = table(), models()
     sol = lr.resolve_model_ref(m, "codex_review")
-    assert sol == "gpt-5.6-sol"
+    assert sol == m["codex_review"]
     for a in ("hard-bug", "security-review"):
         assert lr.resolve(t, a, m)["model"] == sol, a
-    assert lr.resolve(t, "final-review", m)["model"] == "claude-fable-5"
+    assert lr.resolve(t, "final-review", m)["model"] == m["claude_default"]
 
 
 def test_cheap_bulk_uses_cheapest_gpt_tier():
     t, m = table(), models()
     r = lr.resolve(t, "cheap-bulk", m)
     assert r["model_ref"] == "codex_cheap"
-    assert r["model"] == lr.resolve_model_ref(m, "codex_cheap") == "gpt-5.6-luna"
+    assert r["model"] == lr.resolve_model_ref(m, "codex_cheap")

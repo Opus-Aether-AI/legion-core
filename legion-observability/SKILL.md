@@ -6,7 +6,7 @@ description: Use for "how much did that cost", "which model is winning", "is leg
 
 # Legion Observability — see everything
 
-Every Legion executor (claude/opus/sonnet/haiku, gpt-5.x via codex, Cursor Agent, minimax) emits one **`legion.span.v1`** JSONL record per unit of work to `$LEGION_TELEMETRY_DIR` (default `~/.claude/logs/legion/spans/`). This plugin turns that stream into answers.
+Every Legion executor (the configured Claude, Codex, Cursor, and other provider roles) emits one **`legion.span.v1`** JSONL record per unit of work to `$LEGION_TELEMETRY_DIR` (default `~/.claude/logs/legion/spans/`). This plugin turns that stream into answers.
 
 ## Tools
 

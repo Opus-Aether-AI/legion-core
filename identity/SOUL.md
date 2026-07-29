@@ -5,7 +5,7 @@
   ### *we are many; we move as one*
 </div>
 
-> Synthesized by Legion's own panel — a **Codex** (GPT-5.4, the *commander* angle) and
+> Synthesized by Legion's own panel — the configured **Codex workhorse ref** (the *commander* angle) and
 > **Cursor** (the *chorus* angle) delegation, fanned out in parallel and merged by the
 > Opus conductor. The raw concepts live in [`panel/`](./panel).
 
@@ -17,7 +17,7 @@ disagreements resolve into a single, accountable hand on the wheel.
 ## The host
 
 Legion does not command "models." It commands **agents**: human engineers, AI models
-(GPT-5.x via Codex, Cursor, Claude), and the tools between them. Each is a hand in the
+(the configured Codex, Cursor, and Claude roles), and the tools between them. Each is a hand in the
 cohort. The *will* is what keeps them in formation. The developer is not outside the
 legion — they are its first agent and its source of purpose.
 

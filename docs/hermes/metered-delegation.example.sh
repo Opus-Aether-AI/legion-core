@@ -18,7 +18,8 @@ set -euo pipefail
 
 REPO="${REPO:?set REPO to the target git repository}"
 PROMPT_FILE="${PROMPT_FILE:?set PROMPT_FILE to a file containing the task prompt}"
-MODEL="${LEGION_LANE_MODEL:-opus}"
+MODEL_REF="${LEGION_LANE_MODEL_REF:-claude_default}"
+MODEL="${LEGION_LANE_MODEL:-$(legion-route --model-ref "$MODEL_REF")}"
 EFFORT="${LEGION_LANE_EFFORT:-high}"
 SYSTEM_PROMPT="${LEGION_LANE_SYSTEM_PROMPT:-}"
 [[ -n "$SYSTEM_PROMPT" ]] || SYSTEM_PROMPT="Use the installed Legion marketplace skills when relevant. Respect the task safety constraints exactly."

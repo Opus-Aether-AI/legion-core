@@ -54,9 +54,9 @@ _mkt_with_mcp() {  # $1 = marketplace dir
 }
 
 @test "opencode mcp merge: preserves unrelated existing config keys" {
-  printf '%s\n' '{"model":"minimax/MiniMax-M2","theme":"dark"}' > "$OPENCODE_CONFIG"
+  printf '%s\n' '{"model":"test-model-opencode","theme":"dark"}' > "$OPENCODE_CONFIG"
   echo '{"ctx7":{"command":"npx"}}' | python3 "$MERGE_PY" --config "$OPENCODE_CONFIG" >/dev/null
-  run jq -e '.model == "minimax/MiniMax-M2" and .theme == "dark" and (.mcp.ctx7.type == "local")' "$OPENCODE_CONFIG"
+  run jq -e '.model == "test-model-opencode" and .theme == "dark" and (.mcp.ctx7.type == "local")' "$OPENCODE_CONFIG"
   [ "$status" -eq 0 ]
 }
 

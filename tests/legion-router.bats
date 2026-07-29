@@ -11,9 +11,16 @@ setup() {
     SHARE="$REPO_ROOT/legion-observability/bin/legion-share"
     FIXTURE="$BATS_TEST_DIRNAME/fixtures/codex-json/turn-with-diff.jsonl"
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
+    export LEGION_STATE_ROOT="$TEST_TMPDIR/state"
+    export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
+    export LEGION_REPOS_FILE="$LEGION_STATE_ROOT/repos.jsonl"
+    export LEGION_BENCH_DIR="$LEGION_STATE_ROOT/bench"
+    export LEGION_REPORTS_DIR="$LEGION_STATE_ROOT/reports"
     export LEGION_COSTS_FILE="$REPO_ROOT/legion-router/config/costs.json"
     CODEX_WORKHORSE="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
     CODEX_REVIEW="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_review)"
+    CLAUDE_OPUS="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref claude_opus)"
+    MINIMAX_MATCH="$(jq -r '.models[] | select(.match == "minimax") | .match' "$LEGION_COSTS_FILE")"
 }
 
 # Make a throwaway git repo with one source file; echoes its path.
@@ -69,26 +76,26 @@ repos_file_for_repo() {
 }
 
 # ── cost lib ─────────────────────────────────────────────────────────
-@test "cost: opus 4.8 1M in / 0.5M out = 17.5 (5 + 12.5)" {
-    run "$LIB/cost.sh" claude-opus-4-8 1000000 500000 0 0
+@test "cost: claude_opus pricing comes from costs.json" {
+    run "$LIB/cost.sh" "$CLAUDE_OPUS" 1000000 500000 0 0
     [ "$status" -eq 0 ]
     [ "$output" = "17.5" ]
 }
 
-@test "cost: gpt-5.5 uses reference API price (0.1M in / 5k out = 0.65)" {
-    run "$LIB/cost.sh" gpt-5.5 100000 5000 0 0
+@test "cost: codex_review pricing comes from costs.json" {
+    run "$LIB/cost.sh" "$CODEX_REVIEW" 100000 5000 0 0
     [ "$status" -eq 0 ]
     [ "$output" = "0.65" ]
 }
 
-@test "cost: gpt-5.4 is cheaper than gpt-5.5 for the same usage" {
-    run "$LIB/cost.sh" gpt-5.4 100000 5000 0 0
+@test "cost: codex_workhorse pricing comes from costs.json" {
+    run "$LIB/cost.sh" "$CODEX_WORKHORSE" 100000 5000 0 0
     [ "$status" -eq 0 ]
     [ "$output" = "0.325" ]
 }
 
-@test "cost: minimax 1M/1M = 1.5" {
-    run "$LIB/cost.sh" MiniMax-M2.5 1000000 1000000
+@test "cost: the configured minimax matcher uses costs.json pricing" {
+    run "$LIB/cost.sh" "$MINIMAX_MATCH" 1000000 1000000
     [ "$status" -eq 0 ]
     [ "$output" = "1.5" ]
 }
@@ -102,10 +109,10 @@ repos_file_for_repo() {
 # ── legion-delegate run ──────────────────────────────────────────────
 @test "delegate run: happy path returns ok + captures diff + emits span" {
     local repo; repo="$(make_test_repo run1)"
-    run "$DELEGATE" run --model gpt-5.5 --task "add a guard to foo()" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-beta --task "add a guard to foo()" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
-    echo "$output" | jq -e '.model == "gpt-5.5"'
+    echo "$output" | jq -e '.model == "test-model-beta"'
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
     grep -q "MOCK_CODEX_CHANGE" "$diff"
@@ -126,7 +133,7 @@ repos_file_for_repo() {
     local run_error='mock run-level error'
 
     MOCK_CODEX_STDERR="$mcp_noise
-$run_error" run "$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --quiet
+$run_error" run "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     local run_id; run_id="$(echo "$output" | jq -r .run_id)"
     local raw="$repo/.legion/runs/$run_id/codex.err"
@@ -140,7 +147,7 @@ $run_error" ]
 
 @test "delegate run: filters generated Python bytecode from captured diffs" {
     local repo; repo="$(make_test_repo pycache1)"
-    MOCK_CODEX_PYCACHE=1 run "$DELEGATE" run --model gpt-5.5 --task "run Python tests and edit code" --repo "$repo" --quiet
+    MOCK_CODEX_PYCACHE=1 run "$DELEGATE" run --model test-model-beta --task "run Python tests and edit code" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
@@ -153,7 +160,7 @@ $run_error" ]
     local repo; repo="$(make_test_repo dirtywarn1)"
     printf '// dirty\n' >> "$repo/foo.ts"
     printf 'draft contract\n' > "$repo/CONTRACT.md"
-    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo"
+    run "$DELEGATE" run --model test-model-alpha --task x --repo "$repo"
     [ "$status" -eq 0 ]
     [[ "$output" == *"WARNING: the delegated agent will NOT see these files"* ]]
     [[ "$output" == *"modified tracked files (1):"* ]]
@@ -167,14 +174,14 @@ $run_error" ]
 @test "delegate run: --no-dirty-warn suppresses the source visibility warning" {
     local repo; repo="$(make_test_repo dirtywarn2)"
     printf 'draft contract\n' > "$repo/CONTRACT.md"
-    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --no-dirty-warn
+    run "$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --no-dirty-warn
     [ "$status" -eq 0 ]
     [[ "$output" != *"WARNING: the delegated agent will NOT see these files"* ]]
 }
 
 @test "delegate run: --scope restricts the diff and reports excluded paths" {
     local repo; repo="$(make_test_repo scope1)"
-    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --scope foo.ts
+    run "$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --scope foo.ts
     [ "$status" -eq 0 ]
     local diff; diff="$(echo "$output" | tail -n 1 | jq -r .diff_path)"
     [ ! -s "$diff" ]
@@ -185,7 +192,7 @@ $run_error" ]
 
 @test "delegate run: auto-emits an Opus baseline span for share measurement" {
     local repo; repo="$(make_test_repo share0)"
-    run "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
 
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -src '[.[].executor] | sort'"
@@ -198,7 +205,7 @@ $run_error" ]
 
 @test "delegate run: synthetic Opus baseline is ignored when real Opus work exists" {
     local repo; repo="$(make_test_repo share1)"
-    run "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     "$REPO_ROOT/legion-observability/bin/legion-trace" emit \
       --executor opus --model opus --status ok >/dev/null
@@ -210,7 +217,7 @@ $run_error" ]
 
 @test "delegate run: synthetic Opus baseline is ignored when any real non-Codex work exists" {
     local repo; repo="$(make_test_repo share2)"
-    run "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     "$REPO_ROOT/legion-observability/bin/legion-trace" emit \
       --executor claude --model opus --status ok >/dev/null
@@ -222,7 +229,7 @@ $run_error" ]
 
 @test "delegate run: writes a legion.run-state.v1 registry record (running→terminal)" {
     local repo; repo="$(make_test_repo rs1)"
-    out="$("$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet)"
+    out="$("$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet)"
     rid="$(echo "$out" | jq -r .run_id)"
     local rec="$(registry_dir_for_repo "$repo")/$rid.json"
     [ -f "$rec" ]
@@ -234,7 +241,7 @@ $run_error" ]
 
 @test "delegate run: run-state captures pid + pgid + started_at + worktree" {
     local repo; repo="$(make_test_repo rs2)"
-    out="$("$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet)"
+    out="$("$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet)"
     rid="$(echo "$out" | jq -r .run_id)"
     local rec="$(registry_dir_for_repo "$repo")/$rid.json"
     [ "$(jq -r '.process.pid > 0' "$rec")" = "true" ]
@@ -245,7 +252,7 @@ $run_error" ]
 
 @test "delegate run: registers the repo in repos.jsonl for cross-repo discovery" {
     local repo; repo="$(make_test_repo rs3)"
-    "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet >/dev/null
+    "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet >/dev/null
     local repos="$(repos_file_for_repo "$repo")"
     [ -f "$repos" ]
     grep -qF "$repo" "$repos"
@@ -253,7 +260,7 @@ $run_error" ]
 
 @test "delegate run: registry record persists even when the run failed" {
     local repo; repo="$(make_test_repo rs4)"
-    out="$(MOCK_CODEX_FAIL=1 "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet || true)"
+    out="$(MOCK_CODEX_FAIL=1 "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet || true)"
     rid="$(echo "$out" | jq -r .run_id)"
     local rec="$(registry_dir_for_repo "$repo")/$rid.json"
     [ -f "$rec" ]
@@ -262,14 +269,14 @@ $run_error" ]
 
 @test "delegate run: --run-id adopts a preallocated id (fanout queued records)" {
     local repo; repo="$(make_test_repo rid1)"
-    out="$("$DELEGATE" run --model gpt-5.4 --run-id "preset-xyz-123" --task "x" --repo "$repo" --quiet)"
+    out="$("$DELEGATE" run --model test-model-alpha --run-id "preset-xyz-123" --task "x" --repo "$repo" --quiet)"
     [ "$(echo "$out" | jq -r .run_id)" = "preset-xyz-123" ]
     [ -f "$(registry_dir_for_repo "$repo")/preset-xyz-123.json" ]
 }
 
 @test "delegate run: standalone span is its own trace root (trace_id=run_id, parent null)" {
     local repo; repo="$(make_test_repo trace0)"
-    "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet >/dev/null
+    "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet >/dev/null
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | {same:(.trace_id==.run_id), parent:.parent_id}'"
     [ "$output" = '{"same":true,"parent":null}' ]
 }
@@ -277,16 +284,16 @@ $run_error" ]
 @test "delegate run: inherits LEGION_TRACE_ID + LEGION_PARENT_ID into the span" {
     local repo; repo="$(make_test_repo trace1)"
     LEGION_TRACE_ID="trace-abc" LEGION_PARENT_ID="parent-xyz" \
-        "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet >/dev/null
+        "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet >/dev/null
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | {t:.trace_id, p:.parent_id}'"
     [ "$output" = '{"t":"trace-abc","p":"parent-xyz"}' ]
 }
 
 @test "delegate run: invokes codex with model, sandbox, worktree, stdin prompt" {
     local repo; repo="$(make_test_repo run2)"
-    run "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    assert_mock_called codex "exec --json -m gpt-5.4 -s workspace-write"
+    assert_mock_called codex "exec --json -m test-model-alpha -s workspace-write"
     assert_mock_called codex "skip-git-repo-check"
 }
 
@@ -296,7 +303,7 @@ $run_error" ]
     printf 'TOKEN=super-secret\n' > "$repo/.env.local"
     printf '{"copy":[".env.local"]}\n' > "$repo/.legion/sandbox.json"
 
-    run "$DELEGATE" run --model gpt-5.5 --task "touch foo" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-beta --task "touch foo" --repo "$repo" --quiet
 
     [ "$status" -eq 0 ]
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | .artifacts.copied_secret_names'"
@@ -310,7 +317,7 @@ $run_error" ]
       skip "@ai-hero/sandcastle is installed; missing-optional-dependency path not applicable"
     fi
     local repo; repo="$(make_test_repo run2docker)"
-    run "$DELEGATE" run --model gpt-5.4 --sandbox docker --task "x" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-alpha --sandbox docker --task "x" --repo "$repo" --quiet
     [ "$status" -ne 0 ]
     [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
     [[ "$output" != *"invalid --sandbox"* ]]
@@ -322,13 +329,13 @@ $run_error" ]
       skip "@ai-hero/sandcastle is installed; missing-optional-dependency path not applicable"
     fi
     local repo; repo="$(make_test_repo run2podman)"
-    run "$DELEGATE" run --model gpt-5.4 --sandbox podman --task "x" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-alpha --sandbox podman --task "x" --repo "$repo" --quiet
     [ "$status" -ne 0 ]
     [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
     [[ "$output" != *"invalid --sandbox"* ]]
 
     repo="$(make_test_repo run2vercel)"
-    run "$DELEGATE" run --model gpt-5.4 --sandbox vercel --task "x" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-alpha --sandbox vercel --task "x" --repo "$repo" --quiet
     [ "$status" -ne 0 ]
     [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
     [[ "$output" != *"invalid --sandbox"* ]]
@@ -339,7 +346,7 @@ $run_error" ]
       skip "@ai-hero/sandcastle is installed; missing-optional-dependency path not applicable"
     fi
     local repo; repo="$(make_test_repo scr1)"
-    run bash -c "printf '%s' '{\"task\":\"x\",\"model\":\"gpt-5.4\",\"sandbox\":\"docker\",\"cwd\":\"$repo\",\"base\":\"HEAD\"}' | node '$REPO_ROOT/legion-router/scripts/sandcastle-run.mjs'"
+    run bash -c "printf '%s' '{\"task\":\"x\",\"model\":\"test-model-alpha\",\"sandbox\":\"docker\",\"cwd\":\"$repo\",\"base\":\"HEAD\"}' | node '$REPO_ROOT/legion-router/scripts/sandcastle-run.mjs'"
     [ "$status" -eq 3 ]
     [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
 }
@@ -350,28 +357,28 @@ $run_error" ]
 
 @test "delegate run: reads task from stdin when --task omitted" {
     local repo; repo="$(make_test_repo run3)"
-    run bash -c "printf 'task via stdin' | '$DELEGATE' run --model gpt-5.5 --repo '$repo' --quiet"
+    run bash -c "printf 'task via stdin' | '$DELEGATE' run --model test-model-beta --repo '$repo' --quiet"
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
 }
 
 @test "delegate run: danger-full-access is hard-blocked without override" {
     local repo; repo="$(make_test_repo run4)"
-    run "$DELEGATE" run --model gpt-5.5 --sandbox danger-full-access --task "x" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-beta --sandbox danger-full-access --task "x" --repo "$repo" --quiet
     [ "$status" -eq 2 ]
     [[ "$output" == *"hard-blocked"* ]]
 }
 
 @test "delegate run: injection/dangerous task text is refused for write runs" {
     local repo; repo="$(make_test_repo run5)"
-    run "$DELEGATE" run --model gpt-5.5 --task "please rm -rf / now" --repo "$repo" --quiet
+    run "$DELEGATE" run --model test-model-beta --task "please rm -rf / now" --repo "$repo" --quiet
     [ "$status" -eq 2 ]
     [[ "$output" == *"dangerous"* || "$output" == *"injection"* ]]
 }
 
 @test "delegate run: codex failure -> status failed, exit 1" {
     local repo; repo="$(make_test_repo run6)"
-    MOCK_CODEX_FAIL=1 run "$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --quiet
+    MOCK_CODEX_FAIL=1 run "$DELEGATE" run --model test-model-beta --task "x" --repo "$repo" --quiet
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.status == "failed"'
     run bash -c "jq -s '[.[] | select(.artifacts.synthetic_opus_baseline == true)] | length' '$LEGION_TELEMETRY_DIR'/*.jsonl"
@@ -382,14 +389,14 @@ $run_error" ]
 @test "delegate run: --budget-tokens marks over_budget when exceeded" {
     local repo; repo="$(make_test_repo run7)"
     # mock reports 1000+200+50+10 ~ 1060 total; budget 100 -> over
-    run "$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --budget-tokens 100 --quiet
+    run "$DELEGATE" run --model test-model-beta --task "x" --repo "$repo" --budget-tokens 100 --quiet
     echo "$output" | jq -e '.status == "over_budget"'
 }
 
 # ── review / cleanup ─────────────────────────────────────────────────
 @test "delegate review: returns a verdict + emits span" {
     local repo; repo="$(make_test_repo rev1)"
-    run "$DELEGATE" review --model gpt-5.5 --base main --repo "$repo" --quiet
+    run "$DELEGATE" review --model test-model-beta --base main --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     assert_mock_called codex "exec review --base main"
@@ -397,7 +404,7 @@ $run_error" ]
 
 @test "delegate run: auto-cleans the worktree but preserves the diff (no --keep)" {
     local repo; repo="$(make_test_repo cln0)"
-    out="$("$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --quiet)"
+    out="$("$DELEGATE" run --model test-model-beta --task "x" --repo "$repo" --quiet)"
     rid="$(echo "$out" | jq -r .run_id)"
     [ ! -d "$repo/.legion/worktrees/$rid" ]         # worktree removed by default
     [ -s "$repo/.legion/runs/$rid/diff.patch" ]     # diff preserved under runs/
@@ -406,7 +413,7 @@ $run_error" ]
 
 @test "delegate run: --keep retains the worktree, then cleanup removes it" {
     local repo; repo="$(make_test_repo cln1)"
-    out="$("$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --keep --quiet)"
+    out="$("$DELEGATE" run --model test-model-beta --task "x" --repo "$repo" --keep --quiet)"
     rid="$(echo "$out" | jq -r .run_id)"
     [ -d "$repo/.legion/worktrees/$rid" ]
     run "$DELEGATE" cleanup --run "$rid" --repo "$repo" --quiet
@@ -421,7 +428,7 @@ $run_error" ]
     printf '#!/usr/bin/env bash\nsleep 2\nexec "%s" "$@"\n' "$BATS_TEST_DIRNAME/mocks/bin/codex" > "$bin/codex"
     chmod +x "$bin/codex"
 
-    run env PATH="$bin:$PATH" "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --detach --quiet
+    run env PATH="$bin:$PATH" "$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --detach --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "detached"'
     local rid; rid="$(echo "$output" | jq -r .run_id)"
@@ -445,7 +452,7 @@ $run_error" ]
 
 @test "delegate run: writes .legion/.gitignore so runtime state never pollutes the repo" {
     local repo; repo="$(make_test_repo gi1)"
-    "$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --quiet >/dev/null
+    "$DELEGATE" run --model test-model-beta --task "x" --repo "$repo" --quiet >/dev/null
     [ -f "$repo/.legion/.gitignore" ]
     grep -q '[*]' "$repo/.legion/.gitignore"
     # parent repo must show a clean tree (nothing from .legion leaks into status)
@@ -463,9 +470,9 @@ $run_error" ]
 
 @test "delegate run: explicit --model overrides --archetype" {
   local repo; repo="$(make_test_repo arch2)"
-  run "$DELEGATE" run --archetype bulk-mechanical-edit --model gpt-5.5 --task x --repo "$repo" --quiet
+  run "$DELEGATE" run --archetype bulk-mechanical-edit --model test-model-beta --task x --repo "$repo" --quiet
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.model == "gpt-5.5"'
+  echo "$output" | jq -e '.model == "test-model-beta"'
 }
 
 @test "delegate run: --archetype routing to executor=self is refused" {
@@ -490,7 +497,7 @@ $run_error" ]
 
 @test "delegate resume: continues a --keep'd run + emits codex-resume span" {
   local repo; repo="$(make_test_repo res1)"
-  out="$("$DELEGATE" run --model gpt-5.4 --task initial --repo "$repo" --keep --quiet)"
+  out="$("$DELEGATE" run --model test-model-alpha --task initial --repo "$repo" --keep --quiet)"
   rid="$(echo "$out" | jq -r .run_id)"
   run "$DELEGATE" resume --run "$rid" --task "follow up" --repo "$repo" --quiet
   [ "$status" -eq 0 ]
@@ -500,7 +507,7 @@ $run_error" ]
 
 @test "delegate resume: fails clearly when the worktree was not kept" {
   local repo; repo="$(make_test_repo res2)"
-  out="$("$DELEGATE" run --model gpt-5.4 --task x --repo "$repo" --quiet)"
+  out="$("$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --quiet)"
   rid="$(echo "$out" | jq -r .run_id)"
   run "$DELEGATE" resume --run "$rid" --task y --repo "$repo" --quiet
   [ "$status" -eq 2 ]
@@ -546,24 +553,24 @@ $run_error" ]
 
 @test "delegate run: over_budget exits 0 — usable diff, graceful degradation (M1)" {
   local repo; repo="$(make_test_repo m1)"
-  run "$DELEGATE" run --model gpt-5.4 --task x --repo "$repo" --budget-tokens 1 --quiet
+  run "$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --budget-tokens 1 --quiet
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.status == "over_budget"'
 }
 
 @test "delegate resume: inherits the original run's model, not the default (M2)" {
   local repo; repo="$(make_test_repo m2)"
-  out="$("$DELEGATE" run --model gpt-5.5 --task init --repo "$repo" --keep --quiet)"
+  out="$("$DELEGATE" run --model test-model-beta --task init --repo "$repo" --keep --quiet)"
   rid="$(echo "$out" | jq -r .run_id)"
   run "$DELEGATE" resume --run "$rid" --task followup --repo "$repo" --quiet
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.model == "gpt-5.5"'
+  echo "$output" | jq -e '.model == "test-model-beta"'
 }
 
 @test "delegate cleanup --all --purge removes worktrees + branches + run artifacts" {
   local repo; repo="$(make_test_repo cl1)"
-  "$DELEGATE" run --model gpt-5.4 --task a --repo "$repo" --keep --quiet >/dev/null
-  "$DELEGATE" run --model gpt-5.4 --task b --repo "$repo" --keep --quiet >/dev/null
+  "$DELEGATE" run --model test-model-alpha --task a --repo "$repo" --keep --quiet >/dev/null
+  "$DELEGATE" run --model test-model-alpha --task b --repo "$repo" --keep --quiet >/dev/null
   [ "$(find "$repo/.legion/worktrees" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = "2" ]
   run "$DELEGATE" cleanup --all --purge --repo "$repo" --quiet
   [ "$status" -eq 0 ]
@@ -574,7 +581,7 @@ $run_error" ]
 
 @test "delegate run: auto-deletes its worktree on completion (default, no --keep)" {
   local repo; repo="$(make_test_repo auto1)"
-  "$DELEGATE" run --model gpt-5.4 --task x --repo "$repo" --quiet >/dev/null
+  "$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --quiet >/dev/null
   [ "$(find "$repo/.legion/worktrees" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
 }
 
@@ -587,7 +594,7 @@ $run_error" ]
 }
 
 @test "cost: negative token counts clamp to 0 (lib safe for any caller)" {
-    run "$LIB/cost.sh" gpt-5.4 -100 100
+    run "$LIB/cost.sh" "$CODEX_WORKHORSE" -100 100
     [ "$status" -eq 0 ]
     [ "$output" = "0.0015" ]
 }

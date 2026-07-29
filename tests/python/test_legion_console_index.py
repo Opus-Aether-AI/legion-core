@@ -20,7 +20,7 @@ def _record(
     phase="running",
     started_at="2026-06-15T10:00:00Z",
     updated_at="2026-06-15T10:05:00Z",
-    model="gpt-5.4",
+    model="test-model-alpha",
     kind="task",
     repo_root="/repo",
     run_dir="/run",
@@ -65,7 +65,7 @@ def _span(
     parent_id=None,
     status="ok",
     cost_usd=0.0,
-    model="gpt-5.4",
+    model="test-model-alpha",
     tokens=None,
 ):
     return {
@@ -228,7 +228,7 @@ def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
         phase="ok",
         started_at="2026-06-15T09:00:00Z",
         updated_at="2026-06-15T09:30:00Z",
-        model="gpt-5.4",
+        model="test-model-alpha",
         run_dir=str(run1_dir),
         worktree_dir=str(wt1),
         pid=111,
@@ -240,7 +240,7 @@ def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
         phase="ok",
         started_at="2026-06-15T11:00:00Z",
         updated_at="2026-06-15T11:20:00Z",
-        model="gpt-5.4-mini",
+        model="test-model-alpha-mini",
         run_dir=str(run2_dir),
         worktree_dir=str(wt2),
         pid=112,
@@ -252,7 +252,7 @@ def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
         phase="failed",
         started_at="2026-06-15T10:00:00Z",
         updated_at="2026-06-15T10:10:00Z",
-        model="claude-opus-4.8",
+        model="test-model-opus",
         run_dir=str(run3_dir),
         worktree_dir=str(wt3),
         pid=113,
@@ -274,7 +274,7 @@ def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
             parent_id=None,
             status="failed",
             cost_usd=3.0,
-            model="claude-opus-4.8",
+            model="test-model-opus",
         ),
     )
 
@@ -288,9 +288,9 @@ def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
     assert snapshot["aggregates"]["by_status"] == {"awaiting_human": 1, "failed": 1, "done": 1}
     # by_model carries COST (+ run count), not just a count (the "$16 vs $1" bug).
     assert snapshot["aggregates"]["by_model"] == {
-        "gpt-5.4": {"runs": 1, "cost_usd": 1.5},
-        "gpt-5.4-mini": {"runs": 1, "cost_usd": 2.0},
-        "claude-opus-4.8": {"runs": 1, "cost_usd": 3.0},
+        "test-model-alpha": {"runs": 1, "cost_usd": 1.5},
+        "test-model-alpha-mini": {"runs": 1, "cost_usd": 2.0},
+        "test-model-opus": {"runs": 1, "cost_usd": 3.0},
     }
     assert snapshot["aggregates"]["total_cost_usd"] == 6.5
     assert snapshot["aggregates"]["running"] == 0

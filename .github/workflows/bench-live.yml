@@ -113,8 +113,9 @@ jobs:
             exit 1
           fi
           cursor-agent --version
-          if ! cursor-agent models | grep -Eq '^composer-2[.]5[[:space:]]'; then
-            echo "Cursor Agent must expose composer-2.5 for Cursor-backed live modes." >&2
+          cursor_model="$(legion-router/bin/legion-route --model-ref cursor_composer)"
+          if ! cursor-agent models | grep -Fq "$cursor_model"; then
+            echo "Cursor Agent must expose the configured cursor_composer model for Cursor-backed live modes." >&2
             exit 1
           fi
 
@@ -125,14 +126,14 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          CODEX_MODEL: gpt-5.5
-          CLAUDE_MODEL: opus
-          CURSOR_MODEL: composer-2.5
-          LEGION_CURSOR_MODEL: composer-2.5
           LEGION_BENCH_DIR: ${{ runner.temp }}/legion-bench
           LEGION_TELEMETRY_DIR: ${{ runner.temp }}/legion-spans
         run: |
           set -euo pipefail
+          export CODEX_MODEL="$(legion-router/bin/legion-route --model-ref codex_workhorse)"
+          export CLAUDE_MODEL="$(legion-router/bin/legion-route --model-ref claude_default)"
+          export CURSOR_MODEL="$(legion-router/bin/legion-route --model-ref cursor_composer)"
+          export LEGION_CURSOR_MODEL="$CURSOR_MODEL"
           args=()
           IFS=',' read -ra selected_modes <<< "${{ inputs.modes }}"
           for mode in "${selected_modes[@]}"; do

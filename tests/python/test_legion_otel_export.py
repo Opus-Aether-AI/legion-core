@@ -11,7 +11,7 @@ _spec.loader.exec_module(oe)
 
 _SPAN = {
     "schema": "legion.span.v1", "run_id": "r1", "trace_id": "t1",
-    "ts": "2026-06-15T00:00:00Z", "executor": "codex", "model": "gpt-5.4",
+    "ts": "2026-06-15T00:00:00Z", "executor": "codex", "model": "test-model-alpha",
     "status": "ok", "cost_usd": 0.1, "duration_ms": 1000, "tokens": {"input_tokens": 5},
 }
 

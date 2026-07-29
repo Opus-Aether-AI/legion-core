@@ -7,7 +7,7 @@
 #   source cost.sh
 #   cost_for_model "opus" 1000000 500000 0 0              # -> 17.5
 #
-#   cost.sh claude-sonnet-5 1000000 1000000                # -> 12
+#   cost.sh "$(legion-route --model-ref codex_workhorse)" 1000000 1000000
 #
 # Price table resolution order:
 #   1. $LEGION_COSTS_FILE (if set)

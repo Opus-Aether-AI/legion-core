@@ -1,6 +1,6 @@
 {
   "name": "legion-orchestrate",
-  "description": "Legion's dynamic MULTI-MODEL orchestrator — the ultracode loop (decompose -> fan out -> cross-model verify -> synthesize -> gate) made executor-aware: Opus conducts, GPT-5.4 does the bulk of coding in PARALLEL, GPT-5.5 verifies. Ships `legion-fanout` (run many scoped slices in parallel across executors via legion-delegate, collect verified diffs + cost, report) and a SKILL playbook with an LEGION_ULTRACODE max-exhaustive mode (wide fan-out, multi-vote cross-model verify, loop-until-dry). Ties together routing.toml + legion-delegate + legion-share to deliver features with codex carrying >=50% of the work.",
+  "description": "Legion's dynamic multi-model orchestrator — the ultracode loop (decompose -> fan out -> cross-model verify -> synthesize -> gate) made executor-aware: the configured Claude role conducts, the codex_workhorse ref does the bulk of coding in parallel, and the codex_review ref verifies. Ships `legion-fanout` (run many scoped slices in parallel across executors via legion-delegate, collect verified diffs + cost, report) and a SKILL playbook with an LEGION_ULTRACODE max-exhaustive mode (wide fan-out, multi-vote cross-model verify, loop-until-dry). Ties together routing.toml + legion-delegate + legion-share to deliver features with Codex carrying >=50% of the work.",
   "version": "0.1.2",
   "author": {
     "name": "legion-core"
@@ -14,8 +14,8 @@
     "fan-out",
     "parallel",
     "codex",
-    "gpt-5.4",
-    "gpt-5.5",
+    "codex_workhorse",
+    "codex_review",
     "legion"
   ]
 }

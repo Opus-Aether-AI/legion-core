@@ -209,7 +209,7 @@ is_final_review = archetype == "final-review"
 sandbox = "read-only" if is_final_review else "workspace-write"
 print(json.dumps({
     "executor": "claude" if is_final_review else "codex",
-    "model": "claude-fable-5" if is_final_review else "gpt-5.5",
+    "model": "test-model-claude" if is_final_review else "test-model-beta",
     "model_ref": "claude_default" if is_final_review else "codex_workhorse",
     "sandbox": sandbox,
     "reasoning_effort": "high" if is_final_review else "xhigh",
@@ -476,14 +476,14 @@ cat > "$fake_bin/legion-delegate" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'delegate-review\n' >> "$LEGION_RUN_BENCH_CALL_LOG"
-printf '{"status":"ok","verdict":"approved","model":"gpt-5.5","findings":[]}\n'
+printf '{"status":"ok","verdict":"approved","model":"test-model-beta","findings":[]}\n'
 SH
 
 cat > "$fake_bin/legion-claude" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'claude-review\n' >> "$LEGION_RUN_BENCH_CALL_LOG"
-printf '{"status":"ok","model":"claude-fable-5","result":"{\\"verdict\\":\\"approve\\",\\"summary\\":\\"independent review approved\\",\\"findings\\":[]}"}\n'
+printf '{"status":"ok","model":"test-model-claude","result":"{\\"verdict\\":\\"approve\\",\\"summary\\":\\"independent review approved\\",\\"findings\\":[]}"}\n'
 SH
 
 cat > "$fake_bin/legion-report" <<'SH'

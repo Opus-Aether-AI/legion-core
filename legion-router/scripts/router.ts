@@ -4,8 +4,8 @@
  * Routes Claude Code API requests by model name and meters token usage + cost:
  * - Models matching MINIMAX_MODELS → MiniMax API (translation-free; Anthropic-compatible)
  * - Everything else → Anthropic API (client auth passes through when no proxy key)
- * GPT-5.x is NOT routed here (codex exec is an agent, not an endpoint) — the
- * legion-delegate CLI runs it out-of-band and POSTs usage to /ingest, so GPT cost
+ * Codex is NOT routed here (codex exec is an agent, not an endpoint) — the
+ * legion-delegate CLI runs it out-of-band and POSTs usage to /ingest, so Codex cost
  * shows next to Claude on /stats.
  *
  * OPT-IN: only traffic you explicitly point at it is routed. Start it, then set
@@ -105,7 +105,7 @@ const MINIMAX_MODELS = _optionalEnv("MINIMAX_MODELS", "MiniMax").split(",").map(
 const OLLAMA_MODELS = (process.env.OLLAMA_MODELS || "").split(",").map((m) => m.trim().toLowerCase()).filter(Boolean);
 
 // Optional: lock specific Claude Code model tiers to MiniMax model IDs
-// e.g. MINIMAX_MODEL_MAP="haiku:MiniMax-M2.5,sonnet:MiniMax-M2.5"
+// e.g. MINIMAX_MODEL_MAP="small:your-minimax-model,standard:your-minimax-model"
 const MODEL_MAP = new Map<string, string>();
 for (const entry of (process.env.MINIMAX_MODEL_MAP || "").split(",").filter(Boolean)) {
 	const [from, to] = entry.split(":");
@@ -443,7 +443,7 @@ function resolveModel(model: string): RouteResult {
 		};
 	}
 
-	// Check explicit model map first (e.g. "haiku:MiniMax-M2.5" or "haiku:ollama/deepseek-coder")
+	// Check an explicit model map first (e.g. "small:your-provider-model").
 	for (const [pattern, replacement] of MODEL_MAP) {
 		if (model.toLowerCase().includes(pattern)) {
 			// "ollama/" prefix routes to local Ollama

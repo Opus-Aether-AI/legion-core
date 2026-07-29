@@ -16,9 +16,9 @@ def test_percentile_edges():
 
 def test_aggregate_groups_success_and_cost():
     spans = [
-        {"schema": "legion.span.v1", "executor": "codex", "model": "gpt-5.4", "status": "ok", "cost_usd": 0.1, "duration_ms": 100},
-        {"schema": "legion.span.v1", "executor": "codex", "model": "gpt-5.4", "status": "failed", "cost_usd": 0.2, "duration_ms": 300},
-        {"schema": "legion.span.v1", "executor": "anthropic", "model": "claude-opus-4-8", "status": "ok", "cost_usd": 1.0, "duration_ms": 50},
+        {"schema": "legion.span.v1", "executor": "codex", "model": "test-model-alpha", "status": "ok", "cost_usd": 0.1, "duration_ms": 100},
+        {"schema": "legion.span.v1", "executor": "codex", "model": "test-model-alpha", "status": "failed", "cost_usd": 0.2, "duration_ms": 300},
+        {"schema": "legion.span.v1", "executor": "anthropic", "model": "test-model-opus", "status": "ok", "cost_usd": 1.0, "duration_ms": 50},
         {"schema": "other"},  # ignored — wrong schema
     ]
     r = agg.aggregate(spans)
@@ -49,14 +49,14 @@ def test_load_tolerates_garbage_lines(tmp_path):
 
 
 def test_aggregate_by_model_and_status():
-    spans = [{"schema": "legion.span.v1", "executor": "codex", "model": "gpt-5.4", "status": "ok"}]
-    assert "gpt-5.4" in agg.aggregate(spans, by="model")["groups"]
+    spans = [{"schema": "legion.span.v1", "executor": "codex", "model": "test-model-alpha", "status": "ok"}]
+    assert "test-model-alpha" in agg.aggregate(spans, by="model")["groups"]
     assert "ok" in agg.aggregate(spans, by="status")["groups"]
 
 
 def test_aggregate_ignores_synthetic_opus_baselines():
     spans = [
-        {"schema": "legion.span.v1", "executor": "codex", "model": "gpt-5.4", "status": "ok"},
+        {"schema": "legion.span.v1", "executor": "codex", "model": "test-model-alpha", "status": "ok"},
         {
             "schema": "legion.span.v1",
             "executor": "opus-baseline",

@@ -51,7 +51,11 @@ jobs:
     # secrets scrubbed from its env inside legion-intake.sh — the issue body is
     # untrusted, so a prompt injection must not be able to read a token.
     env:
-      CODEX_HOME: ${{ runner.temp }}/legion-intake-agent-home
+      # NOTE: no `runner.*` here. Job-level `env` may only read github, inputs,
+      # matrix, needs, secrets, strategy and vars — a `runner` reference makes the
+      # whole file unparseable, which GitHub reports as a jobless "workflow file
+      # issue" run on every push rather than as an error on this lane. CODEX_HOME
+      # is therefore set per-step, on the steps that actually invoke codex.
       LEGION_INTAKE_WORKER: ${{ inputs.worker }}
       LEGION_INTAKE_WORKER_BIN_INPUT: ${{ inputs.worker_bin }}
       LEGION_INTAKE_INPUT_ARCHETYPE: ${{ inputs.archetype }}
@@ -151,6 +155,8 @@ jobs:
         # subprocess.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Must match the auth step above, so the worker's codex finds auth.json.
+          CODEX_HOME: ${{ runner.temp }}/legion-intake-agent-home
         run: |
           set -euo pipefail
           archetype="${LEGION_INTAKE_INPUT_ARCHETYPE:-${LEGION_INTAKE_DEFAULT_ARCHETYPE:-}}"

@@ -282,6 +282,28 @@ jobs:
           ignore_paths: |
             .git
 
+  validate-workflows:
+    name: validate-workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # A workflow GitHub cannot parse does not fail loudly — it fails as a
+      # jobless run titled "workflow file issue", with no log to read, on every
+      # push. agent-intake.yml sat broken that way for a month. This gates on
+      # workflow validity so the next one fails here instead, with a line number.
+      #
+      # Shellcheck integration is off on purpose: `run:` script style is already
+      # covered by validate-hooks-and-scripts, and folding it in here would make
+      # this gate noisy enough to be ignored, which defeats the point.
+      - name: Lint workflow syntax and contexts
+        run: |
+          set -euo pipefail
+          ver=1.7.7
+          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${ver}/actionlint_${ver}_linux_amd64.tar.gz" \
+            | tar xz -C /tmp actionlint
+          /tmp/actionlint -shellcheck= -color .github/workflows/*.yml
+
   validate-installer-coverage:
     name: validate-installer-coverage
     runs-on: ubuntu-latest

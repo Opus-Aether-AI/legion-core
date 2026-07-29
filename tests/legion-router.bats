@@ -109,9 +109,33 @@ repos_file_for_repo() {
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
     grep -q "MOCK_CODEX_CHANGE" "$diff"
+    local run_id; run_id="$(echo "$output" | jq -r .run_id)"
+    local raw="$repo/.legion/runs/$run_id/codex.err"
+    local filtered="$repo/.legion/runs/$run_id/codex.filtered.err"
+    [ -f "$raw" ]
+    [ ! -s "$filtered" ]
+    [ "$(echo "$output" | jq -r .error_log)" = "no run-level errors were recorded (raw stderr: $raw)" ]
     # span written
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r 'select(.executor==\"codex\") | .executor'"
     [ "$output" = "codex" ]
+}
+
+@test "delegate run: preserves raw stderr and separates benign MCP OAuth noise" {
+    local repo; repo="$(make_test_repo stderr1)"
+    local mcp_noise='ERROR codex_rmcp_client::oauth::refresh_transaction: error=failed to refresh OAuth tokens for server higgsfield: OAuth token refresh failed'
+    local run_error='mock run-level error'
+
+    MOCK_CODEX_STDERR="$mcp_noise
+$run_error" run "$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    local run_id; run_id="$(echo "$output" | jq -r .run_id)"
+    local raw="$repo/.legion/runs/$run_id/codex.err"
+    local filtered="$repo/.legion/runs/$run_id/codex.filtered.err"
+
+    [ "$(cat "$raw")" = "$mcp_noise
+$run_error" ]
+    [ "$(cat "$filtered")" = "$run_error" ]
+    [ "$(echo "$output" | jq -r .error_log)" = "run-level errors: $filtered (raw stderr: $raw)" ]
 }
 
 @test "delegate run: filters generated Python bytecode from captured diffs" {

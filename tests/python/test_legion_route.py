@@ -107,6 +107,34 @@ def test_main_accepts_demo_task_hint(capsys):
     assert out["resolved"] is True
 
 
+def test_main_accepts_positional_and_flag_archetypes_equivalently(capsys):
+    common = ["--file", TABLE, "--models-file", MODELS_TABLE]
+
+    assert lr.main(["scout", *common]) == 0
+    positional = capsys.readouterr().out
+
+    assert lr.main(["--archetype", "scout", *common]) == 0
+    flagged = capsys.readouterr().out
+
+    assert json.loads(positional) == json.loads(flagged)
+
+    assert lr.main(["scout", "--archetype", "scout", *common]) == 0
+    assert json.loads(capsys.readouterr().out) == json.loads(positional)
+
+
+def test_main_rejects_conflicting_positional_and_flag_archetypes(capsys):
+    try:
+        lr.main(["scout", "--archetype", "final-review", "--file", TABLE, "--models-file", MODELS_TABLE])
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("conflicting archetype forms should be a usage error")
+
+    err = capsys.readouterr().err
+    assert "positional archetype 'scout'" in err
+    assert "--archetype 'final-review'" in err
+
+
 def test_main_resolves_model_ref(capsys):
     assert lr.main(["--model-ref", "codex_workhorse", "--models-file", MODELS_TABLE]) == 0
     assert capsys.readouterr().out.strip() == lr.resolve_model_ref(models(), "codex_workhorse")

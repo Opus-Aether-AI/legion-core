@@ -7,6 +7,7 @@ hardcode model choices. Pure stdlib; full routing uses tomllib on Python 3.11+,
 while simple model-ref lookups use a tiny parser for shell entrypoint portability.
 
   legion-route bulk-mechanical-edit
+  legion-route --archetype bulk-mechanical-edit
   legion-route implement-feature --task "Build the demo flow"
   legion-route --list
   legion-route --model-ref codex_workhorse
@@ -241,7 +242,9 @@ def _restore_default_sigpipe():
 def main(argv=None):
     _restore_default_sigpipe()
     ap = argparse.ArgumentParser(description="Resolve a routing archetype.")
-    ap.add_argument("archetype", nargs="?")
+    ap.add_argument("archetype", nargs="?", metavar="ARCHETYPE")
+    ap.add_argument("--archetype", dest="flag_archetype", metavar="ARCHETYPE",
+                    help="routing archetype (equivalent to positional ARCHETYPE)")
     ap.add_argument("--file", default=os.environ.get("LEGION_ROUTING_FILE", _DEFAULT_FILE))
     ap.add_argument("--models-file", default=os.environ.get("LEGION_MODELS_FILE", _DEFAULT_MODELS_FILE))
     ap.add_argument("--list", action="store_true")
@@ -253,6 +256,9 @@ def main(argv=None):
     ap.add_argument("--executor-info", metavar="NAME", help="print the registry entry for one executor as JSON")
     ap.add_argument("--list-executors", action="store_true")
     a = ap.parse_args(argv)
+    if a.archetype and a.flag_archetype and a.archetype != a.flag_archetype:
+        ap.error(f"positional archetype {a.archetype!r} conflicts with --archetype {a.flag_archetype!r}")
+    archetype = a.flag_archetype or a.archetype
     if a.primary:
         print(resolve_primary())
         return 0
@@ -278,11 +284,11 @@ def main(argv=None):
     if a.list:
         print(json.dumps(sorted((table.get("archetypes") or {}).keys())))
         return 0
-    if not a.archetype:
+    if not archetype:
         sys.stderr.write("legion-route: archetype required (or --list)\n")
         return 2
     try:
-        print(json.dumps(resolve(table, a.archetype, models)))
+        print(json.dumps(resolve(table, archetype, models)))
     except RouteConfigError as e:
         sys.stderr.write(f"legion-route: {e}\n")
         return 2

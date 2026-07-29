@@ -128,6 +128,41 @@ is_quota_error() {
   [[ -f "$1" ]] && grep -qiE 'rate.?limit|quota|usage limit|429|too many requests|insufficient_quota|overloaded|capacity|exceeded your' "$1"
 }
 
+# Benign optional-MCP infrastructure noise to remove from the signal-only stderr
+# artifact. Every pattern is deliberately limited to Codex's MCP client logger plus
+# an authentication or connection failure; do not add broad ERROR/MCP patterns here.
+# Anything not confidently known to be unrelated infrastructure noise must remain
+# signal, because hiding a real run failure is worse than retaining noisy stderr.
+MCP_BENIGN_STDERR_PATTERNS=(
+  'codex_rmcp_client::oauth::refresh_transaction:.*(failed to refresh OAuth tokens|OAuth token refresh failed)'
+  'codex_rmcp_client::.*(failed to (connect|initialize) (to )?(MCP )?server|MCP server .* (connection|connect) (failed|error)|MCP (connection|transport).*(failed|error))'
+)
+
+# Preserve raw stderr and write the companion containing only run-level signal.
+filter_codex_stderr() {
+  local raw_err="$1" filtered_err="$2" pattern grep_rc
+  local -a grep_patterns=()
+  for pattern in "${MCP_BENIGN_STDERR_PATTERNS[@]}"; do
+    grep_patterns+=(-e "$pattern")
+  done
+  [[ -f "$raw_err" ]] || { : > "$filtered_err"; return 0; }
+  if grep -Eiv "${grep_patterns[@]}" "$raw_err" > "$filtered_err"; then
+    return 0
+  fi
+  grep_rc=$?
+  [[ "$grep_rc" -eq 1 ]] && return 0   # every raw line was known-benign noise
+  return "$grep_rc"
+}
+
+error_log_summary() {
+  local raw_err="$1" filtered_err="$2"
+  if [[ -s "$filtered_err" ]]; then
+    printf 'run-level errors: %s (raw stderr: %s)' "$filtered_err" "$raw_err"
+  else
+    printf 'no run-level errors were recorded (raw stderr: %s)' "$raw_err"
+  fi
+}
+
 # Run codex exec for one model into $art files; sets the caller's $rc (dynamic scope).
 # Reads $sandbox $wt $effort $task $art from the calling function.
 run_codex() {
@@ -578,7 +613,10 @@ cmd_run() {
   printf '%s\n' "$used_model" > "$art/model.txt"   # persisted so `resume` inherits it (M2)
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 
-  local thread_id usage cost
+  local thread_id usage cost filtered_err error_log
+  filtered_err="$art/codex.filtered.err"
+  filter_codex_stderr "$art/codex.err" "$filtered_err"
+  error_log="$(error_log_summary "$art/codex.err" "$filtered_err")"
   thread_id="$(codex_thread_id "$art/stream.jsonl")"
   usage="$(codex_usage "$art/stream.jsonl")"
   # Sandcastle runs codex inside the sandbox, so the local stream is empty — take
@@ -656,9 +694,9 @@ cmd_run() {
 
   jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --argjson usage "$usage" --argjson cost "${cost:-0}" --arg run "$RUN_ID" --argjson rc "${rc:-0}" '
+    --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-0}" --arg run "$RUN_ID" --argjson rc "${rc:-0}" '
     {run_id:$run, status:$status, model:$model, thread_id:$thread, codex_exit:$rc,
-     worktree:$wt, diff_path:$diff, last_message_path:$last, usage:$usage, cost_usd:$cost}'
+     worktree:$wt, diff_path:$diff, last_message_path:$last, error_log:$error_log, usage:$usage, cost_usd:$cost}'
   # over_budget produced a usable diff (budget is advisory — codex can't be pre-empted),
   # so it exits 0; only a real failure/error is non-zero (M1: graceful degradation).
   case "$status" in
@@ -721,7 +759,10 @@ cmd_review() {
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 
-  local verdict usage cost status="ok"
+  local verdict usage cost filtered_err error_log status="ok"
+  filtered_err="$art/codex.filtered.err"
+  filter_codex_stderr "$art/codex.err" "$filtered_err"
+  error_log="$(error_log_summary "$art/codex.err" "$filtered_err")"
   if [[ -s "$verdict_file" ]]; then verdict="$(cat "$verdict_file")"; else verdict="$(codex_last_message "$art/stream.jsonl")"; fi
   usage="$(codex_usage "$art/stream.jsonl")"
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
@@ -735,8 +776,8 @@ cmd_review() {
   local verdict_json
   if jq -e . <<<"$verdict" >/dev/null 2>&1; then verdict_json="$verdict"; else verdict_json="$(jq -Rn --arg v "$verdict" '$v')"; fi
   jq -cn --arg status "$status" --arg model "$model" --arg run "$RUN_ID" \
-    --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson verdict "$verdict_json" '
-    {run_id:$run, status:$status, model:$model, verdict:$verdict, usage:$usage, cost_usd:$cost}'
+    --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson verdict "$verdict_json" '
+    {run_id:$run, status:$status, model:$model, verdict:$verdict, error_log:$error_log, usage:$usage, cost_usd:$cost}'
   [[ "$status" == "ok" ]] || exit 1
 }
 

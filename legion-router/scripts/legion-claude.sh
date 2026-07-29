@@ -92,13 +92,18 @@ resolve_delegate_bin() {
 
 emit_terminal_json() {
   local executor="$1" model="$2" status="$3" result="$4" usage="$5" cost="$6" fell_back="$7" reason="${8:-}"
+  # LEGION_CLAUDE_WORKTREE / _DIFF are set by cmd_run once a worktree exists, so a caller can
+  # review the run as a diff instead of diffing the operator's tree by hand.
   jq -cn \
     --arg run_id "$RUN_ID" --arg executor "$executor" --arg model "$model" \
     --arg status "$status" --arg result "$result" --argjson usage "$usage" \
-    --argjson cost "${cost:-0}" --argjson fell_back "$fell_back" --arg reason "$reason" '
+    --argjson cost "${cost:-0}" --argjson fell_back "$fell_back" --arg reason "$reason" \
+    --arg wt "${LEGION_CLAUDE_WORKTREE:-}" --arg diff "${LEGION_CLAUDE_DIFF:-}" '
     {run_id:$run_id, executor:$executor, model:$model, status:$status, result:$result,
      usage:$usage, cost_usd:$cost, fell_back:$fell_back}
-    + (if $reason == "" then {} else {fell_back_reason:$reason, reason:$reason} end)'
+    + (if $reason == "" then {} else {fell_back_reason:$reason, reason:$reason} end)
+    + (if $wt == "" then {} else {worktree:$wt} end)
+    + (if $diff == "" then {} else {diff_path:$diff} end)'
 }
 
 run_fallback() {
@@ -148,6 +153,8 @@ cmd_run() {
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
   local effort="" append_sys="" skip_perms=0
+  local base="HEAD" do_apply=0 keep=0 sandbox="" archetype=""
+  local wt="" branch="" wt_report="" diff_path="" diff_rc=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -160,9 +167,15 @@ cmd_run() {
       --effort) effort="$2"; shift 2 ;;                       # reasoning effort passthrough
       --append-system-prompt) append_sys="$2"; shift 2 ;;     # extra system prompt passthrough
       --dangerously-skip-permissions) skip_perms=1; shift ;;  # autonomous headless runs (opt-in)
+      --base) base="$2"; shift 2 ;;                           # worktree base ref
+      --apply) do_apply=1; shift ;;                           # apply the returned diff to the repo
+      --keep) keep=1; shift ;;                                # retain the worktree after the run
+      --sandbox) sandbox="$2"; shift 2 ;;                     # accepted for diff-contract parity
+      --archetype) archetype="$2"; shift 2 ;;                 # accepted for diff-contract parity
       *) die "run: unknown arg '$1'" ;;
     esac
   done
+  : "${sandbox:-}" "${archetype:-}"
 
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
@@ -199,6 +212,25 @@ cmd_run() {
     return 1
   fi
 
+  # Isolate the run. Previously claude inherited the caller's working directory, so a delegated
+  # run edited whatever tree the operator happened to be standing in — `--repo` only ever fed the
+  # state paths. A worktree makes the work reviewable as a diff, like every other coding executor.
+  if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    wt="$repo/.legion/worktrees/$RUN_ID"
+    branch="legion/claude-$RUN_ID"
+    mkdir -p "$repo/.legion/worktrees"
+    if git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" 2>/dev/null; then
+      # Artifacts live under the repo's run dir, not tmpdir — the EXIT trap deletes tmpdir, and
+      # the diff is the reviewable output of the run.
+      mkdir -p "$repo/.legion/runs/$RUN_ID"
+      diff_path="$repo/.legion/runs/$RUN_ID/diff.patch"
+      note "→ claude worktree $wt (branch $branch, base $base)"
+    else
+      wt=""; branch=""
+      note "⚠ worktree add failed; running in $repo directly"
+    fi
+  fi
+
   local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
   [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
   [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
@@ -206,9 +238,34 @@ cmd_run() {
   note "→ ${claude_cmd[*]}"
   start_ms="$(date +%s000)"
   set +e
-  printf '%s' "$task" | "${claude_cmd[@]}" >"$out_file" 2>"$err_file"
+  printf '%s' "$task" | ( cd "${wt:-$repo}" && "${claude_cmd[@]}" ) >"$out_file" 2>"$err_file"
   rc=${PIPESTATUS[1]}
   set -e
+
+  if [[ -n "$wt" ]]; then
+    git -C "$wt" add -A 2>/dev/null || diff_rc=1
+    git -C "$wt" diff --cached >"$diff_path" 2>/dev/null || diff_rc=1
+    [[ "$diff_rc" -ne 0 ]] && note "⚠ could not capture a diff from $wt"
+    if [[ "$do_apply" -eq 1 && -s "$diff_path" ]]; then
+      if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
+        git -C "$repo" apply "$diff_path" && note "diff applied to $repo"
+      else
+        note "diff did not apply cleanly; left in $diff_path"
+      fi
+    fi
+    wt_report="$wt"
+    if [[ "$keep" -ne 1 ]]; then
+      # The worktree goes; the patch stays. It already lives outside the worktree.
+      git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+      git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
+      git -C "$repo" worktree prune >/dev/null 2>&1 || true
+      wt_report="(removed; rerun with --keep to retain the worktree)"
+    fi
+    artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" \
+      --arg wt "$wt_report" --arg diff "$diff_path" \
+      '{stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff}')"
+    export LEGION_CLAUDE_WORKTREE="$wt_report" LEGION_CLAUDE_DIFF="$diff_path"
+  fi
   end_ms="$(date +%s000)"
   dur=$(( end_ms - start_ms ))
 
@@ -264,9 +321,14 @@ legion-claude — delegate a scoped task to Claude headless, with fallback to Co
 
 Usage:
   legion-claude run --task "TASK" [--model MODEL] [--repo DIR] [--effort LEVEL]
+                    [--base REF] [--apply] [--keep] [--sandbox MODE] [--archetype NAME]
                     [--append-system-prompt TEXT] [--dangerously-skip-permissions]
                     [--quiet] [--no-fallback] [--fallback-model MODEL]
   legion-claude run [--model MODEL] [--repo DIR] [...] < task.txt
+
+The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a diff at
+<repo>/.legion/runs/<run-id>/diff.patch, so it never edits the caller's working tree.
+--keep retains the worktree; --apply applies the diff to the repo.
 
 --effort / --append-system-prompt / --dangerously-skip-permissions pass through to
 `claude -p` (skip-permissions is for autonomous headless/cron runs — opt-in).

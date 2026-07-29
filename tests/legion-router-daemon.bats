@@ -10,7 +10,9 @@ setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   PORT=8189
   UPSTREAM_PORT=8190
-  export LEGION_COSTS_FILE="$REPO_ROOT/legion-router/config/costs.json"
+  # Fixture prices, not the shipped table: the cost assertions below are exact,
+  # and pinning them to real list prices makes an unrelated price edit fail here.
+  export LEGION_COSTS_FILE="$REPO_ROOT/tests/fixtures/costs.json"
   ROUTER_STREAM_UPSTREAM_PORT="$UPSTREAM_PORT" bun run "$REPO_ROOT/tests/fixtures/router-stream-upstream.ts" \
     >"$BATS_TEST_TMPDIR/upstream.log" 2>&1 &
   UPSTREAM_PID=$!

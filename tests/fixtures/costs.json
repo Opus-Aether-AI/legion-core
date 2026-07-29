@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "note": "Fixture price table for tests. Deliberately self-contained: tests that assert an exact cost must not depend on real model ids or on list prices that change. Keep `default` at zero so an unpriced model contributes nothing.",
+  "models": [
+    { "match": "test-model-alpha", "input": 2.5, "output": 15.0, "cache_read": 0.25, "cache_write": 0.0 },
+    { "match": "test-model-beta",  "input": 5.0, "output": 30.0, "cache_read": 0.5,  "cache_write": 0.0 }
+  ],
+  "default": { "input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0 }
+}

@@ -1,8 +1,26 @@
 import os
 import re
+import subprocess
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def _tracked_files():
+    """Tracked paths only.
+
+    The rule is about what the repo ships, so walking the filesystem is the wrong
+    scope: a working tree carries local `.legion/` run records and other ignored
+    scratch that legitimately names concrete models, and scanning those turns an
+    ordinary local run into a false failure.
+    """
+    listing = subprocess.run(
+        ["git", "-C", ROOT, "ls-files", "-z"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [rel for rel in listing.stdout.split("\0") if rel]
 
 ACTIVE_DEFAULT_FILES = [
     "README.md",
@@ -73,25 +91,18 @@ def test_only_model_and_cost_catalogs_contain_concrete_model_ids():
         "legion-router/config/costs.json",
     }
     offenders = []
-    for base, dirs, files in os.walk(ROOT):
-        rel_base = os.path.relpath(base, ROOT)
-        dirs[:] = [directory for directory in dirs if directory not in {".git", ".venv", "node_modules"}]
-        if rel_base == "docs/benchmarks" or rel_base.startswith("docs/benchmarks/"):
-            dirs[:] = []
+    for rel in _tracked_files():
+        name = os.path.basename(rel)
+        if rel == "docs/benchmarks" or rel.startswith("docs/benchmarks/"):
             continue
-        for name in files:
-            rel = os.path.normpath(os.path.join(rel_base, name))
-            if rel.startswith("./"):
-                rel = rel[2:]
-            if rel in allowed or name.startswith("CHANGELOG") or "lock" in name.lower():
-                continue
-            path = os.path.join(base, name)
-            try:
-                with open(path, encoding="utf-8") as handle:
-                    text = handle.read()
-            except (OSError, UnicodeDecodeError):
-                continue
-            if match := pattern.search(text):
-                offenders.append(f"{rel}: {match.group(0)}")
+        if rel in allowed or name.startswith("CHANGELOG") or "lock" in name.lower():
+            continue
+        try:
+            with open(os.path.join(ROOT, rel), encoding="utf-8") as handle:
+                text = handle.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if match := pattern.search(text):
+            offenders.append(f"{rel}: {match.group(0)}")
 
     assert offenders == []

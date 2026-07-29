@@ -33,6 +33,8 @@ if [[ "${MOCK_CODEX_FAIL:-}" == "1" ]]; then
   exit 3
 fi
 
+[[ -n "${MOCK_CODEX_STDERR:-}" ]] && printf '%s\n' "$MOCK_CODEX_STDERR" >&2
+
 # Simulate a quota/rate-limit failure for a specific model (to exercise the fallback chain).
 if [[ -n "${MOCK_CODEX_QUOTA_FAIL:-}" && "$model" == "${MOCK_CODEX_QUOTA_FAIL}" ]]; then
   printf '%s\n' '{"type":"thread.started","thread_id":"mock-quota"}'

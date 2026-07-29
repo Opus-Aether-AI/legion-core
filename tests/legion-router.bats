@@ -109,9 +109,33 @@ repos_file_for_repo() {
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
     grep -q "MOCK_CODEX_CHANGE" "$diff"
+    local run_id; run_id="$(echo "$output" | jq -r .run_id)"
+    local raw="$repo/.legion/runs/$run_id/codex.err"
+    local filtered="$repo/.legion/runs/$run_id/codex.filtered.err"
+    [ -f "$raw" ]
+    [ ! -s "$filtered" ]
+    [ "$(echo "$output" | jq -r .error_log)" = "no run-level errors were recorded (raw stderr: $raw)" ]
     # span written
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r 'select(.executor==\"codex\") | .executor'"
     [ "$output" = "codex" ]
+}
+
+@test "delegate run: preserves raw stderr and separates benign MCP OAuth noise" {
+    local repo; repo="$(make_test_repo stderr1)"
+    local mcp_noise='ERROR codex_rmcp_client::oauth::refresh_transaction: error=failed to refresh OAuth tokens for server higgsfield: OAuth token refresh failed'
+    local run_error='mock run-level error'
+
+    MOCK_CODEX_STDERR="$mcp_noise
+$run_error" run "$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    local run_id; run_id="$(echo "$output" | jq -r .run_id)"
+    local raw="$repo/.legion/runs/$run_id/codex.err"
+    local filtered="$repo/.legion/runs/$run_id/codex.filtered.err"
+
+    [ "$(cat "$raw")" = "$mcp_noise
+$run_error" ]
+    [ "$(cat "$filtered")" = "$run_error" ]
+    [ "$(echo "$output" | jq -r .error_log)" = "run-level errors: $filtered (raw stderr: $raw)" ]
 }
 
 @test "delegate run: filters generated Python bytecode from captured diffs" {
@@ -123,6 +147,40 @@ repos_file_for_repo() {
     [ -s "$diff" ]
     ! grep -q "__pycache__" "$diff"
     ! grep -q "\\.pyc" "$diff"
+}
+
+@test "delegate run: warns about tracked and untracked source work hidden by the base" {
+    local repo; repo="$(make_test_repo dirtywarn1)"
+    printf '// dirty\n' >> "$repo/foo.ts"
+    printf 'draft contract\n' > "$repo/CONTRACT.md"
+    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: the delegated agent will NOT see these files"* ]]
+    [[ "$output" == *"modified tracked files (1):"* ]]
+    [[ "$output" == *"foo.ts"* ]]
+    [[ "$output" == *"untracked files (1):"* ]]
+    [[ "$output" == *"CONTRACT.md"* ]]
+    [[ "$output" == *"pass an explicit --base"* ]]
+    [[ "$output" != *".legion/.gitignore"* ]]
+}
+
+@test "delegate run: --no-dirty-warn suppresses the source visibility warning" {
+    local repo; repo="$(make_test_repo dirtywarn2)"
+    printf 'draft contract\n' > "$repo/CONTRACT.md"
+    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --no-dirty-warn
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING: the delegated agent will NOT see these files"* ]]
+}
+
+@test "delegate run: --scope restricts the diff and reports excluded paths" {
+    local repo; repo="$(make_test_repo scope1)"
+    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --scope foo.ts
+    [ "$status" -eq 0 ]
+    local diff; diff="$(echo "$output" | tail -n 1 | jq -r .diff_path)"
+    [ ! -s "$diff" ]
+    [[ "$output" == *"changed paths:"* ]]
+    [[ "$output" == *"MOCK_CODEX_CHANGE.txt"* ]]
+    [[ "$output" == *"changes excluded by --scope:"* ]]
 }
 
 @test "delegate run: auto-emits an Opus baseline span for share measurement" {
@@ -353,6 +411,35 @@ repos_file_for_repo() {
     [ -d "$repo/.legion/worktrees/$rid" ]
     run "$DELEGATE" cleanup --run "$rid" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
+    [ ! -d "$repo/.legion/worktrees/$rid" ]
+}
+
+@test "delegate run: --detach preserves the worktree for its worker and status tracks completion" {
+    local repo; repo="$(make_test_repo detach1)"
+    local bin="$TEST_TMPDIR/detached-bin"
+    mkdir -p "$bin"
+    printf '#!/usr/bin/env bash\nsleep 2\nexec "%s" "$@"\n' "$BATS_TEST_DIRNAME/mocks/bin/codex" > "$bin/codex"
+    chmod +x "$bin/codex"
+
+    run env PATH="$bin:$PATH" "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --detach --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "detached"'
+    local rid; rid="$(echo "$output" | jq -r .run_id)"
+    [ -d "$repo/.legion/worktrees/$rid" ]
+
+    run "$DELEGATE" status --run "$rid" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "executing"'
+
+    local i=0
+    while [ "$i" -lt 50 ]; do
+      run "$DELEGATE" status --run "$rid" --repo "$repo" --quiet
+      [ "$status" -eq 0 ]
+      [ "$(echo "$output" | jq -r .status)" = "completed" ] && break
+      sleep 0.2
+      i=$((i + 1))
+    done
+    [ "$(echo "$output" | jq -r .status)" = "completed" ]
     [ ! -d "$repo/.legion/worktrees/$rid" ]
 }
 

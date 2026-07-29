@@ -10,9 +10,10 @@
 #
 # Commands:
 #   run     --model M [--sandbox S] [--task T | stdin] [--repo DIR] [--base REF]
-#           [--budget-tokens N] [--apply] [--quiet]
+#           [--budget-tokens N] [--scope PATHSPEC] [--detach] [--apply] [--quiet]
 #   review  --model M --base BRANCH [--repo DIR]
 #   apply   --run RUN_ID [--repo DIR]          # apply a captured diff to the repo
+#   status  --run RUN_ID [--repo DIR]
 #   cleanup [--run RUN_ID | --all] [--repo DIR]
 #
 # Safety: default sandbox is workspace-write for `run`, read-only for `review`.
@@ -46,6 +47,7 @@ source "$_self_dir/lib/primary.sh"
 source "$_self_dir/lib/sandbox-setup.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1090
   # shellcheck disable=SC1091
   source "$_state_lib"
 fi
@@ -442,6 +444,102 @@ cleanup_generated_diff_noise() {
   find "$target" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
 }
 
+# The source checkout can legitimately be dirty, but a worktree starts only at
+# its requested base. Make that visibility gap explicit before creating it.
+warn_dirty_source() {
+  local source_repo="$1" source_base="$2"
+  local line path total=0 shown=0
+  local -a tracked=() untracked=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    path="${line:3}"
+    # `.legion/` is runtime state, including the .gitignore written just before
+    # this check. It must never cause a warning about user work.
+    case "$path" in .legion|.legion/*) continue ;; esac
+    total=$((total + 1))
+    if [[ "${line:0:2}" == "??" ]]; then
+      untracked+=("$path")
+    else
+      tracked+=("$path")
+    fi
+  done < <(git -C "$source_repo" status --porcelain --untracked-files=all -- \
+    . ':(exclude).legion' ':(exclude).legion/**')
+  [[ "$total" -gt 0 ]] || return 0
+
+  note "⚠ WARNING: the delegated agent will NOT see these files because its worktree is created from '$source_base'."
+  if [[ "${#tracked[@]}" -gt 0 ]]; then
+    note "  modified tracked files (${#tracked[@]}):"
+    for path in "${tracked[@]}"; do
+      [[ "$shown" -lt 20 ]] || break
+      note "    $path"
+      shown=$((shown + 1))
+    done
+  fi
+  if [[ "${#untracked[@]}" -gt 0 ]]; then
+    note "  untracked files (${#untracked[@]}):"
+    for path in "${untracked[@]}"; do
+      [[ "$shown" -lt 20 ]] || break
+      note "    $path"
+      shown=$((shown + 1))
+    done
+  fi
+  [[ "$shown" -ge "$total" ]] || note "  … and $((total - shown)) more"
+  note "  Remedy: commit the files, or pass an explicit --base that contains them."
+}
+
+# Record lifecycle state next to the run artifacts so `status` does not depend
+# on the mutable global registry.
+write_run_artifact_status() {
+  local run_art="$1" run_id="$2" phase="$3" run_wt="$4" pid="${5:-}" result="${6:-}"
+  local pid_json="null"
+  [[ "$pid" =~ ^[0-9]+$ ]] && pid_json="$pid"
+  jq -cn --arg run "$run_id" --arg status "$phase" --arg wt "$run_wt" --arg dir "$run_art" \
+    --arg result "$result" --argjson pid "$pid_json" '
+    {run_id:$run, status:$status, worktree:$wt, run_dir:$dir, pid:$pid,
+     result_status:(if $result=="" then null else $result end)}' \
+    > "$run_art/status.json.tmp.$$" && mv -f "$run_art/status.json.tmp.$$" "$run_art/status.json"
+}
+
+# Show every changed path grouped by top-level directory. When scopes are
+# present, save the selected list too and make exclusions visible.
+summarize_changed_paths() {
+  local target="$1" run_art="$2" diff_range="$3"; shift 3
+  local all_paths="$run_art/changed-paths.txt" scoped_paths="$run_art/scoped-changed-paths.txt"
+  local path excluded=0
+  if [[ "$diff_range" == "--cached" ]]; then
+    git -C "$target" diff --cached --name-only > "$all_paths"
+  else
+    git -C "$target" diff --name-only "$diff_range" > "$all_paths"
+  fi
+  [[ -s "$all_paths" ]] || return 0
+  note "→ changed paths:"
+  while IFS= read -r path; do
+    note "$path"
+  done < <(awk '
+    {
+      split($0, parts, "/"); top=(index($0, "/") ? parts[1] : ".")
+      if (!(top in seen)) { seen[top]=1; order[++count]=top }
+      grouped[top]=grouped[top] "    " $0 "\n"
+    }
+    END { for (i=1; i<=count; i++) printf "  %s/\n%s", order[i], grouped[order[i]] }
+  ' "$all_paths")
+
+  [[ "$#" -gt 0 ]] || return 0
+  if [[ "$diff_range" == "--cached" ]]; then
+    git -C "$target" diff --cached --name-only -- "$@" > "$scoped_paths"
+  else
+    git -C "$target" diff --name-only "$diff_range" -- "$@" > "$scoped_paths"
+  fi
+  while IFS= read -r path; do
+    grep -Fqx -- "$path" "$scoped_paths" >/dev/null 2>&1 && continue
+    if [[ "$excluded" -eq 0 ]]; then
+      note "→ changes excluded by --scope:"
+      excluded=1
+    fi
+    note "  $path"
+  done < "$all_paths"
+}
+
 # Dispatch a scoped run to a non-codex executor's adapter (the Legion runner
 # contract: `<adapter> run --repo … --task … [--model …] …`). Reads the adapter
 # and its I/O contract from executors.toml via legion-route, builds the right
@@ -490,9 +588,10 @@ dispatch_adapter() {
 # ── run ──────────────────────────────────────────────────────────────
 cmd_run() {
   local model="" sandbox="" task="" repo="$PWD" base="HEAD" archetype="" effort=""
-  local budget=0 do_apply=0 keep=0 preset_run_id=""
+  local budget=0 do_apply=0 keep=0 detach=0 dirty_warn=1 preset_run_id=""
   local untrusted=0
-  local forced_executor="" explicit_model=""
+  local forced_executor="" explicit_model="" detached_worker=0 sandbox_dev_pid_from_parent=""
+  local -a scopes=()
   [[ "${LEGION_UNTRUSTED:-0}" == "1" ]] && untrusted=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -508,7 +607,12 @@ cmd_run() {
       --budget-tokens) budget="$2"; shift 2 ;;
       --apply) do_apply=1; shift ;;
       --keep) keep=1; shift ;;
+      --detach) detach=1; shift ;;
+      --no-dirty-warn) dirty_warn=0; shift ;;
+      --scope) scopes+=("$2"); shift 2 ;;
       --untrusted) untrusted=1; shift ;;
+      --_detached-worker) detached_worker=1; shift ;;
+      --_sandbox-dev-pid) sandbox_dev_pid_from_parent="$2"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
       *) die "run: unknown arg '$1'" ;;
     esac
@@ -559,30 +663,85 @@ cmd_run() {
     self)
       die "executor=self — the primary harness ($(legion_primary)) does this inline, not via legion-delegate. (use --executor <name> to force a specific harness)" ;;
     ""|codex) : ;;
-    *) dispatch_adapter "$r_exec" ;;   # execs the adapter and never returns
+    *)
+      [[ "$detach" -eq 0 && "$detached_worker" -eq 0 ]] || \
+        die "run: --detach is supported only by native codex execution"
+      [[ "${#scopes[@]}" -eq 0 ]] || \
+        die "run: --scope is supported only by native codex execution"
+      dispatch_adapter "$r_exec" ;;   # execs the adapter and never returns
   esac
   [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
   [[ -n "$model" ]] || die "run: --model or --archetype required"
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
 
+  if [[ "$detach" -eq 1 ]] && ! command -v setsid >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+    die "run: --detach requires setsid or python3"
+  fi
+
   RUN_ID="${preset_run_id:-$(_run_id)}"
   local wt="$repo/.legion/worktrees/$RUN_ID"
   local art="$repo/.legion/runs/$RUN_ID"
-  mkdir -p "$art"
-  # Keep all legion runtime state out of the target repo's git status / diffs.
-  printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
   local branch="legion/delegate-$RUN_ID"
-  note "→ worktree $wt (branch $branch, base $base)"
-  git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" || die "worktree add failed"
+  local sandbox_dev_pid=""
+  if [[ "$detached_worker" -eq 1 ]]; then
+    [[ -d "$art" && -d "$wt" ]] || die "run: detached worker setup is missing for '$RUN_ID'"
+  else
+    mkdir -p "$art"
+    # Keep all legion runtime state out of the target repo's git status / diffs.
+    printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+    [[ "$dirty_warn" -eq 0 ]] || warn_dirty_source "$repo" "$base"
+    note "→ worktree $wt (branch $branch, base $base)"
+    git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" || die "worktree add failed"
+  fi
   # Register for EXIT-trap cleanup so a crash/kill before the inline removal
   # below does not orphan the worktree + branch (WS6 worktree-leak guard).
   LEGION_WT_PATH="$wt"; LEGION_WT_BRANCH="$branch"; LEGION_WT_REPO="$repo"; LEGION_WT_KEEP="$keep"
-  local sandbox_dev_pid=""
-  if ! is_sandcastle_sandbox "$sandbox"; then
+  if [[ "$detached_worker" -eq 1 ]]; then
+    sandbox_dev_pid="$sandbox_dev_pid_from_parent"
+    SANDBOX_DEV_PID_TO_TEARDOWN="$sandbox_dev_pid"
+  elif ! is_sandcastle_sandbox "$sandbox"; then
     sandbox_dev_pid="$(LEGION_SANDBOX_ARTIFACT_DIR="$art" LEGION_SANDBOX_QUIET="${QUIET:-0}" sandbox_setup "$wt" "$repo" "$untrusted" || true)"
     SANDBOX_DEV_PID_TO_TEARDOWN="$sandbox_dev_pid"
   fi
   write_run_state running
+  if [[ "$detached_worker" -eq 1 ]]; then
+    printf '%s\n' "$$" > "$art/pid"
+    write_run_artifact_status "$art" "$RUN_ID" "executing" "$wt" "$$"
+  else
+    write_run_artifact_status "$art" "$RUN_ID" "executing" "$wt"
+  fi
+
+  if [[ "$detach" -eq 1 ]]; then
+    local -a worker_args=(run --_detached-worker --run-id "$RUN_ID" --model "$model" \
+      --sandbox "$sandbox" --reasoning-effort "$effort" --task "$task" --repo "$repo" --base "$base" \
+      --budget-tokens "$budget" --no-dirty-warn)
+    [[ -n "$archetype" ]] && worker_args+=(--archetype "$archetype")
+    [[ -n "$forced_executor" ]] && worker_args+=(--executor "$forced_executor")
+    [[ "$do_apply" -eq 1 ]] && worker_args+=(--apply)
+    [[ "$keep" -eq 1 ]] && worker_args+=(--keep)
+    [[ "$untrusted" -eq 1 ]] && worker_args+=(--untrusted)
+    if [[ "${#scopes[@]}" -gt 0 ]]; then
+      for path in "${scopes[@]}"; do worker_args+=(--scope "$path"); done
+    fi
+    [[ -n "$sandbox_dev_pid" ]] && worker_args+=(--_sandbox-dev-pid "$sandbox_dev_pid")
+
+    # The parent must retain neither the worktree nor the sandbox-dev process:
+    # the worker owns both until it reaches the normal cleanup path.
+    LEGION_WT_KEEP=1
+    SANDBOX_DEV_PID_TO_TEARDOWN=""
+    if command -v setsid >/dev/null 2>&1; then
+      nohup setsid "$BASH" "$0" "${worker_args[@]}" </dev/null >"$art/result.json" 2>"$art/worker.err" &
+    else
+      nohup python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+        "$BASH" "$0" "${worker_args[@]}" </dev/null >"$art/result.json" 2>"$art/worker.err" &
+    fi
+    local worker_pid=$!
+    printf '%s\n' "$worker_pid" > "$art/pid"
+    write_run_artifact_status "$art" "$RUN_ID" "executing" "$wt" "$worker_pid"
+    jq -cn --arg run "$RUN_ID" --arg wt "$wt" --arg dir "$art" \
+      '{run_id:$run, worktree:$wt, run_dir:$dir, status:"detached"}'
+    return 0
+  fi
 
   local start_ms end_ms dur rc=0 used_model=""
   start_ms="$(date +%s000)"
@@ -639,9 +798,37 @@ cmd_run() {
   if ! is_sandcastle_sandbox "$sandbox"; then
     cleanup_generated_diff_noise "$wt"
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
-    git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
+    if [[ "${#scopes[@]}" -gt 0 ]]; then
+      git -C "$wt" diff --cached -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
+    else
+      git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
+    fi
+    if [[ "$diff_rc" -eq 0 ]]; then
+      if [[ "${#scopes[@]}" -gt 0 ]]; then
+        summarize_changed_paths "$wt" "$art" --cached "${scopes[@]}" || note "⚠ could not summarize changed paths"
+      else
+        summarize_changed_paths "$wt" "$art" --cached || note "⚠ could not summarize changed paths"
+      fi
+    fi
   else
     [[ -f "$art/diff.patch" ]] || : > "$art/diff.patch"
+    local sandcastle_branch sandcastle_range
+    sandcastle_branch="$(jq -r '.branch // empty' "$art/sandcastle-result.json" 2>/dev/null || true)"
+    if [[ -n "$sandcastle_branch" ]]; then
+      sandcastle_range="$base...$sandcastle_branch"
+      if [[ "${#scopes[@]}" -gt 0 ]]; then
+        git -C "$wt" diff "$sandcastle_range" -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
+      fi
+      if [[ "$diff_rc" -eq 0 ]]; then
+        if [[ "${#scopes[@]}" -gt 0 ]]; then
+          summarize_changed_paths "$wt" "$art" "$sandcastle_range" "${scopes[@]}" || note "⚠ could not summarize changed paths"
+        else
+          summarize_changed_paths "$wt" "$art" "$sandcastle_range" || note "⚠ could not summarize changed paths"
+        fi
+      fi
+    else
+      note "⚠ could not summarize changed paths (sandcastle result branch unavailable)"
+    fi
   fi
 
   local total_tokens status="ok"
@@ -691,6 +878,10 @@ cmd_run() {
     wt_report="(removed; rerun with --keep to retain the worktree)"
     LEGION_WT_PATH=""   # removed here; stop the EXIT trap from retrying
   fi
+
+  local lifecycle_status="completed"
+  case "$status" in failed|error) lifecycle_status="failed" ;; esac
+  write_run_artifact_status "$art" "$RUN_ID" "$lifecycle_status" "$wt_report" "" "$status"
 
   jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
@@ -874,6 +1065,54 @@ cmd_apply() {
   note "✓ applied $diff"
 }
 
+# Report a run from its local artifacts. Detached workers update status.json on
+# start and finish; a still-live recorded pid is the authoritative running bit.
+cmd_status() {
+  local run="" repo="$PWD"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run) run="$2"; shift 2 ;;
+      --repo) repo="$2"; shift 2 ;;
+      --quiet) QUIET=1; shift ;;
+      *) die "status: unknown arg '$1'" ;;
+    esac
+  done
+  [[ -n "$run" ]] || die "status: --run RUN_ID required"
+  repo="$(cd "$repo" && pwd)"
+  local art="$repo/.legion/runs/$run" state_file="$repo/.legion/runs/$run/status.json"
+  [[ -d "$art" ]] || die "status: no run '$run' under $repo/.legion/runs"
+
+  local phase="" result="" wt="" pid="" pid_json="null"
+  if [[ -s "$state_file" ]] && jq -e . "$state_file" >/dev/null 2>&1; then
+    phase="$(jq -r '.status // empty' "$state_file")"
+    result="$(jq -r '.result_status // empty' "$state_file")"
+    wt="$(jq -r '.worktree // empty' "$state_file")"
+    pid="$(jq -r '.pid // empty' "$state_file")"
+  fi
+  if [[ -s "$art/pid" ]]; then
+    local recorded_pid
+    recorded_pid="$(cat "$art/pid" 2>/dev/null || true)"
+    [[ "$recorded_pid" =~ ^[0-9]+$ ]] && pid="$recorded_pid"
+  fi
+
+  case "$phase" in
+    completed|failed) ;;
+    *)
+      if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        phase="executing"
+      else
+        phase="failed"
+        [[ -n "$result" ]] || result="worker exited without a terminal status"
+      fi
+      ;;
+  esac
+  [[ "$pid" =~ ^[0-9]+$ ]] && pid_json="$pid"
+  jq -cn --arg run "$run" --arg status "$phase" --arg wt "$wt" --arg dir "$art" \
+    --arg result "$result" --argjson pid "$pid_json" '
+    {run_id:$run, status:$status, worktree:$wt, run_dir:$dir, pid:$pid,
+     result_status:(if $result=="" then null else $result end)}'
+}
+
 # Bulk/targeted cleanup of delegation worktrees + branches (+ run artifacts with --purge).
 # `run` auto-deletes its own worktree on completion (unless --keep); this reclaims --keep'd
 # runs, resume sessions, and anything orphaned by a crash.
@@ -933,6 +1172,7 @@ main() {
     review)  cmd_review "$@" ;;
     resume)  cmd_resume "$@" ;;
     apply)   cmd_apply "$@" ;;
+    status)  cmd_status "$@" ;;
     cleanup) cmd_cleanup "$@" ;;
     -h|--help|help|"") cat >&2 <<'EOF'
 legion-delegate — delegate a scoped task to an external model agent (Codex by
@@ -941,21 +1181,25 @@ default; any registered executor via --executor)
   run      [--archetype A | --model M] [--executor codex|cursor|claude|opencode]
            [--sandbox read-only|workspace-write|docker|podman|vercel]
            [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
-           [--base REF] [--budget-tokens N] [--apply] [--keep] [--untrusted]
+           [--base REF] [--budget-tokens N] [--scope PATHSPEC ...] [--detach] [--apply] [--keep]
+           [--no-dirty-warn] [--untrusted]
   review   [--archetype A | --model M] --base BRANCH [--repo DIR] [--reasoning-effort E]
            -> structured verdict (codex --output-schema)
   resume   --run RUN_ID [--task T|stdin] [--model M] [--repo DIR] [--reasoning-effort E]
            -> continue a kept codex session (original run needs --keep)
   apply    --run RUN_ID [--repo DIR]
+  status   --run RUN_ID [--repo DIR]
   cleanup  [--run RUN_ID | --all] [--purge] [--repo DIR]
            (run auto-deletes its own worktree on completion unless --keep; this
             reclaims --keep'd/resume worktrees + branches; --purge also drops run artifacts)
 
 --archetype resolves model/sandbox/effort from routing.toml + models.toml. List them: legion-route --list
 --executor forces a specific harness (symmetric reverse-delegate). List them: legion-route --list-executors
+--scope may be repeated; it limits the captured diff to those git pathspecs.
+--detach returns after setup and leaves the worker running in a new session; use status --run RUN_ID to poll it.
 EOF
       [[ "$cmd" == "" ]] && exit 2 || exit 0 ;;
-    *) die "unknown command '$cmd' (run|review|resume|apply|cleanup)" ;;
+    *) die "unknown command '$cmd' (run|review|resume|apply|status|cleanup)" ;;
   esac
 }
 

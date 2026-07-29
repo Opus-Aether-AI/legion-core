@@ -149,6 +149,40 @@ $run_error" ]
     ! grep -q "\\.pyc" "$diff"
 }
 
+@test "delegate run: warns about tracked and untracked source work hidden by the base" {
+    local repo; repo="$(make_test_repo dirtywarn1)"
+    printf '// dirty\n' >> "$repo/foo.ts"
+    printf 'draft contract\n' > "$repo/CONTRACT.md"
+    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: the delegated agent will NOT see these files"* ]]
+    [[ "$output" == *"modified tracked files (1):"* ]]
+    [[ "$output" == *"foo.ts"* ]]
+    [[ "$output" == *"untracked files (1):"* ]]
+    [[ "$output" == *"CONTRACT.md"* ]]
+    [[ "$output" == *"pass an explicit --base"* ]]
+    [[ "$output" != *".legion/.gitignore"* ]]
+}
+
+@test "delegate run: --no-dirty-warn suppresses the source visibility warning" {
+    local repo; repo="$(make_test_repo dirtywarn2)"
+    printf 'draft contract\n' > "$repo/CONTRACT.md"
+    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --no-dirty-warn
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING: the delegated agent will NOT see these files"* ]]
+}
+
+@test "delegate run: --scope restricts the diff and reports excluded paths" {
+    local repo; repo="$(make_test_repo scope1)"
+    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --scope foo.ts
+    [ "$status" -eq 0 ]
+    local diff; diff="$(echo "$output" | tail -n 1 | jq -r .diff_path)"
+    [ ! -s "$diff" ]
+    [[ "$output" == *"changed paths:"* ]]
+    [[ "$output" == *"MOCK_CODEX_CHANGE.txt"* ]]
+    [[ "$output" == *"changes excluded by --scope:"* ]]
+}
+
 @test "delegate run: auto-emits an Opus baseline span for share measurement" {
     local repo; repo="$(make_test_repo share0)"
     run "$DELEGATE" run --model gpt-5.4 --task "x" --repo "$repo" --quiet
@@ -377,6 +411,35 @@ $run_error" ]
     [ -d "$repo/.legion/worktrees/$rid" ]
     run "$DELEGATE" cleanup --run "$rid" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
+    [ ! -d "$repo/.legion/worktrees/$rid" ]
+}
+
+@test "delegate run: --detach preserves the worktree for its worker and status tracks completion" {
+    local repo; repo="$(make_test_repo detach1)"
+    local bin="$TEST_TMPDIR/detached-bin"
+    mkdir -p "$bin"
+    printf '#!/usr/bin/env bash\nsleep 2\nexec "%s" "$@"\n' "$BATS_TEST_DIRNAME/mocks/bin/codex" > "$bin/codex"
+    chmod +x "$bin/codex"
+
+    run env PATH="$bin:$PATH" "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --detach --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "detached"'
+    local rid; rid="$(echo "$output" | jq -r .run_id)"
+    [ -d "$repo/.legion/worktrees/$rid" ]
+
+    run "$DELEGATE" status --run "$rid" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "executing"'
+
+    local i=0
+    while [ "$i" -lt 50 ]; do
+      run "$DELEGATE" status --run "$rid" --repo "$repo" --quiet
+      [ "$status" -eq 0 ]
+      [ "$(echo "$output" | jq -r .status)" = "completed" ] && break
+      sleep 0.2
+      i=$((i + 1))
+    done
+    [ "$(echo "$output" | jq -r .status)" = "completed" ]
     [ ! -d "$repo/.legion/worktrees/$rid" ]
 }
 

@@ -133,7 +133,7 @@ repos_file_for_repo() {
     local run_error='mock run-level error'
 
     MOCK_CODEX_STDERR="$mcp_noise
-$run_error" run "$DELEGATE" run --model gpt-5.5 --task "x" --repo "$repo" --quiet
+$run_error" run "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     local run_id; run_id="$(echo "$output" | jq -r .run_id)"
     local raw="$repo/.legion/runs/$run_id/codex.err"
@@ -160,7 +160,7 @@ $run_error" ]
     local repo; repo="$(make_test_repo dirtywarn1)"
     printf '// dirty\n' >> "$repo/foo.ts"
     printf 'draft contract\n' > "$repo/CONTRACT.md"
-    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo"
+    run "$DELEGATE" run --model test-model-alpha --task x --repo "$repo"
     [ "$status" -eq 0 ]
     [[ "$output" == *"WARNING: the delegated agent will NOT see these files"* ]]
     [[ "$output" == *"modified tracked files (1):"* ]]
@@ -174,14 +174,14 @@ $run_error" ]
 @test "delegate run: --no-dirty-warn suppresses the source visibility warning" {
     local repo; repo="$(make_test_repo dirtywarn2)"
     printf 'draft contract\n' > "$repo/CONTRACT.md"
-    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --no-dirty-warn
+    run "$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --no-dirty-warn
     [ "$status" -eq 0 ]
     [[ "$output" != *"WARNING: the delegated agent will NOT see these files"* ]]
 }
 
 @test "delegate run: --scope restricts the diff and reports excluded paths" {
     local repo; repo="$(make_test_repo scope1)"
-    run "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --scope foo.ts
+    run "$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --scope foo.ts
     [ "$status" -eq 0 ]
     local diff; diff="$(echo "$output" | tail -n 1 | jq -r .diff_path)"
     [ ! -s "$diff" ]
@@ -428,7 +428,7 @@ $run_error" ]
     printf '#!/usr/bin/env bash\nsleep 2\nexec "%s" "$@"\n' "$BATS_TEST_DIRNAME/mocks/bin/codex" > "$bin/codex"
     chmod +x "$bin/codex"
 
-    run env PATH="$bin:$PATH" "$DELEGATE" run --model gpt-5.5 --task x --repo "$repo" --detach --quiet
+    run env PATH="$bin:$PATH" "$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --detach --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "detached"'
     local rid; rid="$(echo "$output" | jq -r .run_id)"

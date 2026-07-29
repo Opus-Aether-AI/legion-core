@@ -19,7 +19,7 @@
 # ── Anthropic Claude on CLAUDE CODE (the `claude` executor / self) ──
 claude_orchestrator = "claude-fable-5"   # self: orchestration / architecture / deep reasoning (run at high)
 claude_default      = "claude-fable-5"   # generic Claude / reverse-delegate target / frontend review (Fable)
-claude_opus         = "claude-opus-4-8"  # FRONTEND polish only — Opus on Claude Code (run at high thinking)
+claude_opus         = "claude-opus-5"    # FRONTEND polish only — Opus on Claude Code (run at high thinking)
 
 # ── OpenAI GPT-5.6 (Codex) — run at max ────────────────────────────
 codex_workhorse     = "gpt-5.6-terra"    # persistent scoped implementation

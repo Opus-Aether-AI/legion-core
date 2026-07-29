@@ -27,7 +27,7 @@
 [executors.claude]
 kind = "primary coding"
 adapter = "legion-claude"
-contract = "prompt"
+contract = "diff"
 model_ref = "claude_default"
 
 [executors.codex]

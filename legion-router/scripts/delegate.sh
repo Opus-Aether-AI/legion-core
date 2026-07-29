@@ -210,7 +210,11 @@ scan_task_text() {
   [[ "${LEGION_ALLOW_UNSAFE:-0}" == "1" ]] && return 0
   local norm
   norm="$(printf '%s' "$text" | tr -s '[:space:]' ' ')"
-  local patterns='rm -rf|rm -fr|rm -[a-z]*r[a-z]* /|git push|--force|force[ -]push|:\(\)\{|/etc/(passwd|shadow)|\.ssh|id_rsa|\.aws/|\.netrc|AWS_SECRET|ANTHROPIC_API_KEY|OPENAI_API_KEY|(curl|wget|fetch)[^|]*\|[[:space:]]*(ba)?sh|nc |ncat|/dev/tcp|DROP TABLE|sudo'
+  # Command-shaped tokens are anchored to a word boundary. Unanchored they fire on ordinary
+  # English: `ncat` matches "truncated", `nc ` matches "sync with", `sudo` matches "pseudo" —
+  # each silently refusing a legitimate task spec. Text is space-normalized above, so
+  # `(^| )` … `( |$)` is a sufficient and portable boundary.
+  local patterns='rm -rf|rm -fr|rm -[a-z]*r[a-z]* /|git push|--force|force[ -]push|:\(\)\{|/etc/(passwd|shadow)|\.ssh|id_rsa|\.aws/|\.netrc|AWS_SECRET|ANTHROPIC_API_KEY|OPENAI_API_KEY|(curl|wget|fetch)[^|]*\|[[:space:]]*(ba)?sh|(^| )nc |(^| )ncat( |$)|/dev/tcp|DROP TABLE|(^| )sudo( |$)'
   if printf '%s' "$norm" | grep -qiE "$patterns"; then
     die "task text matched a dangerous/injection pattern; refusing write delegation. Review the task, or set LEGION_ALLOW_UNSAFE=1 to override."
   fi

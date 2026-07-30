@@ -153,6 +153,7 @@ cmd_run() {
 
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
+  legion_require_top_level_executor "cursor" || return $?
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   agent_bin="$(resolve_cursor_bin)" || die "Cursor Agent CLI not found. Install Cursor CLI or set CURSOR_AGENT_BIN."

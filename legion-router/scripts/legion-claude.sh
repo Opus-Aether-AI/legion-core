@@ -183,6 +183,7 @@ cmd_run() {
 
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
+  legion_require_top_level_executor "claude" || return $?
   repo="$(cd "$repo" && pwd)" || die "run: repo not found: $repo"
   if declare -F legion_resolve_state >/dev/null 2>&1; then
     legion_resolve_state "$repo"
@@ -246,10 +247,13 @@ cmd_run() {
   [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
   [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
   note "→ ${claude_cmd[*]}"
-  legion_activate_executor_context "$RUN_ID"
   start_ms="$(date +%s000)"
   set +e
-  printf '%s' "$task" | ( cd "${wt:-$repo}" && "${claude_cmd[@]}" ) >"$out_file" 2>"$err_file"
+  printf '%s' "$task" | (
+    legion_activate_executor_context "$RUN_ID"
+    cd "${wt:-$repo}"
+    "${claude_cmd[@]}"
+  ) >"$out_file" 2>"$err_file"
   rc=${PIPESTATUS[1]}
   set -e
 
@@ -311,6 +315,8 @@ cmd_run() {
   fi
 
   if [[ "$allow_fallback" -eq 1 ]]; then
+    status="$([[ "$reason" == "claude_limit" ]] && printf blocked || printf failed)"
+    emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
     note "⚠ Claude failed ($reason): falling back to $fallback_model"
     run_fallback "$reason" "$task" "$fallback_model" "$repo"
     return $?
@@ -321,8 +327,8 @@ cmd_run() {
   else
     status="failed"
   fi
-  emit_span "claude" "$model" "$status" "$dur" 0 "$usage" "$task" "$artifacts"
-  emit_terminal_json "claude" "$model" "$status" "$result" "$usage" 0 false "$reason"
+  emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+  emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
   return 1
 }
 

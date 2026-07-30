@@ -34,7 +34,11 @@ For CLI-only use, the published npm package is also available:
 npm install -g @opus-aether-ai/legion-core
 ```
 
-Use `LEGION_REF=main` for the current main branch or `LEGION_REF=<tag>` to pin a release. `minimal` installs router and observability; pass a plugin name to install just that plugin. See `scripts/install.sh --help` for harness and refresh options.
+Use `LEGION_REF=main` for the current main branch or `LEGION_REF=<tag>` to pin
+the bootstrap snapshot. Manual/daily refresh intentionally advances the managed
+source clone to `origin/main`; disable cron when maintaining a frozen snapshot.
+`minimal` installs router and observability; pass a plugin name to install just
+that plugin.
 
 ## Harness support
 

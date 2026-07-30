@@ -71,6 +71,14 @@ make_test_repo() {
     assert_mock_not_called agent
 }
 
+@test "legion-cursor: direct adapter refuses delegated executor context" {
+    local repo; repo="$(make_test_repo nested)"
+    LEGION_DEPTH=1 run "$LEGION_CURSOR" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"nested Legion delegation is blocked"* ]]
+    assert_mock_not_called agent
+}
+
 @test "legion-cursor: missing Cursor Agent CLI fails clearly" {
     local repo; repo="$(make_test_repo miss1)"
     PATH="$(path_without agent)" run "$LEGION_CURSOR" run --task "x" --repo "$repo" --quiet

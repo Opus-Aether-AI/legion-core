@@ -95,6 +95,14 @@ make_test_repo() {
     [ -f "$repo/MOCK_OPENCODE_CHANGE.txt" ]
 }
 
+@test "legion-opencode: direct adapter refuses delegated executor context" {
+    local repo; repo="$(make_test_repo nested)"
+    LEGION_ACTIVE=1 run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"nested Legion delegation is blocked"* ]]
+    assert_mock_not_called opencode
+}
+
 @test "legion-opencode: opencode failure yields status failed and non-zero exit" {
     local repo; repo="$(make_test_repo fail1)"
     MOCK_OPENCODE_FAIL=1 run "$LEGION_OPENCODE" run --task "boom" --repo "$repo" --quiet

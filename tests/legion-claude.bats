@@ -57,6 +57,19 @@ make_test_repo() {
     echo "$output" | jq -e '.result == "GPT_FALLBACK"'
     echo "$output" | jq -e '.fell_back == true'
     echo "$output" | jq -e '.fell_back_reason == "claude_limit"'
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -s \
+      '[.[] | select(.executor == \"claude\" and .status == \"blocked\")] | length'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+}
+
+@test "legion-claude: direct adapter refuses delegated executor context" {
+    local repo; repo="$(make_test_repo nested)"
+    LEGION_EXECUTOR=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"nested Legion delegation is blocked"* ]]
+    assert_mock_not_called claude
+    assert_mock_not_called legion-delegate
 }
 
 @test "legion-claude: missing claude on PATH falls back directly" {

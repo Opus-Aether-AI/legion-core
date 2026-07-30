@@ -9,6 +9,7 @@ record those as `legion.outcome.v1` records for `legion-self-learn run`.
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -40,18 +41,30 @@ VALID_SOURCE_KINDS = {
     "cursor-session",
 }
 BENCHMARK_TOKEN = re.compile(r"(?:^|[-_.])(bench(?:mark)?|eval|fixture|test)(?:$|[-_.])", re.I)
-SECRET_PATTERNS = [
-    re.compile(
-        r"(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\b"
-        r"(\s*[:=]\s*)([^\s,;]+)"
-    ),
-    re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{12,}"),
-    re.compile(
-        r"\b(?:sk-[a-zA-Z0-9_-]{12,}|ghp_[a-zA-Z0-9]{12,}|"
-        r"github_pat_[a-zA-Z0-9_]{12,})\b"
-    ),
-    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I),
-]
+CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?i)\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?key|"
+    r"access[_-]?token|auth[_-]?token|client[_-]?(?:secret|token|key)|"
+    r"private[_-]?key|secret[_-]?access[_-]?key|password|passwd|"
+    r"credential))\b([\"']?\s*[:=]\s*[\"']?)([^\s,;\"']+)"
+)
+PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?"
+    r"-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    re.DOTALL,
+)
+AUTHENTICATED_URL = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@"
+)
+BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{12,}")
+PROVIDER_TOKEN = re.compile(
+    r"\b(?:sk-[a-zA-Z0-9_-]{12,}|ghp_[a-zA-Z0-9]{12,}|"
+    r"github_pat_[a-zA-Z0-9_]{12,}|AKIA[A-Z0-9]{12,})\b"
+)
+JWT_TOKEN = re.compile(
+    r"\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b"
+)
+OPAQUE_TOKEN = re.compile(r"\b[a-zA-Z0-9_+/=-]{40,}\b")
+EMAIL_ADDRESS = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 
 
 @dataclass
@@ -315,16 +328,18 @@ def _redact_text(text: str, home: Path | None = None) -> str:
         home_text = str(home.expanduser())
         if home_text and home_text != "/":
             redacted = redacted.replace(home_text, "~")
-    for index, pattern in enumerate(SECRET_PATTERNS):
-        if index == 0:
-            redacted = pattern.sub(
-                lambda match: f"{match.group(1)}{match.group(2)}<redacted>",
-                redacted,
-            )
-        elif index == 3:
-            redacted = pattern.sub("<redacted-email>", redacted)
-        else:
-            redacted = pattern.sub("<redacted-secret>", redacted)
+    redacted = PEM_PRIVATE_KEY.sub("<redacted-private-key>", redacted)
+    redacted = AUTHENTICATED_URL.sub(
+        lambda match: f"{match.group(1)}<redacted>:<redacted>@",
+        redacted,
+    )
+    redacted = CREDENTIAL_ASSIGNMENT.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}<redacted>",
+        redacted,
+    )
+    for pattern in (BEARER_TOKEN, PROVIDER_TOKEN, JWT_TOKEN, OPAQUE_TOKEN):
+        redacted = pattern.sub("<redacted-secret>", redacted)
+    redacted = EMAIL_ADDRESS.sub("<redacted-email>", redacted)
     return redacted
 
 
@@ -359,10 +374,28 @@ def _repo_scope(repo: Path | None) -> RepoScope | None:
     if repo is None:
         return None
     path = repo.expanduser().resolve()
+    repository_urls = set(_repository_urls_for_path(str(path)))
+    identity = sorted(repository_urls) or [str(path)]
+    return RepoScope(
+        path=path,
+        repo_id=_stable_id(["repo", identity]),
+        repository_urls=repository_urls,
+    )
+
+
+@lru_cache(maxsize=512)
+def _repository_urls_for_path(path_text: str) -> frozenset[str]:
     repository_urls: set[str] = set()
     try:
         proc = subprocess.run(
-            ["git", "-C", str(path), "config", "--get-regexp", r"^remote\..*\.url$"],
+            [
+                "git",
+                "-C",
+                path_text,
+                "config",
+                "--get-regexp",
+                r"^remote\..*\.url$",
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -375,12 +408,7 @@ def _repo_scope(repo: Path | None) -> RepoScope | None:
                 repository_urls.add(normalized)
     except (OSError, subprocess.SubprocessError):
         pass
-    identity = sorted(repository_urls) or [str(path)]
-    return RepoScope(
-        path=path,
-        repo_id=_stable_id(["repo", identity]),
-        repository_urls=repository_urls,
-    )
+    return frozenset(repository_urls)
 
 
 def _path_source_kind(path: Path, home: Path) -> tuple[str, str]:
@@ -514,6 +542,10 @@ def _source_matches_repo(info: SourceInfo, scope: RepoScope, home: Path) -> bool
         try:
             cwd = Path(info.cwd).expanduser().resolve()
             if cwd == scope.path or _path_within(cwd, scope.path):
+                return True
+            if scope.repository_urls.intersection(
+                _repository_urls_for_path(str(cwd))
+            ):
                 return True
         except (OSError, RuntimeError):
             pass
@@ -1127,7 +1159,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--show-evidence",
         action="store_true",
-        help="include redacted snippets and home-relative paths in output",
+        help=(
+            "include best-effort-redacted snippets and home-relative paths for "
+            "local inspection; inspect before sharing"
+        ),
     )
     parser.add_argument(
         "--record",
@@ -1136,11 +1171,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    if not args.logs:
-        args.logs = legion_state.resolve_state(os.getcwd())["state_root"]
     repo_path = Path(args.repo).expanduser().resolve() if args.repo else None
     if repo_path is not None and not repo_path.is_dir():
         parser.error(f"--repo is not a directory: {repo_path}")
+    if not args.logs:
+        state_repo = repo_path if repo_path is not None else Path.cwd()
+        args.logs = legion_state.resolve_state(str(state_repo))["state_root"]
 
     payload = scan(
         Path(args.home).expanduser(),

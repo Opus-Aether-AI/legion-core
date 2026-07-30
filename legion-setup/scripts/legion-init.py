@@ -41,7 +41,7 @@ delegated.
 - If `LEGION_ACTIVE=1`, `LEGION_DEPTH` is positive, or the working directory is
   under `.legion/worktrees/`, this process is already a delegated executor:
   implement the assigned slice directly and do not start another Legion
-  workflow unless the parent explicitly requested nested orchestration.
+  workflow. Return to the parent if the slice needs re-planning.
 - Otherwise, before editing, invoke the applicable installed Legion skill or
   command and read relevant `legion-self-learn hints`.
 - Use `legion-run` for substantial or multi-stage work that needs an explicit
@@ -71,6 +71,29 @@ def _policy_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
+def _managed_hash(
+    body: str,
+    *,
+    before: int,
+    after: int,
+    created: bool,
+    newline: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "after": after,
+            "before": before,
+            "body": body.replace("\r\n", "\n"),
+            "created": created,
+            "eol": "crlf" if newline == "\r\n" else "lf",
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def _metadata_line(
     *,
     before: int,
@@ -83,7 +106,7 @@ def _metadata_line(
     return (
         f"<!-- legion:init:{POLICY_VERSION}:padding-before={before};"
         f"padding-after={after};created={int(created)};eol={eol};"
-        f"sha256={_policy_hash(body)} -->"
+        f"sha256={_managed_hash(body, before=before, after=after, created=created, newline=newline)} -->"
     )
 
 
@@ -124,7 +147,13 @@ def _managed_range(text: str, start: str, end: str) -> tuple[int, int] | None:
     return starts[0], ends[0]
 
 
-def _block_metadata(text: str, start: str, end: str) -> tuple[int, int, bool, str]:
+def _block_metadata(
+    text: str,
+    start: str,
+    end: str,
+    *,
+    require_integrity: bool = False,
+) -> tuple[int, int, bool, str, bool]:
     span = _managed_range(text, start, end)
     if span is None:
         raise InitError("managed block metadata requested for an absent block")
@@ -133,14 +162,37 @@ def _block_metadata(text: str, start: str, end: str) -> tuple[int, int, bool, st
         re.escape(start)
         + r"\r?\n<!-- legion:init:v1:padding-before=(\d+);"
         + r"padding-after=(\d+);created=([01]);"
-        + r"(?:eol=(lf|crlf);)?sha256=[0-9a-f]{16} -->\r?\n"
+        + r"(?:eol=(lf|crlf);)?sha256=([0-9a-f]{16}) -->\r?\n"
     )
     match = pattern.match(block)
     if match is None:
         raise InitError("managed block is missing valid legion-init v1 metadata")
     current_newline = "\r\n" if block.startswith(start + "\r\n") else "\n"
     stored_newline = "\r\n" if match.group(4) == "crlf" else "\n" if match.group(4) == "lf" else current_newline
-    return int(match.group(1)), int(match.group(2)), match.group(3) == "1", stored_newline
+    before = int(match.group(1))
+    after = int(match.group(2))
+    created = match.group(3) == "1"
+    body_suffix = current_newline + end
+    body = block[match.end() :]
+    if not body.endswith(body_suffix):
+        raise InitError("managed block body is malformed")
+    body = body[: -len(body_suffix)]
+    stored_hash = match.group(5)
+    integrity_ok = stored_hash == _managed_hash(
+        body,
+        before=before,
+        after=after,
+        created=created,
+        newline=stored_newline,
+    )
+    legacy_ok = stored_hash == _policy_hash(body.replace("\r\n", "\n"))
+    if require_integrity and not integrity_ok:
+        detail = "legacy metadata" if legacy_ok else "modified metadata or body"
+        raise InitError(
+            f"managed block integrity check failed ({detail}); "
+            "run legion-init once to repair it before removal"
+        )
+    return before, after, created, stored_newline, integrity_ok
 
 
 def _translated_padding(count: int, stored_newline: str, current_newline: str) -> int:
@@ -153,7 +205,9 @@ def _remove(text: str, start: str, end: str) -> tuple[str, bool]:
     span = _managed_range(text, start, end)
     if span is None:
         return text, False
-    before_count, after_count, created, stored_newline = _block_metadata(text, start, end)
+    before_count, after_count, created, stored_newline, _ = _block_metadata(
+        text, start, end, require_integrity=True
+    )
     current_newline = "\r\n" if text[span[0] :].startswith(start + "\r\n") else "\n"
     before_count = _translated_padding(before_count, stored_newline, current_newline)
     after_count = _translated_padding(after_count, stored_newline, current_newline)
@@ -169,6 +223,7 @@ def _remove(text: str, start: str, end: str) -> tuple[str, bool]:
 
 
 def _has_agents_import(text: str) -> bool:
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
     fence_char = ""
     fence_length = 0
     for line in text.splitlines():
@@ -183,13 +238,20 @@ def _has_agents_import(text: str) -> bool:
             fence_char = fence.group(1)[0]
             fence_length = len(fence.group(1))
             continue
-        if not line.startswith(("    ", "\t")) and line.strip() == "@AGENTS.md":
+        if not line.startswith(("    ", "\t")) and re.search(
+            r"(?<![\w/])@(?:\./)?AGENTS\.md(?![\w./-])", line
+        ):
             return True
     return False
 
 
 def _claude_body(existing: str) -> str:
-    unmanaged, _ = _remove(existing, CLAUDE_START, CLAUDE_END)
+    span = _managed_range(existing, CLAUDE_START, CLAUDE_END)
+    unmanaged = (
+        existing[: span[0]] + existing[span[1] :]
+        if span is not None
+        else existing
+    )
     has_agents_import = _has_agents_import(unmanaged)
     import_line = "" if has_agents_import else "@AGENTS.md\n\n"
     return f"{import_line}{CLAUDE_BODY}"
@@ -210,7 +272,7 @@ def _upsert(
 ) -> str:
     span = _managed_range(text, start, end)
     if span is not None:
-        before, after, created, stored_newline = _block_metadata(text, start, end)
+        before, after, created, stored_newline, _ = _block_metadata(text, start, end)
         newline = "\r\n" if text[span[0] :].startswith(start + "\r\n") else "\n"
         block = _render_block(
             start,
@@ -397,7 +459,9 @@ def _apply_transaction(files: list[dict[str, Any]], *, remove: bool) -> None:
 
 def _consistency_warnings(files: list[dict[str, Any]]) -> list[str]:
     claude = next(item for item in files if Path(item["path"]).name == "CLAUDE.md")
-    unmanaged, _ = _remove(claude["_current"], CLAUDE_START, CLAUDE_END)
+    current = claude["_current"]
+    span = _managed_range(current, CLAUDE_START, CLAUDE_END)
+    unmanaged = current[: span[0]] + current[span[1] :] if span is not None else current
     duplicate = re.search(r"(?im)^#{1,6}[ \t]+legion workflow[ \t]*$", unmanaged)
     if duplicate:
         return [

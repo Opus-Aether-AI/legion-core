@@ -117,6 +117,13 @@ payload = {
     "tasks": tasks,
 }
 target = work / "task-ledger.json"
+task_dir = work / "task-ledger.d"
+task_dir.mkdir(parents=True, exist_ok=True)
+for task in tasks:
+    (task_dir / f"{task['index']}.json").write_text(
+        json.dumps(task, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 temp = work / f".task-ledger.{os.getpid()}.tmp"
 temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 os.replace(temp, target)
@@ -124,38 +131,32 @@ PY
 }
 
 update_task_ledger() {
-  local i="$1" state="$2" result_status="${3:-}" base_ref="${4:-}"
-  python3 - "$work/task-ledger.json" "$i" "$state" "$result_status" "$base_ref" <<'PY'
+  local i="$1" state="$2" result_status="${3:-}" base_ref="${4:-}" apply_status="${5:-}"
+  python3 - "$work/task-ledger.d/$i.json" "$state" "$result_status" "$base_ref" "$apply_status" <<'PY'
 import datetime
-import fcntl
 import json
 import os
 import sys
 from pathlib import Path
 
 target = Path(sys.argv[1])
-index = int(sys.argv[2])
-state, result_status, base_ref = sys.argv[3:6]
+state, result_status, base_ref, apply_status = sys.argv[2:6]
 now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-lock_path = target.with_suffix(target.suffix + ".lock")
-with lock_path.open("a+b") as lock:
-    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-    payload = json.loads(target.read_text(encoding="utf-8"))
-    task = payload["tasks"][index]
-    task["state"] = state
-    if state == "running" and not task.get("started_at"):
-        task["started_at"] = now
-    if state in {"completed", "failed", "blocked", "inline", "integrated"}:
-        task["completed_at"] = now
-    if result_status:
-        task["result_status"] = result_status
-    if base_ref:
-        task["base_ref"] = base_ref
-    payload["updated_at"] = now
-    temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temp, target)
-    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+task = json.loads(target.read_text(encoding="utf-8"))
+task["state"] = state
+if state == "running" and not task.get("started_at"):
+    task["started_at"] = now
+if state in {"completed", "failed", "blocked", "inline", "integrated"}:
+    task["completed_at"] = now
+if result_status:
+    task["result_status"] = result_status
+if base_ref:
+    task["base_ref"] = base_ref
+if apply_status:
+    task["apply_status"] = apply_status
+temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+temp.write_text(json.dumps(task, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(temp, target)
 PY
 }
 
@@ -172,6 +173,11 @@ target = Path(sys.argv[1])
 results_path = Path(sys.argv[2])
 now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 payload = json.loads(target.read_text(encoding="utf-8"))
+task_dir = target.with_name("task-ledger.d")
+payload["tasks"] = [
+    json.loads((task_dir / f"{index}.json").read_text(encoding="utf-8"))
+    for index in range(len(payload["tasks"]))
+]
 results = [
     json.loads(line)
     for line in results_path.read_text(encoding="utf-8").splitlines()
@@ -181,7 +187,8 @@ by_id = {str(item.get("id") or ""): item for item in results}
 for task in payload["tasks"]:
     result = by_id.get(task["id"], {})
     if result:
-        task["result_status"] = str(result.get("status") or task.get("result_status") or "")
+        if task.get("state") not in {"failed", "blocked"}:
+            task["result_status"] = str(result.get("status") or task.get("result_status") or "")
         task["diff_path"] = str(result.get("diff_path") or "")
         task["model"] = str(result.get("model") or "")
     if task["state"] in {"queued", "running"}:
@@ -212,6 +219,29 @@ temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
 temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 os.replace(temp, target)
 PY
+}
+
+task_ledger_finalized=0
+finalize_task_ledger_on_exit() {
+  local rc=$?
+  [[ "$task_ledger_finalized" == "0" && -f "$work/task-ledger.json" ]] || return "$rc"
+  set +e
+  results="${results:-$work/results.jsonl}"
+  [[ -f "$results" ]] || : > "$results"
+  applied="${applied:-0}"
+  apply_conflicts="${apply_conflicts:-0}"
+  finalize_task_ledger
+  task_ledger_finalized=1
+  return "$rc"
+}
+terminate_fanout() {
+  trap - INT TERM HUP
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null || true
+  done < <(jobs -pr)
+  wait 2>/dev/null || true
+  exit 143
 }
 MAXC="${LEGION_MAX_CONCURRENCY:-4}"
 
@@ -362,12 +392,21 @@ then
 fi
 
 launch_slice() {
-  local i="$1" base_ref="${2:-HEAD}" line arch model task ex rid
+  local i="$1" base_ref="${2:-HEAD}" base_sha="" line arch model task ex rid
   line="$(cat "$work/slice-$i.in")"
   rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
   arch="$(jq -r '.archetype // ""' <<<"$line" 2>/dev/null || echo "")"
   model="$(jq -r '.model // ""' <<<"$line" 2>/dev/null || echo "")"
   task="$(jq -r '.task // ""' <<<"$line" 2>/dev/null || echo "")"
+  base_sha="$(git -C "$repo" rev-parse "$base_ref^{commit}" 2>/dev/null || true)"
+  if [[ -z "$base_sha" ]]; then
+    jq -cn --arg ref "$base_ref" \
+      '{status:"error",stage:"base",error:("could not resolve immutable base " + $ref)}' \
+      > "$work/slice-$i.out"
+    update_task_ledger "$i" "failed" "error" ""
+    return
+  fi
+  base_ref="$base_sha"
   update_task_ledger "$i" "running" "" "$base_ref"
   if [[ -z "$task" ]]; then
     [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
@@ -432,10 +471,13 @@ launch_slice() {
 has_dependencies="$(jq -r '.has_dependencies' "$work/dag.json")"
 base_head="$(git -C "$repo" rev-parse HEAD)"
 init_task_ledger
+trap finalize_task_ledger_on_exit EXIT
+trap terminate_fanout INT TERM HUP
 integration_branch=""
 integration_wt=""
 integrated=0
 integration_conflicts=0
+integrated_tasks=()
 
 setup_integration_base() {
   [[ -n "$integration_branch" ]] && return 0
@@ -485,18 +527,23 @@ integrate_slice_diff() {
   local i="$1" result dpath
   result="$(cat "$work/slice-$i.out" 2>/dev/null || echo '{}')"
   dpath="$(jq -r '.diff_path // empty' <<<"$result" 2>/dev/null || echo "")"
-  [[ -n "$dpath" && -s "$dpath" ]] || return 0
+  if [[ -z "$dpath" || ! -s "$dpath" ]]; then
+    update_task_ledger "$i" "completed" "ok" "" "no_changes"
+    return 0
+  fi
   if git -C "$integration_wt" apply --check "$dpath" 2>/dev/null; then
     git -C "$integration_wt" apply "$dpath"
     git -C "$integration_wt" add -A
     git -C "$integration_wt" -c user.email=legion@local -c user.name=Legion commit -qm "legion fanout slice $i"
     integrated=$((integrated + 1))
-    update_task_ledger "$i" "integrated" "ok" "$integration_branch"
+    integrated_tasks+=("$i")
+    update_task_ledger "$i" "integrated" "ok" "" "staged"
   else
     integration_conflicts=$((integration_conflicts + 1))
     jq -c '. + {status:"error",stage:"integration-apply",error:"diff did not apply cleanly to integration base"}' \
       "$work/slice-$i.out" > "$work/slice-$i.out.tmp" \
       && mv "$work/slice-$i.out.tmp" "$work/slice-$i.out"
+    update_task_ledger "$i" "failed" "error" "" "conflict"
   fi
 }
 
@@ -606,19 +653,37 @@ if [[ -n "$apply" && "$has_dependencies" == "true" ]]; then
   if [[ -s "$integration_patch" ]]; then
     if git -C "$repo" apply --check "$integration_patch" 2>/dev/null; then
       git -C "$repo" apply "$integration_patch" && applied="$integrated"
+      for i in "${integrated_tasks[@]}"; do
+        update_task_ledger "$i" "integrated" "ok" "" "applied"
+      done
     else
       apply_conflicts=$((apply_conflicts + 1))
+      for i in "${integrated_tasks[@]}"; do
+        update_task_ledger "$i" "failed" "error" "" "conflict"
+      done
     fi
   fi
 elif [[ -n "$apply" ]]; then
-  while IFS= read -r dpath; do
-    [[ -n "$dpath" && -s "$dpath" ]] || continue
-    if git -C "$repo" apply --check "$dpath" 2>/dev/null; then
-      git -C "$repo" apply "$dpath" && applied=$((applied + 1))
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    result_status="$(jq -r '.status // "error"' "$work/slice-$i.out" 2>/dev/null || echo error)"
+    dpath="$(jq -r '.diff_path // empty' "$work/slice-$i.out" 2>/dev/null || true)"
+    if [[ "$result_status" != "ok" ]]; then
+      i=$((i + 1))
+      continue
+    fi
+    if [[ -z "$dpath" || ! -s "$dpath" ]]; then
+      update_task_ledger "$i" "completed" "ok" "" "no_changes"
+    elif git -C "$repo" apply --check "$dpath" 2>/dev/null; then
+      git -C "$repo" apply "$dpath"
+      applied=$((applied + 1))
+      update_task_ledger "$i" "integrated" "ok" "" "applied"
     else
       apply_conflicts=$((apply_conflicts + 1))
+      update_task_ledger "$i" "failed" "error" "" "conflict"
     fi
-  done < <(jq -r '.[] | select(.status=="ok") | .diff_path // empty' <(jq -s '.' "$results"))
+    i=$((i + 1))
+  done
 fi
 if [[ "$has_dependencies" == "true" ]]; then
   apply_conflicts=$((apply_conflicts + integration_conflicts))
@@ -626,6 +691,7 @@ if [[ "$has_dependencies" == "true" ]]; then
 fi
 cleanup_slice_worktrees
 finalize_task_ledger
+task_ledger_finalized=1
 
 # Root span for the fan-out itself, so the delegate spans form a tree under it.
 # Best-effort: telemetry is observability, never block the run on it.

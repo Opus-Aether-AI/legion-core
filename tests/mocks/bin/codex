@@ -43,13 +43,23 @@ if [[ $review -eq 1 && "${MOCK_CODEX_REVIEW_TRANSIENT_FAILS:-0}" =~ ^[0-9]+$ ]] 
   printf '%s\n' "$review_attempt" > "$review_counter"
   if [[ "$review_attempt" -le "$MOCK_CODEX_REVIEW_TRANSIENT_FAILS" ]]; then
     printf '%s\n' '{"type":"thread.started","thread_id":"mock-transient"}'
+    printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":5,"reasoning_output_tokens":1}}'
     printf 'mock codex review timed out\n' >&2
     exit 124
   fi
 fi
 
+if [[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_CONTEXT_LOG:-}" ]]; then
+  printf 'pwd=%s head=%s\n' "$PWD" "$(git rev-parse HEAD 2>/dev/null || true)" \
+    >> "$MOCK_CODEX_REVIEW_CONTEXT_LOG"
+fi
+
 if [[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_DELAY:-}" ]]; then
-  sleep "$MOCK_CODEX_REVIEW_DELAY"
+  sleep "$MOCK_CODEX_REVIEW_DELAY" &
+  delay_pid=$!
+  [[ -n "${MOCK_CODEX_REVIEW_CHILD_PID_FILE:-}" ]] &&
+    printf '%s\n' "$delay_pid" > "$MOCK_CODEX_REVIEW_CHILD_PID_FILE"
+  wait "$delay_pid"
 fi
 
 if [[ "${MOCK_CODEX_FAIL:-}" == "1" ]]; then
@@ -73,7 +83,7 @@ printf '%s\n' '{"type":"turn.started"}'
 
 if [[ $review -eq 1 ]]; then
   if [[ "${MOCK_CODEX_REVIEW_INVALID_VERDICT:-}" == "1" ]]; then
-    msg='{"summary":"mock review without a verdict","findings":[]}'
+    msg='{"verdict":"approve","summary":"mock invalid review","findings":[{}]}'
   else
     msg='{"verdict":"approve","summary":"mock review","findings":[]}'
   fi

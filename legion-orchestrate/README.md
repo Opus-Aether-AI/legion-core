@@ -81,7 +81,9 @@ Validator and evaluator commands run without inherited executor-role variables,
 so a parent Legion session cannot silently change their behavior. Before final
 review, `legion-run` writes the current worktree through a temporary Git index
 to an immutable snapshot commit. Review artifacts record the exact base, head,
-and tree SHAs rather than relying on a moving branch name.
+and tree SHAs rather than relying on a moving branch name. The source worktree
+must be clean when `legion-run` starts; this prevents unrelated local or secret
+files from being included in the external review snapshot.
 
 ## `legion-fanout`
 
@@ -100,9 +102,9 @@ printf '%s\n' \
 - Output includes per-slice `{status, model, diff_path, cost_usd}`, aggregate
   totals, and `task_ledger_path`.
 - `task_ledger_path` points to a durable `legion.task-ledger.v1` record with
-  queued, started, terminal, dependency, run-ID, base, and apply evidence for
-  every slice. Interrupted runs therefore distinguish work that never started
-  from work that failed after launch.
+  queued, started, terminal, dependency, run-ID, immutable base-SHA, and
+  per-slice apply evidence. Interrupted runs therefore distinguish work that
+  never started from work that failed after launch.
 - Bounded by `--max-concurrency` (or `LEGION_MAX_CONCURRENCY`, default 4). Portable to bash 3.2.
 
 ## The playbook + ultracode mode

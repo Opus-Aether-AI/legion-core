@@ -405,22 +405,80 @@ def run_process(
     return payload
 
 
-def _git_output(repo: Path, args: list[str], *, env: dict[str, str] | None = None, stdin: str = "") -> str:
-    result = subprocess.run(
+def _git_output(
+    repo: Path,
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    stdin: str = "",
+    timeout_seconds: int = 1800,
+) -> str:
+    process = subprocess.Popen(
         ["git", "-C", str(repo), *args],
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        input=stdin or None,
+        stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
         env=env,
+        start_new_session=True,
     )
-    if result.returncode != 0:
-        detail = _short(result.stderr or result.stdout, 1000)
+    try:
+        stdout, stderr = process.communicate(
+            input=stdin if stdin else None,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+        raise LegionRunError(
+            f"immutable review input timed out after {timeout_seconds}s: git {' '.join(args)}",
+            124,
+        ) from exc
+    if process.returncode != 0:
+        detail = _short(stderr or stdout, 1000)
         raise LegionRunError(f"could not create immutable review input: git {' '.join(args)}: {detail}", 1)
-    return result.stdout.strip()
+    return stdout.strip()
 
 
-def create_review_snapshot(repo: Path, run_dir: Path) -> dict[str, Any]:
+def require_clean_review_source(repo: Path, *, timeout_seconds: int) -> None:
+    dirty = _git_output(
+        repo,
+        [
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).legion",
+            ":(exclude).legion/**",
+        ],
+        timeout_seconds=timeout_seconds,
+    )
+    if dirty:
+        paths = ", ".join(line[3:] for line in dirty.splitlines()[:8])
+        raise LegionRunError(
+            "legion-run requires a clean source worktree before fan-out so "
+            f"pre-existing local files are not exposed to reviewers: {paths}",
+            2,
+        )
+
+
+def create_review_snapshot(
+    repo: Path,
+    run_dir: Path,
+    *,
+    timeout_seconds: int,
+) -> dict[str, Any]:
     """Write the current worktree to a detached commit without changing its index.
 
     Fan-out applies verified patches to the caller's worktree without committing
@@ -429,8 +487,14 @@ def create_review_snapshot(repo: Path, run_dir: Path) -> dict[str, Any]:
     index gives us an immutable, locally-addressable snapshot commit.
     """
 
-    base_sha = _git_output(repo, ["rev-parse", "HEAD^{commit}"])
-    base_tree = _git_output(repo, ["rev-parse", f"{base_sha}^{{tree}}"])
+    base_sha = _git_output(
+        repo, ["rev-parse", "HEAD^{commit}"], timeout_seconds=timeout_seconds
+    )
+    base_tree = _git_output(
+        repo,
+        ["rev-parse", f"{base_sha}^{{tree}}"],
+        timeout_seconds=timeout_seconds,
+    )
     temp_index = run_dir / "review.index"
     snapshot_env = dict(os.environ)
     snapshot_env.update(
@@ -443,14 +507,27 @@ def create_review_snapshot(repo: Path, run_dir: Path) -> dict[str, Any]:
         }
     )
     try:
-        _git_output(repo, ["read-tree", base_sha], env=snapshot_env)
-        _git_output(repo, ["add", "-A", "--", ".", ":(exclude).legion"], env=snapshot_env)
-        tree_sha = _git_output(repo, ["write-tree"], env=snapshot_env)
+        _git_output(
+            repo,
+            ["read-tree", base_sha],
+            env=snapshot_env,
+            timeout_seconds=timeout_seconds,
+        )
+        _git_output(
+            repo,
+            ["add", "-A", "--", ".", ":(exclude).legion"],
+            env=snapshot_env,
+            timeout_seconds=timeout_seconds,
+        )
+        tree_sha = _git_output(
+            repo, ["write-tree"], env=snapshot_env, timeout_seconds=timeout_seconds
+        )
         head_sha = _git_output(
             repo,
             ["commit-tree", tree_sha, "-p", base_sha],
             env=snapshot_env,
             stdin="Legion immutable review snapshot\n",
+            timeout_seconds=timeout_seconds,
         )
     finally:
         temp_index.unlink(missing_ok=True)
@@ -476,8 +553,6 @@ def hermetic_stage_env(env: dict[str, str]) -> dict[str, str]:
         "LEGION_ACTIVE",
         "LEGION_EXECUTOR",
         "LEGION_DEPTH",
-        "LEGION_PARENT_ID",
-        "LEGION_TRACE_ID",
         "LEGION_FORCE_DELEGATE",
         "LEGION_LOW_CREDIT",
     ):
@@ -1458,6 +1533,7 @@ def execute(
     stage_timeout_seconds: int,
     allow_generated_slices: bool,
 ) -> int:
+    require_clean_review_source(repo, timeout_seconds=stage_timeout_seconds)
     state = legion_state.resolve_state(str(repo))
     run_id = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + f"-{_slug(runner['name'])}"
     run_dir = Path(state["state_root"]) / "runs" / "legion-run" / run_id
@@ -1703,7 +1779,12 @@ def execute(
         _set_stage_status(stages, "route", "passed")
         write_stage_status(run_dir, stages)
 
-        fanout_payload = stage_run("fanout-apply", [_cmd("legion-fanout"), "--slices", str(slices_path), "--repo", str(repo), "--apply", "--json"], run_dir / "fanout.json")
+        fanout_error: LegionRunError | None = None
+        try:
+            fanout_payload = stage_run("fanout-apply", [_cmd("legion-fanout"), "--slices", str(slices_path), "--repo", str(repo), "--apply", "--json"], run_dir / "fanout.json")
+        except LegionRunError as exc:
+            fanout_error = exc
+            fanout_payload = _load_json_value(run_dir / "fanout.json")
         ledger_source = ""
         if isinstance(fanout_payload, dict):
             ledger_source = str(fanout_payload.get("task_ledger_path") or "")
@@ -1718,8 +1799,23 @@ def execute(
                     "reason": "fanout did not return a task ledger",
                 },
             )
+            if fanout_error is None:
+                raise LegionRunError(
+                    "stage semantic failure (fanout.json): successful fanout "
+                    "did not return a readable task ledger",
+                    1,
+                )
+        if fanout_error is not None:
+            raise fanout_error
         validation_payload = stage_run("validate", [runner["commands"]["validate"]], run_dir / "validation.json", shell=True, hermetic=True)
-        review_input = create_review_snapshot(repo, run_dir)
+        current_stage = "review"
+        _set_stage_status(stages, "review", "running")
+        write_stage_status(run_dir, stages)
+        review_input = create_review_snapshot(
+            repo,
+            run_dir,
+            timeout_seconds=stage_timeout_seconds,
+        )
         review_route = run_process(
             [_cmd("legion-route"), "final-review", "--task", "independent final review"],
             env,
@@ -1728,18 +1824,26 @@ def execute(
             timeout_seconds=stage_timeout_seconds,
         )
         review_executor = str(review_route.get("executor") if isinstance(review_route, dict) else "")
+        review_task = (
+            f"Review the immutable repository diff {review_input['base_sha']}...HEAD after "
+            "deterministic validation. "
+            "Return one JSON object only: {\"verdict\":\"approve|request_changes\","
+            "\"summary\":string,\"findings\":[{\"severity\":\"critical|high|medium|low\","
+            "\"title\":string,\"detail\":string}]}. Focus on correctness, unnecessary complexity, "
+            "and spec adherence."
+        )
         if review_executor == "claude":
-            review_task = (
-                f"Review the immutable repository diff {review_input['base_sha']}...HEAD after "
-                "deterministic validation. "
-                "Return one JSON object only: {\"verdict\":\"approve|request_changes\","
-                "\"summary\":string,\"findings\":[{\"severity\":\"critical|high|medium|low\","
-                "\"title\":string,\"detail\":string}]}. Focus on correctness, unnecessary complexity, "
-                "and spec adherence."
-            )
             stage_run("review", [_cmd("legion-claude"), "run", "--repo", str(repo), "--base", review_input["head_sha"], "--model", str(review_route.get("model") or ""), "--effort", str(review_route.get("reasoning_effort") or "high"), "--no-fallback", "--task", review_task], run_dir / "review.json")
+        elif review_executor == "codex":
+            stage_run("review", [_cmd("legion-delegate"), "review", "--model", str(review_route.get("model") or ""), "--reasoning-effort", str(review_route.get("reasoning_effort") or "xhigh"), "--repo", str(repo), "--base", review_input["base_sha"], "--head", review_input["head_sha"]], run_dir / "review.json")
+        elif review_executor == "self":
+            raise LegionRunError(
+                "final-review resolved to executor=self; an independent delegated "
+                "reviewer is required",
+                1,
+            )
         else:
-            stage_run("review", [_cmd("legion-delegate"), "review", "--archetype", "final-review", "--repo", str(repo), "--base", review_input["base_sha"], "--head", review_input["head_sha"]], run_dir / "review.json")
+            stage_run("review", [_cmd("legion-delegate"), "run", "--executor", review_executor, "--model", str(review_route.get("model") or ""), "--sandbox", "read-only", "--repo", str(repo), "--base", review_input["head_sha"], "--task", review_task], run_dir / "review.json")
         eval_payload = stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True, hermetic=True)
         stage_run("report", [_cmd("legion-report"), "--trace", "latest", "--json"], run_dir / "legion-report.json")
         stage_run("share", [_cmd("legion-share"), "--window", "1d", "--json"], run_dir / "share.json")

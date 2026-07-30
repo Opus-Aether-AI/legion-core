@@ -3,7 +3,7 @@
 @AGENTS.md
 
 <!-- legion:init:v1:claude:start -->
-<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=459bfe3024dd2d59 -->
+<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=5ffecb7907800e76 -->
 ## Legion workflow
 
 Load and follow the shared Legion-first repository policy in `AGENTS.md`. Keep

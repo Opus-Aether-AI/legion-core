@@ -85,10 +85,11 @@ provide tighter provenance scope; `--session-limit 0` explicitly restores an
 unbounded scan.
 
 Candidate and recorded evidence contains only counts, stable hashes, roles, and
-source kinds. `--show-evidence` adds redacted snippets and home-relative paths
-to command output for an intentional audit; raw snippets are never copied into
-durable self-learning outcomes. That keeps the daily mode conservative while
-still turning corrections and review gotchas into memory/proposals. Set
+source kinds. `--show-evidence` adds best-effort-redacted snippets and
+home-relative paths to command output for an intentional local audit; inspect
+that output before sharing it. Raw snippets are never copied into durable
+self-learning outcomes. That keeps the daily mode conservative while still
+turning corrections and review gotchas into memory/proposals. Set
 `LEGION_SESSION_LEARN=0` to skip the session scan during refresh.
 
 ## Layout

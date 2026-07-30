@@ -62,8 +62,8 @@ building a new runner profile.
    ```
    Delegated slices run in parallel worktrees; `self` slices come back
    `status:"inline"` for the active primary. The returned `task_ledger_path`
-   is the durable proof that every queued slice started and reached a terminal
-   state.
+   is the durable proof of which queued slices started, which were blocked
+   before launch, and how every slice terminated.
 4. **Cross-model verify** (independent Fable reviewer) — for each returned diff, get an independent structured verdict:
    ```bash
    legion-run resolves `final-review` through its configured executor; do not

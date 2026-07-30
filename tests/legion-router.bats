@@ -465,7 +465,8 @@ $run_error" ]
     git -C "$repo" commit -qm "add review target"
     head_sha="$(git -C "$repo" rev-parse HEAD)"
 
-    run "$DELEGATE" review --model test-model-beta --base "$base_sha" --head HEAD \
+    local review_context="$TEST_TMPDIR/review-context.log"
+    MOCK_CODEX_REVIEW_CONTEXT_LOG="$review_context" run "$DELEGATE" review --model test-model-beta --base "$base_sha" --head HEAD \
       --repo "$repo" --quiet
 
     [ "$status" -eq 0 ]
@@ -487,6 +488,7 @@ $run_error" ]
     ' "$receipt"
     grep -q "export const added = true" "$patch"
     [ ! -d "$repo/.legion/worktrees/$run_id" ]
+    grep -Eq "pwd=$repo/.legion/worktrees/.+ head=$head_sha" "$review_context"
     assert_mock_called codex "exec review --base $base_sha"
 }
 
@@ -502,10 +504,30 @@ $run_error" ]
     echo "$output" | jq -e --arg base "$base_sha" '
       .status == "ok" and .attempts == 2 and .max_attempts == 2
       and .reviewed_base_sha == $base and .reviewed_head_sha == $base
+      and .usage.input_tokens == 1100
+      and .usage.cached_input_tokens == 220
+      and .usage.output_tokens == 55
+      and .usage.reasoning_output_tokens == 11
     '
     [ "$(grep -Fc "codex exec review --base $base_sha" "$MOCK_CALL_LOG")" -eq 2 ]
     jq -e '.status == "ok" and .attempts == 2 and .max_attempts == 2' \
       "$(echo "$output" | jq -r .terminal_receipt)"
+}
+
+@test "delegate review: fails closed on a schema-invalid verdict" {
+    local repo; repo="$(make_test_repo review-invalid)"
+    export MOCK_CODEX_REVIEW_INVALID_VERDICT=1
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD \
+      --max-attempts 2 --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "invalid-verdict"
+      and .attempts == 1 and .verdict == null
+    '
+    local run_id; run_id="$(echo "$output" | jq -r .run_id)"
+    [ ! -d "$repo/.legion/worktrees/$run_id" ]
 }
 
 @test "delegate review: configurable retry bound stops after one transient attempt" {
@@ -571,6 +593,7 @@ $run_error" ]
 @test "delegate review: interruption writes a terminal receipt and cleans its snapshot" {
     local repo; repo="$(make_test_repo review-interrupt)"
     export MOCK_CODEX_REVIEW_DELAY=30
+    export MOCK_CODEX_REVIEW_CHILD_PID_FILE="$TEST_TMPDIR/review-child.pid"
     local stdout="$TEST_TMPDIR/review-interrupt.out"
     local stderr="$TEST_TMPDIR/review-interrupt.err"
 
@@ -588,14 +611,16 @@ $run_error" ]
     [ "$launched" -eq 1 ]
 
     kill -TERM "$review_pid"
-    set +e
-    wait "$review_pid"
-    local review_rc=$?
-    set -e
+    local review_rc=0
+    wait "$review_pid" || review_rc=$?
 
     [ "$review_rc" -eq 143 ]
-    local receipt
+    local child_pid; child_pid="$(cat "$MOCK_CODEX_REVIEW_CHILD_PID_FILE")"
+    ! kill -0 "$child_pid" 2>/dev/null
+    local receipt run_id registry
     receipt="$(find "$repo/.legion/runs" -name terminal.json -print -quit)"
+    run_id="$(jq -r .run_id "$receipt")"
+    registry="$LEGION_REGISTRY_DIR/$run_id.json"
     [ -n "$receipt" ]
     jq -e '
       .schema == "legion.review-terminal.v1"
@@ -605,6 +630,12 @@ $run_error" ]
       and (.reviewed_head_sha | length == 40)
       and (.completed_at | length > 0)
     ' "$receipt"
+    jq -e '.kind == "review" and .lifecycle.phase == "failed"' "$registry"
+    jq -e '.status == "failed" and .result_status == "failed"' \
+      "$(dirname "$receipt")/status.json"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e \
+      'select(.run_id == \"$run_id\" and .executor == \"codex-review\" and .status == \"failed\")'"
+    [ "$status" -eq 0 ]
     [ "$(find "$repo/.legion/worktrees" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
 }
 
@@ -722,6 +753,39 @@ $run_error" ]
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
   assert_mock_not_called codex
+}
+
+@test "delegate run: each delegated-context sentinel independently blocks nesting" {
+  local repo; repo="$(make_test_repo nested-sentinels)"
+  LEGION_EXECUTOR=1 run "$DELEGATE" run --model test-model-beta \
+    --task x --repo "$repo" --quiet
+  [ "$status" -eq 2 ]
+  echo "$output" | jq -e '.reason == "nested-delegation"'
+
+  unset LEGION_EXECUTOR
+  LEGION_DEPTH=1 run "$DELEGATE" run --model test-model-beta \
+    --task x --repo "$repo" --quiet
+  [ "$status" -eq 2 ]
+  echo "$output" | jq -e '.reason == "nested-delegation"'
+  assert_mock_not_called codex
+}
+
+@test "delegate run: blocked route does not follow repo runtime symlinks or persist task text" {
+  local repo; repo="$(make_test_repo blocked-symlink)"
+  local external="$TEST_TMPDIR/external-runtime"
+  mkdir -p "$external"
+  rm -rf "$repo/.legion"
+  ln -s "$external" "$repo/.legion"
+  local secret_task="nested task with private-marker-123"
+
+  LEGION_ACTIVE=1 run "$DELEGATE" run --model test-model-beta \
+    --task "$secret_task" --repo "$repo" --quiet
+
+  [ "$status" -eq 2 ]
+  echo "$output" | jq -e '.reason == "nested-delegation"'
+  [ -z "$(find "$external" -mindepth 1 -print -quit)" ]
+  ! grep -R -Fq "$secret_task" "$LEGION_STATE_ROOT"
+  ! grep -R -Fq "$secret_task" "$LEGION_TELEMETRY_DIR"
 }
 
 @test "delegate run: delegated executor cannot pivot into nested Claude delegation" {

@@ -16,16 +16,17 @@ legion_task_danger_reason() {
   # "run: nc -l" while rejecting matches embedded inside larger identifiers.
   local command_start='(^|[[:space:];|&()])'
   local command_end='($|[[:space:];|&()])'
+  local command_path='([^[:space:];|&()]*/)?'
   local word_start='(^|[^[:alnum:]_])'
   local word_end='($|[^[:alnum:]_])'
 
   if printf '%s' "$norm" | grep -qiE \
-    "${command_start}rm[[:space:]]+(-rf|-fr)${command_end}|${command_start}rm[[:space:]]+-[[:alpha:]]*r[[:alpha:]]*[[:space:]]+/${command_end}"; then
+    "${command_start}${command_path}rm[[:space:]]+(-rf|-fr)${command_end}|${command_start}${command_path}rm[[:space:]]+-[[:alpha:]]*r[[:alpha:]]*[[:space:]]+/${command_end}"; then
     printf 'destructive-rm\n'
     return 0
   fi
   if printf '%s' "$norm" | grep -qiE \
-    "${command_start}git[[:space:]]+push${command_end}|${word_start}force[ -]push${word_end}|(^|[[:space:];|&])--force($|[=[:space:];|&])"; then
+    "${command_start}${command_path}git[[:space:]]+push${command_end}|${word_start}force[ -]push${word_end}|(^|[[:space:];|&])--force($|[=[:space:];|&])"; then
     printf 'force-push\n'
     return 0
   fi
@@ -39,17 +40,17 @@ legion_task_danger_reason() {
     return 0
   fi
   if printf '%s' "$norm" | grep -qiE \
-    "${word_start}(AWS_SECRET|ANTHROPIC_API_KEY|OPENAI_API_KEY)${word_end}"; then
+    "${word_start}(AWS_SECRET|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|ANTHROPIC_API_KEY|OPENAI_API_KEY)${word_end}"; then
     printf 'credential-secret\n'
     return 0
   fi
   if printf '%s' "$norm" | grep -qiE \
-    "${command_start}(curl|wget|fetch)${word_end}[^|]*\\|[[:space:]]*(ba)?sh${command_end}"; then
+    "${command_start}${command_path}(curl|wget|fetch)${word_end}[^|]*\\|[[:space:]]*${command_path}(ba)?sh${command_end}"; then
     printf 'download-pipe-shell\n'
     return 0
   fi
   if printf '%s' "$norm" | grep -qiE \
-    "${command_start}(nc|ncat)${command_end}|${word_start}/dev/tcp${word_end}"; then
+    "${command_start}${command_path}(nc|ncat)${command_end}|${word_start}/dev/tcp${word_end}"; then
     printf 'network-shell\n'
     return 0
   fi
@@ -59,7 +60,7 @@ legion_task_danger_reason() {
     return 0
   fi
   if printf '%s' "$norm" | grep -qiE \
-    "${command_start}sudo${command_end}"; then
+    "${command_start}${command_path}sudo${command_end}"; then
     printf 'privilege-escalation\n'
     return 0
   fi

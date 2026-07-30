@@ -149,7 +149,10 @@ SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '{"ok":1,"slices":1,"failed":0,"applied":1,"results":[]}\n'
+ledger="$LEGION_RUN_DIR/fanout-task-ledger.json"
+printf '{"schema":"legion.task-ledger.v1","status":"completed","tasks":[]}\n' > "$ledger"
+jq -cn --arg ledger "$ledger" \
+  '{ok:1,slices:1,failed:0,applied:1,results:[],task_ledger_path:$ledger}'
 SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
 #!/usr/bin/env bash
@@ -353,7 +356,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 printf 'generated\n' > "$repo/generated.txt"
-printf '{"ok":1,"slices":1,"failed":0,"applied":1,"results":[]}\n'
+ledger="$LEGION_RUN_DIR/fanout-task-ledger.json"
+printf '{"schema":"legion.task-ledger.v1","status":"completed","tasks":[]}\n' > "$ledger"
+jq -cn --arg ledger "$ledger" \
+  '{ok:1,slices:1,failed:0,applied:1,results:[],task_ledger_path:$ledger}'
 SH
   cat > "$BATS_TEST_TMPDIR/bin/fieldops-validate" <<'SH'
 #!/usr/bin/env bash
@@ -362,8 +368,11 @@ jq -cn \
   --arg active "${LEGION_ACTIVE-unset}" \
   --arg executor "${LEGION_EXECUTOR-unset}" \
   --arg depth "${LEGION_DEPTH-unset}" \
+  --arg trace "${LEGION_TRACE_ID-unset}" \
+  --arg parent "${LEGION_PARENT_ID-unset}" \
   --arg validation "${LEGION_VALIDATION-unset}" \
-  '{ok:true,active:$active,executor:$executor,depth:$depth,validation:$validation}'
+  '{ok:true,active:$active,executor:$executor,depth:$depth,
+    trace:$trace,parent:$parent,validation:$validation}'
 SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
 #!/usr/bin/env bash
@@ -377,6 +386,7 @@ SH
   manifest="$(make_plugin)"
 
   LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=3 \
+  LEGION_TRACE_ID=outer-trace LEGION_PARENT_ID=outer-parent \
     run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
   [ "$status" -eq 0 ]
   json="$(printf '%s' "$output" | json_from_output)"
@@ -385,6 +395,8 @@ SH
     .active == "unset"
     and .executor == "unset"
     and .depth == "unset"
+    and .trace == "outer-trace"
+    and .parent == "outer-parent"
     and .validation == "1"
   ' "$run_dir/validation.json"
   base_sha="$(jq -r .base_sha "$run_dir/review-input.json")"
@@ -394,6 +406,97 @@ SH
   [ "$base_sha" != "$head_sha" ]
   git -C "$REPO" cat-file -e "$head_sha:generated.txt"
   grep -Fq -- "--base $base_sha --head $head_sha" "$run_dir/review-args.txt"
+}
+
+@test "legion-run: a successful fanout must return its task ledger" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":1,"slices":1,"failed":0,"applied":1,"results":[]}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-fanout"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.failed_stage == "fanout-apply"'
+  jq -e '.status == "unavailable"' "$run_dir/task-ledger.json"
+}
+
+@test "legion-run: refuses a dirty source before reviewer snapshotting" {
+  install_fake_pipeline_bins
+  printf 'local secret material\n' > "$REPO/private-local.txt"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"requires a clean source worktree"* ]]
+}
+
+@test "legion-run: dispatches a configured Cursor final reviewer through its adapter" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  final-review) printf '{"executor":"cursor","model":"test-cursor","reasoning_effort":"high","resolved":true}\n' ;;
+  *) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
+esac
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$LEGION_RUN_DIR/review-args.txt"
+printf '{"status":"ok","model":"test-cursor","result":"{\\"verdict\\":\\"approve\\",\\"findings\\":[]}"}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-route" "$BATS_TEST_TMPDIR/bin/legion-delegate"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  grep -Fq -- "run --executor cursor --model test-cursor --sandbox read-only" \
+    "$run_dir/review-args.txt"
+}
+
+@test "legion-run: snapshot failures are attributed to the review stage" {
+  install_fake_pipeline_bins
+  printf 'generated.txt filter=reject-review\n' > "$REPO/.gitattributes"
+  git -C "$REPO" add .gitattributes
+  git -C "$REPO" commit -qm "configure review filter"
+  git -C "$REPO" config filter.reject-review.clean false
+  git -C "$REPO" config filter.reject-review.required true
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+repo=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'generated\n' > "$repo/generated.txt"
+ledger="$LEGION_RUN_DIR/fanout-task-ledger.json"
+printf '{"schema":"legion.task-ledger.v1","status":"completed","tasks":[]}\n' > "$ledger"
+jq -cn --arg ledger "$ledger" \
+  '{ok:1,slices:1,failed:0,applied:1,results:[],task_ledger_path:$ledger}'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-fanout"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  echo "$json" | jq -e '.failed_stage == "review"'
 }
 
 @test "legion-run: installed-style plugin directory works through manifest and bin hooks" {
@@ -469,6 +572,8 @@ SH
 @test "legion-run: direct plan-file is resolved relative to the target repo" {
   install_fake_pipeline_bins
   printf 'Use repo-local PLAN.md to build this TDD style.\n' > "$REPO/PLAN.md"
+  git -C "$REPO" add PLAN.md
+  git -C "$REPO" commit -qm "add plan"
   cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -502,6 +607,8 @@ SH
   install_fake_pipeline_bins
   printf 'Product plan: build invitations TDD style.\n' > "$REPO/PLAN.md"
   printf 'Architecture notes: reuse existing auth boundaries.\n' > "$REPO/ARCH.md"
+  git -C "$REPO" add PLAN.md ARCH.md
+  git -C "$REPO" commit -qm "add plans"
   cat > "$BATS_TEST_TMPDIR/bin/heavy-validate" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail

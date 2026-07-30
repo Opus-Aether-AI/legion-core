@@ -16,7 +16,7 @@ routing, delegation, observability, setup bridges, and harness guidance.
   do not add domain-specific plugins, skills, or copy here.
 
 <!-- legion:init:v1:agents:start -->
-<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=80b3e759c2edf2c2 -->
+<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=b926a0603aa8d716 -->
 ## Legion workflow
 
 Legion is the mandatory default operating mode for coding tasks in this
@@ -27,7 +27,7 @@ delegated.
 - If `LEGION_ACTIVE=1`, `LEGION_DEPTH` is positive, or the working directory is
   under `.legion/worktrees/`, this process is already a delegated executor:
   implement the assigned slice directly and do not start another Legion
-  workflow unless the parent explicitly requested nested orchestration.
+  workflow. Return to the parent if the slice needs re-planning.
 - Otherwise, before editing, invoke the applicable installed Legion skill or
   command and read relevant `legion-self-learn hints`.
 - Use `legion-run` for substantial or multi-stage work that needs an explicit

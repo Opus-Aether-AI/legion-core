@@ -56,8 +56,9 @@ legion-session-learn --repo . --query "review was interrupted" --show-evidence
 
 `--repo` uses session cwd and Git remote provenance rather than searching
 transcript text for a project name. System/developer messages and tool results
-are excluded unless explicitly selected. `--show-evidence` displays redacted
-snippets and home-relative paths; durable outcomes remain transcript-free.
+are excluded unless explicitly selected. `--show-evidence` displays
+best-effort-redacted snippets and home-relative paths for local inspection;
+inspect the output before sharing it. Durable outcomes remain transcript-free.
 
 ## What It Improves
 

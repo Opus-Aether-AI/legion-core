@@ -20,6 +20,7 @@ set -euo pipefail
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="${SOURCE_CLONE:-$AGENTS_HOME/sources/legion-core}"
 MARKETPLACE_SLUG="legion-core"
+UPDATE_REF="${LEGION_UPDATE_REF:-main}"
 
 record_refresh_failure() {
     local summary="$1" evidence="${2:-}"
@@ -35,9 +36,15 @@ if [ ! -d "$SOURCE_CLONE/.git" ]; then
     exit 1
 fi
 
-# 1) Pull latest source. Do not clobber local self-learning or operator edits.
-if ! git -C "$SOURCE_CLONE" fetch origin --quiet 2>/dev/null; then
+# 1) Pull latest source. Fetch the update ref explicitly because release-tag
+# installs have a tag-only fetch refspec and therefore no origin/main.
+if ! git -C "$SOURCE_CLONE" fetch origin "$UPDATE_REF" --depth 1 --quiet 2>/dev/null; then
     printf 'legion refresh: git fetch failed\n' >&2
+    exit 2
+fi
+update_sha="$(git -C "$SOURCE_CLONE" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null || true)"
+if [ -z "$update_sha" ]; then
+    printf 'legion refresh: fetched ref is not a commit: %s\n' "$UPDATE_REF" >&2
     exit 2
 fi
 dirty=0
@@ -46,7 +53,7 @@ if ! git -C "$SOURCE_CLONE" diff --cached --quiet 2>/dev/null; then dirty=1; fi
 if [ "$dirty" = "1" ]; then
     printf 'legion refresh: source clone has local edits; fetched but skipped reset\n' >&2
 else
-    git -C "$SOURCE_CLONE" reset --hard origin/main --quiet
+    git -C "$SOURCE_CLONE" reset --hard "$update_sha" --quiet
 fi
 
 # 2) Re-sync ~/.agents/skills/ symlinks (handles added/removed plugins)

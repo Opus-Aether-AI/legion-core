@@ -113,6 +113,9 @@ REVIEW_RECEIPT_HEAD_SHA=""
 REVIEW_RECEIPT_PATCH=""
 REVIEW_RECEIPT_ATTEMPT=0
 REVIEW_RECEIPT_MAX_ATTEMPTS=0
+REVIEW_ART_PATH=""
+REVIEW_WT_PATH=""
+REVIEW_START_MS=0
 kill_codex_child() {
   local pid="${CODEX_CHILD_PID:-}"
   [[ -n "$pid" ]] || return 0
@@ -147,8 +150,31 @@ write_interrupted_review_receipt() {
     mv -f "$REVIEW_RECEIPT_PATH.tmp.$$" "$REVIEW_RECEIPT_PATH" 2>/dev/null || true
 }
 on_terminating_signal() {
+  trap - INT TERM HUP
   kill_codex_child
+  [[ -n "${CODEX_CHILD_PID:-}" ]] && wait "$CODEX_CHILD_PID" 2>/dev/null || true
+  CODEX_CHILD_PID=""
   write_interrupted_review_receipt
+  if [[ -n "$REVIEW_ART_PATH" && -n "${RUN_ID:-}" ]]; then
+    local usage cost end_ms dur artifacts
+    usage="$(aggregate_review_usage "$REVIEW_ART_PATH" "$REVIEW_RECEIPT_ATTEMPT" 2>/dev/null || printf '{}')"
+    cost="$(cost_from_usage "$REVIEW_RECEIPT_MODEL" "$usage" 2>/dev/null || printf '0')"
+    end_ms="$(date +%s000)"
+    dur=$(( end_ms - REVIEW_START_MS ))
+    [[ "$dur" -ge 0 ]] || dur=0
+    artifacts="$(jq -cn --arg receipt "$REVIEW_RECEIPT_PATH" \
+      --arg patch "$REVIEW_RECEIPT_PATCH" --arg base "$REVIEW_RECEIPT_BASE_SHA" \
+      --arg head "$REVIEW_RECEIPT_HEAD_SHA" \
+      '{terminal_receipt:$receipt, review_patch:$patch,
+        reviewed_base_sha:$base, reviewed_head_sha:$head,
+        reason:"interrupted", attempts:'"${REVIEW_RECEIPT_ATTEMPT:-0}"'}' 2>/dev/null || printf '{}')"
+    emit_span "codex-review" "$REVIEW_RECEIPT_MODEL" "failed" "$dur" "$cost" "$usage" \
+      "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" "$artifacts" || true
+    ingest_usage "$REVIEW_RECEIPT_MODEL" "codex" 143 "$usage" "$cost" || true
+    write_run_state failed || true
+    write_run_artifact_status "$REVIEW_ART_PATH" "$RUN_ID" "failed" \
+      "$REVIEW_WT_PATH" "" "failed" || true
+  fi
   exit 143   # 128 + SIGTERM; EXIT trap still runs (sandbox teardown)
 }
 trap on_terminating_signal INT TERM HUP
@@ -374,17 +400,16 @@ emit_span() {
 }
 
 legion_delegated_context() {
-  local depth="${LEGION_DEPTH:-0}"
-  [[ "${LEGION_ACTIVE:-0}" == "1" || "${LEGION_EXECUTOR:-0}" == "1" ]] && return 0
-  [[ "$depth" =~ ^[0-9]+$ && "$depth" -gt 0 ]]
+  legion_executor_context_active
 }
 
 # Refuse literal self routes and nested Legion calls made from an executor that
 # was already delegated by Legion. Top-level same-harness subagents remain valid;
 # executor context, rather than harness family, is the recursion boundary.
 route_preflight() {
-  local target_executor="${1:-codex}" target_model="${2:-}" route_task="${3:-}"
+  local target_executor="${1:-codex}" target_model="${2:-}"
   local route_archetype="${4:-}" primary reason="" art receipt payload artifacts
+  : "${3:-}"  # task text is intentionally never persisted for blocked routes
   primary="$(legion_primary)"
   if [[ "$target_executor" == "self" ]]; then
     reason="inline-self-route"
@@ -394,10 +419,17 @@ route_preflight() {
     return 0
   fi
 
-  art="$repo/.legion/runs/$RUN_ID"
+  if [[ -L "$repo/.legion" || ( -e "$repo/.legion" && ! -d "$repo/.legion" ) ||
+        -L "$repo/.legion/runs" || ( -e "$repo/.legion/runs" && ! -d "$repo/.legion/runs" ) ]]; then
+    art="$LEGION_STATE_ROOT/blocked-routes/$RUN_ID"
+  else
+    art="$repo/.legion/runs/$RUN_ID"
+  fi
   receipt="$art/route-preflight.json"
   mkdir -p "$art"
-  printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+  if [[ "$art" == "$repo/"* && ! -L "$repo/.legion/.gitignore" ]]; then
+    printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+  fi
   payload="$(jq -cn \
     --arg schema "legion.route-preflight.v1" --arg run "$RUN_ID" \
     --arg status "blocked" --arg reason "$reason" --arg primary "$primary" \
@@ -420,7 +452,8 @@ route_preflight() {
     {preflight_receipt:$receipt, reason:$reason, primary:$primary,
      target_executor:$executor,
      target_model:(if $model=="" then null else $model end)}')"
-  emit_span "legion-route" "${target_model:-unresolved}" "blocked" 0 0 '{}' "$route_task" "$artifacts"
+  emit_span "legion-route" "${target_model:-unresolved}" "blocked" 0 0 '{}' \
+    "route blocked: $reason" "$artifacts"
   printf '%s\n' "$payload"
   return 2
 }
@@ -1008,6 +1041,17 @@ review_verdict_is_valid() {
       (.verdict == "approve" or .verdict == "request_changes" or .verdict == "comment")
       and (.summary | type == "string")
       and (.findings | type == "array")
+      and ((keys - ["verdict", "summary", "findings"]) | length == 0)
+      and all(.findings[];
+        type == "object"
+        and ((keys - ["severity", "title", "file", "line", "detail"]) | length == 0)
+        and (.severity == "critical" or .severity == "high"
+             or .severity == "medium" or .severity == "low")
+        and (.title | type == "string")
+        and ((has("file") | not) or (.file | type == "string"))
+        and ((has("line") | not) or (.line | type == "number" and floor == .))
+        and ((has("detail") | not) or (.detail | type == "string"))
+      )
     ' "$verdict_file" >/dev/null 2>&1
 }
 
@@ -1050,6 +1094,7 @@ write_review_terminal_receipt() {
 }
 
 cmd_review() {
+  local RUN_KIND="review"
   local model="" base="" head="" repo="$PWD" archetype="" effort=""
   local max_attempts="${LEGION_REVIEW_MAX_ATTEMPTS:-2}"
   while [[ $# -gt 0 ]]; do
@@ -1112,12 +1157,15 @@ cmd_review() {
   REVIEW_RECEIPT_PATCH="$patch_path"
   REVIEW_RECEIPT_ATTEMPT=0
   REVIEW_RECEIPT_MAX_ATTEMPTS="$max_attempts"
+  REVIEW_ART_PATH="$art"
+  REVIEW_WT_PATH="$wt"
 
   # `codex exec review` has no task stdin. Each attempt gets immutable inputs and
   # separate raw artifacts; only the terminal attempt is copied to stable paths.
   local start_ms end_ms dur rc=0 attempt=0 status="failed" reason="review-failed"
   local attempt_stream attempt_err attempt_verdict
   start_ms="$(date +%s000)"
+  REVIEW_START_MS="$start_ms"
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     REVIEW_RECEIPT_ATTEMPT="$attempt"
     attempt_stream="$art/attempt-$attempt.stream.jsonl"
@@ -1203,6 +1251,9 @@ cmd_review() {
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
   LEGION_WT_PATH=""
   REVIEW_RECEIPT_PATH=""
+  REVIEW_ART_PATH=""
+  REVIEW_WT_PATH=""
+  REVIEW_START_MS=0
 
   jq -cn --arg status "$status" --arg reason "$reason" --arg model "$model" \
     --arg run "$RUN_ID" --arg receipt "$receipt" --arg patch "$patch_path" \

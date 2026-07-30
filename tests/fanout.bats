@@ -212,6 +212,49 @@ SH
   [ "$(ls "$LEGION_REGISTRY_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
 }
 
+@test "fanout: interruption terminalizes its durable task ledger" {
+  local bin="$BATS_TEST_TMPDIR/interrupt-bin"
+  mkdir -p "$bin"
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"executor":"codex","model":"fake-codex","sandbox":"workspace-write","resolved":true}\n'
+SH
+  cat > "$bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+sleep 30
+SH
+  chmod +x "$bin"/*
+  printf '%s\n' '{"id":"slow","archetype":"implement-feature","task":"slow slice"}' \
+    > "$BATS_TEST_TMPDIR/interrupt.jsonl"
+  local stdout="$BATS_TEST_TMPDIR/interrupt.out"
+
+  LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
+    "$FANOUT" --slices "$BATS_TEST_TMPDIR/interrupt.jsonl" --repo "$REPO" \
+    > "$stdout" 2>&1 &
+  local fanout_pid=$!
+  local ledger=""
+  for _ in {1..100}; do
+    ledger="$(find "$REPO/.legion/fanout" -name task-ledger.json -print -quit 2>/dev/null || true)"
+    [[ -n "$ledger" ]] && break
+    sleep 0.02
+  done
+  [ -n "$ledger" ]
+
+  kill -TERM "$fanout_pid"
+  local fanout_rc=0
+  wait "$fanout_pid" || fanout_rc=$?
+
+  [ "$fanout_rc" -eq 143 ]
+  jq -e '
+    .status == "failed"
+    and .tasks[0].state == "failed"
+    and .tasks[0].result_status == "missing_terminal_result"
+    and (.completed_at | length > 0)
+  ' "$ledger"
+}
+
 @test "fanout: a nested fan-out joins the inherited LEGION_TRACE_ID" {
   printf '%s\n' '{"archetype":"implement-feature","task":"build A"}' > "$BATS_TEST_TMPDIR/s.jsonl"
   LEGION_TRACE_ID="outer-trace" LEGION_PARENT_ID="outer-parent" \
@@ -296,6 +339,12 @@ SH
   echo "$output" | jq -e '.ok == 2 and .failed == 0 and .applied == 1'
   echo "$output" | jq -e '[.results[].id] == ["platform-contract","consumer"]'
   echo "$output" | jq -e '.results[1].base_ref != "HEAD"'
+  ledger="$(echo "$output" | jq -r .task_ledger_path)"
+  jq -e '
+    all(.tasks[]; (.base_ref | length) == 40)
+    and (.tasks[0].apply_status == "applied")
+    and (.tasks[1].apply_status == "no_changes")
+  ' "$ledger"
   [ "$(cat "$REPO/platform.txt")" = "contract" ]
 }
 

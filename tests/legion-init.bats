@@ -99,6 +99,18 @@ assert "@AGENTS.md" in block
 PY
 }
 
+@test "legion-init recognizes active inline and relative Claude imports" {
+  printf '# Existing\n\nUse @./AGENTS.md for shared policy.\n' > "$REPO/CLAUDE.md"
+  "$INIT" --repo "$REPO" >/dev/null
+  [ "$(grep -c '@AGENTS.md' "$REPO/CLAUDE.md")" -eq 0 ]
+  [ "$(grep -c '@./AGENTS.md' "$REPO/CLAUDE.md")" -eq 1 ]
+
+  "$INIT" --repo "$REPO" --remove >/dev/null
+  printf '# Existing\n\n<!-- @AGENTS.md is only an example -->\n' > "$REPO/CLAUDE.md"
+  "$INIT" --repo "$REPO" >/dev/null
+  [ "$(grep -c '^@AGENTS.md$' "$REPO/CLAUDE.md")" -eq 1 ]
+}
+
 @test "legion-init fails closed on malformed markers" {
   printf 'keep\n<!-- legion:init:v1:agents:start -->\nunterminated\n' > "$REPO/AGENTS.md"
   before="$(shasum "$REPO/AGENTS.md")"
@@ -194,6 +206,22 @@ PY
   grep -Fq 'claude prefix' "$REPO/CLAUDE.md"
   ! grep -Fq 'legion:init:' "$REPO/AGENTS.md"
   ! grep -Fq 'legion:init:' "$REPO/CLAUDE.md"
+}
+
+@test "legion-init authenticates metadata before removal and repairs it explicitly" {
+  printf 'agents prefix\n' > "$REPO/AGENTS.md"
+  "$INIT" --repo "$REPO" >/dev/null
+  sed -i.bak 's/created=0/created=1/' "$REPO/AGENTS.md"
+  rm "$REPO/AGENTS.md.bak"
+
+  run "$INIT" --repo "$REPO" --remove --json
+  [ "$status" -eq 2 ]
+  echo "$output" | jq -e '.ok == false and (.error | contains("integrity check failed"))'
+  grep -Fq 'agents prefix' "$REPO/AGENTS.md"
+
+  "$INIT" --repo "$REPO" >/dev/null
+  "$INIT" --repo "$REPO" --remove >/dev/null
+  [ "$(cat "$REPO/AGENTS.md")" = "agents prefix" ]
 }
 
 @test "legion-init removal preserves content later added before its block" {

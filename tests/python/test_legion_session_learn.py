@@ -267,6 +267,36 @@ def test_default_recording_cli_hides_log_and_source_paths(tmp_path, capsys):
     assert str(tmp_path) not in json.dumps(recorded)
 
 
+def test_repo_scoped_cli_resolves_recording_state_from_repo(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    calls = []
+    logs = tmp_path / "resolved-state"
+
+    def resolve_state(path):
+        calls.append(path)
+        return {"state_root": str(logs)}
+
+    monkeypatch.setattr(lsl.legion_state, "resolve_state", resolve_state)
+
+    status = lsl.main(
+        [
+            "--home",
+            str(tmp_path),
+            "--repo",
+            str(repo),
+            "--lookback-days",
+            "0",
+            "--record",
+            "--json",
+        ]
+    )
+    json.loads(capsys.readouterr().out)
+
+    assert status == 0
+    assert calls == [str(repo.resolve())]
+
+
 def test_show_evidence_uses_redacted_snippets_and_relative_paths(tmp_path):
     session = tmp_path / ".codex" / "sessions" / "session.jsonl"
     session.parent.mkdir(parents=True)
@@ -303,6 +333,43 @@ def test_show_evidence_uses_redacted_snippets_and_relative_paths(tmp_path):
     assert "Cinematic landing" not in outcome["evidence"]
     assert secret not in json.dumps(outcome)
     assert str(tmp_path) not in json.dumps(outcome)
+
+
+def test_show_evidence_redacts_compound_credentials_and_token_shapes(tmp_path):
+    session = tmp_path / ".codex" / "sessions" / "session.jsonl"
+    session.parent.mkdir(parents=True)
+    secrets = [
+        "compound-client-secret",
+        "url-password",
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN123456",
+        "eyJabcdefghijk.abcdefghijkl.abcdefghijkl",
+        "private-key-material",
+    ]
+    message = (
+        "Cinematic landing screenshot review on mobile. "
+        f"client_secret={secrets[0]} "
+        f"https://operator:{secrets[1]}@example.test/private "
+        f"token={secrets[2]} {secrets[3]} "
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{secrets[4]}\n"
+        "-----END PRIVATE KEY-----"
+    )
+    session.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": message},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = lsl.scan(tmp_path, days=0, show_evidence=True)
+    rendered = json.dumps(result)
+
+    assert "<redacted" in rendered
+    assert all(secret not in rendered for secret in secrets)
 
 
 def test_repo_harness_source_and_role_filters_use_session_metadata(tmp_path):
@@ -442,6 +509,62 @@ def test_repo_scope_matches_external_worktree_by_normalized_git_remote(tmp_path)
     assert result["files_scanned"] == 1
     assert result["files_filtered"]["repo"] == 0
     assert result["candidates"][0]["category"] == "user-correction-feedback"
+
+
+def test_repo_scope_resolves_remote_from_sibling_checkout_cwd(tmp_path):
+    repo = tmp_path / "repo"
+    sibling = tmp_path / "repo-sibling"
+    unrelated = tmp_path / "unrelated"
+    for path, remote in (
+        (repo, "git@github.com:acme/widgets.git"),
+        (sibling, "https://github.com/acme/widgets.git"),
+        (unrelated, "https://github.com/acme/other.git"),
+    ):
+        path.mkdir()
+        subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "add", "origin", remote],
+            check=True,
+        )
+
+    sessions = tmp_path / ".codex" / "sessions"
+    sessions.mkdir(parents=True)
+    for name, cwd, suffix in (
+        ("sibling.jsonl", sibling, "matching sibling"),
+        ("other.jsonl", unrelated, "unrelated checkout"),
+    ):
+        (sessions / name).write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"cwd": str(cwd), "session_id": name},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": (
+                            "U should have linked the wrong attribution source for "
+                            f"{suffix}."
+                        ),
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    lsl._repository_urls_for_path.cache_clear()
+    result = lsl.scan(tmp_path, days=0, repo=repo, show_evidence=True)
+    rendered = json.dumps(result)
+
+    assert result["files_scanned"] == 1
+    assert result["files_filtered"]["repo"] == 1
+    assert "matching sibling" in rendered
+    assert "unrelated checkout" not in rendered
 
 
 def test_default_filters_subagents_benchmarks_catalogs_and_tool_results(tmp_path):

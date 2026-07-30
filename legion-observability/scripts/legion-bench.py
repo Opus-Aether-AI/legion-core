@@ -1525,7 +1525,10 @@ def _learning_case_result(
 def _write_learning_session(home: str, correction: str) -> str:
     path = os.path.join(home, ".codex", "sessions", "legion", "session.jsonl")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = {"payload": {"type": "user_message", "content": correction}}
+    payload = {
+        "originator": "legion-bench",
+        "payload": {"type": "user_message", "content": correction},
+    }
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, sort_keys=True))
         handle.write("\n")
@@ -1544,6 +1547,7 @@ def _learning_probe_results(repo: str, home: str, logs: str, env: dict[str, str]
             logs,
             "--lookback-days",
             "30",
+            "--include-benchmarks",
             "--json",
         ],
         cwd=repo,
@@ -1674,6 +1678,7 @@ def learning_lift_payload(args: argparse.Namespace) -> dict[str, Any]:
                 logs,
                 "--lookback-days",
                 "30",
+                "--include-benchmarks",
                 "--record",
                 "--json",
             ],

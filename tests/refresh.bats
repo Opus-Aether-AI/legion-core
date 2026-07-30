@@ -51,6 +51,21 @@ setup() {
     [ "$(agents_skills_count)" = "2" ]
 }
 
+@test "refresh.sh advances a release-tag clone without origin/main" {
+    make_source_clone marketplace-minimal.json
+    (
+        cd "$SOURCE_CLONE"
+        git tag v-test
+        git config --unset-all remote.origin.fetch
+        git config --add remote.origin.fetch '+refs/tags/v-test:refs/tags/v-test'
+        git update-ref -d refs/remotes/origin/main
+    )
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$SOURCE_CLONE" rev-parse HEAD)" = "$(git -C "$SOURCE_CLONE" rev-parse main)" ]
+}
+
 @test "refresh.sh skips reset when source clone has local edits" {
     make_source_clone marketplace-minimal.json
     echo "operator edit" >> "$SOURCE_CLONE/plugin-with-skill/SKILL.md"
@@ -130,10 +145,10 @@ SH
 
     run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
-    grep -qF "session-learn --lookback-days 3 --max-file-mb 8 --record" "$MOCK_CALL_LOG"
+    grep -qF "session-learn --repo $SOURCE_CLONE --lookback-days 3 --session-limit 100 --max-file-mb 8 --record" "$MOCK_CALL_LOG"
     grep -qF "self-learn run --repo $SOURCE_CLONE --apply-memory --quiet" "$MOCK_CALL_LOG"
 
-    session_line="$(grep -nF "session-learn --lookback-days" "$MOCK_CALL_LOG" | cut -d: -f1)"
+    session_line="$(grep -nF "session-learn --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"
     self_line="$(grep -nF "self-learn run --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"
     [ "$session_line" -lt "$self_line" ]
 }

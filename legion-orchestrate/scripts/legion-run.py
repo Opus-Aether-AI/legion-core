@@ -60,7 +60,9 @@ PIPELINE_REQUIRED_ARTIFACTS = [
     "slices.jsonl",
     "routes.json",
     "fanout.json",
+    "task-ledger.json",
     "review.json",
+    "review-input.json",
     "validation.json",
     "eval.json",
     "learning-feedback.json",
@@ -77,9 +79,9 @@ PIPELINE_STAGE_ARTIFACTS = {
     "self-learn-hints": ["self-learn-hints.json"],
     "plan": ["plan.json", "slices.jsonl"],
     "route": ["routes.json"],
-    "fanout-apply": ["fanout.json"],
+    "fanout-apply": ["fanout.json", "task-ledger.json"],
     "validate": ["validation.json"],
-    "review": ["review.json"],
+    "review": ["review.json", "review-input.json"],
     "evaluate": ["eval.json"],
     "report": ["legion-report.json", "legion-report.html", "legion-observability.html"],
     "share": ["share.json"],
@@ -403,6 +405,168 @@ def run_process(
     return payload
 
 
+def _git_output(
+    repo: Path,
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    stdin: str = "",
+    timeout_seconds: int = 1800,
+) -> str:
+    process = subprocess.Popen(
+        ["git", "-C", str(repo), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(
+            input=stdin if stdin else None,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+        raise LegionRunError(
+            f"immutable review input timed out after {timeout_seconds}s: git {' '.join(args)}",
+            124,
+        ) from exc
+    if process.returncode != 0:
+        detail = _short(stderr or stdout, 1000)
+        raise LegionRunError(f"could not create immutable review input: git {' '.join(args)}: {detail}", 1)
+    return stdout.strip()
+
+
+def require_clean_review_source(repo: Path, *, timeout_seconds: int) -> None:
+    dirty = _git_output(
+        repo,
+        [
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).legion",
+            ":(exclude).legion/**",
+        ],
+        timeout_seconds=timeout_seconds,
+    )
+    if dirty:
+        paths = ", ".join(line[3:] for line in dirty.splitlines()[:8])
+        raise LegionRunError(
+            "legion-run requires a clean source worktree before fan-out so "
+            f"pre-existing local files are not exposed to reviewers: {paths}",
+            2,
+        )
+
+
+def create_review_snapshot(
+    repo: Path,
+    run_dir: Path,
+    *,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Write the current worktree to a detached commit without changing its index.
+
+    Fan-out applies verified patches to the caller's worktree without committing
+    them. Reviewers need those exact bytes, but symbolic ``HEAD`` can move and a
+    fresh executor worktree otherwise loses dirty/untracked changes. A temporary
+    index gives us an immutable, locally-addressable snapshot commit.
+    """
+
+    base_sha = _git_output(
+        repo, ["rev-parse", "HEAD^{commit}"], timeout_seconds=timeout_seconds
+    )
+    base_tree = _git_output(
+        repo,
+        ["rev-parse", f"{base_sha}^{{tree}}"],
+        timeout_seconds=timeout_seconds,
+    )
+    temp_index = run_dir / "review.index"
+    snapshot_env = dict(os.environ)
+    snapshot_env.update(
+        {
+            "GIT_INDEX_FILE": str(temp_index),
+            "GIT_AUTHOR_NAME": "Legion Review",
+            "GIT_AUTHOR_EMAIL": "legion@local",
+            "GIT_COMMITTER_NAME": "Legion Review",
+            "GIT_COMMITTER_EMAIL": "legion@local",
+        }
+    )
+    try:
+        _git_output(
+            repo,
+            ["read-tree", base_sha],
+            env=snapshot_env,
+            timeout_seconds=timeout_seconds,
+        )
+        _git_output(
+            repo,
+            ["add", "-A", "--", ".", ":(exclude).legion"],
+            env=snapshot_env,
+            timeout_seconds=timeout_seconds,
+        )
+        tree_sha = _git_output(
+            repo, ["write-tree"], env=snapshot_env, timeout_seconds=timeout_seconds
+        )
+        head_sha = _git_output(
+            repo,
+            ["commit-tree", tree_sha, "-p", base_sha],
+            env=snapshot_env,
+            stdin="Legion immutable review snapshot\n",
+            timeout_seconds=timeout_seconds,
+        )
+    finally:
+        temp_index.unlink(missing_ok=True)
+        Path(f"{temp_index}.lock").unlink(missing_ok=True)
+
+    payload = {
+        "schema": "legion.review-input.v1",
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "tree_sha": tree_sha,
+        "dirty": tree_sha != base_tree,
+        "created_at": _iso_utc(),
+    }
+    _write_json(run_dir / "review-input.json", payload)
+    return payload
+
+
+def hermetic_stage_env(env: dict[str, str]) -> dict[str, str]:
+    """Remove executor-role state from deterministic validator/evaluator commands."""
+
+    clean = dict(env)
+    for key in (
+        "LEGION_ACTIVE",
+        "LEGION_EXECUTOR",
+        "LEGION_DEPTH",
+        "LEGION_FORCE_DELEGATE",
+        "LEGION_LOW_CREDIT",
+    ):
+        clean.pop(key, None)
+    clean.update(
+        {
+            "CI": clean.get("CI", "1"),
+            "GIT_TERMINAL_PROMPT": "0",
+            "LEGION_VALIDATION": "1",
+        }
+    )
+    return clean
+
+
 def _load_json_object(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -454,7 +618,10 @@ def _is_bad_status(value: Any) -> bool:
 
 
 _BLOCKING_REVIEW_SEVERITIES = {"critical", "high", "medium"}
-_BLOCKING_REVIEW_MARKER = re.compile(r"\[(?:p0|p1|p2)\]", re.IGNORECASE)
+_REVIEW_VERDICTS = {"approve", "request_changes", "comment"}
+_REVIEW_FINDING_SEVERITIES = {"critical", "high", "medium", "low"}
+_REVIEW_VERDICT_KEYS = {"verdict", "summary", "findings"}
+_REVIEW_FINDING_KEYS = {"severity", "title", "file", "line", "detail"}
 
 
 def _review_verdict_value(payload: dict[str, Any]) -> Any:
@@ -482,24 +649,73 @@ def _blocking_review_findings(verdict: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _review_verdict_schema_error(verdict: Any) -> str:
+    """Validate the public review-verdict schema without an optional dependency."""
+    if not isinstance(verdict, dict):
+        return "expected a structured verdict object"
+    missing = _REVIEW_VERDICT_KEYS - verdict.keys()
+    extra = verdict.keys() - _REVIEW_VERDICT_KEYS
+    if missing:
+        return f"missing required field(s): {', '.join(sorted(missing))}"
+    if extra:
+        return f"unexpected field(s): {', '.join(sorted(extra))}"
+    if (
+        not isinstance(verdict["verdict"], str)
+        or verdict["verdict"] not in _REVIEW_VERDICTS
+    ):
+        return "verdict must be approve, request_changes, or comment"
+    if not isinstance(verdict["summary"], str):
+        return "summary must be a string"
+    findings = verdict["findings"]
+    if not isinstance(findings, list):
+        return "findings must be an array"
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            return f"finding {index} must be an object"
+        missing_finding = {"severity", "title"} - finding.keys()
+        extra_finding = finding.keys() - _REVIEW_FINDING_KEYS
+        if missing_finding:
+            return (
+                f"finding {index} missing required field(s): "
+                f"{', '.join(sorted(missing_finding))}"
+            )
+        if extra_finding:
+            return (
+                f"finding {index} has unexpected field(s): "
+                f"{', '.join(sorted(extra_finding))}"
+            )
+        if (
+            not isinstance(finding["severity"], str)
+            or finding["severity"] not in _REVIEW_FINDING_SEVERITIES
+        ):
+            return f"finding {index} has an invalid severity"
+        if not isinstance(finding["title"], str):
+            return f"finding {index} title must be a string"
+        for key in ("file", "detail"):
+            if key in finding and not isinstance(finding[key], str):
+                return f"finding {index} {key} must be a string"
+        if "line" in finding and (
+            not isinstance(finding["line"], int)
+            or isinstance(finding["line"], bool)
+        ):
+            return f"finding {index} line must be an integer"
+    return ""
+
+
 def _review_failure_reason(payload: dict[str, Any]) -> str:
     if payload.get("ok") is False or _is_bad_status(payload.get("status")):
         return "review command reported failure"
     verdict = _review_verdict_value(payload)
-    if isinstance(verdict, dict):
-        decision = str(verdict.get("verdict") or "").strip().lower()
-        if _is_bad_status(decision):
-            return f"review verdict {decision}"
-        blocking = _blocking_review_findings(verdict)
-        if blocking:
-            first = _short(blocking[0].get("title") or blocking[0].get("detail") or "blocking finding", 160)
-            return f"review reported {len(blocking)} blocking finding(s): {first}"
-        return ""
-    text = str(verdict or "").strip()
-    if _is_bad_status(text):
-        return f"review verdict {text.lower()}"
-    if _BLOCKING_REVIEW_MARKER.search(text):
-        return "review reported blocking priority finding(s)"
+    schema_error = _review_verdict_schema_error(verdict)
+    if schema_error:
+        return f"invalid terminal verdict: {schema_error}"
+    decision = str(verdict["verdict"]).strip().lower()
+    if _is_bad_status(decision):
+        return f"review verdict {decision}"
+    blocking = _blocking_review_findings(verdict)
+    if blocking:
+        first = _short(blocking[0].get("title") or blocking[0].get("detail") or "blocking finding", 160)
+        return f"review reported {len(blocking)} blocking finding(s): {first}"
     return ""
 
 
@@ -812,6 +1028,15 @@ def _set_stage_status(stages: list[dict[str, Any]], stage: str, status: str, err
     for item in stages:
         if item["stage"] == stage:
             item["status"] = status
+            if status == "running":
+                item.setdefault("started_at", _iso_utc())
+            elif status in {"passed", "failed", "skipped"}:
+                item["completed_at"] = _iso_utc()
+                item["terminal_status"] = {
+                    "passed": "passed",
+                    "failed": "failed",
+                    "skipped": "not_run",
+                }[status]
             if error:
                 item["error"] = error
             return
@@ -821,6 +1046,8 @@ def _skip_pending_stages(stages: list[dict[str, Any]]) -> None:
     for item in stages:
         if item.get("status") == "pending":
             item["status"] = "skipped"
+            item["terminal_status"] = "not_run"
+            item["completed_at"] = _iso_utc()
 
 
 def write_stage_status(run_dir: Path, stages: list[dict[str, Any]]) -> None:
@@ -1066,9 +1293,19 @@ def validate_stage_payload(stage: str, payload: Any, artifact_path: Path) -> Non
             raise LegionRunError(f"stage semantic failure ({artifact_path.name}): {stage} reported failure", 1)
         return
 
-    if stage == "review" and isinstance(payload, dict):
-        if _review_failure_reason(payload):
-            raise LegionRunError(f"stage semantic failure ({artifact_path.name}): review requested changes", 1)
+    if stage == "review":
+        if not isinstance(payload, dict):
+            raise LegionRunError(
+                f"stage semantic failure ({artifact_path.name}): review gate failed: "
+                "invalid terminal verdict: expected a command result object",
+                1,
+            )
+        reason = _review_failure_reason(payload)
+        if reason:
+            raise LegionRunError(
+                f"stage semantic failure ({artifact_path.name}): review gate failed: {reason}",
+                1,
+            )
 
 
 def _doctor_learning_outcomes(
@@ -1358,6 +1595,7 @@ def execute(
     stage_timeout_seconds: int,
     allow_generated_slices: bool,
 ) -> int:
+    require_clean_review_source(repo, timeout_seconds=stage_timeout_seconds)
     state = legion_state.resolve_state(str(repo))
     run_id = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + f"-{_slug(runner['name'])}"
     run_dir = Path(state["state_root"]) / "runs" / "legion-run" / run_id
@@ -1390,14 +1628,21 @@ def execute(
         }
     )
 
-    def stage_run(stage: str, argv: list[str], artifact: Path, *, shell: bool = False) -> Any:
+    def stage_run(
+        stage: str,
+        argv: list[str],
+        artifact: Path,
+        *,
+        shell: bool = False,
+        hermetic: bool = False,
+    ) -> Any:
         nonlocal current_stage
         current_stage = stage
         _set_stage_status(stages, stage, "running")
         write_stage_status(run_dir, stages)
         payload = run_process(
             argv,
-            env,
+            hermetic_stage_env(env) if hermetic else env,
             repo,
             artifact,
             shell=shell,
@@ -1483,6 +1728,11 @@ def execute(
     def finalize_failure(exc: LegionRunError) -> dict[str, Any]:
         failed_stage = current_stage or "unknown"
         _set_stage_status(stages, failed_stage, "failed", str(exc))
+        if exc.code == 124:
+            for item in stages:
+                if item["stage"] == failed_stage:
+                    item["terminal_status"] = "timed_out"
+                    break
         _skip_pending_stages(stages)
         write_stage_status(run_dir, stages)
         failure = {
@@ -1591,8 +1841,43 @@ def execute(
         _set_stage_status(stages, "route", "passed")
         write_stage_status(run_dir, stages)
 
-        stage_run("fanout-apply", [_cmd("legion-fanout"), "--slices", str(slices_path), "--repo", str(repo), "--apply", "--json"], run_dir / "fanout.json")
-        validation_payload = stage_run("validate", [runner["commands"]["validate"]], run_dir / "validation.json", shell=True)
+        fanout_error: LegionRunError | None = None
+        try:
+            fanout_payload = stage_run("fanout-apply", [_cmd("legion-fanout"), "--slices", str(slices_path), "--repo", str(repo), "--apply", "--json"], run_dir / "fanout.json")
+        except LegionRunError as exc:
+            fanout_error = exc
+            fanout_payload = _load_json_value(run_dir / "fanout.json")
+        ledger_source = ""
+        if isinstance(fanout_payload, dict):
+            ledger_source = str(fanout_payload.get("task_ledger_path") or "")
+        if ledger_source and Path(ledger_source).is_file():
+            shutil.copyfile(ledger_source, run_dir / "task-ledger.json")
+        else:
+            _write_json(
+                run_dir / "task-ledger.json",
+                {
+                    "schema": "legion.task-ledger.v1",
+                    "status": "unavailable",
+                    "reason": "fanout did not return a task ledger",
+                },
+            )
+            if fanout_error is None:
+                raise LegionRunError(
+                    "stage semantic failure (fanout.json): successful fanout "
+                    "did not return a readable task ledger",
+                    1,
+                )
+        if fanout_error is not None:
+            raise fanout_error
+        validation_payload = stage_run("validate", [runner["commands"]["validate"]], run_dir / "validation.json", shell=True, hermetic=True)
+        current_stage = "review"
+        _set_stage_status(stages, "review", "running")
+        write_stage_status(run_dir, stages)
+        review_input = create_review_snapshot(
+            repo,
+            run_dir,
+            timeout_seconds=stage_timeout_seconds,
+        )
         review_route = run_process(
             [_cmd("legion-route"), "final-review", "--task", "independent final review"],
             env,
@@ -1601,18 +1886,27 @@ def execute(
             timeout_seconds=stage_timeout_seconds,
         )
         review_executor = str(review_route.get("executor") if isinstance(review_route, dict) else "")
+        review_task = (
+            f"Review the immutable repository diff {review_input['base_sha']}...HEAD after "
+            "deterministic validation. "
+            "Return one JSON object only: {\"verdict\":\"approve|request_changes\","
+            "\"summary\":string,\"findings\":[{\"severity\":\"critical|high|medium|low\","
+            "\"title\":string,\"detail\":string}]}. Focus on correctness, unnecessary complexity, "
+            "and spec adherence."
+        )
         if review_executor == "claude":
-            review_task = (
-                "Review the current repository diff against HEAD after deterministic validation. "
-                "Return one JSON object only: {\"verdict\":\"approve|request_changes\","
-                "\"summary\":string,\"findings\":[{\"severity\":\"critical|high|medium|low\","
-                "\"title\":string,\"detail\":string}]}. Focus on correctness, unnecessary complexity, "
-                "and spec adherence."
+            stage_run("review", [_cmd("legion-claude"), "run", "--repo", str(repo), "--base", review_input["head_sha"], "--model", str(review_route.get("model") or ""), "--effort", str(review_route.get("reasoning_effort") or "high"), "--sandbox", "read-only", "--no-fallback", "--task", review_task], run_dir / "review.json")
+        elif review_executor == "codex":
+            stage_run("review", [_cmd("legion-delegate"), "review", "--model", str(review_route.get("model") or ""), "--reasoning-effort", str(review_route.get("reasoning_effort") or "xhigh"), "--repo", str(repo), "--base", review_input["base_sha"], "--head", review_input["head_sha"]], run_dir / "review.json")
+        elif review_executor == "self":
+            raise LegionRunError(
+                "final-review resolved to executor=self; an independent delegated "
+                "reviewer is required",
+                1,
             )
-            stage_run("review", [_cmd("legion-claude"), "run", "--repo", str(repo), "--model", str(review_route.get("model") or ""), "--effort", str(review_route.get("reasoning_effort") or "high"), "--no-fallback", "--task", review_task], run_dir / "review.json")
         else:
-            stage_run("review", [_cmd("legion-delegate"), "review", "--archetype", "final-review", "--repo", str(repo), "--base", "HEAD"], run_dir / "review.json")
-        eval_payload = stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True)
+            stage_run("review", [_cmd("legion-delegate"), "run", "--executor", review_executor, "--model", str(review_route.get("model") or ""), "--sandbox", "read-only", "--repo", str(repo), "--base", review_input["head_sha"], "--task", review_task], run_dir / "review.json")
+        eval_payload = stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True, hermetic=True)
         stage_run("report", [_cmd("legion-report"), "--trace", "latest", "--json"], run_dir / "legion-report.json")
         stage_run("share", [_cmd("legion-share"), "--window", "1d", "--json"], run_dir / "share.json")
         finalize_self_learning(

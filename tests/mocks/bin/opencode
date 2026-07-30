@@ -6,10 +6,11 @@
 
 set -euo pipefail
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'opencode %s\n' "$*" >> "$MOCK_CALL_LOG"
+[[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'opencode active=%s executor=%s depth=%s run=%s\n' \
+  "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
 
 model="fixture/opencode-model"
 agent=""
-task=""
 # positional after `run`
 [[ "${1:-}" == "run" ]] && shift
 while [[ $# -gt 0 ]]; do
@@ -19,7 +20,7 @@ while [[ $# -gt 0 ]]; do
     --variant) shift 2 ;;
     --format) shift 2 ;;
     --format=*) shift ;;
-    *) task="$1"; shift ;;
+    *) shift ;;
   esac
 done
 

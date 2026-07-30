@@ -42,7 +42,7 @@ span-emitting** replacement. Swap the raw block for:
 LEGION_PRIMARY=hermes LEGION_TARGET_TYPE=cron LEGION_TARGET_NAME="<lane-name>" \
 legion-claude run \
   --repo "$REPO" \
-  --model opus \
+  --model "$(legion-route --model-ref claude_default)" \
   --effort high \
   --dangerously-skip-permissions \
   --no-fallback \
@@ -72,11 +72,9 @@ What changes:
 `legion-claude` can fall back to the configured Codex workhorse on a Claude
 usage-limit. Be deliberate about that for a *coding* lane:
 
-- The primary Claude path runs `claude -p` **in-place** in `$REPO` (it edits the
-  working tree). The fallback runs Codex via `legion-delegate` in an **isolated
-  worktree with no `--apply`**, so it returns an *unapplied* diff and **lands no code
-  in your repo**. It also runs on a **different model** at the configured effort, not
-  your chosen `opus --effort high`.
+- Both the primary Claude path and the Codex fallback run in isolated worktrees
+  and return unapplied diffs unless `--apply` is explicit. The fallback uses a
+  different configured model and effort from the primary Claude route.
 - So for an unattended implementation lane, prefer **`--no-fallback`**: fail loudly
   and let the next run retry, rather than silently switch models and land nothing
   while reporting success. Drop `--no-fallback` only if you genuinely want the
@@ -84,12 +82,10 @@ usage-limit. Be deliberate about that for a *coding* lane:
 
 ### A note on worktree isolation
 
-`legion-claude` (the "prompt" executor) runs `claude -p` **in-place** in the repo —
-it does *not* use a worktree. The worktree isolation the `-mode` skills describe
-applies to the **diff-producing** executors (codex/cursor/opencode via
-`legion-delegate run --executor …`). Choose `legion-delegate run --executor …` when
-you want the change captured as a reviewable diff in an isolated worktree instead of
-applied in-place.
+`legion-claude` creates a git worktree under `.legion/worktrees/`, captures the
+result under `.legion/runs/<run-id>/diff.patch`, and removes the worktree by
+default. It fails closed if isolation cannot be established. Use `--keep` to
+retain the worktree and `--apply` only after reviewing the diff.
 
 ## Ordering (important)
 

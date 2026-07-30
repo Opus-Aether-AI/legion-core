@@ -24,7 +24,8 @@ make_test_repo() {
 
 @test "legion-claude: happy path uses claude and emits a claude span" {
     local repo; repo="$(make_test_repo ok1)"
-    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    local context="$TEST_TMPDIR/context.log"
+    MOCK_CONTEXT_LOG="$context" run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e '.executor == "claude"'
@@ -34,6 +35,7 @@ make_test_repo() {
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$status" -eq 0 ]
     [ "$output" = "claude" ]
+    grep -Eq '^claude active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
 @test "legion-claude: passes --effort/--append-system-prompt/--dangerously-skip-permissions through to claude" {
@@ -46,24 +48,65 @@ make_test_repo() {
     assert_mock_called claude "--dangerously-skip-permissions"
 }
 
+@test "legion-claude: read-only sandbox uses plan mode" {
+    local repo; repo="$(make_test_repo readonly-plan)"
+    run "$LEGION_CLAUDE" run --task "inspect only" --repo "$repo" \
+        --sandbox read-only --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+    assert_mock_called claude "--permission-mode plan"
+}
+
+@test "legion-claude: read-only sandbox rejects unexpected writes without fallback" {
+    local repo; repo="$(make_test_repo readonly-write)"
+    MOCK_CLAUDE_WRITE=1 run "$LEGION_CLAUDE" run --task "inspect only" --repo "$repo" \
+        --sandbox read-only --apply --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e \
+        '.status == "failed" and .reason == "read_only_violation" and .fell_back == false'
+    [ ! -e "$repo/claude-unexpected.txt" ]
+    assert_mock_not_called legion-delegate
+}
+
 @test "legion-claude: usage limit falls back to codex" {
     local repo; repo="$(make_test_repo fb1)"
-    MOCK_CLAUDE_LIMIT=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    local base; base="$(git -C "$repo" rev-parse HEAD)"
+    MOCK_CLAUDE_LIMIT=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --sandbox read-only --base "$base" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e '.executor == "codex"'
     echo "$output" | jq -e '.result == "GPT_FALLBACK"'
     echo "$output" | jq -e '.fell_back == true'
     echo "$output" | jq -e '.fell_back_reason == "claude_limit"'
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -s \
+      '[.[] | select(.executor == \"claude\" and .status == \"blocked\")] | length'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+    assert_mock_called legion-delegate "--sandbox read-only"
+    assert_mock_called legion-delegate "--base $base"
+}
+
+@test "legion-claude: direct adapter refuses delegated executor context" {
+    local repo; repo="$(make_test_repo nested)"
+    LEGION_EXECUTOR=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"nested Legion delegation is blocked"* ]]
+    assert_mock_not_called claude
+    assert_mock_not_called legion-delegate
 }
 
 @test "legion-claude: missing claude on PATH falls back directly" {
     local repo; repo="$(make_test_repo fb2)"
-    PATH="$(path_without claude)" run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    local base; base="$(git -C "$repo" rev-parse HEAD)"
+    PATH="$(path_without claude)" run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --sandbox read-only --base "$base" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.executor == "codex"'
     echo "$output" | jq -e '.fell_back == true'
     echo "$output" | jq -e '.fell_back_reason == "claude_unavailable"'
+    assert_mock_called legion-delegate "--sandbox read-only"
+    assert_mock_called legion-delegate "--base $base"
 }
 
 @test "legion-claude: LEGION_LOW_CREDIT=claude skips claude entirely" {
@@ -72,6 +115,29 @@ make_test_repo() {
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.executor == "codex"'
     echo "$output" | jq -e '.fell_back_reason == "claude_unavailable"'
+    assert_mock_not_called claude
+}
+
+@test "legion-claude: worktree setup failure fails closed before invoking Claude" {
+    local repo; repo="$(make_test_repo worktree-fail)"
+    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --base "refs/does-not-exist" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e \
+        '.status == "failed" and .reason == "worktree_setup_failed" and .fell_back == false'
+    assert_mock_not_called claude
+    assert_mock_not_called legion-delegate
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor == \"claude\" and .status == \"failed\")'"
+    [ "$status" -eq 0 ]
+}
+
+@test "legion-claude: non-git repo fails closed before invoking Claude" {
+    local repo="$TEST_TMPDIR/not-git"
+    mkdir -p "$repo"
+    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e \
+        '.status == "failed" and .reason == "worktree_setup_failed" and .fell_back == false'
     assert_mock_not_called claude
 }
 

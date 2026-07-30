@@ -1,42 +1,49 @@
 # Keeping legion-core and legion-code in sync
 
-legion-core is the **single source of truth** for the engine (the 6 `legion-*`
-plugins). legion-code (the coding agent) and future agents (e.g. moneyball)
-**consume** it; they don't edit the engine in place.
+`legion-core` owns the engine and its nine `legion-*` plugins. `legion-code`
+owns the broader coding-agent marketplace. They are separate installed
+dependencies: `legion-code` does not vendor or duplicate core plugin sources in
+its marketplace.
 
-## Model: legion-code vendors legion-core
+## Install contract
 
-legion-code already vendors third-party plugins via `git-subdir` entries
-(`scripts/vendor.sh` + `.github/workflows/sync-vendored.yml`). Vendor legion-core
-the same way — its own engine becomes just another pinned upstream.
+The `legion-code` installer invokes the core installer, which maintains the core
+checkout under `~/.agents/sources/legion-core`, shared skills, CLIs, and native
+harness bridges. `legion-code` then installs its own marketplace and overlays.
 
-### One-time conversion (in legion-code)
+Keep that order explicit:
 
-For each of the 6 plugins, change its `marketplace.json` entry from an in-repo
-source to a git-subdir source pointing at legion-core:
+1. install or update `legion-core`;
+2. verify `legion-doctor --repo <target>`;
+3. install or update `legion-code`;
+4. verify the combined marketplace/context profile.
 
-```jsonc
-// before
-{ "name": "legion-router", "source": "./legion-router", "version": "0.5.0" }
-// after
-{ "name": "legion-router", "version": "0.5.0",
-  "source": { "source": "git-subdir",
-              "url": "https://github.com/Opus-Aether-AI/legion-core.git",
-              "path": "legion-router", "ref": "main", "sha": "<legion-core main sha>" } }
+Do not copy core plugin directories into `legion-code`, add stale core plugin
+counts to code docs, or hardcode model IDs there. Consumer guidance should name
+Legion archetypes and model roles resolved through `legion-route`.
+
+## Repository policy
+
+Use the core-owned initializer in repositories that consume the combined stack:
+
+```bash
+legion-init --repo /path/to/repo
+legion-init --repo /path/to/repo --check
 ```
 
-Then `scripts/vendor.sh` materialises them into `vendored/legion-*` and the
-in-repo `legion-*` dirs are removed. Current legion-core main: `2d25d6f5a59c22e93f4734ca72121b5f6a2cfd84`.
+It preserves existing instructions, manages only marked Legion blocks, makes
+`AGENTS.md` the shared policy, and keeps `CLAUDE.md` as an importing
+Claude-specific overlay. Consumer installers may expose an explicit
+`--init-repo=<path>` flag, but must never rewrite the caller's current directory
+implicitly.
 
-### Access model
+## Refresh and ownership
 
-legion-core is public, so `sync-vendored.yml` can refresh it using unauthenticated
-`git ls-remote` / `git clone` calls unless GitHub rate limits become a problem. If a
-future private fork is used, configure `VENDOR_SYNC_TOKEN` with read access and pass it
-to the clone/ls-remote steps.
+Core refresh is opt-in (`--cron` or `LEGION_INSTALL_CRON=1`). An aggregate
+`legion-code` refresh should run core refresh first and code refresh second in
+one owned job so session learning and bridges stay coherent. Until that contract
+is implemented in `legion-code`, update the two installations explicitly.
 
-## Alternative: push-mirror (core → code)
-
-If you'd rather push than pull, a workflow in legion-core can open a PR to
-legion-code on each release. Same token requirement (write access to legion-code).
-Vendoring (pull) is recommended — it reuses machinery legion-code already has.
+Uninstallers must also respect shared ownership: removing `legion-code` should
+not remove a separately installed core unless the operator explicitly requests
+engine removal.

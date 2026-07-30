@@ -11,8 +11,12 @@ source "$_self_dir/lib/cost.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/model-config.sh
 source "$_self_dir/lib/model-config.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/executor-context.sh
+source "$_self_dir/lib/executor-context.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1090
   # shellcheck disable=SC1091
   source "$_state_lib"
 fi
@@ -107,7 +111,7 @@ emit_terminal_json() {
 }
 
 run_fallback() {
-  local reason="$1" task="$2" model="$3" repo="$4"
+  local reason="$1" task="$2" model="$3" repo="$4" sandbox="$5" base="$6"
   local delegate_bin out rc fallback_status fallback_model fallback_usage fallback_cost fallback_result last_path
 
   delegate_bin="$(resolve_delegate_bin)" || {
@@ -115,12 +119,14 @@ run_fallback() {
     return 1
   }
 
-  note "→ legion-delegate run --model $model"
+  note "→ legion-delegate run --model $model --sandbox $sandbox --base $base"
   set +e
   if [[ "${QUIET:-0}" == "1" ]]; then
-    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" --quiet)"
+    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" \
+      --sandbox "$sandbox" --base "$base" --quiet)"
   else
-    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo")"
+    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" \
+      --sandbox "$sandbox" --base "$base")"
   fi
   rc=$?
   set -e
@@ -155,6 +161,7 @@ cmd_run() {
   local effort="" append_sys="" skip_perms=0
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
+  local read_only_violation=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -175,10 +182,19 @@ cmd_run() {
       *) die "run: unknown arg '$1'" ;;
     esac
   done
-  : "${sandbox:-}" "${archetype:-}"
+  [[ -n "$sandbox" ]] || sandbox="workspace-write"
+  case "$sandbox" in
+    read-only|workspace-write) ;;
+    *) die "invalid --sandbox '$sandbox' (read-only|workspace-write)" ;;
+  esac
+  if [[ "$sandbox" == "read-only" && "$skip_perms" -eq 1 ]]; then
+    die "--dangerously-skip-permissions cannot be combined with --sandbox read-only"
+  fi
+  : "${archetype:-}"
 
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
+  legion_require_top_level_executor "claude" || return $?
   repo="$(cd "$repo" && pwd)" || die "run: repo not found: $repo"
   if declare -F legion_resolve_state >/dev/null 2>&1; then
     legion_resolve_state "$repo"
@@ -204,7 +220,7 @@ cmd_run() {
     if [[ "$allow_fallback" -eq 1 ]]; then
       [[ "$low_credit" -eq 1 ]] && note "⚠ LEGION_LOW_CREDIT=claude: skipping Claude and falling back to $fallback_model"
       [[ "$low_credit" -eq 0 ]] && note "⚠ Claude CLI unavailable: falling back to $fallback_model"
-      run_fallback "$reason" "$task" "$fallback_model" "$repo"
+      run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
       return $?
     fi
     emit_span "claude" "$model" "failed" 0 0 "{}" "$task" "$artifacts"
@@ -215,30 +231,41 @@ cmd_run() {
   # Isolate the run. Previously claude inherited the caller's working directory, so a delegated
   # run edited whatever tree the operator happened to be standing in — `--repo` only ever fed the
   # state paths. A worktree makes the work reviewable as a diff, like every other coding executor.
-  if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    wt="$repo/.legion/worktrees/$RUN_ID"
-    branch="legion/claude-$RUN_ID"
-    mkdir -p "$repo/.legion/worktrees"
-    if git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" 2>/dev/null; then
-      # Artifacts live under the repo's run dir, not tmpdir — the EXIT trap deletes tmpdir, and
-      # the diff is the reviewable output of the run.
-      mkdir -p "$repo/.legion/runs/$RUN_ID"
-      diff_path="$repo/.legion/runs/$RUN_ID/diff.patch"
-      note "→ claude worktree $wt (branch $branch, base $base)"
-    else
-      wt=""; branch=""
-      note "⚠ worktree add failed; running in $repo directly"
-    fi
+  if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    note "⚠ repository is not a git worktree"
+    emit_span "claude" "$model" "failed" 0 0 "{}" "$task" "$artifacts"
+    emit_terminal_json "claude" "$model" "failed" "" "{}" 0 false "worktree_setup_failed"
+    return 1
+  fi
+  wt="$repo/.legion/worktrees/$RUN_ID"
+  branch="legion/claude-$RUN_ID"
+  mkdir -p "$repo/.legion/worktrees"
+  if git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" 2>/dev/null; then
+    # Artifacts live under the repo's run dir, not tmpdir — the EXIT trap deletes tmpdir, and
+    # the diff is the reviewable output of the run.
+    mkdir -p "$repo/.legion/runs/$RUN_ID"
+    diff_path="$repo/.legion/runs/$RUN_ID/diff.patch"
+    note "→ claude worktree $wt (branch $branch, base $base)"
+  else
+    note "⚠ worktree add failed"
+    emit_span "claude" "$model" "failed" 0 0 "{}" "$task" "$artifacts"
+    emit_terminal_json "claude" "$model" "failed" "" "{}" 0 false "worktree_setup_failed"
+    return 1
   fi
 
   local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
+  [[ "$sandbox" == "read-only" ]] && claude_cmd+=(--permission-mode plan)
   [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
   [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
   [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
   note "→ ${claude_cmd[*]}"
   start_ms="$(date +%s000)"
   set +e
-  printf '%s' "$task" | ( cd "${wt:-$repo}" && "${claude_cmd[@]}" ) >"$out_file" 2>"$err_file"
+  printf '%s' "$task" | (
+    legion_activate_executor_context "$RUN_ID"
+    cd "${wt:-$repo}"
+    "${claude_cmd[@]}"
+  ) >"$out_file" 2>"$err_file"
   rc=${PIPESTATUS[1]}
   set -e
 
@@ -246,7 +273,11 @@ cmd_run() {
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
     git -C "$wt" diff --cached >"$diff_path" 2>/dev/null || diff_rc=1
     [[ "$diff_rc" -ne 0 ]] && note "⚠ could not capture a diff from $wt"
-    if [[ "$do_apply" -eq 1 && -s "$diff_path" ]]; then
+    if [[ "$sandbox" == "read-only" && -s "$diff_path" ]]; then
+      read_only_violation=1
+      note "⚠ Claude produced file changes during a read-only run; refusing the result"
+    fi
+    if [[ "$do_apply" -eq 1 && "$read_only_violation" -eq 0 && -s "$diff_path" ]]; then
       if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
         git -C "$repo" apply "$diff_path" && note "diff applied to $repo"
       else
@@ -286,6 +317,16 @@ cmd_run() {
     combined_text="${combined_text}"$'\n'"$(cat "$err_file")"
   fi
 
+  if [[ "$read_only_violation" -eq 1 ]]; then
+    reason="read_only_violation"
+    status="failed"
+    [[ -n "$result" ]] && result="${result}"$'\n'
+    result="${result}Claude produced file changes during a read-only run."
+    emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    return 1
+  fi
+
   if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" ]]; then
     status="ok"
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
@@ -300,8 +341,10 @@ cmd_run() {
   fi
 
   if [[ "$allow_fallback" -eq 1 ]]; then
+    status="$([[ "$reason" == "claude_limit" ]] && printf blocked || printf failed)"
+    emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
     note "⚠ Claude failed ($reason): falling back to $fallback_model"
-    run_fallback "$reason" "$task" "$fallback_model" "$repo"
+    run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
     return $?
   fi
 
@@ -310,8 +353,8 @@ cmd_run() {
   else
     status="failed"
   fi
-  emit_span "claude" "$model" "$status" "$dur" 0 "$usage" "$task" "$artifacts"
-  emit_terminal_json "claude" "$model" "$status" "$result" "$usage" 0 false "$reason"
+  emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+  emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
   return 1
 }
 
@@ -321,7 +364,8 @@ legion-claude — delegate a scoped task to Claude headless, with fallback to Co
 
 Usage:
   legion-claude run --task "TASK" [--model MODEL] [--repo DIR] [--effort LEVEL]
-                    [--base REF] [--apply] [--keep] [--sandbox MODE] [--archetype NAME]
+                    [--base REF] [--apply] [--keep]
+                    [--sandbox read-only|workspace-write] [--archetype NAME]
                     [--append-system-prompt TEXT] [--dangerously-skip-permissions]
                     [--quiet] [--no-fallback] [--fallback-model MODEL]
   legion-claude run [--model MODEL] [--repo DIR] [...] < task.txt
@@ -329,6 +373,7 @@ Usage:
 The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a diff at
 <repo>/.legion/runs/<run-id>/diff.patch, so it never edits the caller's working tree.
 --keep retains the worktree; --apply applies the diff to the repo.
+Read-only runs use Claude plan mode and fail if the worktree still changes.
 
 --effort / --append-system-prompt / --dangerously-skip-permissions pass through to
 `claude -p` (skip-permissions is for autonomous headless/cron runs — opt-in).

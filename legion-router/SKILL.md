@@ -1,7 +1,7 @@
 ---
 name: legion-router
 kind: ability
-description: Use when Claude should hand a scoped sub-task to an external model (Codex / Cursor Agent) instead of doing it itself — bulk mechanical edits, independent parallel code generation, cross-model review, Cursor second opinions, or tie-breaks. Drives `legion-delegate` for Codex and `legion-cursor` for Cursor Agent, both in isolated worktrees with metered telemetry. Triggers on "delegate to codex/gpt/cursor", "second opinion", "cross-model review", or cost-metered model routing. (For orchestrating a whole multi-step goal across models, use legion-orchestrate.)
+description: Use when a primary harness should hand a scoped task to a configured Codex, Claude, Cursor, or opencode executor — implementation, independent code generation, cross-model review, second opinions, or tie-breaks. Drives Legion executor adapters in isolated worktrees with metered telemetry. For a whole multi-step goal, use legion-orchestrate.
 ---
 
 # Legion Router — delegate to a legion of models
@@ -15,10 +15,13 @@ check learned harness guardrails when available:
 legion-self-learn hints --entity plugin:legion-router
 ```
 
-Legion is a team. Play each model to its strength:
+Legion is a team. Play each configured role to its strength:
 
-- **Claude = orchestrate** — plan, decompose, decide, **verify**, integrate. Claude is the *conductor*, not the bulk coder. (archetypes: `orchestrate`, `architecture-decision`, `deep-reasoning`)
-- **Codex workhorse = implementation + review** — do **most of the coding** and final review: implementation, tests, refactors, bulk edits, migrations, boilerplate, hard/critical/risky work, and cross-model verification. The concrete model ID resolves from `config/models.toml`.
+- **Active primary = orchestrate** — plan, decompose, decide, verify, and
+  integrate. The primary is the conductor, not automatically the bulk coder.
+- **Configured executor roles = implementation + review** — route implementation,
+  tests, refactors, bulk edits, migrations, and independent verification by
+  archetype. Concrete model IDs resolve from `config/models.toml`.
 
 **The rule:** codex should do **≥50% of delegatable work** (`routing.toml [targets].codex_share`). Concretely — when you have an implementation task, **delegate by archetype by default** rather than coding it yourself; reserve your own cycles for orchestration + judgement, and route the **final review to the independent Fable reviewer**.
 
@@ -27,7 +30,9 @@ Legion is a team. Play each model to its strength:
 2. Before doing an eligible implementation task inline, check `legion-share next` — if it says `codex`, **delegate it** (you're under target); if it says `opus`, your call.
 3. `legion-share` shows the live ratio + per-model breakdown vs the 0.5 target.
 
-So: **Delegate any task that's independent and self-contained** to the configured Codex workhorse or Cursor Agent so Claude stays free to coordinate. Keep only orchestration + genuine judgement inline.
+So: delegate any independent, self-contained task through its configured Legion
+route so the primary stays free to coordinate. Keep orchestration and genuine
+judgement inline.
 
 ## The honest mechanism
 
@@ -49,7 +54,8 @@ Cursor Agent uses the same sidecar pattern through `legion-cursor`: it runs Curs
 |---|---|---|
 | Bulk mechanical edit across many files | ✅ yes | `run --archetype bulk-mechanical-edit` |
 | Independent module/file you can spec fully | ✅ yes | `run` with a tight, stateless task description |
-| Second opinion on a risky diff / PR | ✅ yes | `review --archetype second-opinion-review --base <branch>` |
+| Codex review of a risky diff / PR | ✅ yes | `review --archetype security-review --base <ref> [--head <ref>]` |
+| Different-lineage second opinion | ✅ yes | route `second-opinion-review`, then use that executor's read-only adapter |
 | Two designs both plausible (tie-break) | ✅ yes | `review` on each, compare verdicts |
 | Task needs your conversation context / judgement | ❌ no | do it inline |
 | Tiny edit you can do in one tool call | ❌ no | do it inline (delegation overhead isn't worth it) |
@@ -67,7 +73,7 @@ Run `legion-route --list` for the full set. Grouped by role:
 
 | Role | Archetypes | → model |
 |---|---|---|
-| **Claude orchestrates (self)** | `orchestrate`, `architecture-decision`, `deep-reasoning` | `claude_orchestrator` — **refuses to delegate** |
+| **Primary orchestrates (self)** | `orchestrate`, `architecture-decision`, `deep-reasoning` | active primary — **refuses to delegate** |
 | **Codex execution path** | `scout`, `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `security-review`, `hard-bug`, `perf-optimization` | `codex_workhorse` / `codex_review` |
 | **Fable merge judgement** | `final-review` | `claude_default` |
 
@@ -87,9 +93,12 @@ legion-cursor run --task "Try the same fix using Cursor Agent; minimal edit only
 printf '%s' "$LONG_TASK" | legion-delegate run \
   --model "$(legion-route --model-ref codex_workhorse)" --reasoning-effort high --repo .
 
-# Cross-model second opinion → STRUCTURED verdict JSON you can reconcile:
-legion-delegate review --archetype second-opinion-review --base main --repo .
+# Codex second pass → STRUCTURED verdict JSON you can reconcile:
+legion-delegate review --archetype security-review --base main --head HEAD --repo .
 #   -> {verdict: approve|request_changes|comment, summary, findings:[{severity,title,file,line,detail}]}
+# Review refs are resolved once to immutable commits. Add `--head <ref>` when
+# reviewing a non-HEAD snapshot; `--max-attempts N` bounds transient retries
+# (default 2). Every launched review writes a durable `terminal_receipt`.
 
 # Iterate on a kept session (same codex thread) instead of starting fresh:
 legion-delegate run    --archetype parallel-codegen --task "..." --repo . --keep   # note the run_id
@@ -129,6 +138,9 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
 - `run` defaults to `workspace-write` (edits the worktree); `review` is `read-only`.
 - `danger-full-access` is **hard-blocked** unless `LEGION_ALLOW_DANGER=1`.
 - Task text is scanned for dangerous/injection patterns before any write run (override: `LEGION_ALLOW_UNSAFE=1`).
+- `executor=self` is returned to the primary for inline work. A process carrying
+  `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`, or positive `LEGION_DEPTH` must
+  implement its assigned slice directly; Legion refuses nested delegation.
 
 > **The sandbox is the security boundary — not the task scanner.** `scan_task_text`
 > is a best-effort tripwire and is trivially bypassable (encodings, indirection);

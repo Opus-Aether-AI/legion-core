@@ -590,12 +590,12 @@
         {
           "type": "file_contains",
           "path": "{workspace}/router-plugin.txt",
-          "text": "0.5.3"
+          "text": "generic GitHub issue intake via `legion-intake`"
         },
         {
           "type": "file_contains",
           "path": "{workspace}/router-plugin.txt",
-          "text": "generic GitHub issue intake via `legion-intake`"
+          "text": "Codex, Cursor, Claude, and opencode executors"
         }
       ],
       "required": true
@@ -616,12 +616,12 @@
         {
           "type": "file_contains",
           "path": "{workspace}/marketplace-router.txt",
-          "text": "0.5.3"
+          "text": "delegate, cursor, or a compatible custom worker"
         },
         {
           "type": "file_contains",
           "path": "{workspace}/marketplace-router.txt",
-          "text": "delegate, cursor, or a compatible custom worker"
+          "text": "Codex, Cursor, Claude, and opencode executors"
         }
       ],
       "required": true

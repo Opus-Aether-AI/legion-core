@@ -50,6 +50,85 @@ def test_resolve_unknown_falls_to_defaults():
     assert r["model"] == lr.resolve_model_ref(model_table, "claude_orchestrator")
 
 
+def test_preflight_allows_top_level_same_family_subagent_without_mutating_policy():
+    route = lr.resolve(table(), "implement-feature", models())
+    checked = lr.preflight(route, "codex", {})
+
+    assert route["executor"] == "codex"
+    assert "effective_executor" not in route
+    assert checked["executor"] == "codex"
+    assert checked["effective_executor"] == "codex"
+    assert checked["preflight"] == {
+        "action": "delegate",
+        "reason": "delegated-route",
+        "primary": "codex",
+        "target_executor": "codex",
+        "target_family": "codex",
+    }
+
+
+def test_preflight_returns_nested_legion_route_inline_for_direct_execution():
+    route = lr.resolve(table(), "implement-feature", models())
+    checked = lr.preflight(
+        route,
+        "claude",
+        {"LEGION_ACTIVE": "1", "LEGION_EXECUTOR": "1", "LEGION_DEPTH": "1"},
+    )
+
+    assert checked["effective_executor"] == "self"
+    assert checked["preflight"]["action"] == "inline"
+    assert checked["preflight"]["reason"] == "delegated-context-route"
+
+
+def test_preflight_treats_physical_legion_worktree_as_delegated_without_env(
+    monkeypatch, tmp_path
+):
+    physical_cwd = tmp_path / "repo" / ".legion" / "worktrees" / "slice"
+    physical_cwd.mkdir(parents=True)
+    logical_cwd = tmp_path / "logical-cwd"
+    logical_cwd.symlink_to(physical_cwd, target_is_directory=True)
+    monkeypatch.chdir(logical_cwd)
+
+    route = lr.resolve(table(), "implement-feature", models())
+    checked = lr.preflight(route, "codex", {})
+
+    assert checked["effective_executor"] == "self"
+    assert checked["preflight"]["action"] == "inline"
+    assert checked["preflight"]["reason"] == "delegated-context-route"
+
+
+def test_preflight_does_not_treat_similar_cwd_names_as_legion_worktrees(
+    monkeypatch, tmp_path
+):
+    for relative_cwd in (
+        ".legion/worktrees-old/slice",
+        "not.legion/worktrees/slice",
+        ".legion/other-worktrees/slice",
+    ):
+        cwd = tmp_path / relative_cwd
+        cwd.mkdir(parents=True)
+        monkeypatch.chdir(cwd)
+
+        route = lr.resolve(table(), "implement-feature", models())
+        checked = lr.preflight(route, "codex", {})
+
+        assert checked["effective_executor"] == "codex"
+        assert checked["preflight"]["action"] == "delegate"
+        assert checked["preflight"]["reason"] == "delegated-route"
+
+
+def test_main_preflight_uses_delegated_context_environment(monkeypatch, capsys):
+    monkeypatch.setenv("LEGION_PRIMARY", "codex")
+    monkeypatch.setenv("LEGION_ACTIVE", "1")
+    assert lr.main([
+        "implement-feature", "--preflight",
+        "--file", TABLE, "--models-file", MODELS_TABLE,
+    ]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["effective_executor"] == "self"
+    assert out["preflight"]["reason"] == "delegated-context-route"
+
+
 def test_deep_reasoning_stays_on_claude_orchestrator():
     model_table = models()
     r = lr.resolve(table(), "deep-reasoning", model_table)

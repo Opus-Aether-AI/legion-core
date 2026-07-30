@@ -233,14 +233,21 @@ while [ "$#" -gt 0 ]; do
 done
 python3 - "$slices" "$repo" <<'PY'
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 repo = Path(sys.argv[2])
-count = 0
+slice_rows = []
 if path.exists():
-    count = sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+    slice_rows = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+count = len(slice_rows)
 
 (repo / "fieldops").mkdir(parents=True, exist_ok=True)
 (repo / "tests").mkdir(parents=True, exist_ok=True)
@@ -462,12 +469,47 @@ if __name__ == "__main__":
 )
 
 changed = ["fieldops/triage.py", "tests/test_triage.py"]
+source_base_sha = subprocess.check_output(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    text=True,
+).strip()
+ledger_path = Path(os.environ["LEGION_RUN_DIR"]) / "fanout-task-ledger.json"
+ledger_path.write_text(
+    json.dumps(
+        {
+            "schema": "legion.task-ledger.v1",
+            "status": "completed",
+            "source_base_sha": source_base_sha,
+            "tasks": [
+                {
+                    "index": idx,
+                    "id": str(item.get("id") or f"slice-{idx}"),
+                    "state": "integrated",
+                    "result_status": "ok",
+                    "apply_status": "applied",
+                    "changed_files": changed,
+                }
+                for idx, item in enumerate(slice_rows)
+            ],
+            "apply": {
+                "applied": count,
+                "conflicts": 0,
+                "target_head_sha": source_base_sha,
+            },
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
 print(json.dumps({
     "ok": True,
     "applied": count,
     "failed": 0,
     "changed_files": changed,
     "results": [{"status": "applied", "id": f"slice-{idx}", "changed_files": changed} for idx in range(count)],
+    "task_ledger_path": str(ledger_path),
 }, sort_keys=True))
 PY
 SH
@@ -594,6 +636,7 @@ def called_in_order(names):
 slices = read_jsonl(run_dir / "slices.jsonl") if run_dir else []
 routes = artifact("routes.json").get("routes", [])
 fanout = artifact("fanout.json")
+task_ledger = artifact("task-ledger.json")
 learning_feedback = artifact("learning-feedback.json")
 self_learn = artifact("self-learn.json")
 self_learn_hints = artifact("self-learn-hints.json")
@@ -631,6 +674,12 @@ checks = {
     ),
     "routes_generated_for_all_slices": len(routes) == len(slices) and len(routes) > 0,
     "fanout_apply_ran": "fanout-apply" in calls and fanout.get("failed") == 0,
+    "fanout_task_ledger_retained": (
+        task_ledger.get("schema") == "legion.task-ledger.v1"
+        and task_ledger.get("status") == "completed"
+        and len(task_ledger.get("tasks", [])) == len(slices)
+        and all(item.get("apply_status") == "applied" for item in task_ledger.get("tasks", []))
+    ),
     "final_review_ran": (
         "claude-review" in calls
         and "approve" in str(artifact("review.json").get("result", ""))

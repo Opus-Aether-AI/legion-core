@@ -60,13 +60,18 @@ building a new runner profile.
    legion-fanout --slices slices.jsonl --repo . --max-concurrency 4
    #   {"archetype":"implement-feature","task":"...self-contained spec..."}
    ```
-   Codex slices run in parallel worktrees; `self` slices come back `status:"inline"` for you to do. You stay free to coordinate.
+   Delegated slices run in parallel worktrees; `self` slices come back
+   `status:"inline"` for the active primary. The returned `task_ledger_path`
+   is the durable proof of which queued slices started, which were blocked
+   before launch, and how every slice terminated.
 4. **Cross-model verify** (independent Fable reviewer) — for each returned diff, get an independent structured verdict:
    ```bash
    legion-run resolves `final-review` through its configured executor; do not
    invoke the Codex-only `legion-delegate review` command for that archetype.
    ```
-   Reconcile its findings against your own. **Always get the configured reviewer sign-off before merge.**
+   Review is pinned to the immutable base/head SHAs recorded in
+   `review-input.json`; reconcile its findings against your own. **Always get
+   the configured reviewer sign-off before merge.**
 5. **Synthesize** (Claude) — apply the verified diffs (`legion-delegate apply --run <id>`), resolve conflicts, integrate.
 6. **Gate** — run `/review-gate` (or `/opus-commands:ultra-review` for big diffs) before done.
 

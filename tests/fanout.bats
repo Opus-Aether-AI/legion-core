@@ -10,6 +10,9 @@ setup() {
   export LEGION_DELEGATE="$ROOT/legion-router/bin/legion-delegate"
   export LEGION_TELEMETRY="$ROOT/legion-observability/bin/legion-trace"
   export LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans"
+  # Do not inherit whichever harness happens to run Bats. These policy tests
+  # model a Claude-primary fanout unless a test overrides it explicitly.
+  export LEGION_PRIMARY=claude
   CODEX_WORKHORSE="$("$ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
   CLAUDE_REVIEW="$("$ROOT/legion-router/bin/legion-route" --model-ref claude_default)"
   REPO="$BATS_TEST_TMPDIR/repo"
@@ -20,6 +23,15 @@ setup() {
   printf 'a\n' > "$REPO/a.ts"
   git -C "$REPO" add -A
   git -C "$REPO" -c user.email=t@t.c -c user.name=t commit -qm init
+}
+
+file_mode() {
+  local path="$1"
+  if stat -f '%Lp' "$path" >/dev/null 2>&1; then
+    stat -f '%Lp' "$path"
+  else
+    stat -c '%a' "$path"
+  fi
 }
 
 @test "fanout: resolves legion-route from PATH before source-tree fallback" {
@@ -63,7 +75,39 @@ SH
   echo "$output" | jq -e '[.results[] | select(.status=="inline") | .archetype] == ["deep-reasoning"]'
 }
 
+@test "fanout: top-level same-family slices still launch scoped subagents" {
+  export LEGION_PRIMARY=codex
+  export MOCK_CALL_LOG="$BATS_TEST_TMPDIR/calls.log"
+  printf '%s\n' '{"archetype":"implement-feature","task":"build A"}' > "$BATS_TEST_TMPDIR/caller.jsonl"
+
+  run "$FANOUT" --slices "$BATS_TEST_TMPDIR/caller.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 1 and .inline == 0 and .failed == 0'
+  grep -qF "codex exec" "$MOCK_CALL_LOG"
+}
+
+@test "fanout: delegated executor context returns nested routes inline" {
+  export LEGION_PRIMARY=codex
+  export LEGION_ACTIVE=1
+  export LEGION_EXECUTOR=1
+  export LEGION_DEPTH=1
+  export MOCK_CALL_LOG="$BATS_TEST_TMPDIR/nested-calls.log"
+  printf '%s\n' '{"archetype":"implement-feature","task":"build directly"}' > "$BATS_TEST_TMPDIR/nested.jsonl"
+
+  run "$FANOUT" --slices "$BATS_TEST_TMPDIR/nested.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .inline == 1 and .failed == 0
+    and .results[0].route_reason == "delegated-context-route"
+  '
+  [ ! -s "$MOCK_CALL_LOG" ]
+}
+
 @test "fanout: routes final review slices to the configured Fable reviewer" {
+  # A Codex-primary run may delegate its independent review to Claude/Fable.
+  export LEGION_PRIMARY=codex
   printf '%s\n' '{"archetype":"final-review","task":"review the diff"}' > "$BATS_TEST_TMPDIR/r.jsonl"
   run "$FANOUT" --slices "$BATS_TEST_TMPDIR/r.jsonl" --repo "$REPO"
   [ "$status" -eq 0 ]
@@ -77,6 +121,9 @@ SH
 }
 
 @test "fanout: --task file expands demo slices and --json is accepted" {
+  # Use a third harness so this expansion test exercises all three delegated
+  # slices rather than caller-aware inline handling.
+  export LEGION_PRIMARY=opencode
   printf 'Build a dispatch board with AI scheduling suggestions.\n' > "$BATS_TEST_TMPDIR/task.md"
   run "$FANOUT" --task "$BATS_TEST_TMPDIR/task.md" --repo "$REPO" --json --max-concurrency 1
   [ "$status" -eq 0 ]
@@ -145,10 +192,26 @@ SH
   # state_version >= 3 proves the queued prewrite (sv1) then delegate running(sv2)+terminal(sv3).
   local recs; recs=$(ls "$LEGION_REGISTRY_DIR"/*.json | wc -l | tr -d ' ')
   [ "$recs" = "2" ]
+  [ "$(file_mode "$LEGION_REGISTRY_DIR")" = "700" ]
   for f in "$LEGION_REGISTRY_DIR"/*.json; do
     [ "$(jq -r '.state_version >= 3' "$f")" = "true" ]
     [ "$(jq -r '.run_id | endswith("-s0") or endswith("-s1")' "$f")" = "true" ]
+    [ "$(file_mode "$f")" = "600" ]
   done
+  local ledger; ledger="$(echo "$output" | jq -r .task_ledger_path)"
+  jq -e '
+    .schema == "legion.task-ledger.v1"
+    and .status == "completed"
+    and (.source_base_sha | length == 40)
+    and (.tasks | length == 2)
+    and all(.tasks[];
+      .state == "completed"
+      and .result_status == "ok"
+      and (.queued_at | length > 0)
+      and (.started_at | length > 0)
+      and (.completed_at | length > 0)
+    )
+  ' "$ledger"
 }
 
 @test "fanout: self/inline slices do NOT leave a queued record" {
@@ -158,6 +221,227 @@ SH
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.inline == 1'
   [ "$(ls "$LEGION_REGISTRY_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
+}
+
+@test "fanout: interruption kills descendant process groups and cleans slices before terminalizing its ledger" {
+  local bin="$BATS_TEST_TMPDIR/interrupt-bin"
+  mkdir -p "$bin"
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"executor":"codex","model":"fake-codex","sandbox":"workspace-write","resolved":true}\n'
+SH
+  cat > "$bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+repo=""
+run_id=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    --run-id) run_id="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+worktree="$repo/.legion/worktrees/$run_id"
+branch="legion/delegate-$run_id"
+git -C "$repo" worktree add -q -b "$branch" "$worktree" HEAD
+record="$LEGION_REGISTRY_DIR/$run_id.json"
+jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  .state_version = ((.state_version // 0) + 1)
+  | .lifecycle.phase = "running"
+  | .lifecycle.updated_at = $now
+' "$record" > "$record.tmp.$$"
+mv -f "$record.tmp.$$" "$record"
+printf 'delegate %s\n' "$$" >> "$INTERRUPT_PIDS"
+
+python3 - "$INTERRUPT_PIDS" "$INTERRUPT_WORKER_READY" "$INTERRUPT_LATE_READY" <<'PY' &
+import os
+import signal
+import subprocess
+import sys
+import time
+
+pids_path, ready_path, late_path = sys.argv[1:4]
+os.setsid()
+spawned = False
+
+def append(kind, pid):
+    with open(pids_path, "a", encoding="utf-8") as handle:
+        handle.write(f"{kind} {pid}\n")
+        handle.flush()
+
+def spawn_late_child(_signum, _frame):
+    global spawned
+    if spawned:
+        return
+    spawned = True
+    child = subprocess.Popen([
+        sys.executable,
+        "-c",
+        (
+            "import signal,time;"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+            "signal.signal(signal.SIGINT, signal.SIG_IGN);"
+            "signal.signal(signal.SIGHUP, signal.SIG_IGN);"
+            "time.sleep(60)"
+        ),
+    ])
+    append("late", child.pid)
+    with open(late_path, "w", encoding="utf-8") as handle:
+        handle.write(str(child.pid))
+
+signal.signal(signal.SIGTERM, spawn_late_child)
+signal.signal(signal.SIGINT, spawn_late_child)
+signal.signal(signal.SIGHUP, spawn_late_child)
+append("leader", os.getpid())
+with open(ready_path, "w", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()))
+while True:
+    time.sleep(1)
+PY
+
+while [[ ! -s "$INTERRUPT_WORKER_READY" ]]; do sleep 0.01; done
+printf 'ready\n' > "$INTERRUPT_READY"
+while :; do sleep 1; done
+SH
+  chmod +x "$bin"/*
+  printf '%s\n' \
+    '{"id":"slow","archetype":"implement-feature","task":"slow slice"}' \
+    '{"id":"dependent","depends_on":["slow"],"archetype":"write-tests","task":"wait for slow"}' \
+    > "$BATS_TEST_TMPDIR/interrupt.jsonl"
+  local stdout="$BATS_TEST_TMPDIR/interrupt.out"
+  export INTERRUPT_PIDS="$BATS_TEST_TMPDIR/interrupt.pids"
+  export INTERRUPT_READY="$BATS_TEST_TMPDIR/interrupt.ready"
+  export INTERRUPT_WORKER_READY="$BATS_TEST_TMPDIR/interrupt-worker.ready"
+  export INTERRUPT_LATE_READY="$BATS_TEST_TMPDIR/interrupt-late.ready"
+  export LEGION_REGISTRY_DIR="$BATS_TEST_TMPDIR/interrupt-registry"
+
+  LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
+    "$FANOUT" --slices "$BATS_TEST_TMPDIR/interrupt.jsonl" --repo "$REPO" \
+    --keep > "$stdout" 2>&1 &
+  local fanout_pid=$!
+  local ledger=""
+  for _ in {1..100}; do
+    ledger="$(find "$REPO/.legion/fanout" -name task-ledger.json -print -quit 2>/dev/null || true)"
+    [[ -n "$ledger" && -s "$INTERRUPT_READY" ]] && break
+    sleep 0.02
+  done
+  [ -n "$ledger" ]
+  [ -s "$INTERRUPT_READY" ]
+  local slice_run_id
+  slice_run_id="$(jq -r '.tasks[0].run_id' "$ledger")"
+  local integration_branch
+  integration_branch="legion/fanout-$(jq -r '.fanout_run_id' "$ledger")"
+  [ -d "$REPO/.legion/worktrees/$slice_run_id" ]
+  [ -d "$(dirname "$ledger")/integration" ]
+
+  kill -TERM "$fanout_pid"
+  for _ in {1..100}; do
+    [[ -s "$INTERRUPT_LATE_READY" ]] && break
+    sleep 0.02
+  done
+  local ledger_status_during_cleanup
+  ledger_status_during_cleanup="$(jq -r '.status' "$ledger")"
+  local fanout_rc=0
+  wait "$fanout_pid" || fanout_rc=$?
+
+  local process_leaked=0 pid
+  while read -r _kind pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      process_leaked=1
+    fi
+  done < "$INTERRUPT_PIDS"
+  local slice_worktree_leaked=0 slice_branch_leaked=0
+  local integration_worktree_leaked=0 integration_branch_leaked=0
+  [ ! -d "$REPO/.legion/worktrees/$slice_run_id" ] || slice_worktree_leaked=1
+  [ -z "$(git -C "$REPO" branch --list "legion/delegate-$slice_run_id")" ] || slice_branch_leaked=1
+  [ ! -d "$(dirname "$ledger")/integration" ] || integration_worktree_leaked=1
+  [ -z "$(git -C "$REPO" branch --list "$integration_branch")" ] || integration_branch_leaked=1
+
+  # A failing implementation must not leak the fixture after this assertion
+  # snapshot; remove anything it left behind before checking the expectations.
+  while read -r _kind pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -KILL "$pid" 2>/dev/null || true
+  done < "$INTERRUPT_PIDS"
+  git -C "$REPO" worktree remove --force "$REPO/.legion/worktrees/$slice_run_id" >/dev/null 2>&1 || true
+  git -C "$REPO" worktree remove --force "$(dirname "$ledger")/integration" >/dev/null 2>&1 || true
+  git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+  git -C "$REPO" branch -D "legion/delegate-$slice_run_id" "$integration_branch" >/dev/null 2>&1 || true
+
+  [ "$fanout_rc" -eq 143 ]
+  [ -s "$INTERRUPT_LATE_READY" ]
+  [ "$ledger_status_during_cleanup" = "running" ]
+  [ "$process_leaked" -eq 0 ]
+  [ "$slice_worktree_leaked" -eq 0 ]
+  [ "$slice_branch_leaked" -eq 0 ]
+  [ "$integration_worktree_leaked" -eq 0 ]
+  [ "$integration_branch_leaked" -eq 0 ]
+  jq -e '
+    .status == "failed"
+    and .tasks[0].state == "failed"
+    and .tasks[0].result_status == "missing_terminal_result"
+    and .tasks[1].state == "failed"
+    and (.completed_at | length > 0)
+  ' "$ledger"
+  jq -s -e '
+    length == 2
+    and all(.[];
+      .schema == "legion.run-state.v1"
+      and .lifecycle.phase == "failed"
+      and (.lifecycle.updated_at | length > 0)
+    )
+    and ([.[].state_version] | sort) == [2, 3]
+  ' "$LEGION_REGISTRY_DIR"/*.json
+  for f in "$LEGION_REGISTRY_DIR"/*.json; do
+    [ "$(file_mode "$f")" = "600" ]
+  done
+  [ -z "$(find "$LEGION_REGISTRY_DIR" -name '*.tmp.*' -print -quit)" ]
+}
+
+@test "fanout: normal --keep still retains slice worktrees for inspection" {
+  printf '%s\n' '{"archetype":"implement-feature","task":"build A"}' > "$BATS_TEST_TMPDIR/keep.jsonl"
+
+  run "$FANOUT" --slices "$BATS_TEST_TMPDIR/keep.jsonl" --repo "$REPO" --keep
+
+  [ "$status" -eq 0 ]
+  local run_id
+  run_id="$(echo "$output" | jq -r '.results[0].run_id')"
+  [ -n "$run_id" ]
+  [ -d "$REPO/.legion/worktrees/$run_id" ]
+  [ -n "$(git -C "$REPO" branch --list "legion/delegate-$run_id")" ]
+
+  "$LEGION_DELEGATE" cleanup --run "$run_id" --repo "$REPO" --quiet
+}
+
+@test "fanout: slice cleanup prunes the global worktree registry only once" {
+  local bin="$BATS_TEST_TMPDIR/git-log-bin"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$bin"
+  cat > "$bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'git %s\n' "$*" >> "$FANOUT_GIT_CALL_LOG"
+exec "$FANOUT_REAL_GIT" "$@"
+SH
+  chmod +x "$bin/git"
+  export FANOUT_REAL_GIT="$real_git"
+  export FANOUT_GIT_CALL_LOG="$BATS_TEST_TMPDIR/git-calls.log"
+  printf '%s\n' \
+    '{"archetype":"implement-feature","task":"build A"}' \
+    '{"archetype":"write-tests","task":"test A"}' \
+    '{"archetype":"cheap-bulk","task":"document A"}' \
+    > "$BATS_TEST_TMPDIR/prune-once.jsonl"
+
+  PATH="$bin:$PATH" run "$FANOUT" \
+    --slices "$BATS_TEST_TMPDIR/prune-once.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 3 and .failed == 0'
+  [ "$(grep -cE '^git -C .+ worktree prune$' "$FANOUT_GIT_CALL_LOG")" -eq 1 ]
 }
 
 @test "fanout: a nested fan-out joins the inherited LEGION_TRACE_ID" {
@@ -244,6 +528,12 @@ SH
   echo "$output" | jq -e '.ok == 2 and .failed == 0 and .applied == 1'
   echo "$output" | jq -e '[.results[].id] == ["platform-contract","consumer"]'
   echo "$output" | jq -e '.results[1].base_ref != "HEAD"'
+  ledger="$(echo "$output" | jq -r .task_ledger_path)"
+  jq -e '
+    all(.tasks[]; (.base_ref | length) == 40)
+    and (.tasks[0].apply_status == "applied")
+    and (.tasks[1].apply_status == "no_changes")
+  ' "$ledger"
   [ "$(cat "$REPO/platform.txt")" = "contract" ]
 }
 

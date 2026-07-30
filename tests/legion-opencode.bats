@@ -23,7 +23,8 @@ make_test_repo() {
 
 @test "legion-opencode: happy path runs opencode headless, captures diff, emits span" {
     local repo; repo="$(make_test_repo ok1)"
-    run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
+    local context="$TEST_TMPDIR/context.log"
+    MOCK_CONTEXT_LOG="$context" run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e --arg m "$OPENCODE_DEFAULT" '.status == "ok" and .executor == "opencode" and .model == $m'
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
@@ -33,6 +34,7 @@ make_test_repo() {
 
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$output" = "opencode" ]
+    grep -Eq '^opencode active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
 @test "legion-opencode: parses the JSONL event stream (cost summed across message ids, nested tokens)" {
@@ -91,6 +93,14 @@ make_test_repo() {
     run "$LEGION_OPENCODE" run --task "edit" --repo "$repo" --apply --quiet
     [ "$status" -eq 0 ]
     [ -f "$repo/MOCK_OPENCODE_CHANGE.txt" ]
+}
+
+@test "legion-opencode: direct adapter refuses delegated executor context" {
+    local repo; repo="$(make_test_repo nested)"
+    LEGION_ACTIVE=1 run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"nested Legion delegation is blocked"* ]]
+    assert_mock_not_called opencode
 }
 
 @test "legion-opencode: opencode failure yields status failed and non-zero exit" {

@@ -6,11 +6,16 @@
 set -euo pipefail
 
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'claude %s\n' "$*" >> "$MOCK_CALL_LOG"
+[[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'claude active=%s executor=%s depth=%s run=%s\n' \
+    "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
 
 MOCK_STATE_FILE="$HOME/.mock-claude-marketplaces"
 
 if [[ "${1:-}" == "-p" ]]; then
     cat >/dev/null || true
+    if [[ "${MOCK_CLAUDE_WRITE:-0}" == "1" ]]; then
+        printf 'unexpected\n' > claude-unexpected.txt
+    fi
     if [[ "${MOCK_CLAUDE_LIMIT:-0}" == "1" ]]; then
         printf '%s\n' '{"is_error":true,"result":"You have reached your usage limit"}'
         exit 0

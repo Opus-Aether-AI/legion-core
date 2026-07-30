@@ -91,7 +91,7 @@
       "target_type": "plugin",
       "target_name": "legion-observability",
       "files": {
-        "home/.codex/sessions/legion/session.jsonl": "{\"payload\":{\"type\":\"user_message\",\"content\":\"u should have linked the right harness bench repo, wrong attribution source\"}}\n"
+        "home/.codex/sessions/legion/session.jsonl": "{\"originator\":\"legion-bench\",\"payload\":{\"type\":\"user_message\",\"content\":\"u should have linked the right harness bench repo, wrong attribution source\"}}\n"
       },
       "command": [
         "{repo}/legion-observability/bin/legion-session-learn",
@@ -101,6 +101,7 @@
         "{logs}",
         "--lookback-days",
         "30",
+        "--include-benchmarks",
         "--record",
         "--json"
       ],

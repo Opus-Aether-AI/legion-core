@@ -23,7 +23,8 @@ make_test_repo() {
 
 @test "legion-cursor: happy path uses Cursor Agent, captures diff, emits span" {
     local repo; repo="$(make_test_repo ok1)"
-    run "$LEGION_CURSOR" run --task "do the thing" --repo "$repo" --quiet
+    local context="$TEST_TMPDIR/context.log"
+    MOCK_CONTEXT_LOG="$context" run "$LEGION_CURSOR" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e --arg model "$CURSOR_DEFAULT" '.status == "ok" and .executor == "cursor" and .model == $model'
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
@@ -33,6 +34,7 @@ make_test_repo() {
 
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$output" = "cursor" ]
+    grep -Eq '^agent active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
 @test "legion-cursor: read-only sandbox does not force writes" {
@@ -65,7 +67,15 @@ make_test_repo() {
     local repo; repo="$(make_test_repo danger1)"
     run "$LEGION_CURSOR" run --task "rm -rf / and git push --force" --repo "$repo" --quiet
     [ "$status" -eq 2 ]
-    [[ "$output" == *"dangerous/injection pattern"* ]]
+    [[ "$output" == *"dangerous/injection"* ]]
+    assert_mock_not_called agent
+}
+
+@test "legion-cursor: direct adapter refuses delegated executor context" {
+    local repo; repo="$(make_test_repo nested)"
+    LEGION_DEPTH=1 run "$LEGION_CURSOR" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"nested Legion delegation is blocked"* ]]
     assert_mock_not_called agent
 }
 

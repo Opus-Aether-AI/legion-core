@@ -1,8 +1,10 @@
 # legion-orchestrate
 
-Legion's dynamic **multi-model** orchestrator — the ultracode loop, but Claude conducts while the configured Codex workhorse does the bulk of coding in parallel and independent Fable review verifies.
+Legion's dynamic **multi-model** orchestrator: the active primary decomposes
+work, configured executor roles implement parallel slices, and an independent
+review role verifies the result.
 
-> Decompose → fan out (configured Codex, parallel) → cross-model verify (independent Fable) → synthesize → gate.
+> Decompose → fan out → cross-model verify → synthesize → gate.
 
 ## `legion-run`
 
@@ -72,6 +74,16 @@ slice generator is available only through the explicit
 `--allow-generated-slices` compatibility flag. External stages are bounded by
 `--stage-timeout-seconds` (default 1800); timeout or cancellation writes a
 terminal receipt and stops the stage's owned process group.
+`stage-status.json` retains start/completion timestamps and explicit terminal
+states (`passed`, `failed`, `timed_out`, or `not_run`) for every lifecycle stage.
+
+Validator and evaluator commands run without inherited executor-role variables,
+so a parent Legion session cannot silently change their behavior. Before final
+review, `legion-run` writes the current worktree through a temporary Git index
+to an immutable snapshot commit. Review artifacts record the exact base, head,
+and tree SHAs rather than relying on a moving branch name. The source worktree
+must be clean when `legion-run` starts; this prevents unrelated local or secret
+files from being included in the external review snapshot.
 
 ## `legion-fanout`
 
@@ -85,8 +97,14 @@ printf '%s\n' \
   | legion-fanout --slices - --repo . --max-concurrency 4
 ```
 
-- Codex slices run in parallel git worktrees via `legion-delegate`; `self`/`deep-reasoning` slices return `status:"inline"` for Claude to do.
-- Output: per-slice `{status, model, diff_path, cost_usd}` + totals + `by_model` + `total_cost_usd`.
+- Delegated slices run in parallel git worktrees via `legion-delegate`;
+  `self` slices return `status:"inline"` for the active primary.
+- Output includes per-slice `{status, model, diff_path, cost_usd}`, aggregate
+  totals, and `task_ledger_path`.
+- `task_ledger_path` points to a durable `legion.task-ledger.v1` record with
+  queued, started, terminal, dependency, run-ID, immutable base-SHA, and
+  per-slice apply evidence. Interrupted runs therefore distinguish work that
+  never started from work that failed after launch.
 - Bounded by `--max-concurrency` (or `LEGION_MAX_CONCURRENCY`, default 4). Portable to bash 3.2.
 
 ## The playbook + ultracode mode

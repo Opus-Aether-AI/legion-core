@@ -1,34 +1,11 @@
-# CLAUDE.md — legion-core
+# CLAUDE.md — Claude Code overlay
 
-Contributor guidance for the **legion-core** engine (the model-agnostic subset
-of the Legion marketplace).
+@AGENTS.md
 
-## Scope
+<!-- legion:init:v1:claude:start -->
+<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=5ffecb7907800e76 -->
+## Legion workflow
 
-- This repo is the reusable orchestration core: 5 `legion-*` plugins, their
-  schemas, config, install/bridge scripts, and the `bats` test suite.
-- Domain agents (trading, research, etc.) build *on top* of this — they do not
-  live here. Keep this repo free of domain-specific plugins, skills, or copy.
-
-## Editing rules
-
-1. Keep `.claude-plugin/marketplace.json` and each `<plugin>/.claude-plugin/plugin.json`
-   version in sync; bump both on a plugin change.
-2. Skill frontmatter stays strict: `name` + `description`, single-line description
-   (no block scalars — `legion-doctor` enforces this).
-3. Bash is the lingua franca; scripts must pass `shellcheck`.
-4. Every change is gated by `legion-doctor` + `bats tests/` in CI.
-
-## Verify locally
-
-```bash
-bats tests/
-legion-observability/bin/legion-doctor
-shellcheck $(git ls-files '*.sh')
-```
-
-## Conventions
-
-- No secrets in the tree (gitleaks gates CI; creds live in env / Keychain).
-- Telemetry conforms to `legion-observability/schema/legion.span.v1.schema.json`.
-- New executors emit spans via `legion-trace emit` so the stream stays uniform.
+Load and follow the shared Legion-first repository policy in `AGENTS.md`. Keep
+shared guidance there; this file should contain only Claude-specific additions.
+<!-- legion:init:v1:claude:end -->

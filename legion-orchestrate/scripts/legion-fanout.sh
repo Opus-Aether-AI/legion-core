@@ -54,6 +54,7 @@ LEGION_TELEMETRY="${LEGION_TELEMETRY:-$(resolve_optional_legion_cmd legion-trace
 FANOUT_PRIMARY="$("$LEGION_ROUTE" --primary 2>/dev/null || echo primary)"
 _state_lib="$_self/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1090
   # shellcheck disable=SC1091
   source "$_state_lib"
 fi
@@ -62,21 +63,296 @@ fi
 # "queued / up-next" in the Console before they launch. The delegate adopts the id
 # (--run-id) and rewrites it running->terminal. Best-effort (never block on telemetry).
 write_queued_record() {
-  local rid="$1" arch="$2" model="$3" task="$4"
+  local rid="$1" arch="$2" model="$3" task="$4" temp record
   mkdir -p "$LEGION_REGISTRY_DIR" 2>/dev/null || return 0
-  jq -cn --arg run "$rid" --arg trace "$FANOUT_TRACE_ID" --arg parent "$FANOUT_RUN_ID" \
-    --arg repo "$repo" --arg arch "$arch" --arg model "$model" --arg task "$task" \
-    --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-    {schema:"legion.run-state.v1", run_id:$run, trace_id:$trace, parent_id:$parent,
-     kind:"run", state_version:1, repo_root:$repo, archetype:$arch, model:$model, task:$task,
-     process:{pid:0,pgid:0,started_at:""},
-     lifecycle:{phase:"queued", started_at:"", updated_at:$now}}' \
-    > "$LEGION_REGISTRY_DIR/$rid.json.tmp.$$" 2>/dev/null \
-    && mv -f "$LEGION_REGISTRY_DIR/$rid.json.tmp.$$" "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null || true
+  chmod 700 "$LEGION_REGISTRY_DIR" 2>/dev/null || true
+  record="$LEGION_REGISTRY_DIR/$rid.json"
+  temp="$record.tmp.$$"
+  if (
+    umask 077
+    jq -cn --arg run "$rid" --arg trace "$FANOUT_TRACE_ID" --arg parent "$FANOUT_RUN_ID" \
+      --arg repo "$repo" --arg arch "$arch" --arg model "$model" --arg task "$task" \
+      --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      {schema:"legion.run-state.v1", run_id:$run, trace_id:$trace, parent_id:$parent,
+       kind:"run", state_version:1, repo_root:$repo, archetype:$arch, model:$model, task:$task,
+       process:{pid:0,pgid:0,started_at:""},
+       lifecycle:{phase:"queued", started_at:"", updated_at:$now}}' > "$temp" 2>/dev/null
+  ); then
+    chmod 600 "$temp" 2>/dev/null || true
+    mv -f "$temp" "$record" 2>/dev/null || rm -f "$temp"
+  else
+    rm -f "$temp"
+  fi
+}
+
+init_task_ledger() {
+  python3 - "$work" "$n" "$base_head" "$FANOUT_RUN_ID" "$FANOUT_TRACE_ID" <<'PY'
+import datetime
+import json
+import os
+import sys
+from pathlib import Path
+
+work = Path(sys.argv[1])
+n = int(sys.argv[2])
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+dag = json.loads((work / "dag.json").read_text(encoding="utf-8"))
+tasks = []
+for i in range(n):
+    source = json.loads((work / f"slice-{i}.in").read_text(encoding="utf-8"))
+    task = dag["slices"][i]
+    tasks.append({
+        "index": i,
+        "id": task["id"],
+        "run_id": (work / f"slice-{i}.runid").read_text(encoding="utf-8").strip(),
+        "archetype": str(source.get("archetype") or ""),
+        "task": str(source.get("task") or ""),
+        "depends_on": task["depends_on"],
+        "state": "queued",
+        "queued_at": now,
+        "started_at": "",
+        "completed_at": "",
+        "base_ref": "",
+        "result_status": "",
+    })
+payload = {
+    "schema": "legion.task-ledger.v1",
+    "fanout_run_id": sys.argv[4],
+    "trace_id": sys.argv[5],
+    "source_base_sha": sys.argv[3],
+    "created_at": now,
+    "updated_at": now,
+    "status": "running",
+    "tasks": tasks,
+}
+target = work / "task-ledger.json"
+task_dir = work / "task-ledger.d"
+task_dir.mkdir(parents=True, exist_ok=True)
+for task in tasks:
+    (task_dir / f"{task['index']}.json").write_text(
+        json.dumps(task, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+temp = work / f".task-ledger.{os.getpid()}.tmp"
+temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(temp, target)
+PY
+}
+
+update_task_ledger() {
+  local i="$1" state="$2" result_status="${3:-}" base_ref="${4:-}" apply_status="${5:-}"
+  python3 - "$work/task-ledger.d/$i.json" "$state" "$result_status" "$base_ref" "$apply_status" <<'PY'
+import datetime
+import json
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+state, result_status, base_ref, apply_status = sys.argv[2:6]
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+task = json.loads(target.read_text(encoding="utf-8"))
+task["state"] = state
+if state == "running" and not task.get("started_at"):
+    task["started_at"] = now
+if state in {"completed", "failed", "blocked", "inline", "integrated"}:
+    task["completed_at"] = now
+if result_status:
+    task["result_status"] = result_status
+if base_ref:
+    task["base_ref"] = base_ref
+if apply_status:
+    task["apply_status"] = apply_status
+temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+temp.write_text(json.dumps(task, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(temp, target)
+PY
+}
+
+finalize_task_ledger() {
+  python3 - "$work/task-ledger.json" "$results" "$applied" "$apply_conflicts" "$repo" <<'PY'
+import datetime
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+results_path = Path(sys.argv[2])
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+payload = json.loads(target.read_text(encoding="utf-8"))
+task_dir = target.with_name("task-ledger.d")
+payload["tasks"] = [
+    json.loads((task_dir / f"{index}.json").read_text(encoding="utf-8"))
+    for index in range(len(payload["tasks"]))
+]
+results = [
+    json.loads(line)
+    for line in results_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+by_id = {str(item.get("id") or ""): item for item in results}
+for task in payload["tasks"]:
+    result = by_id.get(task["id"], {})
+    if result:
+        if task.get("state") not in {"failed", "blocked"}:
+            task["result_status"] = str(result.get("status") or task.get("result_status") or "")
+        task["diff_path"] = str(result.get("diff_path") or "")
+        task["model"] = str(result.get("model") or "")
+    if task["state"] in {"queued", "running"}:
+        task["state"] = "failed"
+        task["completed_at"] = now
+        task["result_status"] = task["result_status"] or "missing_terminal_result"
+repo = sys.argv[5]
+head = subprocess.run(
+    ["git", "-C", repo, "rev-parse", "HEAD"],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+payload.update({
+    "updated_at": now,
+    "completed_at": now,
+    "status": "failed" if any(
+        task["state"] in {"failed", "blocked"} or task["result_status"] not in {"ok", "inline"}
+        for task in payload["tasks"]
+    ) or int(sys.argv[4]) else "completed",
+    "apply": {
+        "applied": int(sys.argv[3]),
+        "conflicts": int(sys.argv[4]),
+        "target_head_sha": head.stdout.strip() if head.returncode == 0 else "",
+    },
+})
+temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(temp, target)
+PY
+}
+
+task_ledger_finalized=0
+finalize_task_ledger_on_exit() {
+  local rc=$?
+  [[ "$task_ledger_finalized" == "0" && -f "$work/task-ledger.json" ]] || return "$rc"
+  set +e
+  results="${results:-$work/results.jsonl}"
+  [[ -f "$results" ]] || : > "$results"
+  applied="${applied:-0}"
+  apply_conflicts="${apply_conflicts:-0}"
+  finalize_task_ledger
+  task_ledger_finalized=1
+  return "$rc"
+}
+
+terminalize_interrupted_run_records() {
+  local i rid record temp now
+  [[ -d "${LEGION_REGISTRY_DIR:-}" ]] || return 0
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  for ((i = 0; i < n; i++)); do
+    rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
+    [[ -n "$rid" ]] || continue
+    record="$LEGION_REGISTRY_DIR/$rid.json"
+    [[ -f "$record" ]] || continue
+    if ! jq -e --arg run "$rid" '
+      .schema == "legion.run-state.v1"
+      and .run_id == $run
+      and ((.lifecycle.phase // "") == "queued"
+           or (.lifecycle.phase // "") == "running")
+    ' "$record" >/dev/null 2>&1; then
+      continue
+    fi
+
+    temp="$record.tmp.$$"
+    if (
+      umask 077
+      jq --arg now "$now" '
+        .state_version = ((.state_version // 0) + 1)
+        | .lifecycle.phase = "failed"
+        | .lifecycle.updated_at = $now
+      ' "$record" > "$temp" 2>/dev/null
+    ); then
+      chmod 600 "$temp" 2>/dev/null || true
+      mv -f "$temp" "$record" || rm -f "$temp"
+    else
+      rm -f "$temp"
+    fi
+  done
+}
+
+fanout_descendant_pids=()
+fanout_descendant_pgids=()
+snapshot_descendant_tree() {
+  local pid="$1" child
+  while IFS= read -r child; do
+    [[ "$child" =~ ^[0-9]+$ ]] && snapshot_descendant_tree "$child"
+  done < <(pgrep -P "$pid" 2>/dev/null || true)
+  fanout_descendant_pids+=("$pid")
+}
+
+append_descendant_pgid() {
+  local candidate="$1" existing
+  for existing in "${fanout_descendant_pgids[@]+"${fanout_descendant_pgids[@]}"}"; do
+    [[ "$existing" == "$candidate" ]] && return 0
+  done
+  fanout_descendant_pgids+=("$candidate")
+}
+
+terminate_descendant_process_groups() {
+  fanout_descendant_pids=()
+  fanout_descendant_pgids=()
+
+  local pid pgid self_pgid
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] && snapshot_descendant_tree "$pid"
+  done < <(jobs -pr)
+
+  self_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+  for pid in "${fanout_descendant_pids[@]+"${fanout_descendant_pids[@]}"}"; do
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    if [[ "$pgid" =~ ^[0-9]+$ && "$pgid" -gt 0 && "$pgid" != "$self_pgid" ]]; then
+      append_descendant_pgid "$pgid"
+    fi
+  done
+
+  # Signal independent descendant groups first. The later KILL targets the
+  # group again, so children forked by a TERM handler cannot escape the initial
+  # process snapshot.
+  for pgid in "${fanout_descendant_pgids[@]+"${fanout_descendant_pgids[@]}"}"; do
+    kill -TERM "-$pgid" 2>/dev/null || true
+  done
+  # Background shell functions normally share this script's process group; do
+  # not signal that group (it may include the caller). Terminate those members
+  # individually, child-first, using the frozen descendant snapshot.
+  for pid in "${fanout_descendant_pids[@]+"${fanout_descendant_pids[@]}"}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+
+  sleep 0.25
+  for pgid in "${fanout_descendant_pgids[@]+"${fanout_descendant_pgids[@]}"}"; do
+    kill -0 "-$pgid" 2>/dev/null && kill -KILL "-$pgid" 2>/dev/null || true
+  done
+  for pid in "${fanout_descendant_pids[@]+"${fanout_descendant_pids[@]}"}"; do
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+}
+
+terminate_fanout() {
+  trap - INT TERM HUP
+  set +e
+  terminate_descendant_process_groups
+  teardown_integration_base
+  cleanup_slice_worktrees 1
+  terminalize_interrupted_run_records
+  # Make the cleanup-before-terminalization ordering explicit rather than
+  # relying on the EXIT trap's implicit timing.
+  finalize_task_ledger_on_exit
+  exit 143
 }
 MAXC="${LEGION_MAX_CONCURRENCY:-4}"
 
-slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; json=0 ; keep_slices=0
+slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; keep_slices=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slices) slices_src="$2"; shift 2 ;;
@@ -85,7 +361,7 @@ while [[ $# -gt 0 ]]; do
     --max-concurrency) MAXC="$2"; shift 2 ;;
     --keep) keep_slices=1; shift ;; # retain slice worktrees after apply (default: reclaim them)
     --apply) apply="1"; shift ;;
-    --json) json=1; shift ;; # output is already JSON; accepted for roadmap compatibility
+    --json) shift ;; # output is already JSON; accepted for roadmap compatibility
     -h|--help) echo "usage: legion-fanout (--slices <file|-> | --task <file|->) [--repo DIR] [--max-concurrency N] [--keep] [--apply] [--json]"; exit 0 ;;
     *) echo "legion-fanout: unknown arg '$1'" >&2; exit 2 ;;
   esac
@@ -223,42 +499,62 @@ then
 fi
 
 launch_slice() {
-  local i="$1" base_ref="${2:-HEAD}" line arch model task ex rid
+  local i="$1" base_ref="${2:-HEAD}" base_sha="" line arch model task ex rid
   line="$(cat "$work/slice-$i.in")"
   rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
   arch="$(jq -r '.archetype // ""' <<<"$line" 2>/dev/null || echo "")"
   model="$(jq -r '.model // ""' <<<"$line" 2>/dev/null || echo "")"
   task="$(jq -r '.task // ""' <<<"$line" 2>/dev/null || echo "")"
+  base_sha="$(git -C "$repo" rev-parse "$base_ref^{commit}" 2>/dev/null || true)"
+  if [[ -z "$base_sha" ]]; then
+    jq -cn --arg ref "$base_ref" \
+      '{status:"error",stage:"base",error:("could not resolve immutable base " + $ref)}' \
+      > "$work/slice-$i.out"
+    update_task_ledger "$i" "failed" "error" ""
+    return
+  fi
+  base_ref="$base_sha"
+  update_task_ledger "$i" "running" "" "$base_ref"
   if [[ -z "$task" ]]; then
     [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
-    echo '{"status":"error","error":"empty task"}' > "$work/slice-$i.out"; return
+    echo '{"status":"error","error":"empty task"}' > "$work/slice-$i.out"
+    update_task_ledger "$i" "failed" "error" "$base_ref"
+    return
   fi
-  # self archetypes are NOT delegated — return for Opus to do inline (drop the queued
-  # record: it's not a delegated agent).
+  # Self routes and nested routes from an already-delegated executor are
+  # returned inline. Top-level same-harness subagents remain valid.
   if [[ -n "$arch" ]]; then
     local route_out route_err route_rc
     route_out="$work/slice-$i.route.json"
     route_err="$work/slice-$i.route.err"
     set +e
-    "$LEGION_ROUTE" "$arch" > "$route_out" 2> "$route_err"
+    "$LEGION_ROUTE" "$arch" --preflight > "$route_out" 2> "$route_err"
     route_rc=$?
     set -e
     if [[ "$route_rc" -ne 0 ]]; then
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
       jq -cn --arg a "$arch" --arg t "$task" --arg e "$(tr '\n' ' ' < "$route_err")" \
         '{status:"error",stage:"route",archetype:$a,task:$t,error:$e}' > "$work/slice-$i.out"
+      update_task_ledger "$i" "failed" "error" "$base_ref"
       return
     fi
     if ! jq -e 'type == "object"' "$route_out" >/dev/null 2>&1; then
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
       jq -cn --arg a "$arch" --arg t "$task" --arg e "$(cat "$route_out" 2>/dev/null)" \
         '{status:"error",stage:"route",archetype:$a,task:$t,error:("invalid route JSON: " + $e)}' > "$work/slice-$i.out"
+      update_task_ledger "$i" "failed" "error" "$base_ref"
       return
     fi
-    ex="$(jq -r '.executor // ""' "$route_out" 2>/dev/null || echo "")"
+    ex="$(jq -r '.effective_executor // .executor // ""' "$route_out" 2>/dev/null || echo "")"
     if [[ "$ex" == "self" ]]; then
+      local route_reason
+      route_reason="$(jq -r '.preflight.reason // "inline-self-route"' "$route_out" 2>/dev/null || echo inline-self-route)"
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
-      jq -cn --arg a "$arch" --arg t "$task" --arg p "$FANOUT_PRIMARY" '{status:"inline",archetype:$a,task:$t,note:($p + " (primary) does this inline")}' > "$work/slice-$i.out"
+      jq -cn --arg a "$arch" --arg t "$task" --arg p "$FANOUT_PRIMARY" \
+        --arg reason "$route_reason" \
+        '{status:"inline",archetype:$a,task:$t,route_reason:$reason,
+          note:($p + " (primary) does this inline")}' > "$work/slice-$i.out"
+      update_task_ledger "$i" "inline" "inline" "$base_ref"
       return
     fi
   fi
@@ -272,14 +568,22 @@ launch_slice() {
   [[ -n "$model" ]] && args+=(--model "$model")
   args+=(--task "$task")
   "$LEGION_DELEGATE" "${args[@]}" > "$work/slice-$i.out" 2> "$work/slice-$i.err" || true
+  local result_status ledger_state
+  result_status="$(jq -r '.status // "error"' "$work/slice-$i.out" 2>/dev/null || echo error)"
+  ledger_state="failed"
+  [[ "$result_status" == "ok" ]] && ledger_state="completed"
+  update_task_ledger "$i" "$ledger_state" "$result_status" "$base_ref"
 }
 
 has_dependencies="$(jq -r '.has_dependencies' "$work/dag.json")"
 base_head="$(git -C "$repo" rev-parse HEAD)"
+init_task_ledger
+trap finalize_task_ledger_on_exit EXIT
 integration_branch=""
 integration_wt=""
 integrated=0
 integration_conflicts=0
+integrated_tasks=()
 
 setup_integration_base() {
   [[ -n "$integration_branch" ]] && return 0
@@ -290,9 +594,11 @@ setup_integration_base() {
 }
 
 teardown_integration_base() {
-  [[ -n "$integration_wt" && -d "$integration_wt" ]] && git -C "$repo" worktree remove --force "$integration_wt" >/dev/null 2>&1 || true
-  [[ -n "$integration_branch" ]] && git -C "$repo" branch -D "$integration_branch" >/dev/null 2>&1 || true
+  if [[ -n "$integration_wt" && -d "$integration_wt" ]]; then
+    git -C "$repo" worktree remove --force "$integration_wt" >/dev/null 2>&1 || rm -rf "$integration_wt"
+  fi
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  [[ -n "$integration_branch" ]] && git -C "$repo" branch -D "$integration_branch" >/dev/null 2>&1 || true
 }
 
 # Slices are delegated with --keep so their diffs survive until the sequential
@@ -301,18 +607,31 @@ teardown_integration_base() {
 # not a blanket `cleanup --all`, which would disturb concurrent runs. --keep on
 # the fan-out retains them for inspection.
 cleanup_slice_worktrees() {
-  [[ "$keep_slices" == "1" ]] && return 0
-  local i rid swt
+  local force="${1:-0}"
+  [[ "$keep_slices" == "1" && "$force" != "1" ]] && return 0
+  local i rid swt branch
+  local -a slice_branches=()
   for ((i = 0; i < n; i++)); do    # slices are 0-indexed (slice-0 … slice-(n-1))
     rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
     [[ -n "$rid" ]] || continue
     swt="$repo/.legion/worktrees/$rid"
-    [[ -d "$swt" ]] || continue
-    git -C "$repo" worktree remove --force "$swt" >/dev/null 2>&1 || rm -rf "$swt"
-    git -C "$repo" branch -D "legion/delegate-$rid" >/dev/null 2>&1 || true
+    slice_branches+=("legion/delegate-$rid")
+    if [[ -d "$swt" ]]; then
+      git -C "$repo" worktree remove --force "$swt" >/dev/null 2>&1 || rm -rf "$swt"
+    fi
   done
+  # A fallback rm leaves stale worktree administration behind. Prune once after
+  # all removals so every branch is free before deletion without an O(n) global
+  # repository scan for every slice.
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  for branch in "${slice_branches[@]+"${slice_branches[@]}"}"; do
+    git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
+  done
 }
+
+# No delegated children or integration worktrees exist before this point, so
+# install signal cleanup only after every cleanup helper is defined.
+trap terminate_fanout INT TERM HUP
 
 mark_blocked() {
   local i="$1" blocked_by_json="$2"
@@ -322,23 +641,30 @@ mark_blocked() {
   local rid
   rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
   [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null || true
+  update_task_ledger "$i" "blocked" "blocked" ""
 }
 
 integrate_slice_diff() {
   local i="$1" result dpath
   result="$(cat "$work/slice-$i.out" 2>/dev/null || echo '{}')"
   dpath="$(jq -r '.diff_path // empty' <<<"$result" 2>/dev/null || echo "")"
-  [[ -n "$dpath" && -s "$dpath" ]] || return 0
+  if [[ -z "$dpath" || ! -s "$dpath" ]]; then
+    update_task_ledger "$i" "completed" "ok" "" "no_changes"
+    return 0
+  fi
   if git -C "$integration_wt" apply --check "$dpath" 2>/dev/null; then
     git -C "$integration_wt" apply "$dpath"
     git -C "$integration_wt" add -A
     git -C "$integration_wt" -c user.email=legion@local -c user.name=Legion commit -qm "legion fanout slice $i"
     integrated=$((integrated + 1))
+    integrated_tasks+=("$i")
+    update_task_ledger "$i" "integrated" "ok" "" "staged"
   else
     integration_conflicts=$((integration_conflicts + 1))
     jq -c '. + {status:"error",stage:"integration-apply",error:"diff did not apply cleanly to integration base"}' \
       "$work/slice-$i.out" > "$work/slice-$i.out.tmp" \
       && mv "$work/slice-$i.out.tmp" "$work/slice-$i.out"
+    update_task_ledger "$i" "failed" "error" "" "conflict"
   fi
 }
 
@@ -448,25 +774,45 @@ if [[ -n "$apply" && "$has_dependencies" == "true" ]]; then
   if [[ -s "$integration_patch" ]]; then
     if git -C "$repo" apply --check "$integration_patch" 2>/dev/null; then
       git -C "$repo" apply "$integration_patch" && applied="$integrated"
+      for i in "${integrated_tasks[@]}"; do
+        update_task_ledger "$i" "integrated" "ok" "" "applied"
+      done
     else
       apply_conflicts=$((apply_conflicts + 1))
+      for i in "${integrated_tasks[@]}"; do
+        update_task_ledger "$i" "failed" "error" "" "conflict"
+      done
     fi
   fi
 elif [[ -n "$apply" ]]; then
-  while IFS= read -r dpath; do
-    [[ -n "$dpath" && -s "$dpath" ]] || continue
-    if git -C "$repo" apply --check "$dpath" 2>/dev/null; then
-      git -C "$repo" apply "$dpath" && applied=$((applied + 1))
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    result_status="$(jq -r '.status // "error"' "$work/slice-$i.out" 2>/dev/null || echo error)"
+    dpath="$(jq -r '.diff_path // empty' "$work/slice-$i.out" 2>/dev/null || true)"
+    if [[ "$result_status" != "ok" ]]; then
+      i=$((i + 1))
+      continue
+    fi
+    if [[ -z "$dpath" || ! -s "$dpath" ]]; then
+      update_task_ledger "$i" "completed" "ok" "" "no_changes"
+    elif git -C "$repo" apply --check "$dpath" 2>/dev/null; then
+      git -C "$repo" apply "$dpath"
+      applied=$((applied + 1))
+      update_task_ledger "$i" "integrated" "ok" "" "applied"
     else
       apply_conflicts=$((apply_conflicts + 1))
+      update_task_ledger "$i" "failed" "error" "" "conflict"
     fi
-  done < <(jq -r '.[] | select(.status=="ok") | .diff_path // empty' <(jq -s '.' "$results"))
+    i=$((i + 1))
+  done
 fi
 if [[ "$has_dependencies" == "true" ]]; then
   apply_conflicts=$((apply_conflicts + integration_conflicts))
   teardown_integration_base
 fi
 cleanup_slice_worktrees
+finalize_task_ledger
+task_ledger_finalized=1
 
 # Root span for the fan-out itself, so the delegate spans form a tree under it.
 # Best-effort: telemetry is observability, never block the run on it.
@@ -480,7 +826,8 @@ if [[ -x "$LEGION_TELEMETRY" ]]; then
     --cost "${total_cost:-0}" --task "fanout: $n slices" >/dev/null 2>&1 || true
 fi
 
-jq -s --argjson applied "$applied" --argjson conflicts "$apply_conflicts" '{
+jq -s --argjson applied "$applied" --argjson conflicts "$apply_conflicts" \
+  --arg task_ledger_path "$work/task-ledger.json" '{
   slices: length,
   ok:     ([.[] | select(.status == "ok")]     | length),
   inline: ([.[] | select(.status == "inline")] | length),
@@ -488,6 +835,7 @@ jq -s --argjson applied "$applied" --argjson conflicts "$apply_conflicts" '{
   total_cost_usd: ([.[].cost_usd // 0] | add),
   applied: $applied,
   apply_conflicts: $conflicts,
+  task_ledger_path: $task_ledger_path,
   by_model: (reduce .[] as $r ({}; .[($r.model // ($r.status // "unknown"))] += 1)),
   results: .
 }' "$results"

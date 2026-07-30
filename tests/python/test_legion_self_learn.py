@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
 
 
 HERE = os.path.dirname(__file__)
@@ -46,6 +47,23 @@ def test_default_repo_walks_up_from_vendored_layout(tmp_path, monkeypatch):
     monkeypatch.setattr(self_learn, "_here", lambda: str(scripts))
 
     assert self_learn.default_repo() == os.path.abspath(str(consumer))
+
+
+def test_default_repo_prefers_active_git_worktree_over_outer_consumer(tmp_path, monkeypatch):
+    consumer = tmp_path / "consumer"
+    worktree = consumer / ".legion" / "worktrees" / "review"
+    scripts = worktree / "legion-observability" / "scripts"
+    for root in (consumer, worktree):
+        (root / ".claude-plugin").mkdir(parents=True)
+        (root / ".claude-plugin" / "marketplace.json").write_text("{}", encoding="utf-8")
+    scripts.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(worktree), "init", "-q"], check=True)
+    monkeypatch.delenv("LEGION_ROOT", raising=False)
+    monkeypatch.delenv("LEGION_MARKETPLACE_ROOT", raising=False)
+    monkeypatch.delenv("MARKETPLACE_ROOT", raising=False)
+    monkeypatch.setattr(self_learn, "_here", lambda: str(scripts))
+
+    assert self_learn.default_repo() == os.path.abspath(str(worktree))
 
 
 def _catalog(tmp_path):

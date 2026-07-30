@@ -1,7 +1,7 @@
 {
   "name": "legion-setup",
-  "description": "One skill to install AND update the Legion marketplace — no team hand-holding. First run installs marketplace plugins, cross-harness skills, Codex and Cursor bridges, shared CLIs, and daily refresh/self-learning; after that the same skill updates to latest. Ships `legion-setup`, `legion-codex-setup`, and `legion-cursor-setup`.",
-  "version": "0.1.1",
+  "description": "Install and update Legion, wire Codex/Cursor/opencode bridges, and make Legion the repository-default workflow without replacing existing instructions. Ships `legion-setup`, `legion-init`, and the native harness setup commands; daily refresh/self-learning is opt-in.",
+  "version": "0.2.0",
   "author": {
     "name": "legion-core"
   },
@@ -15,6 +15,8 @@
     "onboarding",
     "cursor",
     "codex",
+    "opencode",
+    "agents-md",
     "marketplace",
     "legion"
   ]

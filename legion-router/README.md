@@ -1,6 +1,8 @@
 # legion-router
 
-Legion's multi-model brain. Lets Claude orchestrate and **delegate scoped sub-tasks to external model agents** (Codex / Cursor Agent), bringing back a **verified, metered diff** — plus an opt-in Anthropic-compatible metering proxy so all model spend lands in one place.
+Legion's multi-model brain. Any supported primary harness can delegate scoped
+work to configured executors and receive a reviewable, metered diff. An optional
+Anthropic-compatible sidecar keeps proxied and out-of-band spend in one stream.
 
 > One orchestrator, a legion of models.
 
@@ -9,7 +11,9 @@ Legion's multi-model brain. Lets Claude orchestrate and **delegate scoped sub-ta
 | Bin | Script | What it does |
 |---|---|---|
 | `legion-delegate` | `scripts/delegate.sh` | Delegate a task to a model agent via `codex exec` in an isolated git worktree; capture diff + last message + token usage; price it; emit a telemetry span; report usage to `/ingest`. Subcommands: `run`, `review`, `apply`, `cleanup`. |
+| `legion-claude` | `scripts/legion-claude.sh` | Delegate to Claude headless in an isolated worktree, capture a patch, and optionally fall back through the configured Codex route. |
 | `legion-cursor` | `scripts/legion-cursor.sh` | Delegate a task to Cursor Agent headless (`agent -p`) in an isolated worktree; capture diff + result + usage; emit a telemetry span with `executor=cursor`. |
+| `legion-opencode` | `scripts/legion-opencode.sh` | Delegate to opencode headless in an isolated worktree and normalize its event stream into the Legion result/span contract. |
 | `legion-intake` | `scripts/legion-intake.sh` | GitHub issue intake wrapper. Runs a compatible Legion worker (`delegate`, `cursor`, or `custom`) in explore or implement mode, comments assessment results, and opens review PRs for implementation diffs. |
 | `legion-router` | `scripts/router.sh` | Manage the loopback `:8082` Anthropic-compatible metering proxy as a launchd service: `install`/`uninstall`/`start`/`stop`/`restart`/`status`/`logs`/`errors`/`dev`. Endpoints: `/health`, `/stats`, `POST /ingest`. Keys optional (runs as a pure meter). |
 
@@ -42,11 +46,12 @@ legion-delegate apply --run <RUN_ID> --repo .
 # Delegate a scoped task to Cursor Agent headless
 legion-cursor run --task "try the same fix with Cursor Agent; minimal edit" --repo .
 
-# Cross-model second opinion on a branch
-legion-delegate review --archetype second-opinion-review --base main --repo .
+# Structured Codex review of an immutable base/head pair
+legion-delegate review --archetype security-review --base main --head HEAD --repo .
 ```
 
-Requires: `codex` CLI for `legion-delegate`, Cursor CLI (`agent` or `cursor-agent`) for `legion-cursor`, plus `jq` and `git`. The proxy additionally needs `bun`.
+Requires the CLI for each executor you use, plus `jq` and `git`. The proxy
+additionally needs `bun`.
 
 `legion-intake` is intentionally one level above the provider. By default it runs
 `legion-delegate` (using the configured Codex route), but `--worker cursor` or
@@ -117,10 +122,11 @@ legion-router/
 │   ├── sandcastle-run.mjs       # optional Sandcastle bridge for docker/podman/vercel
 │   └── lib/
 │       ├── codex-json.sh        # parse `codex exec --json` streams (single point of codex-schema knowledge)
-│       └── cost.sh              # per-model USD cost from config/costs.json
+│       ├── cost.sh              # per-model USD cost from config/costs.json
+│       └── executor-context.sh  # recursion-proof delegated-child role signal
 ├── config/costs.json            # per-model price table (GPT defaults to $0 — see SKILL.md)
 ├── references/                  # routing policy + cost model docs
-└── SKILL.md                     # when/how Opus should delegate
+└── SKILL.md                     # when/how a primary should delegate
 ```
 
 ## Safety
@@ -129,7 +135,16 @@ legion-router/
 - `danger-full-access` is hard-blocked unless `LEGION_ALLOW_DANGER=1`.
 - Task text is scanned for dangerous/injection patterns before write runs (`LEGION_ALLOW_UNSAFE=1` to override).
 - Delegation never auto-applies a diff unless `--apply` is given and the diff applies cleanly.
+- Reviews resolve `--base`/`--head` once to commit SHAs, retry transient
+  executor failures at most twice by default, and write a durable terminal receipt.
+- Every executor receives `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`,
+  `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized repository policy uses that
+  context to prevent accidental recursive delegation.
 
 ## Telemetry
 
-Each delegation writes a `legion.span.v1` JSONL span to `$LEGION_TELEMETRY_DIR` (default `~/.claude/logs/legion/spans/`). The `legion-observability` plugin aggregates these into per-executor cost/success/latency reports and OTLP traces.
+Each delegation writes a `legion.span.v1` JSONL span to
+`$LEGION_TELEMETRY_DIR`. The default is the current repository's
+`~/.legion/projects/<repo-id>/spans/`; run `legion-state --repo .` to print the
+resolved path. The `legion-observability` plugin aggregates these into
+per-executor cost/success/latency reports and OTLP traces.

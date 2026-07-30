@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.18.0...v0.18.1) (2026-07-29)
+
+
+### Fixed
+
+* **router:** delegate lifecycle, diff scope and route arg parity ([#99](https://github.com/Opus-Aether-AI/legion-core/issues/99)) ([eb0c03c](https://github.com/Opus-Aether-AI/legion-core/commit/eb0c03ca211770229f3303d664f73ad46e6ce0c4))
+* **router:** isolate claude runs, unblock ordinary prose, move opus to 5 ([#100](https://github.com/Opus-Aether-AI/legion-core/issues/100)) ([26b2248](https://github.com/Opus-Aether-AI/legion-core/commit/26b22481a16221da5999359fa1e9bcdbd1383182))
+
+
+### Changed
+
+* **models:** resolve all model ids from config, never hardcode ([#98](https://github.com/Opus-Aether-AI/legion-core/issues/98)) ([963f15e](https://github.com/Opus-Aether-AI/legion-core/commit/963f15e78a540047007c8dcfd88b4f4b20bf127b))
+
 ## [0.18.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.17.1...v0.18.0) (2026-07-20)
 
 

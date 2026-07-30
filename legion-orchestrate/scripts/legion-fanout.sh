@@ -63,17 +63,26 @@ fi
 # "queued / up-next" in the Console before they launch. The delegate adopts the id
 # (--run-id) and rewrites it running->terminal. Best-effort (never block on telemetry).
 write_queued_record() {
-  local rid="$1" arch="$2" model="$3" task="$4"
+  local rid="$1" arch="$2" model="$3" task="$4" temp record
   mkdir -p "$LEGION_REGISTRY_DIR" 2>/dev/null || return 0
-  jq -cn --arg run "$rid" --arg trace "$FANOUT_TRACE_ID" --arg parent "$FANOUT_RUN_ID" \
-    --arg repo "$repo" --arg arch "$arch" --arg model "$model" --arg task "$task" \
-    --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-    {schema:"legion.run-state.v1", run_id:$run, trace_id:$trace, parent_id:$parent,
-     kind:"run", state_version:1, repo_root:$repo, archetype:$arch, model:$model, task:$task,
-     process:{pid:0,pgid:0,started_at:""},
-     lifecycle:{phase:"queued", started_at:"", updated_at:$now}}' \
-    > "$LEGION_REGISTRY_DIR/$rid.json.tmp.$$" 2>/dev/null \
-    && mv -f "$LEGION_REGISTRY_DIR/$rid.json.tmp.$$" "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null || true
+  chmod 700 "$LEGION_REGISTRY_DIR" 2>/dev/null || true
+  record="$LEGION_REGISTRY_DIR/$rid.json"
+  temp="$record.tmp.$$"
+  if (
+    umask 077
+    jq -cn --arg run "$rid" --arg trace "$FANOUT_TRACE_ID" --arg parent "$FANOUT_RUN_ID" \
+      --arg repo "$repo" --arg arch "$arch" --arg model "$model" --arg task "$task" \
+      --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      {schema:"legion.run-state.v1", run_id:$run, trace_id:$trace, parent_id:$parent,
+       kind:"run", state_version:1, repo_root:$repo, archetype:$arch, model:$model, task:$task,
+       process:{pid:0,pgid:0,started_at:""},
+       lifecycle:{phase:"queued", started_at:"", updated_at:$now}}' > "$temp" 2>/dev/null
+  ); then
+    chmod 600 "$temp" 2>/dev/null || true
+    mv -f "$temp" "$record" 2>/dev/null || rm -f "$temp"
+  else
+    rm -f "$temp"
+  fi
 }
 
 init_task_ledger() {
@@ -255,11 +264,15 @@ terminalize_interrupted_run_records() {
     fi
 
     temp="$record.tmp.$$"
-    if jq --arg now "$now" '
-      .state_version = ((.state_version // 0) + 1)
-      | .lifecycle.phase = "failed"
-      | .lifecycle.updated_at = $now
-    ' "$record" > "$temp" 2>/dev/null; then
+    if (
+      umask 077
+      jq --arg now "$now" '
+        .state_version = ((.state_version // 0) + 1)
+        | .lifecycle.phase = "failed"
+        | .lifecycle.updated_at = $now
+      ' "$record" > "$temp" 2>/dev/null
+    ); then
+      chmod 600 "$temp" 2>/dev/null || true
       mv -f "$temp" "$record" || rm -f "$temp"
     else
       rm -f "$temp"

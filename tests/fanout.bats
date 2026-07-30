@@ -25,6 +25,15 @@ setup() {
   git -C "$REPO" -c user.email=t@t.c -c user.name=t commit -qm init
 }
 
+file_mode() {
+  local path="$1"
+  if stat -f '%Lp' "$path" >/dev/null 2>&1; then
+    stat -f '%Lp' "$path"
+  else
+    stat -c '%a' "$path"
+  fi
+}
+
 @test "fanout: resolves legion-route from PATH before source-tree fallback" {
   local bin="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$bin"
@@ -183,9 +192,11 @@ SH
   # state_version >= 3 proves the queued prewrite (sv1) then delegate running(sv2)+terminal(sv3).
   local recs; recs=$(ls "$LEGION_REGISTRY_DIR"/*.json | wc -l | tr -d ' ')
   [ "$recs" = "2" ]
+  [ "$(file_mode "$LEGION_REGISTRY_DIR")" = "700" ]
   for f in "$LEGION_REGISTRY_DIR"/*.json; do
     [ "$(jq -r '.state_version >= 3' "$f")" = "true" ]
     [ "$(jq -r '.run_id | endswith("-s0") or endswith("-s1")' "$f")" = "true" ]
+    [ "$(file_mode "$f")" = "600" ]
   done
   local ledger; ledger="$(echo "$output" | jq -r .task_ledger_path)"
   jq -e '
@@ -384,6 +395,9 @@ SH
     )
     and ([.[].state_version] | sort) == [2, 3]
   ' "$LEGION_REGISTRY_DIR"/*.json
+  for f in "$LEGION_REGISTRY_DIR"/*.json; do
+    [ "$(file_mode "$f")" = "600" ]
+  done
   [ -z "$(find "$LEGION_REGISTRY_DIR" -name '*.tmp.*' -print -quit)" ]
 }
 

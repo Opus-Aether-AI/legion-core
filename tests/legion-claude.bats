@@ -70,8 +70,9 @@ make_test_repo() {
 
 @test "legion-claude: usage limit falls back to codex" {
     local repo; repo="$(make_test_repo fb1)"
+    local base; base="$(git -C "$repo" rev-parse HEAD)"
     MOCK_CLAUDE_LIMIT=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
-        --sandbox read-only --quiet
+        --sandbox read-only --base "$base" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e '.executor == "codex"'
@@ -83,6 +84,7 @@ make_test_repo() {
     [ "$status" -eq 0 ]
     [ "$output" = "1" ]
     assert_mock_called legion-delegate "--sandbox read-only"
+    assert_mock_called legion-delegate "--base $base"
 }
 
 @test "legion-claude: direct adapter refuses delegated executor context" {
@@ -96,13 +98,15 @@ make_test_repo() {
 
 @test "legion-claude: missing claude on PATH falls back directly" {
     local repo; repo="$(make_test_repo fb2)"
+    local base; base="$(git -C "$repo" rev-parse HEAD)"
     PATH="$(path_without claude)" run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
-        --sandbox read-only --quiet
+        --sandbox read-only --base "$base" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.executor == "codex"'
     echo "$output" | jq -e '.fell_back == true'
     echo "$output" | jq -e '.fell_back_reason == "claude_unavailable"'
     assert_mock_called legion-delegate "--sandbox read-only"
+    assert_mock_called legion-delegate "--base $base"
 }
 
 @test "legion-claude: LEGION_LOW_CREDIT=claude skips claude entirely" {

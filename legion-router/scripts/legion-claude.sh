@@ -159,6 +159,7 @@ cmd_run() {
   local effort="" append_sys="" skip_perms=0
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
+  local read_only_violation=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -179,7 +180,15 @@ cmd_run() {
       *) die "run: unknown arg '$1'" ;;
     esac
   done
-  : "${sandbox:-}" "${archetype:-}"
+  [[ -n "$sandbox" ]] || sandbox="workspace-write"
+  case "$sandbox" in
+    read-only|workspace-write) ;;
+    *) die "invalid --sandbox '$sandbox' (read-only|workspace-write)" ;;
+  esac
+  if [[ "$sandbox" == "read-only" && "$skip_perms" -eq 1 ]]; then
+    die "--dangerously-skip-permissions cannot be combined with --sandbox read-only"
+  fi
+  : "${archetype:-}"
 
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
@@ -243,6 +252,7 @@ cmd_run() {
   fi
 
   local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
+  [[ "$sandbox" == "read-only" ]] && claude_cmd+=(--permission-mode plan)
   [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
   [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
   [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
@@ -261,7 +271,11 @@ cmd_run() {
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
     git -C "$wt" diff --cached >"$diff_path" 2>/dev/null || diff_rc=1
     [[ "$diff_rc" -ne 0 ]] && note "⚠ could not capture a diff from $wt"
-    if [[ "$do_apply" -eq 1 && -s "$diff_path" ]]; then
+    if [[ "$sandbox" == "read-only" && -s "$diff_path" ]]; then
+      read_only_violation=1
+      note "⚠ Claude produced file changes during a read-only run; refusing the result"
+    fi
+    if [[ "$do_apply" -eq 1 && "$read_only_violation" -eq 0 && -s "$diff_path" ]]; then
       if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
         git -C "$repo" apply "$diff_path" && note "diff applied to $repo"
       else
@@ -301,6 +315,16 @@ cmd_run() {
     combined_text="${combined_text}"$'\n'"$(cat "$err_file")"
   fi
 
+  if [[ "$read_only_violation" -eq 1 ]]; then
+    reason="read_only_violation"
+    status="failed"
+    [[ -n "$result" ]] && result="${result}"$'\n'
+    result="${result}Claude produced file changes during a read-only run."
+    emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    return 1
+  fi
+
   if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" ]]; then
     status="ok"
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
@@ -338,7 +362,8 @@ legion-claude — delegate a scoped task to Claude headless, with fallback to Co
 
 Usage:
   legion-claude run --task "TASK" [--model MODEL] [--repo DIR] [--effort LEVEL]
-                    [--base REF] [--apply] [--keep] [--sandbox MODE] [--archetype NAME]
+                    [--base REF] [--apply] [--keep]
+                    [--sandbox read-only|workspace-write] [--archetype NAME]
                     [--append-system-prompt TEXT] [--dangerously-skip-permissions]
                     [--quiet] [--no-fallback] [--fallback-model MODEL]
   legion-claude run [--model MODEL] [--repo DIR] [...] < task.txt
@@ -346,6 +371,7 @@ Usage:
 The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a diff at
 <repo>/.legion/runs/<run-id>/diff.patch, so it never edits the caller's working tree.
 --keep retains the worktree; --apply applies the diff to the repo.
+Read-only runs use Claude plan mode and fail if the worktree still changes.
 
 --effort / --append-system-prompt / --dangerously-skip-permissions pass through to
 `claude -p` (skip-permissions is for autonomous headless/cron runs — opt-in).

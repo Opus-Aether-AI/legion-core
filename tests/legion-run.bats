@@ -157,11 +157,12 @@ SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '{"status":"ok","model":"test-model-beta","verdict":"ok"}\n'
+printf '{"status":"ok","model":"test-model-beta","verdict":{"verdict":"approve","summary":"independent review passed","findings":[]}}\n'
 SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-claude" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" > "$LEGION_RUN_DIR/claude-review.args"
 printf '{"status":"ok","model":"test-model-claude","result":"{\\"verdict\\":\\"approve\\",\\"summary\\":\\"independent review passed\\",\\"findings\\":[]}"}\n'
 SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-doctor" <<'SH'
@@ -341,6 +342,34 @@ SH
   json="$(printf '%s' "$output" | json_from_output)"
   run_dir="$(echo "$json" | jq -r '.run_dir')"
   jq -e '.model == "test-model-claude" and (.result | contains("approve"))' "$run_dir/review.json"
+  grep -Fq -- "--sandbox read-only" "$run_dir/claude-review.args"
+}
+
+@test "legion-run: fails closed when Claude omits the terminal review verdict" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  final-review) printf '{"executor":"claude","model":"test-model-claude","reasoning_effort":"high","resolved":true}\n' ;;
+  *) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
+esac
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-claude" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"status":"ok","model":"test-model-claude","result":"Review incomplete due to timeout."}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-route" "$BATS_TEST_TMPDIR/bin/legion-claude"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "review"'
+  jq -e '(.message | contains("invalid terminal verdict"))' "$run_dir/failure.json"
 }
 
 @test "legion-run: validation is role-clean and review uses an immutable snapshot" {
@@ -378,7 +407,7 @@ SH
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" > "$LEGION_RUN_DIR/review-args.txt"
-printf '{"status":"ok","model":"test-model-beta","verdict":{"verdict":"approve","findings":[]}}\n'
+printf '{"status":"ok","model":"test-model-beta","verdict":{"verdict":"approve","summary":"immutable snapshot reviewed","findings":[]}}\n'
 SH
   chmod +x "$BATS_TEST_TMPDIR/bin/legion-fanout" \
     "$BATS_TEST_TMPDIR/bin/fieldops-validate" \
@@ -452,7 +481,7 @@ SH
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" > "$LEGION_RUN_DIR/review-args.txt"
-printf '{"status":"ok","model":"test-cursor","result":"{\\"verdict\\":\\"approve\\",\\"findings\\":[]}"}\n'
+printf '{"status":"ok","model":"test-cursor","result":"{\\"verdict\\":\\"approve\\",\\"summary\\":\\"adapter review passed\\",\\"findings\\":[]}"}\n'
 SH
   chmod +x "$BATS_TEST_TMPDIR/bin/legion-route" "$BATS_TEST_TMPDIR/bin/legion-delegate"
   manifest="$(make_plugin)"

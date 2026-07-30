@@ -48,6 +48,26 @@ make_test_repo() {
     assert_mock_called claude "--dangerously-skip-permissions"
 }
 
+@test "legion-claude: read-only sandbox uses plan mode" {
+    local repo; repo="$(make_test_repo readonly-plan)"
+    run "$LEGION_CLAUDE" run --task "inspect only" --repo "$repo" \
+        --sandbox read-only --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+    assert_mock_called claude "--permission-mode plan"
+}
+
+@test "legion-claude: read-only sandbox rejects unexpected writes without fallback" {
+    local repo; repo="$(make_test_repo readonly-write)"
+    MOCK_CLAUDE_WRITE=1 run "$LEGION_CLAUDE" run --task "inspect only" --repo "$repo" \
+        --sandbox read-only --apply --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e \
+        '.status == "failed" and .reason == "read_only_violation" and .fell_back == false'
+    [ ! -e "$repo/claude-unexpected.txt" ]
+    assert_mock_not_called legion-delegate
+}
+
 @test "legion-claude: usage limit falls back to codex" {
     local repo; repo="$(make_test_repo fb1)"
     MOCK_CLAUDE_LIMIT=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet

@@ -770,6 +770,36 @@ $run_error" ]
   assert_mock_not_called codex
 }
 
+@test "delegate run: physical Legion worktree cwd blocks nesting without env sentinels" {
+  local repo; repo="$(make_test_repo nested-worktree-cwd)"
+  local physical_cwd="$TEST_TMPDIR/outer/.legion/worktrees/slice"
+  local logical_cwd="$TEST_TMPDIR/logical-cwd"
+  mkdir -p "$physical_cwd"
+  ln -s "$physical_cwd" "$logical_cwd"
+
+  run env -u LEGION_ACTIVE -u LEGION_EXECUTOR -u LEGION_DEPTH \
+    bash -c 'cd "$1" && "$2" run --model test-model-beta --task x --repo "$3" --quiet' \
+    _ "$logical_cwd" "$DELEGATE" "$repo"
+
+  [ "$status" -eq 2 ]
+  echo "$output" | jq -e '.reason == "nested-delegation"'
+  assert_mock_not_called codex
+}
+
+@test "delegate run: similar cwd names do not trigger worktree recursion guard" {
+  local repo; repo="$(make_test_repo non-worktree-cwd)"
+  local cwd="$TEST_TMPDIR/outer/.legion/worktrees-old/slice"
+  mkdir -p "$cwd"
+
+  run env -u LEGION_ACTIVE -u LEGION_EXECUTOR -u LEGION_DEPTH \
+    bash -c 'cd "$1" && "$2" run --model test-model-beta --task x --repo "$3" --quiet' \
+    _ "$cwd" "$DELEGATE" "$repo"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "ok" and .model == "test-model-beta"'
+  assert_mock_called codex "exec --json -m test-model-beta"
+}
+
 @test "delegate run: blocked route does not follow repo runtime symlinks or persist task text" {
   local repo; repo="$(make_test_repo blocked-symlink)"
   local external="$TEST_TMPDIR/external-runtime"

@@ -2,10 +2,21 @@
 # Shared delegated-executor context. Repository policies use these variables to
 # distinguish a primary/orchestrator from a child that must implement directly.
 
+legion_executor_worktree_cwd() {
+  local physical_cwd
+  physical_cwd="$(builtin pwd -P 2>/dev/null)" || return 1
+
+  case "$physical_cwd/" in
+    */.legion/worktrees/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 legion_executor_context_active() {
   local depth="${LEGION_DEPTH:-0}"
   [[ "${LEGION_ACTIVE:-0}" == "1" || "${LEGION_EXECUTOR:-0}" == "1" ]] && return 0
-  [[ "$depth" =~ ^[0-9]+$ && "$depth" -gt 0 ]]
+  [[ "$depth" =~ ^[0-9]+$ && "$depth" -gt 0 ]] && return 0
+  legion_executor_worktree_cwd
 }
 
 legion_require_top_level_executor() {

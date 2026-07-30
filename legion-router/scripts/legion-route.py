@@ -18,6 +18,7 @@ import copy
 import json
 import os
 import sys
+from pathlib import Path
 
 try:
     import tomllib
@@ -67,15 +68,30 @@ def executor_family(name):
     return normalized
 
 
-def delegated_context(env=None):
+def delegated_worktree_cwd(cwd=None):
+    """Whether the physical working directory is a Legion-managed worktree."""
+    try:
+        path = Path.cwd() if cwd is None else Path(cwd)
+        parts = path.resolve().parts
+    except (OSError, RuntimeError):
+        return False
+    return any(
+        parts[index:index + 2] == (".legion", "worktrees")
+        for index in range(len(parts) - 1)
+    )
+
+
+def delegated_context(env=None, cwd=None):
     """Whether Legion is already running inside a delegated executor."""
     env = os.environ if env is None else env
     if env.get("LEGION_ACTIVE") == "1" or env.get("LEGION_EXECUTOR") == "1":
         return True
     try:
-        return int(env.get("LEGION_DEPTH", "0")) > 0
+        if int(env.get("LEGION_DEPTH", "0")) > 0:
+            return True
     except ValueError:
-        return False
+        pass
+    return delegated_worktree_cwd(cwd)
 
 
 def preflight(route, primary, env=None):

@@ -618,7 +618,10 @@ def _is_bad_status(value: Any) -> bool:
 
 
 _BLOCKING_REVIEW_SEVERITIES = {"critical", "high", "medium"}
-_BLOCKING_REVIEW_MARKER = re.compile(r"\[(?:p0|p1|p2)\]", re.IGNORECASE)
+_REVIEW_VERDICTS = {"approve", "request_changes", "comment"}
+_REVIEW_FINDING_SEVERITIES = {"critical", "high", "medium", "low"}
+_REVIEW_VERDICT_KEYS = {"verdict", "summary", "findings"}
+_REVIEW_FINDING_KEYS = {"severity", "title", "file", "line", "detail"}
 
 
 def _review_verdict_value(payload: dict[str, Any]) -> Any:
@@ -646,24 +649,73 @@ def _blocking_review_findings(verdict: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _review_verdict_schema_error(verdict: Any) -> str:
+    """Validate the public review-verdict schema without an optional dependency."""
+    if not isinstance(verdict, dict):
+        return "expected a structured verdict object"
+    missing = _REVIEW_VERDICT_KEYS - verdict.keys()
+    extra = verdict.keys() - _REVIEW_VERDICT_KEYS
+    if missing:
+        return f"missing required field(s): {', '.join(sorted(missing))}"
+    if extra:
+        return f"unexpected field(s): {', '.join(sorted(extra))}"
+    if (
+        not isinstance(verdict["verdict"], str)
+        or verdict["verdict"] not in _REVIEW_VERDICTS
+    ):
+        return "verdict must be approve, request_changes, or comment"
+    if not isinstance(verdict["summary"], str):
+        return "summary must be a string"
+    findings = verdict["findings"]
+    if not isinstance(findings, list):
+        return "findings must be an array"
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            return f"finding {index} must be an object"
+        missing_finding = {"severity", "title"} - finding.keys()
+        extra_finding = finding.keys() - _REVIEW_FINDING_KEYS
+        if missing_finding:
+            return (
+                f"finding {index} missing required field(s): "
+                f"{', '.join(sorted(missing_finding))}"
+            )
+        if extra_finding:
+            return (
+                f"finding {index} has unexpected field(s): "
+                f"{', '.join(sorted(extra_finding))}"
+            )
+        if (
+            not isinstance(finding["severity"], str)
+            or finding["severity"] not in _REVIEW_FINDING_SEVERITIES
+        ):
+            return f"finding {index} has an invalid severity"
+        if not isinstance(finding["title"], str):
+            return f"finding {index} title must be a string"
+        for key in ("file", "detail"):
+            if key in finding and not isinstance(finding[key], str):
+                return f"finding {index} {key} must be a string"
+        if "line" in finding and (
+            not isinstance(finding["line"], int)
+            or isinstance(finding["line"], bool)
+        ):
+            return f"finding {index} line must be an integer"
+    return ""
+
+
 def _review_failure_reason(payload: dict[str, Any]) -> str:
     if payload.get("ok") is False or _is_bad_status(payload.get("status")):
         return "review command reported failure"
     verdict = _review_verdict_value(payload)
-    if isinstance(verdict, dict):
-        decision = str(verdict.get("verdict") or "").strip().lower()
-        if _is_bad_status(decision):
-            return f"review verdict {decision}"
-        blocking = _blocking_review_findings(verdict)
-        if blocking:
-            first = _short(blocking[0].get("title") or blocking[0].get("detail") or "blocking finding", 160)
-            return f"review reported {len(blocking)} blocking finding(s): {first}"
-        return ""
-    text = str(verdict or "").strip()
-    if _is_bad_status(text):
-        return f"review verdict {text.lower()}"
-    if _BLOCKING_REVIEW_MARKER.search(text):
-        return "review reported blocking priority finding(s)"
+    schema_error = _review_verdict_schema_error(verdict)
+    if schema_error:
+        return f"invalid terminal verdict: {schema_error}"
+    decision = str(verdict["verdict"]).strip().lower()
+    if _is_bad_status(decision):
+        return f"review verdict {decision}"
+    blocking = _blocking_review_findings(verdict)
+    if blocking:
+        first = _short(blocking[0].get("title") or blocking[0].get("detail") or "blocking finding", 160)
+        return f"review reported {len(blocking)} blocking finding(s): {first}"
     return ""
 
 
@@ -1241,9 +1293,19 @@ def validate_stage_payload(stage: str, payload: Any, artifact_path: Path) -> Non
             raise LegionRunError(f"stage semantic failure ({artifact_path.name}): {stage} reported failure", 1)
         return
 
-    if stage == "review" and isinstance(payload, dict):
-        if _review_failure_reason(payload):
-            raise LegionRunError(f"stage semantic failure ({artifact_path.name}): review requested changes", 1)
+    if stage == "review":
+        if not isinstance(payload, dict):
+            raise LegionRunError(
+                f"stage semantic failure ({artifact_path.name}): review gate failed: "
+                "invalid terminal verdict: expected a command result object",
+                1,
+            )
+        reason = _review_failure_reason(payload)
+        if reason:
+            raise LegionRunError(
+                f"stage semantic failure ({artifact_path.name}): review gate failed: {reason}",
+                1,
+            )
 
 
 def _doctor_learning_outcomes(
@@ -1833,7 +1895,7 @@ def execute(
             "and spec adherence."
         )
         if review_executor == "claude":
-            stage_run("review", [_cmd("legion-claude"), "run", "--repo", str(repo), "--base", review_input["head_sha"], "--model", str(review_route.get("model") or ""), "--effort", str(review_route.get("reasoning_effort") or "high"), "--no-fallback", "--task", review_task], run_dir / "review.json")
+            stage_run("review", [_cmd("legion-claude"), "run", "--repo", str(repo), "--base", review_input["head_sha"], "--model", str(review_route.get("model") or ""), "--effort", str(review_route.get("reasoning_effort") or "high"), "--sandbox", "read-only", "--no-fallback", "--task", review_task], run_dir / "review.json")
         elif review_executor == "codex":
             stage_run("review", [_cmd("legion-delegate"), "review", "--model", str(review_route.get("model") or ""), "--reasoning-effort", str(review_route.get("reasoning_effort") or "xhigh"), "--repo", str(repo), "--base", review_input["base_sha"], "--head", review_input["head_sha"]], run_dir / "review.json")
         elif review_executor == "self":

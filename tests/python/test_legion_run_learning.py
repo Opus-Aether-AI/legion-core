@@ -74,8 +74,74 @@ def test_validate_stage_payload_rejects_review_findings(tmp_path):
             tmp_path / "review.json",
         )
 
-    assert "review requested changes" in str(structured_exc.value)
-    assert "review requested changes" in str(text_exc.value)
+    assert "review verdict request_changes" in str(structured_exc.value)
+    assert "invalid terminal verdict" in str(text_exc.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not a result object",
+        {"status": "ok"},
+        {"status": "ok", "result": "Review incomplete due to timeout."},
+        {"status": "ok", "result": "{bad json"},
+        {
+            "status": "ok",
+            "verdict": {
+                "verdict": [],
+                "summary": "Reviewed.",
+                "findings": [],
+            },
+        },
+        {
+            "status": "ok",
+            "verdict": {
+                "verdict": "approve",
+                "summary": "Reviewed.",
+                "findings": [{"severity": "urgent", "title": "Invalid severity"}],
+            },
+        },
+        {
+            "status": "ok",
+            "verdict": {
+                "verdict": "approve",
+                "summary": "Reviewed.",
+                "findings": [],
+                "unexpected": True,
+            },
+        },
+    ],
+)
+def test_validate_stage_payload_requires_schema_valid_terminal_review(
+    tmp_path, payload
+):
+    legion_run = load_legion_run()
+
+    with pytest.raises(legion_run.LegionRunError) as exc:
+        legion_run.validate_stage_payload(
+            "review",
+            payload,
+            tmp_path / "review.json",
+        )
+
+    assert "invalid terminal verdict" in str(exc.value)
+
+
+def test_validate_stage_payload_preserves_schema_valid_codex_comment(tmp_path):
+    legion_run = load_legion_run()
+
+    legion_run.validate_stage_payload(
+        "review",
+        {
+            "status": "ok",
+            "verdict": {
+                "verdict": "comment",
+                "summary": "Only a low-severity observation remains.",
+                "findings": [{"severity": "low", "title": "Optional cleanup"}],
+            },
+        },
+        tmp_path / "review.json",
+    )
 
 
 def test_collect_learning_outcomes_harvests_doctor_and_validator_feedback(tmp_path):

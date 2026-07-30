@@ -234,13 +234,74 @@ finalize_task_ledger_on_exit() {
   task_ledger_finalized=1
   return "$rc"
 }
+
+fanout_descendant_pids=()
+fanout_descendant_pgids=()
+snapshot_descendant_tree() {
+  local pid="$1" child
+  while IFS= read -r child; do
+    [[ "$child" =~ ^[0-9]+$ ]] && snapshot_descendant_tree "$child"
+  done < <(pgrep -P "$pid" 2>/dev/null || true)
+  fanout_descendant_pids+=("$pid")
+}
+
+append_descendant_pgid() {
+  local candidate="$1" existing
+  for existing in "${fanout_descendant_pgids[@]+"${fanout_descendant_pgids[@]}"}"; do
+    [[ "$existing" == "$candidate" ]] && return 0
+  done
+  fanout_descendant_pgids+=("$candidate")
+}
+
+terminate_descendant_process_groups() {
+  fanout_descendant_pids=()
+  fanout_descendant_pgids=()
+
+  local pid pgid self_pgid
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] && snapshot_descendant_tree "$pid"
+  done < <(jobs -pr)
+
+  self_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+  for pid in "${fanout_descendant_pids[@]+"${fanout_descendant_pids[@]}"}"; do
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    if [[ "$pgid" =~ ^[0-9]+$ && "$pgid" -gt 0 && "$pgid" != "$self_pgid" ]]; then
+      append_descendant_pgid "$pgid"
+    fi
+  done
+
+  # Signal independent descendant groups first. The later KILL targets the
+  # group again, so children forked by a TERM handler cannot escape the initial
+  # process snapshot.
+  for pgid in "${fanout_descendant_pgids[@]+"${fanout_descendant_pgids[@]}"}"; do
+    kill -TERM "-$pgid" 2>/dev/null || true
+  done
+  # Background shell functions normally share this script's process group; do
+  # not signal that group (it may include the caller). Terminate those members
+  # individually, child-first, using the frozen descendant snapshot.
+  for pid in "${fanout_descendant_pids[@]+"${fanout_descendant_pids[@]}"}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+
+  sleep 0.25
+  for pgid in "${fanout_descendant_pgids[@]+"${fanout_descendant_pgids[@]}"}"; do
+    kill -0 "-$pgid" 2>/dev/null && kill -KILL "-$pgid" 2>/dev/null || true
+  done
+  for pid in "${fanout_descendant_pids[@]+"${fanout_descendant_pids[@]}"}"; do
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+}
+
 terminate_fanout() {
   trap - INT TERM HUP
-  local pid
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null || true
-  done < <(jobs -pr)
-  wait 2>/dev/null || true
+  set +e
+  terminate_descendant_process_groups
+  teardown_integration_base
+  cleanup_slice_worktrees 1
+  # Make the cleanup-before-terminalization ordering explicit rather than
+  # relying on the EXIT trap's implicit timing.
+  finalize_task_ledger_on_exit
   exit 143
 }
 MAXC="${LEGION_MAX_CONCURRENCY:-4}"
@@ -472,7 +533,6 @@ has_dependencies="$(jq -r '.has_dependencies' "$work/dag.json")"
 base_head="$(git -C "$repo" rev-parse HEAD)"
 init_task_ledger
 trap finalize_task_ledger_on_exit EXIT
-trap terminate_fanout INT TERM HUP
 integration_branch=""
 integration_wt=""
 integrated=0
@@ -488,9 +548,11 @@ setup_integration_base() {
 }
 
 teardown_integration_base() {
-  [[ -n "$integration_wt" && -d "$integration_wt" ]] && git -C "$repo" worktree remove --force "$integration_wt" >/dev/null 2>&1 || true
-  [[ -n "$integration_branch" ]] && git -C "$repo" branch -D "$integration_branch" >/dev/null 2>&1 || true
+  if [[ -n "$integration_wt" && -d "$integration_wt" ]]; then
+    git -C "$repo" worktree remove --force "$integration_wt" >/dev/null 2>&1 || rm -rf "$integration_wt"
+  fi
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  [[ -n "$integration_branch" ]] && git -C "$repo" branch -D "$integration_branch" >/dev/null 2>&1 || true
 }
 
 # Slices are delegated with --keep so their diffs survive until the sequential
@@ -499,18 +561,25 @@ teardown_integration_base() {
 # not a blanket `cleanup --all`, which would disturb concurrent runs. --keep on
 # the fan-out retains them for inspection.
 cleanup_slice_worktrees() {
-  [[ "$keep_slices" == "1" ]] && return 0
+  local force="${1:-0}"
+  [[ "$keep_slices" == "1" && "$force" != "1" ]] && return 0
   local i rid swt
   for ((i = 0; i < n; i++)); do    # slices are 0-indexed (slice-0 … slice-(n-1))
     rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
     [[ -n "$rid" ]] || continue
     swt="$repo/.legion/worktrees/$rid"
-    [[ -d "$swt" ]] || continue
-    git -C "$repo" worktree remove --force "$swt" >/dev/null 2>&1 || rm -rf "$swt"
+    if [[ -d "$swt" ]]; then
+      git -C "$repo" worktree remove --force "$swt" >/dev/null 2>&1 || rm -rf "$swt"
+    fi
+    git -C "$repo" worktree prune >/dev/null 2>&1 || true
     git -C "$repo" branch -D "legion/delegate-$rid" >/dev/null 2>&1 || true
   done
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
 }
+
+# No delegated children or integration worktrees exist before this point, so
+# install signal cleanup only after every cleanup helper is defined.
+trap terminate_fanout INT TERM HUP
 
 mark_blocked() {
   local i="$1" blocked_by_json="$2"

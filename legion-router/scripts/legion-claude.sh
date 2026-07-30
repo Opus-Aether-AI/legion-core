@@ -111,7 +111,7 @@ emit_terminal_json() {
 }
 
 run_fallback() {
-  local reason="$1" task="$2" model="$3" repo="$4"
+  local reason="$1" task="$2" model="$3" repo="$4" sandbox="$5"
   local delegate_bin out rc fallback_status fallback_model fallback_usage fallback_cost fallback_result last_path
 
   delegate_bin="$(resolve_delegate_bin)" || {
@@ -119,12 +119,12 @@ run_fallback() {
     return 1
   }
 
-  note "→ legion-delegate run --model $model"
+  note "→ legion-delegate run --model $model --sandbox $sandbox"
   set +e
   if [[ "${QUIET:-0}" == "1" ]]; then
-    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" --quiet)"
+    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" --sandbox "$sandbox" --quiet)"
   else
-    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo")"
+    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" --sandbox "$sandbox")"
   fi
   rc=$?
   set -e
@@ -218,7 +218,7 @@ cmd_run() {
     if [[ "$allow_fallback" -eq 1 ]]; then
       [[ "$low_credit" -eq 1 ]] && note "⚠ LEGION_LOW_CREDIT=claude: skipping Claude and falling back to $fallback_model"
       [[ "$low_credit" -eq 0 ]] && note "⚠ Claude CLI unavailable: falling back to $fallback_model"
-      run_fallback "$reason" "$task" "$fallback_model" "$repo"
+      run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox"
       return $?
     fi
     emit_span "claude" "$model" "failed" 0 0 "{}" "$task" "$artifacts"
@@ -342,7 +342,7 @@ cmd_run() {
     status="$([[ "$reason" == "claude_limit" ]] && printf blocked || printf failed)"
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
     note "⚠ Claude failed ($reason): falling back to $fallback_model"
-    run_fallback "$reason" "$task" "$fallback_model" "$repo"
+    run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox"
     return $?
   fi
 

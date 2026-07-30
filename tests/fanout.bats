@@ -236,6 +236,13 @@ done
 worktree="$repo/.legion/worktrees/$run_id"
 branch="legion/delegate-$run_id"
 git -C "$repo" worktree add -q -b "$branch" "$worktree" HEAD
+record="$LEGION_REGISTRY_DIR/$run_id.json"
+jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  .state_version = ((.state_version // 0) + 1)
+  | .lifecycle.phase = "running"
+  | .lifecycle.updated_at = $now
+' "$record" > "$record.tmp.$$"
+mv -f "$record.tmp.$$" "$record"
 printf 'delegate %s\n' "$$" >> "$INTERRUPT_PIDS"
 
 python3 - "$INTERRUPT_PIDS" "$INTERRUPT_WORKER_READY" "$INTERRUPT_LATE_READY" <<'PY' &
@@ -298,6 +305,7 @@ SH
   export INTERRUPT_READY="$BATS_TEST_TMPDIR/interrupt.ready"
   export INTERRUPT_WORKER_READY="$BATS_TEST_TMPDIR/interrupt-worker.ready"
   export INTERRUPT_LATE_READY="$BATS_TEST_TMPDIR/interrupt-late.ready"
+  export LEGION_REGISTRY_DIR="$BATS_TEST_TMPDIR/interrupt-registry"
 
   LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
     "$FANOUT" --slices "$BATS_TEST_TMPDIR/interrupt.jsonl" --repo "$REPO" \
@@ -367,6 +375,16 @@ SH
     and .tasks[1].state == "failed"
     and (.completed_at | length > 0)
   ' "$ledger"
+  jq -s -e '
+    length == 2
+    and all(.[];
+      .schema == "legion.run-state.v1"
+      and .lifecycle.phase == "failed"
+      and (.lifecycle.updated_at | length > 0)
+    )
+    and ([.[].state_version] | sort) == [2, 3]
+  ' "$LEGION_REGISTRY_DIR"/*.json
+  [ -z "$(find "$LEGION_REGISTRY_DIR" -name '*.tmp.*' -print -quit)" ]
 }
 
 @test "fanout: normal --keep still retains slice worktrees for inspection" {
@@ -382,6 +400,34 @@ SH
   [ -n "$(git -C "$REPO" branch --list "legion/delegate-$run_id")" ]
 
   "$LEGION_DELEGATE" cleanup --run "$run_id" --repo "$REPO" --quiet
+}
+
+@test "fanout: slice cleanup prunes the global worktree registry only once" {
+  local bin="$BATS_TEST_TMPDIR/git-log-bin"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$bin"
+  cat > "$bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'git %s\n' "$*" >> "$FANOUT_GIT_CALL_LOG"
+exec "$FANOUT_REAL_GIT" "$@"
+SH
+  chmod +x "$bin/git"
+  export FANOUT_REAL_GIT="$real_git"
+  export FANOUT_GIT_CALL_LOG="$BATS_TEST_TMPDIR/git-calls.log"
+  printf '%s\n' \
+    '{"archetype":"implement-feature","task":"build A"}' \
+    '{"archetype":"write-tests","task":"test A"}' \
+    '{"archetype":"cheap-bulk","task":"document A"}' \
+    > "$BATS_TEST_TMPDIR/prune-once.jsonl"
+
+  PATH="$bin:$PATH" run "$FANOUT" \
+    --slices "$BATS_TEST_TMPDIR/prune-once.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 3 and .failed == 0'
+  [ "$(grep -cE '^git -C .+ worktree prune$' "$FANOUT_GIT_CALL_LOG")" -eq 1 ]
 }
 
 @test "fanout: a nested fan-out joins the inherited LEGION_TRACE_ID" {

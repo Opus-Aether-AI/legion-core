@@ -235,6 +235,38 @@ finalize_task_ledger_on_exit() {
   return "$rc"
 }
 
+terminalize_interrupted_run_records() {
+  local i rid record temp now
+  [[ -d "${LEGION_REGISTRY_DIR:-}" ]] || return 0
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  for ((i = 0; i < n; i++)); do
+    rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
+    [[ -n "$rid" ]] || continue
+    record="$LEGION_REGISTRY_DIR/$rid.json"
+    [[ -f "$record" ]] || continue
+    if ! jq -e --arg run "$rid" '
+      .schema == "legion.run-state.v1"
+      and .run_id == $run
+      and ((.lifecycle.phase // "") == "queued"
+           or (.lifecycle.phase // "") == "running")
+    ' "$record" >/dev/null 2>&1; then
+      continue
+    fi
+
+    temp="$record.tmp.$$"
+    if jq --arg now "$now" '
+      .state_version = ((.state_version // 0) + 1)
+      | .lifecycle.phase = "failed"
+      | .lifecycle.updated_at = $now
+    ' "$record" > "$temp" 2>/dev/null; then
+      mv -f "$temp" "$record" || rm -f "$temp"
+    else
+      rm -f "$temp"
+    fi
+  done
+}
+
 fanout_descendant_pids=()
 fanout_descendant_pgids=()
 snapshot_descendant_tree() {
@@ -299,6 +331,7 @@ terminate_fanout() {
   terminate_descendant_process_groups
   teardown_integration_base
   cleanup_slice_worktrees 1
+  terminalize_interrupted_run_records
   # Make the cleanup-before-terminalization ordering explicit rather than
   # relying on the EXIT trap's implicit timing.
   finalize_task_ledger_on_exit
@@ -563,18 +596,24 @@ teardown_integration_base() {
 cleanup_slice_worktrees() {
   local force="${1:-0}"
   [[ "$keep_slices" == "1" && "$force" != "1" ]] && return 0
-  local i rid swt
+  local i rid swt branch
+  local -a slice_branches=()
   for ((i = 0; i < n; i++)); do    # slices are 0-indexed (slice-0 … slice-(n-1))
     rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
     [[ -n "$rid" ]] || continue
     swt="$repo/.legion/worktrees/$rid"
+    slice_branches+=("legion/delegate-$rid")
     if [[ -d "$swt" ]]; then
       git -C "$repo" worktree remove --force "$swt" >/dev/null 2>&1 || rm -rf "$swt"
     fi
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
-    git -C "$repo" branch -D "legion/delegate-$rid" >/dev/null 2>&1 || true
   done
+  # A fallback rm leaves stale worktree administration behind. Prune once after
+  # all removals so every branch is free before deletion without an O(n) global
+  # repository scan for every slice.
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  for branch in "${slice_branches[@]+"${slice_branches[@]}"}"; do
+    git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
+  done
 }
 
 # No delegated children or integration worktrees exist before this point, so

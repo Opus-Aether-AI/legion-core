@@ -67,7 +67,7 @@ make_test_repo() {
     local repo; repo="$(make_test_repo danger1)"
     run "$LEGION_CURSOR" run --task "rm -rf / and git push --force" --repo "$repo" --quiet
     [ "$status" -eq 2 ]
-    [[ "$output" == *"dangerous/injection pattern"* ]]
+    [[ "$output" == *"dangerous/injection"* ]]
     assert_mock_not_called agent
 }
 

@@ -54,6 +54,7 @@ LEGION_TELEMETRY="${LEGION_TELEMETRY:-$(resolve_optional_legion_cmd legion-trace
 FANOUT_PRIMARY="$("$LEGION_ROUTE" --primary 2>/dev/null || echo primary)"
 _state_lib="$_self/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1090
   # shellcheck disable=SC1091
   source "$_state_lib"
 fi
@@ -76,7 +77,7 @@ write_queued_record() {
 }
 MAXC="${LEGION_MAX_CONCURRENCY:-4}"
 
-slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; json=0 ; keep_slices=0
+slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; keep_slices=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slices) slices_src="$2"; shift 2 ;;
@@ -85,7 +86,7 @@ while [[ $# -gt 0 ]]; do
     --max-concurrency) MAXC="$2"; shift 2 ;;
     --keep) keep_slices=1; shift ;; # retain slice worktrees after apply (default: reclaim them)
     --apply) apply="1"; shift ;;
-    --json) json=1; shift ;; # output is already JSON; accepted for roadmap compatibility
+    --json) shift ;; # output is already JSON; accepted for roadmap compatibility
     -h|--help) echo "usage: legion-fanout (--slices <file|-> | --task <file|->) [--repo DIR] [--max-concurrency N] [--keep] [--apply] [--json]"; exit 0 ;;
     *) echo "legion-fanout: unknown arg '$1'" >&2; exit 2 ;;
   esac

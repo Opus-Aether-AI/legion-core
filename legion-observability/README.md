@@ -31,7 +31,8 @@ legion-bench corpus --corpus heldout-oss-36 --repo . --require-reliable --report
 legion-bench compare --baseline runs/base/run.json --candidate runs/new/run.json
 legion-bench gate --baseline runs/base/run.json --candidate runs/new/run.json
 legion-report --by model --html > report.html
-cat ~/.claude/logs/legion/spans/*.jsonl | legion-otel-export --dry-run | jq .
+legion-state --repo . --field telemetry_dir
+cat "$(legion-state --repo . --field telemetry_dir)"/*.jsonl | legion-otel-export --dry-run | jq .
 legion-session-learn --record              # mine recent session corrections
 legion-self-learn run --apply-memory       # synthesize safe memory/proposals
 legion-self-learn hints                    # active learned guardrails
@@ -66,8 +67,8 @@ observe -> analyze -> propose -> baseline -> isolate -> mutate -> score -> keep/
 - **Score:** run plugin + entity `legion-eval` datasets and `legion-doctor`, then persist metrics in `experiments.tsv`.
 - **Experiment:** source edits are opt-in (`--apply-source`); candidates run in isolated temp copies and only the best measured improvement is applied to the real checkout. Trigger fixes update markdown frontmatter or marketplace descriptions so the scorecard can measure them.
 
-The installed daily `legion-refresh` cron first records recent session feedback,
-then runs the self-learning synthesis:
+When the optional daily `legion-refresh` cron is enabled, it first records
+recent session feedback, then runs the self-learning synthesis:
 
 ```bash
 legion-session-learn --record
@@ -106,6 +107,10 @@ legion-observability/
 
 ## Env
 
-- `LEGION_TELEMETRY_DIR` — span dir (default `~/.claude/logs/legion/spans`).
-- `LEGION_BENCH_DIR` — benchmark artifact dir (default `~/.claude/logs/legion/bench`).
+- `LEGION_TELEMETRY_DIR` — span dir (default:
+  `~/.legion/projects/<repo-id>/spans`).
+- `LEGION_BENCH_DIR` — benchmark artifact dir (default:
+  `~/.legion/projects/<repo-id>/bench`).
+- `legion-state --repo .` — print every resolved project path and override
+  source.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — enables real OTLP export; unset = no-op.

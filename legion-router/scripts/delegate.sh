@@ -38,6 +38,9 @@ source "$_self_dir/lib/cost.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/model-config.sh
 source "$_self_dir/lib/model-config.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/executor-context.sh
+source "$_self_dir/lib/executor-context.sh"
 
 # shellcheck disable=SC1091
 # shellcheck source=lib/primary.sh
@@ -704,7 +707,11 @@ cmd_run() {
     sandbox_dev_pid="$sandbox_dev_pid_from_parent"
     SANDBOX_DEV_PID_TO_TEARDOWN="$sandbox_dev_pid"
   elif ! is_sandcastle_sandbox "$sandbox"; then
-    sandbox_dev_pid="$(LEGION_SANDBOX_ARTIFACT_DIR="$art" LEGION_SANDBOX_QUIET="${QUIET:-0}" sandbox_setup "$wt" "$repo" "$untrusted" || true)"
+    sandbox_dev_pid="$(
+      unset LEGION_ACTIVE LEGION_EXECUTOR LEGION_DEPTH LEGION_RUN_ID
+      LEGION_SANDBOX_ARTIFACT_DIR="$art" LEGION_SANDBOX_QUIET="${QUIET:-0}" \
+        sandbox_setup "$wt" "$repo" "$untrusted" || true
+    )"
     SANDBOX_DEV_PID_TO_TEARDOWN="$sandbox_dev_pid"
   fi
   write_run_state running
@@ -747,6 +754,9 @@ cmd_run() {
     return 0
   fi
 
+  # Mark only the executor process (and its direct children) as delegated.
+  # Sandbox install/dev setup above must not inherit Legion role state.
+  legion_activate_executor_context "$RUN_ID"
   local start_ms end_ms dur rc=0 used_model=""
   start_ms="$(date +%s000)"
   # Try the chosen model, then the archetype's fallback chain on a quota/rate-limit error.
@@ -927,6 +937,7 @@ cmd_review() {
   [[ -n "$base" ]] || die "review: --base BRANCH required"
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
   RUN_ID="$(_run_id)"
+  legion_activate_executor_context "$RUN_ID"
   local art="$repo/.legion/runs/$RUN_ID"; mkdir -p "$art"
   local verdict_file="$art/verdict.json"
 
@@ -1007,6 +1018,7 @@ cmd_resume() {
   [[ -n "$effort" ]] || effort="xhigh"   # codex always at xhigh unless overridden
 
   RUN_ID="$run"
+  legion_activate_executor_context "$RUN_ID"
   local start_ms end_ms dur rc=0
   start_ms="$(date +%s000)"
   note "→ codex exec resume $thread_id (run $run)"

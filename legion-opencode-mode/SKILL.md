@@ -14,9 +14,8 @@ legion-delegate run --executor <claude|codex|cursor> --task "…" --repo .
 ```
 
 Each call runs the target headless and emits a `legion.span.v1` span so the work shows
-in the Console with its cost. Diff-producing executors (codex/cursor/opencode) run in an
-isolated git worktree and bring back a reviewable diff; Claude (a prompt executor) runs
-in-place and returns a result.
+in the Console with its cost. Codex, Cursor, opencode, and Claude delegation run in
+isolated git worktrees and bring back reviewable diffs.
 This is the opencode mirror of `legion-codex-mode` (Codex-primary) and `legion-router`
 (Claude-primary): **you** orchestrate and delegate *out* — only for the archetypes where
 another model clearly wins.

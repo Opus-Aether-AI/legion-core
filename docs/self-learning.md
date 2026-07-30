@@ -31,7 +31,8 @@ Legion implements that protocol locally:
 
 ## What It Observes
 
-- `legion.span.v1` telemetry from `~/.claude/logs/legion/spans/`
+- `legion.span.v1` telemetry from the `telemetry_dir` reported by
+  `legion-state --repo .`
 - Review verdict artifacts referenced by spans
 - `legion-eval` trigger misses/collisions
 - `legion-optimize` accepted routing advice
@@ -64,19 +65,20 @@ Otherwise Legion falls back to catalog token matching and manual records.
 
 ## Daily Active Mode
 
-The installed `legion-core-refresh` cron runs:
+When enabled at install time, the `legion-core-refresh` cron runs:
 
 ```bash
 legion-session-learn --record
 legion-self-learn run --repo ~/.agents/sources/legion-core --apply-memory --quiet
 ```
 
-This writes:
+This writes under the project `state_root` reported by
+`legion-state --repo ~/.agents/sources/legion-core`:
 
-- `~/.claude/logs/legion/self-learn/harness-memory.json`
-- `~/.claude/logs/legion/self-learn/reports/<date>.json`
-- `~/.claude/logs/legion/self-learn/experiments.md`
-- `~/.claude/logs/legion/self-learn/experiments.tsv`
+- `self-learn/harness-memory.json`
+- `self-learn/reports/<date>.json`
+- `self-learn/experiments.md`
+- `self-learn/experiments.tsv`
 
 Memory mode is intentionally safe: it does not rewrite source or vendored skills.
 The default cron run scans all available spans and manual records so bugs recorded

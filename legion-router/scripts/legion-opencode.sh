@@ -16,8 +16,12 @@ source "$_self_dir/lib/cost.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/model-config.sh
 source "$_self_dir/lib/model-config.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/executor-context.sh
+source "$_self_dir/lib/executor-context.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1090
   # shellcheck disable=SC1091
   source "$_state_lib"
 fi
@@ -180,6 +184,7 @@ cmd_run() {
   [[ "$sandbox" == "read-only" ]] && cmd+=(--agent plan)
   cmd+=("$task")
 
+  legion_activate_executor_context "$RUN_ID"
   note "-> ${cmd[*]}"
   start_ms="$(date +%s000)"
   set +e

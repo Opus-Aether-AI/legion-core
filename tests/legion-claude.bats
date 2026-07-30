@@ -24,7 +24,8 @@ make_test_repo() {
 
 @test "legion-claude: happy path uses claude and emits a claude span" {
     local repo; repo="$(make_test_repo ok1)"
-    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    local context="$TEST_TMPDIR/context.log"
+    MOCK_CONTEXT_LOG="$context" run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e '.executor == "claude"'
@@ -34,6 +35,7 @@ make_test_repo() {
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$status" -eq 0 ]
     [ "$output" = "claude" ]
+    grep -Eq '^claude active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
 @test "legion-claude: passes --effort/--append-system-prompt/--dangerously-skip-permissions through to claude" {
@@ -72,6 +74,29 @@ make_test_repo() {
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.executor == "codex"'
     echo "$output" | jq -e '.fell_back_reason == "claude_unavailable"'
+    assert_mock_not_called claude
+}
+
+@test "legion-claude: worktree setup failure fails closed before invoking Claude" {
+    local repo; repo="$(make_test_repo worktree-fail)"
+    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --base "refs/does-not-exist" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e \
+        '.status == "failed" and .reason == "worktree_setup_failed" and .fell_back == false'
+    assert_mock_not_called claude
+    assert_mock_not_called legion-delegate
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor == \"claude\" and .status == \"failed\")'"
+    [ "$status" -eq 0 ]
+}
+
+@test "legion-claude: non-git repo fails closed before invoking Claude" {
+    local repo="$TEST_TMPDIR/not-git"
+    mkdir -p "$repo"
+    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e \
+        '.status == "failed" and .reason == "worktree_setup_failed" and .fell_back == false'
     assert_mock_not_called claude
 }
 

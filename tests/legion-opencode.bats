@@ -23,7 +23,8 @@ make_test_repo() {
 
 @test "legion-opencode: happy path runs opencode headless, captures diff, emits span" {
     local repo; repo="$(make_test_repo ok1)"
-    run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
+    local context="$TEST_TMPDIR/context.log"
+    MOCK_CONTEXT_LOG="$context" run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e --arg m "$OPENCODE_DEFAULT" '.status == "ok" and .executor == "opencode" and .model == $m'
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
@@ -33,6 +34,7 @@ make_test_repo() {
 
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$output" = "opencode" ]
+    grep -Eq '^opencode active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
 @test "legion-opencode: parses the JSONL event stream (cost summed across message ids, nested tokens)" {

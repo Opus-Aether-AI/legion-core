@@ -8,6 +8,7 @@
 #   legion-setup codex [all|mcp|skills|verify]  # wire Legion into Codex CLI
 #   legion-setup cursor [all|mcp|agents|verify] # wire Legion into Cursor Agent
 #   legion-setup opencode [all|mcp|verify]      # wire Legion into opencode
+#   legion-setup init [--repo DIR|--check|--dry-run|--remove] # add repo policy
 #   legion-setup uninstall [flags]
 #
 # First-time bootstrap (before this script exists on the machine) — one paste:
@@ -70,9 +71,10 @@ case "${1:-auto}" in
   codex)          shift || true; exec "$HERE/legion-codex-setup.sh" "$@" ;;
   cursor)         shift || true; exec "$HERE/legion-cursor-setup.sh" "$@" ;;
   opencode)       shift || true; exec "$HERE/legion-opencode-setup.sh" "$@" ;;
+  init)           shift || true; exec python3 "$HERE/legion-init.py" "$@" ;;
   uninstall)
     if is_installed; then bash "$SOURCE_CLONE/scripts/uninstall.sh" "${@:2}"; else yellow "not installed"; fi ;;
   auto|"")        if is_installed; then do_update; else do_install; fi ;;
   -h|--help)      sed -n '2,16p' "$0" ;;
-  *)              red "usage: legion-setup [install [profile]|update|status|codex|cursor|opencode|uninstall|auto]"; exit 2 ;;
+  *)              red "usage: legion-setup [install [profile]|update|status|codex|cursor|opencode|init|uninstall|auto]"; exit 2 ;;
 esac

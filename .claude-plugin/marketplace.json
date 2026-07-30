@@ -12,8 +12,8 @@
     {
       "name": "legion-router",
       "source": "./legion-router",
-      "description": "Legion's multi-model brain: delegate scoped tasks from the configured Claude role to the Codex and Cursor refs via `legion-delegate` and `legion-cursor`, bringing back verified, metered diffs. Also ships generic GitHub issue intake via `legion-intake`, which can run delegate, cursor, or a compatible custom worker. Runs agents in isolated git worktrees, captures diff + last message + token usage, prices via a shared cost table, emits legion.span.v1 telemetry, and reports Codex usage to the router /ingest sink so spend shows next to Claude. Ships the opt-in `legion-router` loopback :8082 Anthropic-compatible metering proxy, codex-json parser, and per-model cost lib.",
-      "version": "0.5.3",
+      "description": "Legion's multi-model brain: delegate scoped tasks to configured Codex, Cursor, Claude, and opencode executors, then bring back a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
+      "version": "0.5.4",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",
@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic core/stable harness benchmarks plus A/B corpus runs with repeated-run flake detection, legion-catalog marketplace inventory, legion-self-learn daily failure mining + command/agent/skill improvement memory/proposals, legion-trace, legion-otel-export, and legion-doctor install verification.",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -63,8 +63,8 @@
     {
       "name": "legion-orchestrate",
       "source": "./legion-orchestrate",
-      "description": "Legion's dynamic multi-model orchestrator — the ultracode loop (decompose -> fan out -> cross-model verify -> synthesize -> gate) made executor-aware: the configured Claude role conducts, the codex_workhorse ref does the bulk of coding in parallel, and the codex_review ref verifies. Ships `legion-fanout` (run scoped slices in parallel across executors via legion-delegate, collect verified diffs + cost) + a SKILL playbook with an LEGION_ULTRACODE max-exhaustive mode (wide fan-out, multi-vote cross-model verify, loop-until-dry).",
-      "version": "0.1.2",
+      "description": "Legion's dynamic multi-model orchestrator: the active primary decomposes work, configured executor roles fan out scoped slices, independent roles cross-verify, and the primary synthesizes and gates. Ships `legion-fanout` plus the LEGION_ULTRACODE max-exhaustive workflow.",
+      "version": "0.1.3",
       "category": "agent-orchestration",
       "keywords": [
         "orchestration",
@@ -108,8 +108,8 @@
     {
       "name": "legion-setup",
       "source": "./legion-setup",
-      "description": "One skill to install AND update the Legion marketplace — no team hand-holding. First run installs marketplace plugins, cross-harness skills, Codex and Cursor bridges, shared CLIs, and daily refresh/self-learning; after that the same skill updates to latest. Ships `legion-setup`, `legion-codex-setup`, and `legion-cursor-setup`.",
-      "version": "0.1.1",
+      "description": "Install and update Legion, wire Codex/Cursor/opencode bridges, and make Legion the repository-default workflow without replacing existing instructions. Ships `legion-setup`, `legion-init`, and the native harness setup commands; daily refresh/self-learning is opt-in.",
+      "version": "0.2.0",
       "category": "productivity",
       "keywords": [
         "install",
@@ -154,7 +154,7 @@
       "name": "legion-opencode-mode",
       "source": "./legion-opencode-mode",
       "description": "The decision guide for an opencode-primary Legion session — the opencode counterpart of legion-codex-mode. When you drive Legion under opencode you do most of the work yourself; this skill tells you WHICH kind of task is worth handing to another model and to WHOM — Claude for deep architecture and polished frontend (with the impeccable skill), a workhorse model for bulk implementation, a different model for a second opinion — versus keeping it inline. Triggers on running Legion under opencode, on deep-design / frontend-polish / final-review judgement calls, or on 'ask claude' / 'get a second opinion' while working in opencode.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "category": "agent-orchestration",
       "keywords": [
         "opencode",

@@ -230,8 +230,7 @@ JSON
       "scope": "plugin",
       "prompt": "Show per-executor cost and latency from Legion spans.",
       "expect_type": "plugin",
-      "expect": "legion-router",
-      "expect_not": "legion-observability",
+      "expect": "legion-nonexistent-fixture",
       "required": true
     }
   ]

@@ -24,12 +24,13 @@ that domain agents build on, so the bar is: stays generic, stays green.
 
 ## Known follow-ups (good first issues)
 
-- `scripts/install.sh` still carries `opus`/`vendored` profile branches inherited
-  from the parent marketplace; for the core, only `all` / `minimal` / `<name>` are
-  meaningful. Simplify the profile menu.
-- The Codex/Cursor MCP-bridge e2e tests assume a marketplace with MCP plugins
-  (the core ships none); they're `skip`-guarded. Add fixture-based coverage so the
-  bridge is exercised without real MCP plugins.
+- `scripts/install.sh` and `legion-setup` still carry or advertise legacy
+  `opus`/`vendored` profiles inherited from the parent marketplace. For the core,
+  only `all` / `minimal` / `<name>` are meaningful; simplify the profile menu and
+  its help text together.
+- The Codex/Cursor/opencode MCP-bridge e2e tests assume a marketplace with MCP
+  plugins (the core ships none); they are `skip`-guarded. Add fixture-based
+  coverage so every bridge is exercised without real MCP plugins.
 - Keychain usage (`security`) is macOS-only; add a Linux/secret-store path.
 
 ## Provenance

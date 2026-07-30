@@ -11,8 +11,12 @@ source "$_self_dir/lib/cost.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/model-config.sh
 source "$_self_dir/lib/model-config.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/executor-context.sh
+source "$_self_dir/lib/executor-context.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
+  # shellcheck disable=SC1090
   # shellcheck disable=SC1091
   source "$_state_lib"
 fi
@@ -215,20 +219,26 @@ cmd_run() {
   # Isolate the run. Previously claude inherited the caller's working directory, so a delegated
   # run edited whatever tree the operator happened to be standing in — `--repo` only ever fed the
   # state paths. A worktree makes the work reviewable as a diff, like every other coding executor.
-  if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    wt="$repo/.legion/worktrees/$RUN_ID"
-    branch="legion/claude-$RUN_ID"
-    mkdir -p "$repo/.legion/worktrees"
-    if git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" 2>/dev/null; then
-      # Artifacts live under the repo's run dir, not tmpdir — the EXIT trap deletes tmpdir, and
-      # the diff is the reviewable output of the run.
-      mkdir -p "$repo/.legion/runs/$RUN_ID"
-      diff_path="$repo/.legion/runs/$RUN_ID/diff.patch"
-      note "→ claude worktree $wt (branch $branch, base $base)"
-    else
-      wt=""; branch=""
-      note "⚠ worktree add failed; running in $repo directly"
-    fi
+  if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    note "⚠ repository is not a git worktree"
+    emit_span "claude" "$model" "failed" 0 0 "{}" "$task" "$artifacts"
+    emit_terminal_json "claude" "$model" "failed" "" "{}" 0 false "worktree_setup_failed"
+    return 1
+  fi
+  wt="$repo/.legion/worktrees/$RUN_ID"
+  branch="legion/claude-$RUN_ID"
+  mkdir -p "$repo/.legion/worktrees"
+  if git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" 2>/dev/null; then
+    # Artifacts live under the repo's run dir, not tmpdir — the EXIT trap deletes tmpdir, and
+    # the diff is the reviewable output of the run.
+    mkdir -p "$repo/.legion/runs/$RUN_ID"
+    diff_path="$repo/.legion/runs/$RUN_ID/diff.patch"
+    note "→ claude worktree $wt (branch $branch, base $base)"
+  else
+    note "⚠ worktree add failed"
+    emit_span "claude" "$model" "failed" 0 0 "{}" "$task" "$artifacts"
+    emit_terminal_json "claude" "$model" "failed" "" "{}" 0 false "worktree_setup_failed"
+    return 1
   fi
 
   local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
@@ -236,6 +246,7 @@ cmd_run() {
   [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
   [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
   note "→ ${claude_cmd[*]}"
+  legion_activate_executor_context "$RUN_ID"
   start_ms="$(date +%s000)"
   set +e
   printf '%s' "$task" | ( cd "${wt:-$repo}" && "${claude_cmd[@]}" ) >"$out_file" 2>"$err_file"

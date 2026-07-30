@@ -6,14 +6,14 @@ description: Use for "how much did that cost", "which model is winning", "is leg
 
 # Legion Observability — see everything
 
-Every Legion executor (the configured Claude, Codex, Cursor, and other provider roles) emits one **`legion.span.v1`** JSONL record per unit of work to `$LEGION_TELEMETRY_DIR` (default `~/.claude/logs/legion/spans/`). This plugin turns that stream into answers.
+Every Legion executor (the configured Claude, Codex, Cursor, and other provider roles) emits one **`legion.span.v1`** JSONL record per unit of work to `$LEGION_TELEMETRY_DIR` (default `~/.legion/projects/<repo-id>/spans/`; inspect with `legion-state --repo .`). This plugin turns that stream into answers.
 
 ## Tools
 
 | Bin | What it does |
 |---|---|
 | `legion-report [--by executor\|model\|status] [--html]` | Per-group **cost / success-rate / p50-p95 latency** table (TUI or static HTML). The dashboard. |
-| `legion-bench run --suite core --repo . [--strict]` | Run the Legion harness benchmark: deterministic trigger eval, routing policy, doctor checks, and fixture-backed task cases for session learning / self-learning memory. Writes artifacts under `$LEGION_BENCH_DIR` or `~/.claude/logs/legion/bench`, emits a `legion-bench` span, and can record failed required cases with `--record-failures`. |
+| `legion-bench run --suite core --repo . [--strict]` | Run the Legion harness benchmark: deterministic trigger eval, routing policy, doctor checks, and fixture-backed task cases for session learning / self-learning memory. Writes artifacts under `$LEGION_BENCH_DIR` (default `~/.legion/projects/<repo-id>/bench`), emits a `legion-bench` span, and can record failed required cases with `--record-failures`. |
 | `legion-bench stable --suite stable --repo . [--repeat 3] [--strict]` | Run the comprehensive deterministic suite repeatedly and report min/mean/max score, per-dimension pass rates, total case-runs, and flakes. Use this as the stable PR/release gate before broad benchmark claims. |
 | `legion-bench corpus --corpus FILE --mode A --mode B --baseline A [--require-reliable]` | Run a real A/B task corpus across harness modes such as direct Codex, direct Claude, Cursor, `legion-delegate`, or `legion-orchestrate`. Reports per-mode pass rate, duration, cost/tokens from spans, baseline-vs-candidate lift, and sample-size reliability. Use this for proper performance numbers. |
 | `legion-bench learning-lift --repo . [--strict]` | Run an isolated before/after self-learning fixture and report percentage-point score lift. Relative lift is suppressed as a headline for the tiny synthetic fixture; broad performance claims still require a larger held-out task corpus. |
@@ -30,7 +30,7 @@ Every Legion executor (the configured Claude, Codex, Cursor, and other provider 
 | `legion-self-learn hints [--entity TYPE:NAME]` | Read the active self-learning memory before changing Legion harness pieces or running workflow commands. |
 | `legion-self-learn record --entity TYPE:NAME --summary "..."` | Record a bug or mistake found during a session so the daily loop can turn it into memory/proposals. |
 
-## When Opus should reach for this
+## When to reach for this
 
 - **"What did that cost?" / "which model should I have used?"** → `legion-report` (cost is real per-model, GPT shown next to Claude — see [[project_legion_marketplace]]).
 - **Closing the cost-optimization loop** → the report's per-archetype cost/success/latency is the evidence the routing policy is tuned against (improve quality at equal-or-lower cost).
@@ -57,11 +57,13 @@ legion-self-learn record --entity command:feature \
   --severity medium --evidence "review finding / PR link / run id"
 ```
 
-The daily `legion-refresh` cron runs `legion-session-learn --record`, then
+When enabled, the daily `legion-refresh` cron runs
+`legion-session-learn --record`, then
 `legion-self-learn run --apply-memory --quiet`. This writes
-`~/.claude/logs/legion/self-learn/harness-memory.json` and a markdown experiment
-log. It does not silently edit vendored or source harness files, and unresolved
-outcomes stay active until a kept source experiment resolves them.
+the current project's `self-learn/harness-memory.json` and experiment log under
+the state root reported by `legion-state --repo .`. It does not silently edit
+vendored or source harness files, and unresolved outcomes stay active until a
+kept source experiment resolves them.
 
 ## The span contract
 

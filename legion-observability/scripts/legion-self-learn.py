@@ -77,9 +77,26 @@ def _find_marketplace_root(start: str) -> str:
     return match
 
 
+def _git_marketplace_root(start: str) -> str:
+    """Return the active worktree root when it owns a Legion marketplace."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", start, "rev-parse", "--show-toplevel"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    root = result.stdout.strip() if result.returncode == 0 else ""
+    marketplace = os.path.join(root, ".claude-plugin", "marketplace.json")
+    return os.path.abspath(root) if root and os.path.isfile(marketplace) else ""
+
+
 def default_repo() -> str:
-    # Prefer an explicit marketplace root override, else walk up from the script
-    # to the outermost consumer marketplace, else fall back to the standalone core.
+    # Prefer an explicit override, then the active Git worktree (important when
+    # a Legion worktree itself is nested under another marketplace checkout),
+    # then the outermost non-Git consumer marketplace.
     env = (
         os.environ.get("MARKETPLACE_ROOT")
         or os.environ.get("LEGION_ROOT")
@@ -87,6 +104,9 @@ def default_repo() -> str:
     )
     if env:
         return os.path.abspath(os.path.expanduser(env))
+    worktree = _git_marketplace_root(_here())
+    if worktree:
+        return worktree
     walked = _find_marketplace_root(_here())
     if walked:
         return walked

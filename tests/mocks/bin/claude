@@ -6,6 +6,8 @@
 set -euo pipefail
 
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'claude %s\n' "$*" >> "$MOCK_CALL_LOG"
+[[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'claude active=%s executor=%s depth=%s run=%s\n' \
+    "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
 
 MOCK_STATE_FILE="$HOME/.mock-claude-marketplaces"
 

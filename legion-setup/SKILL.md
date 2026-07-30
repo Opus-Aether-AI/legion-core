@@ -2,7 +2,7 @@
 name: legion-setup
 kind: procedure
 disable-model-invocation: true
-description: Install or update the Legion multi-model marketplace — one skill for both. Use when the user pastes the Legion GitHub repo link, says "install legion", "set up legion", "add legion", "update legion", "upgrade legion", "refresh legion", or wants Legion to work on/with Codex or Cursor. First run installs marketplace plugins, cross-harness skills, shared CLIs, daily refresh/self-learning, and the Codex/Cursor bridges. The `codex` and `cursor` subcommands wire marketplace MCPs, skills/agents, and delegation runners into those agents.
+description: Install or update the Legion multi-model marketplace. Use when the user pastes the Legion GitHub repo link, says "install legion", "set up legion", "add legion", "update legion", "upgrade legion", or "refresh legion", or wants Legion on Codex, Cursor, or opencode. First run installs marketplace plugins, shared skills and CLIs, plus the selected harness bridges; daily refresh is opt-in. The harness subcommands wire supported MCP, skill, agent, and delegation surfaces.
 ---
 
 # Legion Setup — install & update in one skill
@@ -14,10 +14,10 @@ The whole team needs exactly two moves, both handled here.
 If `legion-setup` is already on `$PATH` (Legion partly installed), just run it — it auto-detects and installs:
 
 ```bash
-legion-setup install            # all plugins (default); or: opus | vendored | minimal
+legion-setup install            # all plugins (default); or: minimal | <plugin-name>
 ```
 
-If it's a brand-new machine (nothing installed yet), bootstrap with one paste — this installs the marketplace, the plugins, cross-harness skills for Codex/Cursor/opencode, shared CLIs, a daily refresh/self-learning cron, **and this skill** (so updates are one word afterwards):
+If it's a brand-new machine (nothing installed yet), bootstrap with one paste — this installs the marketplace, plugins, cross-harness skills for Codex/Cursor/opencode, shared CLIs, and this skill (so updates are one word afterwards). Add `--cron` only when you want daily refresh/self-learning:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash -s all
@@ -35,10 +35,11 @@ legion-setup update             # pulls latest + re-syncs everything
 
 ## Run Legion on Codex CLI
 
-Legion is built for Claude Code but runs natively on Codex CLI too: both speak MCP,
-both read skills from `~/.agents/skills`, and `legion-claude` lets a Codex-primary
-session call Claude when it's worth it (with automatic configured Codex fallback when your
-Claude limit is hit). One command wires the marketplace into Codex:
+Legion is model-agnostic and runs natively on Codex CLI: both harnesses speak
+MCP, both read skills from `~/.agents/skills`, and `legion-claude` lets a
+Codex-primary session call Claude when it is worth it (with automatic configured
+Codex fallback when the Claude limit is hit). One command wires the marketplace
+into Codex:
 
 ```bash
 legion-setup codex              # all: register MCPs + verify skill mirror + verify legion-claude
@@ -74,6 +75,37 @@ Cursor invocation map:
 - Ask Cursor to use `legion-agent-<name>` for bridged Legion subagents.
 - Ask Cursor to use `legion-skill-runner` when a task needs a mirrored skill from `~/.agents/skills`.
 
+## Run Legion on opencode
+
+```bash
+legion-setup opencode           # register MCPs + verify the shared CLI/skill wiring
+legion-setup opencode mcp       # append marketplace MCPs to opencode's config
+legion-setup opencode verify    # read-only readiness check
+```
+
+opencode reads the shared Legion skills from `~/.agents/skills`; restart it after
+MCP registration.
+
+## Make Legion the repository default
+
+Use the idempotent repository initializer to add a precise Legion-first policy
+without replacing existing agent instructions:
+
+```bash
+legion-init --repo .             # add/update managed blocks
+legion-init --repo . --check     # CI: fail when blocks are missing or stale
+legion-init --repo . --dry-run   # preview without writes
+legion-init --repo . --remove    # remove only managed blocks
+```
+
+`legion-setup init` is an alias. The command resolves the Git root, serializes
+mutations, and transactionally manages versioned blocks in `AGENTS.md` and
+`CLAUDE.md`; `--check` and `--dry-run` do not write Git metadata. It preserves
+every unmanaged byte and file mode, avoids duplicate `@AGENTS.md` imports, and
+fails closed on malformed markers, case collisions, or symlinks. The policy
+exports a clear role contract: primaries enter Legion; executors with
+`LEGION_ACTIVE=1` implement their assigned slice without recursively delegating.
+
 ## Status / uninstall
 
 ```bash
@@ -87,4 +119,5 @@ legion-setup uninstall          # remove (add --all to also drop the marketplace
 - User says "update/upgrade/refresh legion" → run `legion-setup update` (idempotent; installs if somehow missing).
 - User wants Legion **on Codex** ("legion on codex", "codex setup", "use legion in codex") → run `legion-setup codex`, then `legion-setup codex verify`.
 - User wants Legion **on Cursor** ("legion on cursor", "cursor setup", "use legion in cursor") → run `legion-setup cursor`, then `legion-setup cursor verify`.
+- User wants Legion **on opencode** ("legion on opencode", "opencode setup") → run `legion-setup opencode`, then `legion-setup opencode verify`.
 - `legion-setup` with no args auto-picks: update if installed, install if not. It's safe to re-run anytime.

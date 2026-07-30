@@ -125,7 +125,7 @@ review/validation feedback into self-learning memory. Open the printed
 results, self-learning updates, and links to the nested Legion reports.
 
 `run` writes a durable benchmark artifact under
-`~/.claude/logs/legion/bench/` with:
+the `bench_dir` reported by `legion-state --repo .`, with:
 
 - case ID and suite
 - prompt/task
@@ -139,7 +139,7 @@ results, self-learning updates, and links to the nested Legion reports.
 - final status and failure reason
 
 `stable` runs the same suite multiple times and writes
-`~/.claude/logs/legion/bench/stability/<run-id>.json` with:
+`<bench_dir>/stability/<run-id>.json` with:
 
 - iterations and case-runs
 - min/mean/max score and pass rate
@@ -163,7 +163,7 @@ legion-bench corpus \
 Each mode can be any command: direct Codex, direct Claude Code, Cursor Agent,
 `legion-delegate`, `legion-orchestrate`, an Aider runner, or a SWE-bench wrapper.
 The runner writes per-case workspaces and artifacts under
-`~/.claude/logs/legion/bench/corpus/`, captures stdout/stderr, validates files or
+`<bench_dir>/corpus/`, captures stdout/stderr, validates files or
 JSON/JSONL, and aggregates pass rate, duration, cost, tokens, span count, and
 per-model span rollups.
 Relative lift is only marked reliable once the comparison has at least
@@ -358,7 +358,7 @@ legion-self-learn run --repo . --apply-memory --quiet
 ```
 
 `--record-failures` writes failed required cases as `legion.outcome.v1` rows with
-`source: legion-bench` under `~/.claude/logs/legion/self-learn/outcomes.jsonl`.
+`source: legion-bench` under `<state_root>/self-learn/outcomes.jsonl`.
 For the corpus path the outcome is **attributed to the failing harness mode**
 (`target_type: command`, `target_name: legion-delegate`/`legion-cursor`/`direct-*`),
 so a harness regression lands on the right entity. Those outcomes remain

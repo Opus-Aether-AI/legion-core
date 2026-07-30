@@ -109,7 +109,8 @@ repos_file_for_repo() {
 # ── legion-delegate run ──────────────────────────────────────────────
 @test "delegate run: happy path returns ok + captures diff + emits span" {
     local repo; repo="$(make_test_repo run1)"
-    run "$DELEGATE" run --model test-model-beta --task "add a guard to foo()" --repo "$repo" --quiet
+    local context="$TEST_TMPDIR/context.log"
+    MOCK_CONTEXT_LOG="$context" run "$DELEGATE" run --model test-model-beta --task "add a guard to foo()" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e '.model == "test-model-beta"'
@@ -125,6 +126,23 @@ repos_file_for_repo() {
     # span written
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r 'select(.executor==\"codex\") | .executor'"
     [ "$output" = "codex" ]
+    grep -Eq '^codex active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
+}
+
+@test "delegate run: executor context does not leak into sandbox setup" {
+    local repo; repo="$(make_test_repo executor-context)"
+    mkdir -p "$repo/.legion"
+    printf '%s\n' '{"install":"printf '\''%s\\n'\'' \"${LEGION_ACTIVE:-unset}\" > SANDBOX_LEGION_ACTIVE.txt"}' > "$repo/.legion/sandbox.json"
+    git -C "$repo" add .legion/sandbox.json
+    git -C "$repo" -c user.email=t@t.c -c user.name=t commit -qm sandbox
+    local context="$TEST_TMPDIR/context.log"
+
+    MOCK_CONTEXT_LOG="$context" run "$DELEGATE" run --model test-model-beta \
+        --task "add a guard" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    grep -Fq '+unset' "$diff"
+    grep -Eq '^codex active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
 @test "delegate run: preserves raw stderr and separates benign MCP OAuth noise" {

@@ -1,7 +1,7 @@
 {
   "name": "legion-router",
-  "description": "Legion's multi-model brain: delegate scoped tasks from the configured Claude role to the Codex and Cursor refs, then bring back a verified, metered diff. Ships `legion-delegate` for Codex, `legion-cursor` for Cursor Agent headless runs, generic GitHub issue intake via `legion-intake`, the `legion-router` loopback :8082 Anthropic-compatible metering proxy, plus the shared cost table and codex-json parser. One orchestrator, a legion of models.",
-  "version": "0.5.3",
+  "description": "Legion's multi-model brain: delegate scoped tasks to configured Codex, Cursor, Claude, and opencode executors, then bring back a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
+  "version": "0.5.4",
   "author": {
     "name": "legion-core"
   },

@@ -11,6 +11,8 @@
 
 set -euo pipefail
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'codex %s\n' "$*" >> "$MOCK_CALL_LOG"
+[[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'codex active=%s executor=%s depth=%s run=%s\n' \
+  "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
 
 args=("$@")
 cd_dir="."; out_file=""; sandbox="read-only"; model="mock"; review=0; resume=0

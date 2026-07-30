@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.18.1...v0.18.2) (2026-07-30)
+
+
+### Fixed
+
+* **release:** gate publish on validate + legion-ci being green ([#103](https://github.com/Opus-Aether-AI/legion-core/issues/103)) ([1cf00fe](https://github.com/Opus-Aether-AI/legion-core/commit/1cf00fe8719838add533b223831783d187fba717))
+
 ## [0.18.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.18.0...v0.18.1) (2026-07-29)
 
 

@@ -75,8 +75,11 @@ fi
 # from Claude/Codex/Cursor logs into self-learning outcomes before synthesis.
 SESSION_LEARN="${LEGION_SESSION_LEARN_BIN:-$SOURCE_CLONE/legion-observability/bin/legion-session-learn}"
 if [ "${LEGION_SESSION_LEARN:-1}" = "1" ] && [ -x "$SESSION_LEARN" ]; then
-    if ! "$SESSION_LEARN" --lookback-days "${LEGION_SESSION_LEARN_DAYS:-3}" \
-        --max-file-mb "${LEGION_SESSION_LEARN_MAX_FILE_MB:-8}" --record >/dev/null 2>&1; then
+    if ! "$SESSION_LEARN" --repo "$SOURCE_CLONE" \
+        --lookback-days "${LEGION_SESSION_LEARN_DAYS:-3}" \
+        --session-limit "${LEGION_SESSION_LEARN_LIMIT:-100}" \
+        --max-file-mb "${LEGION_SESSION_LEARN_MAX_FILE_MB:-8}" \
+        --record >/dev/null 2>&1; then
         printf 'legion refresh: session learning scan failed (self-learning still running)\n' >&2
         record_refresh_failure "Daily session learning scan failed." "legion-session-learn --record returned nonzero"
     fi

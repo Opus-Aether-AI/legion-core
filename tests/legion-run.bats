@@ -316,8 +316,8 @@ SH
   run_dir="$(echo "$json" | jq -r '.run_dir')"
   echo "$json" | jq -e '.ok == false and .failed_stage == "fanout-apply"'
   jq -e '.status == "timed_out" and .exit_code == 124 and .timeout_seconds == 1' "$run_dir/fanout.json"
-  jq -e '.stages[] | select(.stage == "fanout-apply" and .status == "failed")' "$run_dir/stage-status.json"
-  jq -e '.stages[] | select(.stage == "review" and .status == "skipped")' "$run_dir/stage-status.json"
+  jq -e '.stages[] | select(.stage == "fanout-apply" and .status == "failed" and .terminal_status == "timed_out")' "$run_dir/stage-status.json"
+  jq -e '.stages[] | select(.stage == "review" and .status == "skipped" and .terminal_status == "not_run")' "$run_dir/stage-status.json"
 }
 
 @test "legion-run: dispatches final review through the resolved Claude route" {
@@ -338,6 +338,62 @@ SH
   json="$(printf '%s' "$output" | json_from_output)"
   run_dir="$(echo "$json" | jq -r '.run_dir')"
   jq -e '.model == "test-model-claude" and (.result | contains("approve"))' "$run_dir/review.json"
+}
+
+@test "legion-run: validation is role-clean and review uses an immutable snapshot" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+repo=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'generated\n' > "$repo/generated.txt"
+printf '{"ok":1,"slices":1,"failed":0,"applied":1,"results":[]}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/fieldops-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+jq -cn \
+  --arg active "${LEGION_ACTIVE-unset}" \
+  --arg executor "${LEGION_EXECUTOR-unset}" \
+  --arg depth "${LEGION_DEPTH-unset}" \
+  --arg validation "${LEGION_VALIDATION-unset}" \
+  '{ok:true,active:$active,executor:$executor,depth:$depth,validation:$validation}'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$LEGION_RUN_DIR/review-args.txt"
+printf '{"status":"ok","model":"test-model-beta","verdict":{"verdict":"approve","findings":[]}}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-fanout" \
+    "$BATS_TEST_TMPDIR/bin/fieldops-validate" \
+    "$BATS_TEST_TMPDIR/bin/legion-delegate"
+  manifest="$(make_plugin)"
+
+  LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=3 \
+    run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  jq -e '
+    .active == "unset"
+    and .executor == "unset"
+    and .depth == "unset"
+    and .validation == "1"
+  ' "$run_dir/validation.json"
+  base_sha="$(jq -r .base_sha "$run_dir/review-input.json")"
+  head_sha="$(jq -r .head_sha "$run_dir/review-input.json")"
+  [ "${#base_sha}" -eq 40 ]
+  [ "${#head_sha}" -eq 40 ]
+  [ "$base_sha" != "$head_sha" ]
+  git -C "$REPO" cat-file -e "$head_sha:generated.txt"
+  grep -Fq -- "--base $base_sha --head $head_sha" "$run_dir/review-args.txt"
 }
 
 @test "legion-run: installed-style plugin directory works through manifest and bin hooks" {

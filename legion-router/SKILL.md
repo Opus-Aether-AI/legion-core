@@ -54,7 +54,8 @@ Cursor Agent uses the same sidecar pattern through `legion-cursor`: it runs Curs
 |---|---|---|
 | Bulk mechanical edit across many files | ✅ yes | `run --archetype bulk-mechanical-edit` |
 | Independent module/file you can spec fully | ✅ yes | `run` with a tight, stateless task description |
-| Second opinion on a risky diff / PR | ✅ yes | `review --archetype second-opinion-review --base <branch>` |
+| Codex review of a risky diff / PR | ✅ yes | `review --archetype security-review --base <ref> [--head <ref>]` |
+| Different-lineage second opinion | ✅ yes | route `second-opinion-review`, then use that executor's read-only adapter |
 | Two designs both plausible (tie-break) | ✅ yes | `review` on each, compare verdicts |
 | Task needs your conversation context / judgement | ❌ no | do it inline |
 | Tiny edit you can do in one tool call | ❌ no | do it inline (delegation overhead isn't worth it) |
@@ -92,9 +93,12 @@ legion-cursor run --task "Try the same fix using Cursor Agent; minimal edit only
 printf '%s' "$LONG_TASK" | legion-delegate run \
   --model "$(legion-route --model-ref codex_workhorse)" --reasoning-effort high --repo .
 
-# Cross-model second opinion → STRUCTURED verdict JSON you can reconcile:
-legion-delegate review --archetype second-opinion-review --base main --repo .
+# Codex second pass → STRUCTURED verdict JSON you can reconcile:
+legion-delegate review --archetype security-review --base main --head HEAD --repo .
 #   -> {verdict: approve|request_changes|comment, summary, findings:[{severity,title,file,line,detail}]}
+# Review refs are resolved once to immutable commits. Add `--head <ref>` when
+# reviewing a non-HEAD snapshot; `--max-attempts N` bounds transient retries
+# (default 2). Every launched review writes a durable `terminal_receipt`.
 
 # Iterate on a kept session (same codex thread) instead of starting fresh:
 legion-delegate run    --archetype parallel-codegen --task "..." --repo . --keep   # note the run_id
@@ -134,6 +138,9 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
 - `run` defaults to `workspace-write` (edits the worktree); `review` is `read-only`.
 - `danger-full-access` is **hard-blocked** unless `LEGION_ALLOW_DANGER=1`.
 - Task text is scanned for dangerous/injection patterns before any write run (override: `LEGION_ALLOW_UNSAFE=1`).
+- `executor=self` is returned to the primary for inline work. A process carrying
+  `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`, or positive `LEGION_DEPTH` must
+  implement its assigned slice directly; Legion refuses nested delegation.
 
 > **The sandbox is the security boundary — not the task scanner.** `scan_task_text`
 > is a best-effort tripwire and is trivially bypassable (encodings, indirection);

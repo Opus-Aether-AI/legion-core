@@ -130,10 +130,10 @@ SH
 
     run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
-    grep -qF "session-learn --lookback-days 3 --max-file-mb 8 --record" "$MOCK_CALL_LOG"
+    grep -qF "session-learn --repo $SOURCE_CLONE --lookback-days 3 --session-limit 100 --max-file-mb 8 --record" "$MOCK_CALL_LOG"
     grep -qF "self-learn run --repo $SOURCE_CLONE --apply-memory --quiet" "$MOCK_CALL_LOG"
 
-    session_line="$(grep -nF "session-learn --lookback-days" "$MOCK_CALL_LOG" | cut -d: -f1)"
+    session_line="$(grep -nF "session-learn --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"
     self_line="$(grep -nF "self-learn run --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"
     [ "$session_line" -lt "$self_line" ]
 }

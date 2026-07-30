@@ -75,6 +75,144 @@ write_queued_record() {
     > "$LEGION_REGISTRY_DIR/$rid.json.tmp.$$" 2>/dev/null \
     && mv -f "$LEGION_REGISTRY_DIR/$rid.json.tmp.$$" "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null || true
 }
+
+init_task_ledger() {
+  python3 - "$work" "$n" "$base_head" "$FANOUT_RUN_ID" "$FANOUT_TRACE_ID" <<'PY'
+import datetime
+import json
+import os
+import sys
+from pathlib import Path
+
+work = Path(sys.argv[1])
+n = int(sys.argv[2])
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+dag = json.loads((work / "dag.json").read_text(encoding="utf-8"))
+tasks = []
+for i in range(n):
+    source = json.loads((work / f"slice-{i}.in").read_text(encoding="utf-8"))
+    task = dag["slices"][i]
+    tasks.append({
+        "index": i,
+        "id": task["id"],
+        "run_id": (work / f"slice-{i}.runid").read_text(encoding="utf-8").strip(),
+        "archetype": str(source.get("archetype") or ""),
+        "task": str(source.get("task") or ""),
+        "depends_on": task["depends_on"],
+        "state": "queued",
+        "queued_at": now,
+        "started_at": "",
+        "completed_at": "",
+        "base_ref": "",
+        "result_status": "",
+    })
+payload = {
+    "schema": "legion.task-ledger.v1",
+    "fanout_run_id": sys.argv[4],
+    "trace_id": sys.argv[5],
+    "source_base_sha": sys.argv[3],
+    "created_at": now,
+    "updated_at": now,
+    "status": "running",
+    "tasks": tasks,
+}
+target = work / "task-ledger.json"
+temp = work / f".task-ledger.{os.getpid()}.tmp"
+temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(temp, target)
+PY
+}
+
+update_task_ledger() {
+  local i="$1" state="$2" result_status="${3:-}" base_ref="${4:-}"
+  python3 - "$work/task-ledger.json" "$i" "$state" "$result_status" "$base_ref" <<'PY'
+import datetime
+import fcntl
+import json
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+index = int(sys.argv[2])
+state, result_status, base_ref = sys.argv[3:6]
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+lock_path = target.with_suffix(target.suffix + ".lock")
+with lock_path.open("a+b") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    task = payload["tasks"][index]
+    task["state"] = state
+    if state == "running" and not task.get("started_at"):
+        task["started_at"] = now
+    if state in {"completed", "failed", "blocked", "inline", "integrated"}:
+        task["completed_at"] = now
+    if result_status:
+        task["result_status"] = result_status
+    if base_ref:
+        task["base_ref"] = base_ref
+    payload["updated_at"] = now
+    temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temp, target)
+    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+PY
+}
+
+finalize_task_ledger() {
+  python3 - "$work/task-ledger.json" "$results" "$applied" "$apply_conflicts" "$repo" <<'PY'
+import datetime
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+results_path = Path(sys.argv[2])
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+payload = json.loads(target.read_text(encoding="utf-8"))
+results = [
+    json.loads(line)
+    for line in results_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+by_id = {str(item.get("id") or ""): item for item in results}
+for task in payload["tasks"]:
+    result = by_id.get(task["id"], {})
+    if result:
+        task["result_status"] = str(result.get("status") or task.get("result_status") or "")
+        task["diff_path"] = str(result.get("diff_path") or "")
+        task["model"] = str(result.get("model") or "")
+    if task["state"] in {"queued", "running"}:
+        task["state"] = "failed"
+        task["completed_at"] = now
+        task["result_status"] = task["result_status"] or "missing_terminal_result"
+repo = sys.argv[5]
+head = subprocess.run(
+    ["git", "-C", repo, "rev-parse", "HEAD"],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+payload.update({
+    "updated_at": now,
+    "completed_at": now,
+    "status": "failed" if any(
+        task["state"] in {"failed", "blocked"} or task["result_status"] not in {"ok", "inline"}
+        for task in payload["tasks"]
+    ) or int(sys.argv[4]) else "completed",
+    "apply": {
+        "applied": int(sys.argv[3]),
+        "conflicts": int(sys.argv[4]),
+        "target_head_sha": head.stdout.strip() if head.returncode == 0 else "",
+    },
+})
+temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(temp, target)
+PY
+}
 MAXC="${LEGION_MAX_CONCURRENCY:-4}"
 
 slices_src="" ; task_src="" ; repo="$PWD" ; apply="" ; keep_slices=0
@@ -230,36 +368,47 @@ launch_slice() {
   arch="$(jq -r '.archetype // ""' <<<"$line" 2>/dev/null || echo "")"
   model="$(jq -r '.model // ""' <<<"$line" 2>/dev/null || echo "")"
   task="$(jq -r '.task // ""' <<<"$line" 2>/dev/null || echo "")"
+  update_task_ledger "$i" "running" "" "$base_ref"
   if [[ -z "$task" ]]; then
     [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
-    echo '{"status":"error","error":"empty task"}' > "$work/slice-$i.out"; return
+    echo '{"status":"error","error":"empty task"}' > "$work/slice-$i.out"
+    update_task_ledger "$i" "failed" "error" "$base_ref"
+    return
   fi
-  # self archetypes are NOT delegated — return for Opus to do inline (drop the queued
-  # record: it's not a delegated agent).
+  # Self routes and nested routes from an already-delegated executor are
+  # returned inline. Top-level same-harness subagents remain valid.
   if [[ -n "$arch" ]]; then
     local route_out route_err route_rc
     route_out="$work/slice-$i.route.json"
     route_err="$work/slice-$i.route.err"
     set +e
-    "$LEGION_ROUTE" "$arch" > "$route_out" 2> "$route_err"
+    "$LEGION_ROUTE" "$arch" --preflight > "$route_out" 2> "$route_err"
     route_rc=$?
     set -e
     if [[ "$route_rc" -ne 0 ]]; then
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
       jq -cn --arg a "$arch" --arg t "$task" --arg e "$(tr '\n' ' ' < "$route_err")" \
         '{status:"error",stage:"route",archetype:$a,task:$t,error:$e}' > "$work/slice-$i.out"
+      update_task_ledger "$i" "failed" "error" "$base_ref"
       return
     fi
     if ! jq -e 'type == "object"' "$route_out" >/dev/null 2>&1; then
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
       jq -cn --arg a "$arch" --arg t "$task" --arg e "$(cat "$route_out" 2>/dev/null)" \
         '{status:"error",stage:"route",archetype:$a,task:$t,error:("invalid route JSON: " + $e)}' > "$work/slice-$i.out"
+      update_task_ledger "$i" "failed" "error" "$base_ref"
       return
     fi
-    ex="$(jq -r '.executor // ""' "$route_out" 2>/dev/null || echo "")"
+    ex="$(jq -r '.effective_executor // .executor // ""' "$route_out" 2>/dev/null || echo "")"
     if [[ "$ex" == "self" ]]; then
+      local route_reason
+      route_reason="$(jq -r '.preflight.reason // "inline-self-route"' "$route_out" 2>/dev/null || echo inline-self-route)"
       [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null
-      jq -cn --arg a "$arch" --arg t "$task" --arg p "$FANOUT_PRIMARY" '{status:"inline",archetype:$a,task:$t,note:($p + " (primary) does this inline")}' > "$work/slice-$i.out"
+      jq -cn --arg a "$arch" --arg t "$task" --arg p "$FANOUT_PRIMARY" \
+        --arg reason "$route_reason" \
+        '{status:"inline",archetype:$a,task:$t,route_reason:$reason,
+          note:($p + " (primary) does this inline")}' > "$work/slice-$i.out"
+      update_task_ledger "$i" "inline" "inline" "$base_ref"
       return
     fi
   fi
@@ -273,10 +422,16 @@ launch_slice() {
   [[ -n "$model" ]] && args+=(--model "$model")
   args+=(--task "$task")
   "$LEGION_DELEGATE" "${args[@]}" > "$work/slice-$i.out" 2> "$work/slice-$i.err" || true
+  local result_status ledger_state
+  result_status="$(jq -r '.status // "error"' "$work/slice-$i.out" 2>/dev/null || echo error)"
+  ledger_state="failed"
+  [[ "$result_status" == "ok" ]] && ledger_state="completed"
+  update_task_ledger "$i" "$ledger_state" "$result_status" "$base_ref"
 }
 
 has_dependencies="$(jq -r '.has_dependencies' "$work/dag.json")"
 base_head="$(git -C "$repo" rev-parse HEAD)"
+init_task_ledger
 integration_branch=""
 integration_wt=""
 integrated=0
@@ -323,6 +478,7 @@ mark_blocked() {
   local rid
   rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
   [[ -n "$rid" ]] && rm -f "$LEGION_REGISTRY_DIR/$rid.json" 2>/dev/null || true
+  update_task_ledger "$i" "blocked" "blocked" ""
 }
 
 integrate_slice_diff() {
@@ -335,6 +491,7 @@ integrate_slice_diff() {
     git -C "$integration_wt" add -A
     git -C "$integration_wt" -c user.email=legion@local -c user.name=Legion commit -qm "legion fanout slice $i"
     integrated=$((integrated + 1))
+    update_task_ledger "$i" "integrated" "ok" "$integration_branch"
   else
     integration_conflicts=$((integration_conflicts + 1))
     jq -c '. + {status:"error",stage:"integration-apply",error:"diff did not apply cleanly to integration base"}' \
@@ -468,6 +625,7 @@ if [[ "$has_dependencies" == "true" ]]; then
   teardown_integration_base
 fi
 cleanup_slice_worktrees
+finalize_task_ledger
 
 # Root span for the fan-out itself, so the delegate spans form a tree under it.
 # Best-effort: telemetry is observability, never block the run on it.
@@ -481,7 +639,8 @@ if [[ -x "$LEGION_TELEMETRY" ]]; then
     --cost "${total_cost:-0}" --task "fanout: $n slices" >/dev/null 2>&1 || true
 fi
 
-jq -s --argjson applied "$applied" --argjson conflicts "$apply_conflicts" '{
+jq -s --argjson applied "$applied" --argjson conflicts "$apply_conflicts" \
+  --arg task_ledger_path "$work/task-ledger.json" '{
   slices: length,
   ok:     ([.[] | select(.status == "ok")]     | length),
   inline: ([.[] | select(.status == "inline")] | length),
@@ -489,6 +648,7 @@ jq -s --argjson applied "$applied" --argjson conflicts "$apply_conflicts" '{
   total_cost_usd: ([.[].cost_usd // 0] | add),
   applied: $applied,
   apply_conflicts: $conflicts,
+  task_ledger_path: $task_ledger_path,
   by_model: (reduce .[] as $r ({}; .[($r.model // ($r.status // "unknown"))] += 1)),
   results: .
 }' "$results"

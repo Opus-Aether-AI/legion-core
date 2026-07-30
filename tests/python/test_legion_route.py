@@ -50,6 +50,48 @@ def test_resolve_unknown_falls_to_defaults():
     assert r["model"] == lr.resolve_model_ref(model_table, "claude_orchestrator")
 
 
+def test_preflight_allows_top_level_same_family_subagent_without_mutating_policy():
+    route = lr.resolve(table(), "implement-feature", models())
+    checked = lr.preflight(route, "codex", {})
+
+    assert route["executor"] == "codex"
+    assert "effective_executor" not in route
+    assert checked["executor"] == "codex"
+    assert checked["effective_executor"] == "codex"
+    assert checked["preflight"] == {
+        "action": "delegate",
+        "reason": "delegated-route",
+        "primary": "codex",
+        "target_executor": "codex",
+        "target_family": "codex",
+    }
+
+
+def test_preflight_returns_nested_legion_route_inline_for_direct_execution():
+    route = lr.resolve(table(), "implement-feature", models())
+    checked = lr.preflight(
+        route,
+        "claude",
+        {"LEGION_ACTIVE": "1", "LEGION_EXECUTOR": "1", "LEGION_DEPTH": "1"},
+    )
+
+    assert checked["effective_executor"] == "self"
+    assert checked["preflight"]["action"] == "inline"
+    assert checked["preflight"]["reason"] == "delegated-context-route"
+
+
+def test_main_preflight_uses_delegated_context_environment(monkeypatch, capsys):
+    monkeypatch.setenv("LEGION_PRIMARY", "codex")
+    monkeypatch.setenv("LEGION_ACTIVE", "1")
+    assert lr.main([
+        "implement-feature", "--preflight",
+        "--file", TABLE, "--models-file", MODELS_TABLE,
+    ]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["effective_executor"] == "self"
+    assert out["preflight"]["reason"] == "delegated-context-route"
+
+
 def test_deep_reasoning_stays_on_claude_orchestrator():
     model_table = models()
     r = lr.resolve(table(), "deep-reasoning", model_table)

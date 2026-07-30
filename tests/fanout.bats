@@ -10,6 +10,9 @@ setup() {
   export LEGION_DELEGATE="$ROOT/legion-router/bin/legion-delegate"
   export LEGION_TELEMETRY="$ROOT/legion-observability/bin/legion-trace"
   export LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans"
+  # Do not inherit whichever harness happens to run Bats. These policy tests
+  # model a Claude-primary fanout unless a test overrides it explicitly.
+  export LEGION_PRIMARY=claude
   CODEX_WORKHORSE="$("$ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
   CLAUDE_REVIEW="$("$ROOT/legion-router/bin/legion-route" --model-ref claude_default)"
   REPO="$BATS_TEST_TMPDIR/repo"
@@ -63,7 +66,39 @@ SH
   echo "$output" | jq -e '[.results[] | select(.status=="inline") | .archetype] == ["deep-reasoning"]'
 }
 
+@test "fanout: top-level same-family slices still launch scoped subagents" {
+  export LEGION_PRIMARY=codex
+  export MOCK_CALL_LOG="$BATS_TEST_TMPDIR/calls.log"
+  printf '%s\n' '{"archetype":"implement-feature","task":"build A"}' > "$BATS_TEST_TMPDIR/caller.jsonl"
+
+  run "$FANOUT" --slices "$BATS_TEST_TMPDIR/caller.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 1 and .inline == 0 and .failed == 0'
+  grep -qF "codex exec" "$MOCK_CALL_LOG"
+}
+
+@test "fanout: delegated executor context returns nested routes inline" {
+  export LEGION_PRIMARY=codex
+  export LEGION_ACTIVE=1
+  export LEGION_EXECUTOR=1
+  export LEGION_DEPTH=1
+  export MOCK_CALL_LOG="$BATS_TEST_TMPDIR/nested-calls.log"
+  printf '%s\n' '{"archetype":"implement-feature","task":"build directly"}' > "$BATS_TEST_TMPDIR/nested.jsonl"
+
+  run "$FANOUT" --slices "$BATS_TEST_TMPDIR/nested.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .inline == 1 and .failed == 0
+    and .results[0].route_reason == "delegated-context-route"
+  '
+  [ ! -s "$MOCK_CALL_LOG" ]
+}
+
 @test "fanout: routes final review slices to the configured Fable reviewer" {
+  # A Codex-primary run may delegate its independent review to Claude/Fable.
+  export LEGION_PRIMARY=codex
   printf '%s\n' '{"archetype":"final-review","task":"review the diff"}' > "$BATS_TEST_TMPDIR/r.jsonl"
   run "$FANOUT" --slices "$BATS_TEST_TMPDIR/r.jsonl" --repo "$REPO"
   [ "$status" -eq 0 ]
@@ -77,6 +112,9 @@ SH
 }
 
 @test "fanout: --task file expands demo slices and --json is accepted" {
+  # Use a third harness so this expansion test exercises all three delegated
+  # slices rather than caller-aware inline handling.
+  export LEGION_PRIMARY=opencode
   printf 'Build a dispatch board with AI scheduling suggestions.\n' > "$BATS_TEST_TMPDIR/task.md"
   run "$FANOUT" --task "$BATS_TEST_TMPDIR/task.md" --repo "$REPO" --json --max-concurrency 1
   [ "$status" -eq 0 ]
@@ -149,6 +187,20 @@ SH
     [ "$(jq -r '.state_version >= 3' "$f")" = "true" ]
     [ "$(jq -r '.run_id | endswith("-s0") or endswith("-s1")' "$f")" = "true" ]
   done
+  local ledger; ledger="$(echo "$output" | jq -r .task_ledger_path)"
+  jq -e '
+    .schema == "legion.task-ledger.v1"
+    and .status == "completed"
+    and (.source_base_sha | length == 40)
+    and (.tasks | length == 2)
+    and all(.tasks[];
+      .state == "completed"
+      and .result_status == "ok"
+      and (.queued_at | length > 0)
+      and (.started_at | length > 0)
+      and (.completed_at | length > 0)
+    )
+  ' "$ledger"
 }
 
 @test "fanout: self/inline slices do NOT leave a queued record" {

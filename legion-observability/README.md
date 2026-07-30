@@ -16,7 +16,7 @@ See everything Legion's multi-model runs do — per-executor **cost, success rat
 | `legion-catalog` | `scripts/legion-catalog.py` | Read-only inventory of plugins, skills, agents, commands, hooks, and MCPs. |
 | `legion-self-learn` | `scripts/legion-self-learn.py` | Daily self-learning loop: spans + review findings + trigger evals + benchmark misses + session feedback + manual bug records -> entity-scoped memory/proposals; optional source candidates run in isolated copies and are kept only on measured scorecard improvement. |
 | `legion-context-profile` | `scripts/legion-context-profile.py` | Reversibly shape active Codex/.agents skills and Claude plugins from external context profiles and skill groups when context budget gets noisy. |
-| `legion-session-learn` | `scripts/legion-session-learn.py` | Mine recent Claude/Codex/Cursor sessions and project memories for recurring gotchas and explicit user corrections, then optionally record them into self-learning outcomes. |
+| `legion-session-learn` | `scripts/legion-session-learn.py` | Mine bounded, provenance-aware Claude/Codex/Cursor sessions and project memories for recurring gotchas and explicit corrections; output and recorded outcomes use hashes/counts instead of transcript text by default. |
 
 ## Quick start
 
@@ -33,7 +33,7 @@ legion-bench gate --baseline runs/base/run.json --candidate runs/new/run.json
 legion-report --by model --html > report.html
 legion-state --repo . --field telemetry_dir
 cat "$(legion-state --repo . --field telemetry_dir)"/*.jsonl | legion-otel-export --dry-run | jq .
-legion-session-learn --record              # mine recent session corrections
+legion-session-learn --repo . --record     # scoped, privacy-safe session corrections
 legion-self-learn run --apply-memory       # synthesize safe memory/proposals
 legion-self-learn hints                    # active learned guardrails
 legion-context-profile list                # discover external profiles
@@ -44,7 +44,9 @@ legion-context-profile coverage \
   --skills-root ~/.agents/sources/legion/vendored \
   --marketplace ~/.agents/sources/legion/.claude-plugin/marketplace.json
 legion-context-profile apply --dry-run     # preview profile/group context trim
-legion-session-learn --query moneyball --record
+legion-session-learn --repo . --query moneyball --record
+legion-session-learn --repo . --harness codex --role user --query "wrong source" --json
+legion-session-learn --repo . --show-evidence --query "review was interrupted"
 
 # Emit a span from any runner/executor:
 legion-trace emit --executor codex --model "$(legion-route --model-ref codex_workhorse)" --status ok \
@@ -71,15 +73,23 @@ When the optional daily `legion-refresh` cron is enabled, it first records
 recent session feedback, then runs the self-learning synthesis:
 
 ```bash
-legion-session-learn --record
+legion-session-learn --repo . --record
 legion-self-learn run --apply-memory --quiet
 ```
 
-That mode is active but conservative: user corrections, review gotchas, and
-session findings become memory/proposals and scorecard ledgers without silently
-rewriting vendored or source harness files. Unresolved outcomes remain active
-until a kept source experiment resolves them. Set `LEGION_SESSION_LEARN=0` to
-skip the session scan during refresh.
+The scan is bounded to the newest 100 eligible sources by default. It excludes
+system/developer catalogs, tool results, collaboration subagents, and sources
+marked as benchmark/eval fixtures. Equivalent records emitted twice by a
+harness are deduplicated. `--repo`, `--harness`, `--role`, and `--source-kind`
+provide tighter provenance scope; `--session-limit 0` explicitly restores an
+unbounded scan.
+
+Candidate and recorded evidence contains only counts, stable hashes, roles, and
+source kinds. `--show-evidence` adds redacted snippets and home-relative paths
+to command output for an intentional audit; raw snippets are never copied into
+durable self-learning outcomes. That keeps the daily mode conservative while
+still turning corrections and review gotchas into memory/proposals. Set
+`LEGION_SESSION_LEARN=0` to skip the session scan during refresh.
 
 ## Layout
 
@@ -114,3 +124,7 @@ legion-observability/
 - `legion-state --repo .` — print every resolved project path and override
   source.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — enables real OTLP export; unset = no-op.
+- `LEGION_SESSION_LEARN=0` — disable refresh-time session mining.
+- `LEGION_SESSION_LEARN_DAYS`, `LEGION_SESSION_LEARN_LIMIT`, and
+  `LEGION_SESSION_LEARN_MAX_FILE_MB` — bound the repo-scoped refresh scan
+  (defaults: 3 days, 100 sources, 8 MiB for non-JSONL files).

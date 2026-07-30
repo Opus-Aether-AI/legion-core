@@ -46,8 +46,8 @@ legion-delegate apply --run <RUN_ID> --repo .
 # Delegate a scoped task to Cursor Agent headless
 legion-cursor run --task "try the same fix with Cursor Agent; minimal edit" --repo .
 
-# Cross-model second opinion on a branch
-legion-delegate review --archetype second-opinion-review --base main --repo .
+# Structured Codex review of an immutable base/head pair
+legion-delegate review --archetype security-review --base main --head HEAD --repo .
 ```
 
 Requires the CLI for each executor you use, plus `jq` and `git`. The proxy
@@ -135,6 +135,8 @@ legion-router/
 - `danger-full-access` is hard-blocked unless `LEGION_ALLOW_DANGER=1`.
 - Task text is scanned for dangerous/injection patterns before write runs (`LEGION_ALLOW_UNSAFE=1` to override).
 - Delegation never auto-applies a diff unless `--apply` is given and the diff applies cleanly.
+- Reviews resolve `--base`/`--head` once to commit SHAs, retry transient
+  executor failures at most twice by default, and write a durable terminal receipt.
 - Every executor receives `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`,
   `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized repository policy uses that
   context to prevent accidental recursive delegation.

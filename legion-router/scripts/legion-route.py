@@ -56,6 +56,51 @@ def resolve_primary(env=None):
     return "claude"
 
 
+def executor_family(name):
+    """Collapse executor variants to the harness family that owns the process."""
+    normalized = str(name or "").strip().lower()
+    if normalized == "self":
+        return "self"
+    for family in ("codex", "claude", "cursor", "opencode", "hermes"):
+        if normalized.startswith(family):
+            return family
+    return normalized
+
+
+def delegated_context(env=None):
+    """Whether Legion is already running inside a delegated executor."""
+    env = os.environ if env is None else env
+    if env.get("LEGION_ACTIVE") == "1" or env.get("LEGION_EXECUTOR") == "1":
+        return True
+    try:
+        return int(env.get("LEGION_DEPTH", "0")) > 0
+    except ValueError:
+        return False
+
+
+def preflight(route, primary, env=None):
+    """Return a recursion-aware route without changing configured policy."""
+    out = copy.deepcopy(route)
+    target = str(out.get("executor") or "")
+    primary_family = executor_family(primary)
+    target_family = executor_family(target)
+    if target == "self":
+        action, reason = "inline", "inline-self-route"
+    elif delegated_context(env):
+        action, reason = "inline", "delegated-context-route"
+    else:
+        action, reason = "delegate", "delegated-route"
+    out["effective_executor"] = "self" if action == "inline" else target
+    out["preflight"] = {
+        "action": action,
+        "reason": reason,
+        "primary": primary_family,
+        "target_executor": target,
+        "target_family": target_family,
+    }
+    return out
+
+
 def load_executors(path=None):
     execs_path = path or os.environ.get("LEGION_EXECUTORS_FILE", _DEFAULT_EXECUTORS_FILE)
     table = load_table(execs_path)
@@ -252,6 +297,11 @@ def main(argv=None):
     ap.add_argument("--list-models", action="store_true")
     ap.add_argument("--model-ref")
     ap.add_argument("--primary", action="store_true", help="print the resolved primary harness and exit")
+    ap.add_argument(
+        "--preflight",
+        action="store_true",
+        help="add caller-aware effective_executor/preflight fields",
+    )
     ap.add_argument("--executors-file", default=os.environ.get("LEGION_EXECUTORS_FILE", _DEFAULT_EXECUTORS_FILE))
     ap.add_argument("--executor-info", metavar="NAME", help="print the registry entry for one executor as JSON")
     ap.add_argument("--list-executors", action="store_true")
@@ -288,7 +338,10 @@ def main(argv=None):
         sys.stderr.write("legion-route: archetype required (or --list)\n")
         return 2
     try:
-        print(json.dumps(resolve(table, archetype, models)))
+        route = resolve(table, archetype, models)
+        if a.preflight:
+            route = preflight(route, resolve_primary())
+        print(json.dumps(route))
     except RouteConfigError as e:
         sys.stderr.write(f"legion-route: {e}\n")
         return 2

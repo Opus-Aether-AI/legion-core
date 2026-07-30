@@ -38,12 +38,26 @@ Legion implements that protocol locally:
 - `legion-optimize` accepted routing advice
 - `legion-bench --record-failures` benchmark misses
 - Session feedback mined by `legion-session-learn --record`, including explicit
-  user corrections from Claude/Codex/Cursor logs
+  user corrections from Claude/Codex/Cursor logs. The default scan is bounded,
+  excludes catalogs/tool results/subagents/benchmark-marked sources, deduplicates
+  equivalent messages, and records only evidence counts and hashes.
 - Manual bug records from:
 
 ```bash
 legion-self-learn record --entity TYPE:NAME --summary "..."
 ```
+
+For a repository-specific audit:
+
+```bash
+legion-session-learn --repo . --harness codex --role user --query "wrong source" --json
+legion-session-learn --repo . --query "review was interrupted" --show-evidence
+```
+
+`--repo` uses session cwd and Git remote provenance rather than searching
+transcript text for a project name. System/developer messages and tool results
+are excluded unless explicitly selected. `--show-evidence` displays redacted
+snippets and home-relative paths; durable outcomes remain transcript-free.
 
 ## What It Improves
 
@@ -68,7 +82,7 @@ Otherwise Legion falls back to catalog token matching and manual records.
 When enabled at install time, the `legion-core-refresh` cron runs:
 
 ```bash
-legion-session-learn --record
+legion-session-learn --repo ~/.agents/sources/legion-core --record
 legion-self-learn run --repo ~/.agents/sources/legion-core --apply-memory --quiet
 ```
 
@@ -85,6 +99,11 @@ The default cron run scans all available spans and manual records so bugs record
 after yesterday's cron are still ingested. Passing `--day YYYY-MM-DD` keeps an
 exact UTC-day report window for reproducible audits and tests. Durable memory
 preserves unresolved hints until a kept source experiment resolves them.
+
+The preceding session-learning step is separately bounded to the newest 100
+eligible sources. Set `LEGION_SESSION_LEARN=0` to disable it; run
+`legion-session-learn --session-limit 0` manually only for an intentional
+unbounded audit.
 
 `experiments.tsv` is the daily scorecard and experiment ledger:
 

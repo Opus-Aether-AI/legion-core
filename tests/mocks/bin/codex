@@ -4,6 +4,11 @@
 # Behaviour controls (env):
 #   MOCK_CALL_LOG   append "codex <args>" for assertions
 #   MOCK_CODEX_FAIL =1 -> emit a thread.started then exit 3 (failure path)
+#   MOCK_CODEX_REVIEW_TRANSIENT_FAILS=N -> fail the first N review attempts
+#   MOCK_CODEX_REVIEW_ATTEMPT_FILE=PATH -> persistent counter for transient failures
+#   MOCK_CODEX_REVIEW_NO_VERDICT=1 -> review exits 0 without writing its verdict
+#   MOCK_CODEX_REVIEW_INVALID_VERDICT=1 -> write a malformed review verdict
+#   MOCK_CODEX_REVIEW_DELAY=N -> keep a review alive for signal-handling tests
 #
 # Emits the codex-cli 0.139.x --json event shape. For `exec` with a writable
 # sandbox it creates a real file change in the -C worktree so `git diff` is
@@ -29,6 +34,24 @@ while [[ $i -lt ${#args[@]} ]]; do
   i=$((i+1))
 done
 
+if [[ $review -eq 1 && "${MOCK_CODEX_REVIEW_TRANSIENT_FAILS:-0}" =~ ^[0-9]+$ ]] &&
+   [[ "${MOCK_CODEX_REVIEW_TRANSIENT_FAILS:-0}" -gt 0 ]]; then
+  review_counter="${MOCK_CODEX_REVIEW_ATTEMPT_FILE:-${TMPDIR:-/tmp}/mock-codex-review-attempts}"
+  review_attempt=0
+  [[ -f "$review_counter" ]] && read -r review_attempt < "$review_counter"
+  review_attempt=$((review_attempt + 1))
+  printf '%s\n' "$review_attempt" > "$review_counter"
+  if [[ "$review_attempt" -le "$MOCK_CODEX_REVIEW_TRANSIENT_FAILS" ]]; then
+    printf '%s\n' '{"type":"thread.started","thread_id":"mock-transient"}'
+    printf 'mock codex review timed out\n' >&2
+    exit 124
+  fi
+fi
+
+if [[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_DELAY:-}" ]]; then
+  sleep "$MOCK_CODEX_REVIEW_DELAY"
+fi
+
 if [[ "${MOCK_CODEX_FAIL:-}" == "1" ]]; then
   printf '%s\n' '{"type":"thread.started","thread_id":"mock-fail"}'
   printf 'mock codex forced failure\n' >&2
@@ -49,8 +72,12 @@ printf '%s\n' '{"type":"thread.started","thread_id":"'"$thread_id"'"}'
 printf '%s\n' '{"type":"turn.started"}'
 
 if [[ $review -eq 1 ]]; then
-  msg='{"verdict":"approve","summary":"mock review","findings":[]}'
-  printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"verdict\":\"approve\",\"summary\":\"mock review\",\"findings\":[]}"}}'
+  if [[ "${MOCK_CODEX_REVIEW_INVALID_VERDICT:-}" == "1" ]]; then
+    msg='{"summary":"mock review without a verdict","findings":[]}'
+  else
+    msg='{"verdict":"approve","summary":"mock review","findings":[]}'
+  fi
+  printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"'"$(printf '%s' "$msg" | sed 's/"/\\"/g')"'"}}'
 else
   msg="Mock codex ($model) completed the task."
   # resume passes no -s (sandbox default read-only) but still edits the worktree.
@@ -66,5 +93,9 @@ else
 fi
 
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":10}}'
-[[ -n "$out_file" ]] && printf '%s\n' "$msg" > "$out_file"
+if [[ -n "$out_file" ]]; then
+  if [[ $review -ne 1 || "${MOCK_CODEX_REVIEW_NO_VERDICT:-}" != "1" ]]; then
+    printf '%s\n' "$msg" > "$out_file"
+  fi
+fi
 exit 0

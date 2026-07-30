@@ -19,6 +19,9 @@ source "$_self_dir/lib/model-config.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/executor-context.sh
 source "$_self_dir/lib/executor-context.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/task-scan.sh
+source "$_self_dir/lib/task-scan.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -60,14 +63,7 @@ validate_sandbox() {
 }
 
 scan_task_text() {
-  local text="$1"
-  [[ "${LEGION_ALLOW_UNSAFE:-0}" == "1" ]] && return 0
-  local norm
-  norm="$(printf '%s' "$text" | tr -s '[:space:]' ' ')"
-  local patterns='rm -rf|rm -fr|rm -[a-z]*r[a-z]* /|git push|--force|force[ -]push|:\(\)\{|/etc/(passwd|shadow)|\.ssh|id_rsa|\.aws/|\.netrc|AWS_SECRET|ANTHROPIC_API_KEY|OPENAI_API_KEY|(curl|wget|fetch)[^|]*\|[[:space:]]*(ba)?sh|(^| )nc |(^| )ncat( |$)|/dev/tcp|DROP TABLE|(^| )sudo( |$)'
-  if printf '%s' "$norm" | grep -qiE "$patterns"; then
-    die "task text matched a dangerous/injection pattern; refusing write delegation. Review the task, or set LEGION_ALLOW_UNSAFE=1 to override."
-  fi
+  legion_scan_task_text "$1"
 }
 
 emit_span() {

@@ -8,6 +8,7 @@ setup() {
     setup_test_env
     LIB="$REPO_ROOT/legion-router/scripts/lib"
     DELEGATE="$REPO_ROOT/legion-router/scripts/delegate.sh"
+    TASK_SCAN_FIXTURE="$BATS_TEST_DIRNAME/fixtures/dangerous-task-cases.json"
     SHARE="$REPO_ROOT/legion-observability/bin/legion-share"
     FIXTURE="$BATS_TEST_DIRNAME/fixtures/codex-json/turn-with-diff.jsonl"
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
@@ -394,6 +395,36 @@ $run_error" ]
     [[ "$output" == *"dangerous"* || "$output" == *"injection"* ]]
 }
 
+@test "task scanner: boundary fixtures allow embedded text and classify actual commands" {
+    local task reason expected i count
+    count="$(jq '.allow | length' "$TASK_SCAN_FIXTURE")"
+    for ((i = 0; i < count; i++)); do
+        task="$(jq -r --argjson i "$i" '.allow[$i]' "$TASK_SCAN_FIXTURE")"
+        run bash -c "source '$LIB/task-scan.sh'; legion_task_danger_reason \"\$1\"" _ "$task"
+        [ "$status" -eq 1 ]
+        [ -z "$output" ]
+    done
+
+    count="$(jq '.block | length' "$TASK_SCAN_FIXTURE")"
+    for ((i = 0; i < count; i++)); do
+        task="$(jq -r --argjson i "$i" '.block[$i].task' "$TASK_SCAN_FIXTURE")"
+        expected="$(jq -r --argjson i "$i" '.block[$i].reason' "$TASK_SCAN_FIXTURE")"
+        run bash -c "source '$LIB/task-scan.sh'; legion_task_danger_reason \"\$1\"" _ "$task"
+        [ "$status" -eq 0 ]
+        [ "$output" = "$expected" ]
+    done
+}
+
+@test "delegate run: benign words containing command substrings reach the executor" {
+    local repo; repo="$(make_test_repo scanner-boundary)"
+    run "$DELEGATE" run --model test-model-beta \
+      --task "Fix the truncated sync response with pseudocode and a backdrop table." \
+      --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+    assert_mock_called codex "exec --json"
+}
+
 @test "delegate run: codex failure -> status failed, exit 1" {
     local repo; repo="$(make_test_repo run6)"
     MOCK_CODEX_FAIL=1 run "$DELEGATE" run --model test-model-beta --task "x" --repo "$repo" --quiet
@@ -414,10 +445,167 @@ $run_error" ]
 # ── review / cleanup ─────────────────────────────────────────────────
 @test "delegate review: returns a verdict + emits span" {
     local repo; repo="$(make_test_repo rev1)"
-    run "$DELEGATE" review --model test-model-beta --base main --repo "$repo" --quiet
+    local base_sha; base_sha="$(git -C "$repo" rev-parse HEAD)"
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
-    assert_mock_called codex "exec review --base main"
+    echo "$output" | jq -e --arg sha "$base_sha" '
+      .reviewed_base_sha == $sha and .reviewed_head_sha == $sha
+      and .attempts == 1 and .max_attempts == 2
+    '
+    assert_mock_called codex "exec review --base $base_sha"
+}
+
+@test "delegate review: freezes base/head SHAs and writes a durable terminal receipt" {
+    local repo; repo="$(make_test_repo review-snapshot)"
+    local base_sha head_sha
+    base_sha="$(git -C "$repo" rev-parse HEAD)"
+    printf 'export const added = true\n' >> "$repo/foo.ts"
+    git -C "$repo" add foo.ts
+    git -C "$repo" commit -qm "add review target"
+    head_sha="$(git -C "$repo" rev-parse HEAD)"
+
+    run "$DELEGATE" review --model test-model-beta --base "$base_sha" --head HEAD \
+      --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    local receipt patch run_id
+    receipt="$(echo "$output" | jq -r .terminal_receipt)"
+    patch="$(echo "$output" | jq -r .review_patch)"
+    run_id="$(echo "$output" | jq -r .run_id)"
+    echo "$output" | jq -e --arg base "$base_sha" --arg head "$head_sha" '
+      .status == "ok" and .reason == "completed"
+      and .reviewed_base_sha == $base and .reviewed_head_sha == $head
+      and .attempts == 1 and .verdict.verdict == "approve"
+    '
+    jq -e --arg base "$base_sha" --arg head "$head_sha" --arg patch "$patch" '
+      .schema == "legion.review-terminal.v1"
+      and .status == "ok" and .reason == "completed"
+      and .reviewed_base_sha == $base and .reviewed_head_sha == $head
+      and .review_patch == $patch and .attempts == 1
+      and (.completed_at | length > 0)
+    ' "$receipt"
+    grep -q "export const added = true" "$patch"
+    [ ! -d "$repo/.legion/worktrees/$run_id" ]
+    assert_mock_called codex "exec review --base $base_sha"
+}
+
+@test "delegate review: retries one transient failure with the same immutable SHAs" {
+    local repo; repo="$(make_test_repo review-retry)"
+    local base_sha; base_sha="$(git -C "$repo" rev-parse HEAD)"
+    export MOCK_CODEX_REVIEW_TRANSIENT_FAILS=1
+    export MOCK_CODEX_REVIEW_ATTEMPT_FILE="$TEST_TMPDIR/review-attempts"
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e --arg base "$base_sha" '
+      .status == "ok" and .attempts == 2 and .max_attempts == 2
+      and .reviewed_base_sha == $base and .reviewed_head_sha == $base
+    '
+    [ "$(grep -Fc "codex exec review --base $base_sha" "$MOCK_CALL_LOG")" -eq 2 ]
+    jq -e '.status == "ok" and .attempts == 2 and .max_attempts == 2' \
+      "$(echo "$output" | jq -r .terminal_receipt)"
+}
+
+@test "delegate review: configurable retry bound stops after one transient attempt" {
+    local repo; repo="$(make_test_repo review-retry-bound)"
+    export MOCK_CODEX_REVIEW_TRANSIENT_FAILS=2
+    export MOCK_CODEX_REVIEW_ATTEMPT_FILE="$TEST_TMPDIR/review-bound-attempts"
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD \
+      --max-attempts 1 --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "transient-exhausted"
+      and .attempts == 1 and .max_attempts == 1
+    '
+    [ "$(grep -Fc "codex exec review" "$MOCK_CALL_LOG")" -eq 1 ]
+}
+
+@test "delegate review: fails closed on a missing verdict without retrying" {
+    local repo; repo="$(make_test_repo review-missing)"
+    export MOCK_CODEX_REVIEW_NO_VERDICT=1
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD \
+      --max-attempts 2 --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "missing-verdict"
+      and .attempts == 1 and .verdict == null
+    '
+    [ "$(grep -Fc "codex exec review" "$MOCK_CALL_LOG")" -eq 1 ]
+    jq -e '
+      .status == "failed" and .reason == "missing-verdict"
+      and .attempts == 1 and .verdict_path == null
+    ' "$(echo "$output" | jq -r .terminal_receipt)"
+}
+
+@test "delegate review: does not retry a non-transient executor failure" {
+    local repo; repo="$(make_test_repo review-failure)"
+    export MOCK_CODEX_FAIL=1
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD \
+      --max-attempts 2 --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "review-failed" and .attempts == 1
+    '
+    [ "$(grep -Fc "codex exec review" "$MOCK_CALL_LOG")" -eq 1 ]
+}
+
+@test "delegate review: rejects an invalid retry bound before launching" {
+    local repo; repo="$(make_test_repo review-bound)"
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD \
+      --max-attempts 0 --repo "$repo" --quiet
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--max-attempts must be a positive integer"* ]]
+    assert_mock_not_called codex
+}
+
+@test "delegate review: interruption writes a terminal receipt and cleans its snapshot" {
+    local repo; repo="$(make_test_repo review-interrupt)"
+    export MOCK_CODEX_REVIEW_DELAY=30
+    local stdout="$TEST_TMPDIR/review-interrupt.out"
+    local stderr="$TEST_TMPDIR/review-interrupt.err"
+
+    "$DELEGATE" review --model test-model-beta --base HEAD \
+      --repo "$repo" --quiet >"$stdout" 2>"$stderr" &
+    local review_pid=$!
+    local launched=0
+    for _ in {1..100}; do
+      if grep -qF "codex exec review" "$MOCK_CALL_LOG"; then
+        launched=1
+        break
+      fi
+      sleep 0.02
+    done
+    [ "$launched" -eq 1 ]
+
+    kill -TERM "$review_pid"
+    set +e
+    wait "$review_pid"
+    local review_rc=$?
+    set -e
+
+    [ "$review_rc" -eq 143 ]
+    local receipt
+    receipt="$(find "$repo/.legion/runs" -name terminal.json -print -quit)"
+    [ -n "$receipt" ]
+    jq -e '
+      .schema == "legion.review-terminal.v1"
+      and .status == "failed" and .reason == "interrupted"
+      and .codex_exit == 143 and .attempts == 1
+      and (.reviewed_base_sha | length == 40)
+      and (.reviewed_head_sha | length == 40)
+      and (.completed_at | length > 0)
+    ' "$receipt"
+    [ "$(find "$repo/.legion/worktrees" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
 }
 
 @test "delegate run: auto-cleans the worktree but preserves the diff (no --keep)" {
@@ -497,7 +685,55 @@ $run_error" ]
   local repo; repo="$(make_test_repo arch3)"
   run "$DELEGATE" run --archetype deep-reasoning --task x --repo "$repo" --quiet
   [ "$status" -eq 2 ]
-  [[ "$output" == *"executor=self"* ]]
+  echo "$output" | jq -e '.schema == "legion.route-preflight.v1"
+    and .status == "blocked"
+    and .reason == "inline-self-route"
+    and .executor == "self"'
+  assert_mock_not_called codex
+}
+
+@test "delegate run: top-level same-family Codex subagent is allowed" {
+  local repo; repo="$(make_test_repo caller-codex)"
+  LEGION_PRIMARY=codex run "$DELEGATE" run --model test-model-beta \
+    --task x --repo "$repo" --quiet
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "ok" and .model == "test-model-beta"'
+  assert_mock_called codex "exec --json -m test-model-beta"
+}
+
+@test "delegate run: delegated executor context blocks nested Legion with telemetry" {
+  local repo; repo="$(make_test_repo nested-codex)"
+  LEGION_PRIMARY=codex LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=1 \
+    run "$DELEGATE" run --model test-model-beta --task x --repo "$repo" --quiet
+  [ "$status" -eq 2 ]
+  echo "$output" | jq -e '.schema == "legion.route-preflight.v1"
+    and .status == "blocked"
+    and .reason == "nested-delegation"
+    and .primary == "codex"
+    and .executor == "codex"
+    and (.receipt | endswith("/route-preflight.json"))'
+  local receipt; receipt="$(echo "$output" | jq -r .receipt)"
+  jq -e '.reason == "nested-delegation" and .primary == "codex"' "$receipt"
+  run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec \
+    'select(.executor==\"legion-route\" and .status==\"blocked\")
+     | .artifacts.reason == \"nested-delegation\"
+       and .artifacts.primary == \"codex\"
+       and .artifacts.target_executor == \"codex\"'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+  assert_mock_not_called codex
+}
+
+@test "delegate run: delegated executor cannot pivot into nested Claude delegation" {
+  local repo; repo="$(make_test_repo caller-claude)"
+  LEGION_PRIMARY=codex LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=2 \
+    run "$DELEGATE" run --archetype frontend-polish --task x --repo "$repo" --quiet
+  [ "$status" -eq 2 ]
+  echo "$output" | jq -e '.reason == "nested-delegation"
+    and .primary == "codex"
+    and .executor == "claude"
+    and .archetype == "frontend-polish"'
+  assert_mock_not_called claude
 }
 
 @test "delegate review: --archetype gives configured reviewer + structured verdict via --output-schema" {
@@ -506,10 +742,11 @@ $run_error" ]
   # Cross-lineage archetypes (second-opinion/tiebreak)
   # route to Cursor and run via `--executor cursor`, not this codex path.
   local repo; repo="$(make_test_repo arch4)"
-  run "$DELEGATE" review --archetype security-review --base main --repo "$repo" --quiet
+  local base_sha; base_sha="$(git -C "$repo" rev-parse HEAD)"
+  run "$DELEGATE" review --archetype security-review --base HEAD --repo "$repo" --quiet
   [ "$status" -eq 0 ]
   echo "$output" | jq -e --arg model "$CODEX_REVIEW" '.model == $model and .verdict.verdict == "approve" and (.verdict.summary | type == "string")'
-  assert_mock_called codex "exec review --base main -m $CODEX_REVIEW"
+  assert_mock_called codex "exec review --base $base_sha -m $CODEX_REVIEW"
   assert_mock_called codex "output-schema"
 }
 
@@ -605,7 +842,7 @@ $run_error" ]
 
 @test "delegate review: passes a clean reasoning effort (no 5-field pipe leak)" {
     local repo; repo="$(make_test_repo rev5)"
-    run "$DELEGATE" review --archetype security-review --base main --repo "$repo" --quiet
+    run "$DELEGATE" review --archetype security-review --base HEAD --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     assert_mock_called codex "model_reasoning_effort=max"
     ! grep -qE 'model_reasoning_effort=[a-z]+\|' "$MOCK_CALL_LOG"

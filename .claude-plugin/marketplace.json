@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic core/stable harness benchmarks plus A/B corpus runs with repeated-run flake detection, legion-catalog marketplace inventory, legion-self-learn daily failure mining + command/agent/skill improvement memory/proposals, legion-trace, legion-otel-export, and legion-doctor install verification.",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -64,7 +64,7 @@
       "name": "legion-orchestrate",
       "source": "./legion-orchestrate",
       "description": "Legion's dynamic multi-model orchestrator: the active primary decomposes work, configured executor roles fan out scoped slices, independent roles cross-verify, and the primary synthesizes and gates. Ships `legion-fanout` plus the LEGION_ULTRACODE max-exhaustive workflow.",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "category": "agent-orchestration",
       "keywords": [
         "orchestration",

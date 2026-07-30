@@ -11,7 +11,7 @@
 # Commands:
 #   run     --model M [--sandbox S] [--task T | stdin] [--repo DIR] [--base REF]
 #           [--budget-tokens N] [--scope PATHSPEC] [--detach] [--apply] [--quiet]
-#   review  --model M --base BRANCH [--repo DIR]
+#   review  --model M --base REF [--head REF] [--max-attempts N] [--repo DIR]
 #   apply   --run RUN_ID [--repo DIR]          # apply a captured diff to the repo
 #   status  --run RUN_ID [--repo DIR]
 #   cleanup [--run RUN_ID | --all] [--repo DIR]
@@ -41,6 +41,9 @@ source "$_self_dir/lib/model-config.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/executor-context.sh
 source "$_self_dir/lib/executor-context.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/task-scan.sh
+source "$_self_dir/lib/task-scan.sh"
 
 # shellcheck disable=SC1091
 # shellcheck source=lib/primary.sh
@@ -101,14 +104,51 @@ trap 'cleanup_sandbox_dev_on_exit; cleanup_worktree_on_exit' EXIT
 # stream.jsonl still growing). Best-effort: TERM the tracked child plus any codex
 # grandchild (review/resume wrap it in a `( cd … && codex )` subshell).
 CODEX_CHILD_PID=""
+REVIEW_RECEIPT_PATH=""
+REVIEW_RECEIPT_RUN_ID=""
+REVIEW_RECEIPT_MODEL=""
+REVIEW_RECEIPT_ARCHETYPE=""
+REVIEW_RECEIPT_BASE_SHA=""
+REVIEW_RECEIPT_HEAD_SHA=""
+REVIEW_RECEIPT_PATCH=""
+REVIEW_RECEIPT_ATTEMPT=0
+REVIEW_RECEIPT_MAX_ATTEMPTS=0
 kill_codex_child() {
   local pid="${CODEX_CHILD_PID:-}"
   [[ -n "$pid" ]] || return 0
-  pkill -TERM -P "$pid" 2>/dev/null || true
+  terminate_process_tree "$pid"
+}
+terminate_process_tree() {
+  local pid="$1" child
+  while IFS= read -r child; do
+    [[ -n "$child" ]] && terminate_process_tree "$child"
+  done < <(pgrep -P "$pid" 2>/dev/null || true)
   kill -TERM "$pid" 2>/dev/null || true
+}
+write_interrupted_review_receipt() {
+  [[ -n "$REVIEW_RECEIPT_PATH" ]] || return 0
+  mkdir -p "$(dirname "$REVIEW_RECEIPT_PATH")"
+  jq -cn \
+    --arg schema "legion.review-terminal.v1" --arg run "$REVIEW_RECEIPT_RUN_ID" \
+    --arg status "failed" --arg reason "interrupted" \
+    --arg model "$REVIEW_RECEIPT_MODEL" --arg archetype "$REVIEW_RECEIPT_ARCHETYPE" \
+    --arg base "$REVIEW_RECEIPT_BASE_SHA" --arg head "$REVIEW_RECEIPT_HEAD_SHA" \
+    --arg patch "$REVIEW_RECEIPT_PATCH" --arg completed "$(_now)" \
+    --argjson attempts "$REVIEW_RECEIPT_ATTEMPT" \
+    --argjson max_attempts "$REVIEW_RECEIPT_MAX_ATTEMPTS" '
+    {schema:$schema, run_id:$run, status:$status, reason:$reason,
+     executor:"codex-review", model:$model,
+     archetype:(if $archetype=="" then null else $archetype end),
+     reviewed_base_sha:$base, reviewed_head_sha:$head,
+     review_patch:$patch, verdict_path:null,
+     attempts:$attempts, max_attempts:$max_attempts, codex_exit:143,
+     completed_at:$completed}' \
+    > "$REVIEW_RECEIPT_PATH.tmp.$$" 2>/dev/null &&
+    mv -f "$REVIEW_RECEIPT_PATH.tmp.$$" "$REVIEW_RECEIPT_PATH" 2>/dev/null || true
 }
 on_terminating_signal() {
   kill_codex_child
+  write_interrupted_review_receipt
   exit 143   # 128 + SIGTERM; EXIT trap still runs (sandbox teardown)
 }
 trap on_terminating_signal INT TERM HUP
@@ -246,18 +286,7 @@ validate_sandbox() {
 # codex sandbox (read-only / workspace-write, danger hard-blocked). Whitespace is
 # normalized first so "rm  -rf" / "rm -fr" can't trivially slip the pattern.
 scan_task_text() {
-  local text="$1"
-  [[ "${LEGION_ALLOW_UNSAFE:-0}" == "1" ]] && return 0
-  local norm
-  norm="$(printf '%s' "$text" | tr -s '[:space:]' ' ')"
-  # Command-shaped tokens are anchored to a word boundary. Unanchored they fire on ordinary
-  # English: `ncat` matches "truncated", `nc ` matches "sync with", `sudo` matches "pseudo" —
-  # each silently refusing a legitimate task spec. Text is space-normalized above, so
-  # `(^| )` … `( |$)` is a sufficient and portable boundary.
-  local patterns='rm -rf|rm -fr|rm -[a-z]*r[a-z]* /|git push|--force|force[ -]push|:\(\)\{|/etc/(passwd|shadow)|\.ssh|id_rsa|\.aws/|\.netrc|AWS_SECRET|ANTHROPIC_API_KEY|OPENAI_API_KEY|(curl|wget|fetch)[^|]*\|[[:space:]]*(ba)?sh|(^| )nc |(^| )ncat( |$)|/dev/tcp|DROP TABLE|(^| )sudo( |$)'
-  if printf '%s' "$norm" | grep -qiE "$patterns"; then
-    die "task text matched a dangerous/injection pattern; refusing write delegation. Review the task, or set LEGION_ALLOW_UNSAFE=1 to override."
-  fi
+  legion_scan_task_text "$1"
 }
 
 # ── Telemetry + metering ─────────────────────────────────────────────
@@ -342,6 +371,58 @@ emit_span() {
      target_name:(if $target_name=="" then null else $target_name end),
      duration_ms:$dur, cost_usd:$cost, tokens:$usage, artifacts:$artifacts}' \
     >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
+}
+
+legion_delegated_context() {
+  local depth="${LEGION_DEPTH:-0}"
+  [[ "${LEGION_ACTIVE:-0}" == "1" || "${LEGION_EXECUTOR:-0}" == "1" ]] && return 0
+  [[ "$depth" =~ ^[0-9]+$ && "$depth" -gt 0 ]]
+}
+
+# Refuse literal self routes and nested Legion calls made from an executor that
+# was already delegated by Legion. Top-level same-harness subagents remain valid;
+# executor context, rather than harness family, is the recursion boundary.
+route_preflight() {
+  local target_executor="${1:-codex}" target_model="${2:-}" route_task="${3:-}"
+  local route_archetype="${4:-}" primary reason="" art receipt payload artifacts
+  primary="$(legion_primary)"
+  if [[ "$target_executor" == "self" ]]; then
+    reason="inline-self-route"
+  elif legion_delegated_context; then
+    reason="nested-delegation"
+  else
+    return 0
+  fi
+
+  art="$repo/.legion/runs/$RUN_ID"
+  receipt="$art/route-preflight.json"
+  mkdir -p "$art"
+  printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+  payload="$(jq -cn \
+    --arg schema "legion.route-preflight.v1" --arg run "$RUN_ID" \
+    --arg status "blocked" --arg reason "$reason" --arg primary "$primary" \
+    --arg executor "$target_executor" --arg model "$target_model" \
+    --arg archetype "$route_archetype" --arg receipt "$receipt" '
+    {schema:$schema, run_id:$run, status:$status, reason:$reason,
+     primary:$primary, executor:$executor,
+     model:(if $model=="" then null else $model end),
+     archetype:(if $archetype=="" then null else $archetype end),
+     receipt:$receipt,
+     message:(if $reason=="inline-self-route"
+              then "executor=self is inline work for the active primary"
+              else "Legion is already inside a delegated executor; implement directly instead of nesting Legion"
+              end)}')"
+  printf '%s\n' "$payload" > "$receipt.tmp.$$"
+  mv -f "$receipt.tmp.$$" "$receipt"
+  artifacts="$(jq -cn --arg receipt "$receipt" --arg reason "$reason" \
+    --arg primary "$primary" --arg executor "$target_executor" \
+    --arg model "$target_model" '
+    {preflight_receipt:$receipt, reason:$reason, primary:$primary,
+     target_executor:$executor,
+     target_model:(if $model=="" then null else $model end)}')"
+  emit_span "legion-route" "${target_model:-unresolved}" "blocked" 0 0 '{}' "$route_task" "$artifacts"
+  printf '%s\n' "$payload"
+  return 2
 }
 
 # write/update the per-run state record (legion.run-state.v1) — the Console + handoff
@@ -663,12 +744,15 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"        # read from stdin if not given
   [[ -n "$task" ]] || die "run: empty task"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
+  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
+  RUN_ID="${preset_run_id:-$(_run_id)}"
+  route_preflight "${r_exec:-codex}" "$model" "$task" "$archetype" || return $?
   # Dispatch by executor. `self` is the primary's own inline work (never delegated);
   # codex (or an unclassified task) uses the native codex path below; any other
   # registered coding executor runs through its adapter.
   case "$r_exec" in
     self)
-      die "executor=self — the primary harness ($(legion_primary)) does this inline, not via legion-delegate. (use --executor <name> to force a specific harness)" ;;
+      die "internal error: executor=self passed route preflight" ;;
     ""|codex) : ;;
     *)
       [[ "$detach" -eq 0 && "$detached_worker" -eq 0 ]] || \
@@ -679,13 +763,11 @@ cmd_run() {
   esac
   [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
   [[ -n "$model" ]] || die "run: --model or --archetype required"
-  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
 
   if [[ "$detach" -eq 1 ]] && ! command -v setsid >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
     die "run: --detach requires setsid or python3"
   fi
 
-  RUN_ID="${preset_run_id:-$(_run_id)}"
   local wt="$repo/.legion/worktrees/$RUN_ID"
   local art="$repo/.legion/runs/$RUN_ID"
   local branch="legion/delegate-$RUN_ID"
@@ -911,15 +993,74 @@ cmd_run() {
 }
 
 # ── review (second opinion / cross-model) ────────────────────────────
+is_review_transient_failure() {
+  local exit_code="$1" err_file="$2"
+  case "$exit_code" in 124|130|137|143) return 0 ;; esac
+  [[ -f "$err_file" ]] && grep -qiE \
+    'rate.?limit|quota|429|overloaded|capacity|timed?[ -]?out|timeout|temporar(il)?y unavailable|connection (reset|closed)|broken pipe|interrupted|transport.*(closed|error)' \
+    "$err_file"
+}
+
+review_verdict_is_valid() {
+  local verdict_file="$1"
+  [[ -s "$verdict_file" ]] &&
+    jq -e '
+      (.verdict == "approve" or .verdict == "request_changes" or .verdict == "comment")
+      and (.summary | type == "string")
+      and (.findings | type == "array")
+    ' "$verdict_file" >/dev/null 2>&1
+}
+
+aggregate_review_usage() {
+  local art="$1" attempts="$2" i
+  for ((i = 1; i <= attempts; i++)); do
+    codex_usage "$art/attempt-$i.stream.jsonl"
+  done | jq -sc '
+    reduce .[] as $u
+      ({input_tokens:0,cached_input_tokens:0,output_tokens:0,reasoning_output_tokens:0};
+       .input_tokens += ($u.input_tokens // 0)
+       | .cached_input_tokens += ($u.cached_input_tokens // 0)
+       | .output_tokens += ($u.output_tokens // 0)
+       | .reasoning_output_tokens += ($u.reasoning_output_tokens // 0))
+  '
+}
+
+write_review_terminal_receipt() {
+  local receipt="$1" status="$2" reason="$3" model="$4" archetype="$5"
+  local base_sha="$6" head_sha="$7" patch_path="$8" verdict_path="$9"
+  local attempts="${10}" max_attempts="${11}" exit_code="${12}" error_log="${13}"
+  jq -cn \
+    --arg schema "legion.review-terminal.v1" --arg run "$RUN_ID" \
+    --arg status "$status" --arg reason "$reason" --arg model "$model" \
+    --arg archetype "$archetype" --arg base "$base_sha" --arg head "$head_sha" \
+    --arg patch "$patch_path" --arg verdict "$verdict_path" \
+    --arg error_log "$error_log" --arg completed "$(_now)" \
+    --argjson attempts "$attempts" --argjson max_attempts "$max_attempts" \
+    --argjson exit_code "$exit_code" '
+    {schema:$schema, run_id:$run, status:$status, reason:$reason,
+     executor:"codex-review", model:$model,
+     archetype:(if $archetype=="" then null else $archetype end),
+     reviewed_base_sha:$base, reviewed_head_sha:$head,
+     review_patch:$patch,
+     verdict_path:(if $verdict=="" then null else $verdict end),
+     attempts:$attempts, max_attempts:$max_attempts, codex_exit:$exit_code,
+     error_log:$error_log, completed_at:$completed}' \
+    > "$receipt.tmp.$$"
+  mv -f "$receipt.tmp.$$" "$receipt"
+}
+
 cmd_review() {
-  local model="" base="" repo="$PWD" archetype="" effort=""
+  local model="" base="" head="" repo="$PWD" archetype="" effort=""
+  local max_attempts="${LEGION_REVIEW_MAX_ATTEMPTS:-2}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --model) model="$2"; shift 2 ;;
       --base) base="$2"; shift 2 ;;
+      --head) head="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
       --archetype) archetype="$2"; shift 2 ;;
       --reasoning-effort) effort="$2"; shift 2 ;;
+      --max-attempts) max_attempts="$2"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
       *) die "review: unknown arg '$1'" ;;
     esac
@@ -933,57 +1074,147 @@ cmd_review() {
     [[ -n "$effort" ]] || effort="$r_effort"
   fi
   [[ -n "$model" ]] || model="$(legion_model_ref codex_review)" || die "could not resolve codex_review in models.toml"
-  [[ -n "$effort" ]] || effort="xhigh"   # codex review always at xhigh unless overridden
-  [[ -n "$base" ]] || die "review: --base BRANCH required"
+  [[ -n "$effort" ]] || effort="xhigh"
+  [[ -n "$base" ]] || die "review: --base REF required"
+  [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || die "review: --max-attempts must be a positive integer"
+
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
+  local base_sha head_sha
+  base_sha="$(git -C "$repo" rev-parse --verify "$base^{commit}" 2>/dev/null)" \
+    || die "review: could not resolve --base '$base' to a commit"
+  [[ -n "$head" ]] || head="HEAD"
+  head_sha="$(git -C "$repo" rev-parse --verify "$head^{commit}" 2>/dev/null)" \
+    || die "review: could not resolve --head '$head' to a commit"
+
   RUN_ID="$(_run_id)"
+  route_preflight "codex" "$model" "review --base $base_sha --head $head_sha" "$archetype" || return $?
   legion_activate_executor_context "$RUN_ID"
   local art="$repo/.legion/runs/$RUN_ID"; mkdir -p "$art"
+  local wt="$repo/.legion/worktrees/$RUN_ID"
+  local branch="" sandbox="read-only"
+  local patch_path="$art/review.patch" receipt="$art/terminal.json"
   local verdict_file="$art/verdict.json"
 
-  # `codex exec review` takes NO -C / -s — run inside the repo; --output-schema forces
-  # a structured verdict Opus can reconcile programmatically.
-  local start_ms end_ms dur rc=0
+  git -C "$repo" diff --binary "$base_sha...$head_sha" > "$patch_path" \
+    || die "review: could not capture immutable review patch"
+  note "→ review worktree $wt (head $head_sha, base $base_sha)"
+  git -C "$repo" worktree add -q --detach "$wt" "$head_sha" || die "review: detached worktree add failed"
+  LEGION_WT_PATH="$wt"; LEGION_WT_BRANCH=""; LEGION_WT_REPO="$repo"; LEGION_WT_KEEP=0
+  write_run_state running
+  write_run_artifact_status "$art" "$RUN_ID" "executing" "$wt"
+
+  REVIEW_RECEIPT_PATH="$receipt"
+  REVIEW_RECEIPT_RUN_ID="$RUN_ID"
+  REVIEW_RECEIPT_MODEL="$model"
+  REVIEW_RECEIPT_ARCHETYPE="$archetype"
+  REVIEW_RECEIPT_BASE_SHA="$base_sha"
+  REVIEW_RECEIPT_HEAD_SHA="$head_sha"
+  REVIEW_RECEIPT_PATCH="$patch_path"
+  REVIEW_RECEIPT_ATTEMPT=0
+  REVIEW_RECEIPT_MAX_ATTEMPTS="$max_attempts"
+
+  # `codex exec review` has no task stdin. Each attempt gets immutable inputs and
+  # separate raw artifacts; only the terminal attempt is copied to stable paths.
+  local start_ms end_ms dur rc=0 attempt=0 status="failed" reason="review-failed"
+  local attempt_stream attempt_err attempt_verdict
   start_ms="$(date +%s000)"
-  # </dev/null: `codex exec review` takes no task on stdin, so never let it inherit
-  # (and block on / drain) the wrapper's stdin — a non-tty stdin (nohup, pipe,
-  # `script -q`) otherwise fed it a stray EOF. Backgrounded + waited so a killed
-  # wrapper reaps codex via on_terminating_signal instead of orphaning it.
-  set +e
-  if [[ -n "$effort" ]]; then
-    ( cd "$repo" && "$CODEX_BIN" exec review --base "$base" -m "$model" --json \
-        -c "model_reasoning_effort=$effort" --output-schema "$REVIEW_SCHEMA" \
-        -o "$verdict_file" ) </dev/null >"$art/stream.jsonl" 2>"$art/codex.err" &
-    CODEX_CHILD_PID=$!
-  else
-    ( cd "$repo" && "$CODEX_BIN" exec review --base "$base" -m "$model" --json \
-        --output-schema "$REVIEW_SCHEMA" -o "$verdict_file" ) </dev/null >"$art/stream.jsonl" 2>"$art/codex.err" &
-    CODEX_CHILD_PID=$!
-  fi
-  wait "$CODEX_CHILD_PID"; rc=$?
-  CODEX_CHILD_PID=""
-  set -e
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    REVIEW_RECEIPT_ATTEMPT="$attempt"
+    attempt_stream="$art/attempt-$attempt.stream.jsonl"
+    attempt_err="$art/attempt-$attempt.codex.err"
+    attempt_verdict="$art/attempt-$attempt.verdict.json"
+    rm -f "$attempt_verdict"
+    note "→ codex review attempt $attempt/$max_attempts (base $base_sha, head $head_sha)"
+    set +e
+    if [[ -n "$effort" ]]; then
+      ( cd "$wt" && "$CODEX_BIN" exec review --base "$base_sha" -m "$model" --json \
+          -c "model_reasoning_effort=$effort" --output-schema "$REVIEW_SCHEMA" \
+          -o "$attempt_verdict" ) </dev/null >"$attempt_stream" 2>"$attempt_err" &
+      CODEX_CHILD_PID=$!
+    else
+      ( cd "$wt" && "$CODEX_BIN" exec review --base "$base_sha" -m "$model" --json \
+          --output-schema "$REVIEW_SCHEMA" -o "$attempt_verdict" ) \
+          </dev/null >"$attempt_stream" 2>"$attempt_err" &
+      CODEX_CHILD_PID=$!
+    fi
+    wait "$CODEX_CHILD_PID"; rc=$?
+    CODEX_CHILD_PID=""
+    set -e
+
+    if [[ "$rc" -eq 0 ]]; then
+      if [[ ! -s "$attempt_verdict" ]]; then
+        reason="missing-verdict"
+        break
+      fi
+      if ! review_verdict_is_valid "$attempt_verdict"; then
+        reason="invalid-verdict"
+        break
+      fi
+      status="ok"
+      reason="completed"
+      break
+    fi
+    if is_review_transient_failure "$rc" "$attempt_err"; then
+      reason="transient-exhausted"
+      if [[ "$attempt" -lt "$max_attempts" ]]; then
+        note "⚠ transient review failure (exit $rc); retrying with the same immutable SHAs"
+        continue
+      fi
+    else
+      reason="review-failed"
+    fi
+    break
+  done
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 
-  local verdict usage cost filtered_err error_log status="ok"
+  cp "$attempt_stream" "$art/stream.jsonl"
+  cp "$attempt_err" "$art/codex.err"
+  [[ -s "$attempt_verdict" ]] && cp "$attempt_verdict" "$verdict_file"
+  local usage cost filtered_err error_log verdict_json="null"
+  usage="$(aggregate_review_usage "$art" "$attempt")"
+  cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
   filtered_err="$art/codex.filtered.err"
   filter_codex_stderr "$art/codex.err" "$filtered_err"
   error_log="$(error_log_summary "$art/codex.err" "$filtered_err")"
-  if [[ -s "$verdict_file" ]]; then verdict="$(cat "$verdict_file")"; else verdict="$(codex_last_message "$art/stream.jsonl")"; fi
-  usage="$(codex_usage "$art/stream.jsonl")"
-  cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
-  [[ "$rc" -ne 0 ]] && status="failed"
+  if [[ "$status" == "ok" ]]; then
+    verdict_json="$(cat "$verdict_file")"
+  fi
 
-  emit_span "codex-review" "$model" "$status" "$dur" "$cost" "$usage" "review --base $base" \
-    "$(jq -cn --arg v "$verdict_file" '{verdict:$v}')"
+  write_review_terminal_receipt "$receipt" "$status" "$reason" "$model" "$archetype" \
+    "$base_sha" "$head_sha" "$patch_path" \
+    "$([[ "$status" == "ok" ]] && printf '%s' "$verdict_file")" \
+    "$attempt" "$max_attempts" "$rc" "$error_log"
+  local artifacts
+  artifacts="$(jq -cn --arg receipt "$receipt" --arg verdict "$verdict_file" \
+    --arg patch "$patch_path" --arg base "$base_sha" --arg head "$head_sha" \
+    --arg reason "$reason" --argjson attempts "$attempt" '
+    {terminal_receipt:$receipt, verdict:$verdict, review_patch:$patch,
+     reviewed_base_sha:$base, reviewed_head_sha:$head,
+     reason:$reason, attempts:$attempts}')"
+  emit_span "codex-review" "$model" "$status" "$dur" "$cost" "$usage" \
+    "review --base $base_sha --head $head_sha" "$artifacts"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
+  write_run_state "$status"
+  write_run_artifact_status "$art" "$RUN_ID" \
+    "$([[ "$status" == "ok" ]] && printf completed || printf failed)" \
+    "$wt" "" "$status"
 
-  # Embed the verdict as JSON when it parses (schema-valid), else as a string.
-  local verdict_json
-  if jq -e . <<<"$verdict" >/dev/null 2>&1; then verdict_json="$verdict"; else verdict_json="$(jq -Rn --arg v "$verdict" '$v')"; fi
-  jq -cn --arg status "$status" --arg model "$model" --arg run "$RUN_ID" \
-    --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson verdict "$verdict_json" '
-    {run_id:$run, status:$status, model:$model, verdict:$verdict, error_log:$error_log, usage:$usage, cost_usd:$cost}'
+  git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  LEGION_WT_PATH=""
+  REVIEW_RECEIPT_PATH=""
+
+  jq -cn --arg status "$status" --arg reason "$reason" --arg model "$model" \
+    --arg run "$RUN_ID" --arg receipt "$receipt" --arg patch "$patch_path" \
+    --arg base "$base_sha" --arg head "$head_sha" --arg error_log "$error_log" \
+    --argjson attempts "$attempt" --argjson max_attempts "$max_attempts" \
+    --argjson usage "$usage" --argjson cost "${cost:-0}" \
+    --argjson verdict "$verdict_json" '
+    {run_id:$run, status:$status, reason:$reason, model:$model,
+     reviewed_base_sha:$base, reviewed_head_sha:$head,
+     review_patch:$patch, terminal_receipt:$receipt,
+     attempts:$attempts, max_attempts:$max_attempts,
+     verdict:$verdict, error_log:$error_log, usage:$usage, cost_usd:$cost}'
   [[ "$status" == "ok" ]] || exit 1
 }
 
@@ -1199,8 +1430,9 @@ default; any registered executor via --executor)
            [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
            [--base REF] [--budget-tokens N] [--scope PATHSPEC ...] [--detach] [--apply] [--keep]
            [--no-dirty-warn] [--untrusted]
-  review   [--archetype A | --model M] --base BRANCH [--repo DIR] [--reasoning-effort E]
-           -> structured verdict (codex --output-schema)
+  review   [--archetype A | --model M] --base REF [--head REF] [--max-attempts N]
+           [--repo DIR] [--reasoning-effort E]
+           -> immutable-SHA structured verdict + terminal receipt
   resume   --run RUN_ID [--task T|stdin] [--model M] [--repo DIR] [--reasoning-effort E]
            -> continue a kept codex session (original run needs --keep)
   apply    --run RUN_ID [--repo DIR]

@@ -85,7 +85,9 @@ delegated.
 - Run `legion-observability/bin/legion-doctor` as the local health gate.
 - Run `shellcheck $(git ls-files '*.sh')` for shell changes.
 - CI also runs workflow checks under `.github/workflows/`.
-- Work on a feature branch and open pull requests against `main`.
+- Work on a feature branch and open pull requests against `main`. PR titles and
+  commit subjects must use a configured Conventional Commit type so squash and
+  rebase merges both remain compatible with Release Please.
 
 ## Reference material
 

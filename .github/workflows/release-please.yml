@@ -38,6 +38,25 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
     steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: New main commits are release-compatible
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          range="${BEFORE_SHA}..${AFTER_SHA}"
+          if [[ "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            range="${AFTER_SHA}"
+          fi
+
+          while IFS= read -r title; do
+            scripts/validate-conventional-title.sh "${title}"
+          done < <(git log --format=%s --reverse "${range}")
+
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:

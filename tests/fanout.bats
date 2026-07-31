@@ -265,34 +265,182 @@ SH
 
 @test "state lock keeps 40 contending Bash writers mutually exclusive" {
   local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
-  local root="$BATS_TEST_TMPDIR/lock-stress"
+  local round root record completed guard overlap i
+
+  for ((round = 0; round < 5; round++)); do
+    root="$BATS_TEST_TMPDIR/lock-stress-$round"
+    record="$root/state.json"
+    completed="$root/completed"
+    guard="$root/critical-section"
+    overlap="$root/overlap"
+    mkdir -p "$root"
+    : > "$record"
+    mkdir "$record.lock"
+    printf '99999999\n' > "$record.lock/pid"
+
+    for ((i = 0; i < 40; i++)); do
+      bash -c '
+        source "$1"
+        lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+        if ! mkdir "$3" 2>/dev/null; then
+          : > "$4"
+        fi
+        sleep 0.02
+        rmdir "$3" 2>/dev/null || true
+        printf "%s\n" "$5" >> "$6"
+        legion_release_run_state_lock "$lock"
+      ' _ "$state_lib" "$record" "$guard" "$overlap" "$i" "$completed" &
+    done
+    wait
+
+    [ ! -e "$overlap" ]
+    [ "$(wc -l < "$completed" | tr -d ' ')" = "40" ]
+  done
+}
+
+@test "state lock recovery cannot delete a replacement owner generation" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-recovery-race"
   local record="$root/state.json"
-  local completed="$root/completed"
   local guard="$root/critical-section"
   local overlap="$root/overlap"
-  local i
+  local old_entered="$root/old-entered"
+  local release_old="$root/release-old"
+  local recovery_ready="$root/recovery-ready"
+  local allow_recovery="$root/allow-recovery"
+  local new_entered="$root/new-entered"
+  local release_new="$root/release-new"
+  local reclaimer_entered="$root/reclaimer-entered"
+  local release_reclaimer="$root/release-reclaimer"
+  local old_pid reclaimer_pid new_pid i
   mkdir -p "$root"
   : > "$record"
-  mkdir "$record.lock"
-  printf '99999999\n' > "$record.lock/pid"
 
-  for ((i = 0; i < 40; i++)); do
+  OLD_ENTERED="$old_entered" RELEASE_OLD="$release_old" \
     bash -c '
       source "$1"
       lock="$(legion_acquire_run_state_lock "$2")" || exit 3
-      if ! mkdir "$3" 2>/dev/null; then
-        : > "$4"
-      fi
-      sleep 0.03
-      rmdir "$3" 2>/dev/null || true
-      printf "%s\n" "$5" >> "$6"
+      mkdir "$3" || exit 4
+      : > "$OLD_ENTERED"
+      while [[ ! -e "$RELEASE_OLD" ]]; do sleep 0.005; done
+      rmdir "$3"
       legion_release_run_state_lock "$lock"
-    ' _ "$state_lib" "$record" "$guard" "$overlap" "$i" "$completed" &
-  done
-  wait
+    ' _ "$state_lib" "$record" "$guard" &
+  old_pid=$!
 
+  for ((i = 0; i < 1000; i++)); do
+    [[ -e "$old_entered" ]] && break
+    sleep 0.005
+  done
+  [ -e "$old_entered" ]
+
+  EXPECT_OWNER="$old_pid" RECOVERY_READY="$recovery_ready" \
+    ALLOW_RECOVERY="$allow_recovery" RECLAIMER_ENTERED="$reclaimer_entered" \
+    RELEASE_RECLAIMER="$release_reclaimer" \
+    bash -c '
+      kill() {
+        if [[ "${1:-}" == "-0" && "${2:-}" == "$EXPECT_OWNER" ]]; then
+          : > "$RECOVERY_READY"
+          while [[ ! -e "$ALLOW_RECOVERY" ]]; do sleep 0.005; done
+        fi
+        builtin kill "$@"
+      }
+      source "$1"
+      legion_recover_dead_run_state_lock "$2.lock"
+      lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+      if ! mkdir "$3" 2>/dev/null; then : > "$4"; fi
+      : > "$RECLAIMER_ENTERED"
+      while [[ ! -e "$RELEASE_RECLAIMER" ]]; do sleep 0.005; done
+      rmdir "$3" 2>/dev/null || true
+      legion_release_run_state_lock "$lock"
+    ' _ "$state_lib" "$record" "$guard" "$overlap" &
+  reclaimer_pid=$!
+
+  for ((i = 0; i < 1000; i++)); do
+    [[ -e "$recovery_ready" ]] && break
+    sleep 0.005
+  done
+  [ -e "$recovery_ready" ]
+  : > "$release_old"
+
+  NEW_ENTERED="$new_entered" RELEASE_NEW="$release_new" \
+    bash -c '
+      source "$1"
+      lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+      if ! mkdir "$3" 2>/dev/null; then : > "$4"; fi
+      : > "$NEW_ENTERED"
+      while [[ ! -e "$RELEASE_NEW" ]]; do sleep 0.005; done
+      rmdir "$3" 2>/dev/null || true
+      legion_release_run_state_lock "$lock"
+    ' _ "$state_lib" "$record" "$guard" "$overlap" &
+  new_pid=$!
+
+  for ((i = 0; i < 200; i++)); do
+    [[ -e "$new_entered" ]] && break
+    sleep 0.005
+  done
+  : > "$allow_recovery"
+  for ((i = 0; i < 1000; i++)); do
+    [[ -e "$new_entered" || -e "$reclaimer_entered" ]] && break
+    sleep 0.005
+  done
+  if [[ -e "$new_entered" ]]; then
+    for ((i = 0; i < 100; i++)); do
+      [[ -e "$reclaimer_entered" ]] && break
+      sleep 0.005
+    done
+    : > "$release_new"
+  else
+    for ((i = 0; i < 100; i++)); do
+      [[ -e "$new_entered" ]] && break
+      sleep 0.005
+    done
+    : > "$release_reclaimer"
+  fi
+  for ((i = 0; i < 1000; i++)); do
+    [[ -e "$new_entered" && -e "$reclaimer_entered" ]] && break
+    sleep 0.005
+  done
+  : > "$release_new"
+  : > "$release_reclaimer"
+  wait "$old_pid"
+  wait "$new_pid"
+  wait "$reclaimer_pid"
+
+  [ -e "$new_entered" ]
+  [ -e "$reclaimer_entered" ]
   [ ! -e "$overlap" ]
-  [ "$(wc -l < "$completed" | tr -d ' ')" = "40" ]
+}
+
+@test "state lock recovery fails closed on incomplete and symlinked locks" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-fail-closed"
+  local empty="$root/empty.json.lock"
+  local invalid="$root/invalid.json.lock"
+  local linked="$root/linked.json.lock"
+  local claim_linked="$root/claim-linked.json.lock"
+  local target="$root/target"
+  mkdir -p "$empty" "$invalid" "$claim_linked" "$target"
+  printf 'not-a-pid\n' > "$invalid/pid"
+  printf '99999999\n' > "$claim_linked/pid"
+  ln -s "$target" "$linked"
+  ln -s "$target" "$claim_linked/.claim"
+  source "$state_lib"
+
+  legion_recover_dead_run_state_lock "$empty"
+  legion_recover_dead_run_state_lock "$invalid"
+  legion_recover_dead_run_state_lock "$claim_linked"
+  if legion_acquire_run_state_lock "${linked%.lock}"; then
+    false
+  fi
+
+  [ -d "$empty" ]
+  [ ! -e "$empty/pid" ]
+  [ "$(cat "$invalid/pid")" = "not-a-pid" ]
+  [ -L "$linked" ]
+  [ -L "$claim_linked/.claim" ]
+  [ "$(cat "$claim_linked/pid")" = "99999999" ]
+  [ -z "$(find "$root" -maxdepth 1 -name '.legion-lock-reap.*' -print -quit)" ]
 }
 
 @test "adapter state temp creation does not follow a predictable symlink" {

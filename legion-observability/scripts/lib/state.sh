@@ -46,29 +46,72 @@ legion_prepare_private_registry() {
   chmod 700 "$registry" || return 1
 }
 
-# Bash 3.2/macOS has no portable flock(1). An atomic mkdir is the lock. Dead
-# owner recovery is serialized by a second mkdir so competing reclaimers cannot
-# delete a newly acquired lock. Empty locks are never reclaimed: they may be a
-# live writer between mkdir and its PID write, so failing closed preserves mutual
-# exclusion even if a kill in that tiny window leaves telemetry stuck.
-legion_recover_dead_run_state_lock() {
-  local lock="$1" recovery="$1.recover" owner=""
-  [[ ! -L "$recovery" ]] || return 0
-  (umask 077; mkdir "$recovery") 2>/dev/null || return 0
-
-  if [[ -d "$lock" && ! -L "$lock" ]]; then
-    owner="$(cat "$lock/pid" 2>/dev/null || true)"
-    if [[ "$owner" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -f "$lock/pid" 2>/dev/null || true
-      rmdir "$lock" 2>/dev/null || true
-    fi
+# Bash 3.2/macOS has no portable flock(1). An atomic mkdir is the primary lock.
+# Release and dead-owner recovery first claim that exact directory generation,
+# then atomically rename it into a same-parent quarantine before cleanup. A new
+# owner can therefore reuse the canonical path without a delayed cleanup ever
+# touching it. Empty/invalid locks and interrupted claims fail closed: portable
+# shell cannot safely infer that a paused creator or claimant is dead.
+legion_claim_run_state_lock_mutation() {
+  local lock="$1" claim="$1/.claim"
+  [[ -d "$lock" && ! -L "$lock" ]] || return 1
+  (umask 077; mkdir "$claim") 2>/dev/null || return 1
+  if [[ ! -d "$lock" || -L "$lock" || ! -d "$claim" || -L "$claim" ]]; then
+    [[ ! -L "$claim" ]] && rmdir "$claim" 2>/dev/null || true
+    return 1
   fi
-  rmdir "$recovery" 2>/dev/null || true
+  printf '%s\n' "$claim"
+}
+
+legion_release_run_state_lock_claim() {
+  local claim="$1"
+  [[ -d "$claim" && ! -L "$claim" ]] || return 0
+  rmdir "$claim" 2>/dev/null || true
+}
+
+legion_quarantine_claimed_run_state_lock() {
+  local lock="$1" directory="${1%/*}" quarantine="" held=""
+  quarantine="$(umask 077; mktemp -d "$directory/.legion-lock-reap.XXXXXX")" || {
+    legion_release_run_state_lock_claim "$lock/.claim"
+    return 1
+  }
+  if [[ ! -d "$quarantine" || -L "$quarantine" ]]; then
+    legion_release_run_state_lock_claim "$lock/.claim"
+    return 1
+  fi
+  held="$quarantine/held"
+  if ! mv "$lock" "$held" 2>/dev/null; then
+    legion_release_run_state_lock_claim "$lock/.claim"
+    rmdir "$quarantine" 2>/dev/null || true
+    return 1
+  fi
+
+  # Cleanup only the claimed generation. Unexpected contents remain isolated in
+  # the private quarantine rather than being recursively removed or followed.
+  if [[ -d "$held" && ! -L "$held" \
+    && -f "$held/pid" && ! -L "$held/pid" \
+    && -d "$held/.claim" && ! -L "$held/.claim" ]]; then
+    rm -f "$held/pid" 2>/dev/null || true
+    rmdir "$held/.claim" 2>/dev/null || true
+    rmdir "$held" 2>/dev/null || true
+    rmdir "$quarantine" 2>/dev/null || true
+  fi
+}
+
+legion_recover_dead_run_state_lock() {
+  local lock="$1" claim="" owner=""
+  claim="$(legion_claim_run_state_lock_mutation "$lock")" || return 0
+  owner="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [[ "$owner" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+    legion_quarantine_claimed_run_state_lock "$lock"
+  else
+    legion_release_run_state_lock_claim "$claim"
+  fi
 }
 
 legion_acquire_run_state_lock() {
   local record="$1"
-  local lock="$record.lock" attempt=0
+  local lock="$record.lock" owner="" attempt=0
   while [[ "$attempt" -lt 500 ]]; do
     if (umask 077; mkdir "$lock") 2>/dev/null; then
       if (set -C; umask 077; printf '%s\n' "$$" > "$lock/pid") 2>/dev/null; then
@@ -80,11 +123,14 @@ legion_acquire_run_state_lock() {
     fi
     [[ ! -L "$lock" ]] || return 1
     if [[ ! -d "$lock" ]]; then
-      [[ ! -e "$lock" ]] || return 1
       attempt=$((attempt + 1))
+      sleep 0.01
       continue
     fi
-    legion_recover_dead_run_state_lock "$lock"
+    owner="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [[ ! "$owner" =~ ^[1-9][0-9]*$ ]] || ! kill -0 "$owner" 2>/dev/null; then
+      legion_recover_dead_run_state_lock "$lock"
+    fi
     attempt=$((attempt + 1))
     sleep 0.01
   done
@@ -92,12 +138,21 @@ legion_acquire_run_state_lock() {
 }
 
 legion_release_run_state_lock() {
-  local lock="$1" owner=""
-  [[ -d "$lock" && ! -L "$lock" ]] || return 0
-  owner="$(cat "$lock/pid" 2>/dev/null || true)"
-  [[ "$owner" == "$$" ]] || return 0
-  rm -f "$lock/pid" 2>/dev/null || true
-  rmdir "$lock" 2>/dev/null || true
+  local lock="$1" claim="" owner="" attempt=0
+  while [[ "$attempt" -lt 500 ]]; do
+    [[ -d "$lock" && ! -L "$lock" ]] || return 0
+    if claim="$(legion_claim_run_state_lock_mutation "$lock")"; then
+      owner="$(cat "$lock/pid" 2>/dev/null || true)"
+      if [[ "$owner" == "$$" ]]; then
+        legion_quarantine_claimed_run_state_lock "$lock"
+      else
+        legion_release_run_state_lock_claim "$claim"
+      fi
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.01
+  done
 }
 
 legion_create_run_state_temp() {

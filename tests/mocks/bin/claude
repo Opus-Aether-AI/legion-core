@@ -34,6 +34,7 @@ if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "list" ]]
 fi
 
 if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "add" ]]; then
+    [[ "${MOCK_CLAUDE_MARKETPLACE_ADD_FAIL:-0}" != "1" ]] || exit 1
     printf 'legion-core\n' >> "$MOCK_STATE_FILE"
     printf 'added marketplace: %s\n' "${4:-}"
     exit 0

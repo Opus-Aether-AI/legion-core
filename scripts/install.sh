@@ -46,16 +46,10 @@ if [ -z "$MARKETPLACE_CLONE_URL" ]; then
 fi
 # Install from the latest published release by default (reproducible — a bad
 # `main` commit can't break installs). Override with LEGION_REF=main (bleeding
-# edge) or LEGION_REF=<tag> to pin. Falls back to main if no release / offline.
+# edge) or LEGION_REF=<tag> to pin. Resolution fails closed when no stable
+# release is available; mutable main always requires an explicit opt-in.
 MARKETPLACE_REF="${LEGION_REF:-}"
-if [ -z "$MARKETPLACE_REF" ]; then
-    # `|| true` so a failed lookup (offline / rate-limit / non-GitHub repo) can't
-    # trip `set -e` — we simply fall back to `main` below.
-    MARKETPLACE_REF="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null \
-        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
-fi
-[ -z "$MARKETPLACE_REF" ] && MARKETPLACE_REF="main"
-MARKETPLACE_RAW_BASE="${LEGION_RAW_BASE:-https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${MARKETPLACE_REF}}"
+MARKETPLACE_RAW_BASE="${LEGION_RAW_BASE:-}"
 
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="$AGENTS_HOME/sources/legion-core"
@@ -120,6 +114,20 @@ preflight() {
     fi
 }
 
+resolve_marketplace_ref() {
+    if [ -z "$MARKETPLACE_REF" ]; then
+        # `|| true` keeps lookup failures under our explicit fail-closed handling.
+        MARKETPLACE_REF="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null \
+            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
+    fi
+    if [ -z "$MARKETPLACE_REF" ]; then
+        red "Could not resolve latest stable GitHub release; set LEGION_REF explicitly to override."
+        exit 2
+    fi
+    [ -n "$MARKETPLACE_RAW_BASE" ] || \
+        MARKETPLACE_RAW_BASE="https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${MARKETPLACE_REF}"
+}
+
 # ── Public file fetch helper ─────────────────────────────────────────
 fetch_public_file() {
     local path="$1"
@@ -127,14 +135,23 @@ fetch_public_file() {
 }
 
 # ── Add marketplace (idempotent) ─────────────────────────────────────
+marketplace_source_for_ref() {
+    case "$MARKETPLACE_REPO" in
+        ./*|../*|/*) printf '%s\n' "$MARKETPLACE_REPO" ;;
+        http://*|https://*|git@*|file://*) printf '%s#%s\n' "$MARKETPLACE_CLONE_URL" "$MARKETPLACE_REF" ;;
+        *) printf '%s@%s\n' "$MARKETPLACE_REPO" "$MARKETPLACE_REF" ;;
+    esac
+}
+
 add_marketplace() {
     [ "$DO_CLAUDE" = "1" ] || return 0
-    if claude plugin marketplace list 2>/dev/null | grep -q "$MARKETPLACE_SLUG"; then
-        dim "Marketplace already added: $MARKETPLACE_SLUG"
-    else
-        bold "Adding marketplace: $MARKETPLACE_REPO"
-        claude plugin marketplace add "$MARKETPLACE_REPO"
-    fi
+    local marketplace_source
+    marketplace_source="$(marketplace_source_for_ref)"
+    bold "Registering marketplace: $marketplace_source"
+    # `add` is intentionally repeated: Claude updates an existing marketplace
+    # with the same manifest name to this source, migrating old main-tracking
+    # registrations without uninstalling their plugins.
+    claude plugin marketplace add "$marketplace_source"
     bold "Refreshing marketplace cache..."
     claude plugin marketplace update "$MARKETPLACE_SLUG" >/dev/null
 }
@@ -641,11 +658,12 @@ refresh_symlinks_only() {
 # ── Preflight runs for all real modes ────────────────────────────────
 case "$MODE" in
     help)             print_help; exit 0 ;;
-    list)             preflight; print_list; exit 0 ;;
+    list)             preflight; resolve_marketplace_ref; print_list; exit 0 ;;
     refresh-symlinks) refresh_symlinks_only; exit 0 ;;
 esac
 
 preflight
+resolve_marketplace_ref
 
 case "$MODE" in
     all)

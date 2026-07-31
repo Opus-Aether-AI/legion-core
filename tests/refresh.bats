@@ -127,7 +127,18 @@ SH
 
     run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
+    assert_mock_called claude "marketplace add Opus-Aether-AI/legion-core@v0.0.0-test"
     assert_mock_called claude "marketplace update legion"
+}
+
+@test "refresh.sh fails when the Claude marketplace cannot be rebound to the stable tag" {
+    make_source_clone marketplace-minimal.json
+    export MOCK_CLAUDE_MARKETPLACE_ADD_FAIL=1
+
+    run bash "$REFRESH_SH"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not bind Claude marketplace"* ]]
+    [[ "$output" == *"plugin reconciliation failed"* ]]
 }
 
 @test "refresh.sh updates each installed Legion plugin after refreshing the marketplace" {

@@ -71,7 +71,7 @@ else
 fi
 
 # 2) Re-sync ~/.agents/skills/ symlinks (handles added/removed plugins)
-if ! bash "$SOURCE_CLONE/scripts/install.sh" --refresh-symlinks --no-claude --no-cron 2>/dev/null; then
+if ! LEGION_REF="$UPDATE_REF" bash "$SOURCE_CLONE/scripts/install.sh" --refresh-symlinks --no-claude --no-cron 2>/dev/null; then
     printf 'legion refresh: symlink sync had warnings\n' >&2
     record_refresh_failure "Daily refresh symlink/Cursor bridge sync failed." "install.sh --refresh-symlinks returned nonzero"
 fi
@@ -80,7 +80,21 @@ fi
 # plugins. Missing plugins are deliberately ignored; an installed plugin that
 # cannot reach the marketplace version is a failed refresh.
 refresh_status=0
+marketplace_source_for_ref() {
+    case "$MARKETPLACE_REPO" in
+        ./*|../*|/*) printf '%s\n' "$MARKETPLACE_REPO" ;;
+        http://*|https://*|git@*|file://*) printf '%s#%s\n' "$MARKETPLACE_REPO" "$UPDATE_REF" ;;
+        *) printf '%s@%s\n' "$MARKETPLACE_REPO" "$UPDATE_REF" ;;
+    esac
+}
+
 reconcile_claude_plugins() {
+    local marketplace_source
+    marketplace_source="$(marketplace_source_for_ref)"
+    if ! claude plugin marketplace add "$marketplace_source" >/dev/null 2>&1; then
+        printf 'legion refresh: could not bind Claude marketplace to %s\n' "$UPDATE_REF" >&2
+        return 1
+    fi
     if ! claude plugin marketplace update "$MARKETPLACE_SLUG" >/dev/null 2>&1; then
         printf 'legion refresh: claude marketplace update failed\n' >&2
         return 1

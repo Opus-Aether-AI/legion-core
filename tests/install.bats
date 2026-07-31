@@ -182,7 +182,7 @@ setup() {
     [ "$status" -eq 0 ]
 
     # Mock claude was called with `marketplace add` + per-plugin `install`
-    assert_mock_called claude "marketplace add Opus-Aether-AI/legion-core"
+    assert_mock_called claude "marketplace add Opus-Aether-AI/legion-core@v0.0.0-test"
     assert_mock_called claude "plugin install plugin-with-skill@legion-core"
     assert_mock_called claude "plugin install plugin-nested@legion-core"
     assert_mock_called claude "plugin install plugin-claude-only@legion-core"
@@ -445,13 +445,22 @@ SH
     if grep -F "plugin install plugin-with-skill" "$MOCK_CALL_LOG"; then false; fi
 }
 
-@test "add_marketplace reports 'already added' on second run" {
+@test "add_marketplace rebinds the pinned source on a second run" {
     bash "$INSTALL_SH" all --no-cron --no-cross-harness  # marketplace registered
     : > "$MOCK_CALL_LOG"
 
     run bash "$INSTALL_SH" all --no-cron --no-cross-harness
     [ "$status" -eq 0 ]
-    [[ "$output" == *"already added"* ]]
+    assert_mock_called claude "marketplace add Opus-Aether-AI/legion-core@v0.0.0-test"
+    assert_mock_called claude "marketplace update legion-core"
+}
+
+@test "install fails closed when no stable release can be resolved" {
+    export MOCK_RELEASE_RESPONSE='{}'
+
+    run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Could not resolve latest stable GitHub release"* ]]
 }
 
 # ── Preflight failures (missing tools) ──────────────────────────────

@@ -245,6 +245,67 @@ EOF
     ! grep -q '^release_sha=' "$outputs"
 }
 
+@test "pending release finder rejects package and manifest drift" {
+    local repo="$TEST_TMPDIR/version-drift"
+    local outputs="$TEST_TMPDIR/version-drift.outputs"
+    make_pending_release_fixture "$repo"
+    printf '%s\n' '{".":"0.19.0"}' > "$repo/.release-please-manifest.json"
+
+    run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" MOCK_RELEASE_EXISTS=0 \
+        bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"package.json (0.19.1) and release manifest (0.19.0) differ"* ]]
+}
+
+@test "pending release finder requires its GitHub output contract" {
+    run env -u GITHUB_OUTPUT -u GH_REPO -u GITHUB_REPOSITORY \
+        bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$TEST_TMPDIR"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: GITHUB_OUTPUT=<path> GH_REPO=<owner/repo>"* ]]
+}
+
+@test "pending release finder rejects a non-Git directory" {
+    local outputs="$TEST_TMPDIR/non-git.outputs"
+    local repo="$TEST_TMPDIR/non-git"
+    mkdir -p "$repo"
+
+    run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" \
+        bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$repo"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"is not a Git checkout"* ]]
+}
+
+@test "pending release finder rejects a missing exact Release Please commit" {
+    local repo="$TEST_TMPDIR/missing-release-commit"
+    local outputs="$TEST_TMPDIR/missing-release-commit.outputs"
+    mkdir -p "$repo"
+    printf '%s\n' '{"name":"@opus-aether-ai/legion-core","version":"0.19.1"}' > "$repo/package.json"
+    printf '%s\n' '{".":"0.19.1"}' > "$repo/.release-please-manifest.json"
+    (
+        cd "$repo"
+        git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "fix: unrelated change"
+    )
+
+    run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" MOCK_RELEASE_EXISTS=0 \
+        bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no first-parent commit has exact title: chore(main): release 0.19.1"* ]]
+}
+
+@test "pending release finder rejects a tag on the wrong commit" {
+    local repo="$TEST_TMPDIR/tag-collision"
+    local outputs="$TEST_TMPDIR/tag-collision.outputs"
+    make_pending_release_fixture "$repo"
+    git -C "$repo" tag v0.19.1 HEAD~1
+
+    run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" MOCK_RELEASE_EXISTS=0 \
+        bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"expected release commit"* ]]
+}
+
 @test "consumer update workflow pins immutable core identity and opens a validated PR" {
     local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
 

@@ -74,6 +74,10 @@ setup() {
     grep -q 'npm@12.0.2' "$automatic"
     grep -q 'npm@12.0.2' "$manual"
     ! grep -q -- '--clobber' "$automatic"
+    grep -q 'gh workflow run validate.yml' "$automatic"
+    grep -q 'gh workflow run legion-ci.yml' "$automatic"
+    grep -q 'workflow_dispatch:' "$REPO_ROOT/.github/workflows/validate.yml"
+    grep -q 'workflow_dispatch:' "$REPO_ROOT/.github/workflows/legion-ci.yml"
 
     local gate_line action_line
     gate_line="$(grep -n 'needs: await-checks' "$automatic" | head -n1 | cut -d: -f1)"

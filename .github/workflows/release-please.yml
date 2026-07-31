@@ -23,7 +23,7 @@ permissions:
   # Needed by await-checks to read other workflows' runs for this commit. A
   # workflow-level `permissions:` block zeroes every scope it does not list, so
   # this must be explicit even though the repo default would allow it.
-  actions: read
+  actions: write
 
 concurrency:
   group: release-please-${{ github.ref }}
@@ -94,6 +94,30 @@ jobs:
           fi
           echo "Enabling auto-merge on Release PR #${pr_number}"
           gh pr merge "${pr_number}" --repo "${REPO}" --auto --squash
+
+      # Pull requests opened with GITHUB_TOKEN do not emit pull_request events,
+      # so branch-required workflows would otherwise remain action_required.
+      # Explicit dispatches attach those checks to the release PR head SHA.
+      - name: Dispatch required checks on Release PR
+        if: ${{ steps.release.outputs.pr != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          pr_number="$(jq -r '.number // empty' <<<"${RELEASE_PR}")"
+          if [ -z "${pr_number}" ]; then
+            echo "::error::release-please output did not include a PR number"
+            exit 1
+          fi
+          head_ref="$(gh pr view "${pr_number}" --repo "${REPO}" --json headRefName --jq '.headRefName')"
+          if [ -z "${head_ref}" ]; then
+            echo "::error::Release PR #${pr_number} has no head branch"
+            exit 1
+          fi
+          gh workflow run validate.yml --repo "${REPO}" --ref "${head_ref}"
+          gh workflow run legion-ci.yml --repo "${REPO}" --ref "${head_ref}"
 
   publish:
     name: Publish package

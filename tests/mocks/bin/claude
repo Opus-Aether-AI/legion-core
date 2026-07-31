@@ -34,12 +34,17 @@ if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "list" ]]
 fi
 
 if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "add" ]]; then
+    [[ "${MOCK_CLAUDE_MARKETPLACE_ADD_FAIL:-0}" != "1" ]] || exit 1
     printf 'legion-core\n' >> "$MOCK_STATE_FILE"
+    if [[ -n "${MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE:-}" ]]; then
+        printf '%s\n' "${4:-}" > "$MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE"
+    fi
     printf 'added marketplace: %s\n' "${4:-}"
     exit 0
 fi
 
 if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "update" ]]; then
+    [[ "${MOCK_CLAUDE_MARKETPLACE_UPDATE_FAIL:-0}" != "1" ]] || exit 1
     exit 0
 fi
 
@@ -59,6 +64,17 @@ if [[ "${1:-}" == "plugin" && "${2:-}" == "install" ]]; then
     exit 0
 fi
 
+if [[ "${1:-}" == "plugin" && "${2:-}" == "update" ]]; then
+    if [[ "${MOCK_CLAUDE_UPDATE_FAIL:-0}" == "1" ]]; then
+        printf '✘ update failed (mocked)\n' >&2
+        exit 1
+    fi
+    plugin_name="${3%@*}"
+    mkdir -p "$HOME/.claude/plugins/cache/legion-core/$plugin_name/${MOCK_CLAUDE_PLUGIN_VERSION:-0.1.0}"
+    printf '✔ Successfully updated plugin: %s\n' "${3:-}"
+    exit 0
+fi
+
 if [[ "${1:-}" == "plugin" && "${2:-}" == "uninstall" ]]; then
     printf '✔ Successfully uninstalled: %s\n' "${3:-}"
     rm -rf "$HOME/.claude/plugins/cache/legion-core/${3%@*}"
@@ -70,7 +86,7 @@ if [[ "${1:-}" == "plugin" && "${2:-}" == "list" ]]; then
         [[ -d "$d" ]] || continue
         name="$(basename "$d")"
         printf '❯ %s@legion-core\n' "$name"
-        printf '  Version: 0.1.0\n'
+        printf '  Version: %s\n' "${MOCK_CLAUDE_PLUGIN_VERSION:-0.1.0}"
         printf '  Scope: user\n'
     done
     exit 0

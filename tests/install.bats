@@ -59,6 +59,21 @@ setup() {
     [[ "$output" == *"Unknown flag"* ]]
 }
 
+@test "release tag validator implements SemVer 2.0 identifiers" {
+    local tag
+    for tag in v0.0.0 v1.2.3-alpha.1+build.01 v1.2.3-0 v1.2.3-01a; do
+        run bash "$INSTALL_SH" --validate-release-tag="$tag"
+        [ "$status" -eq 0 ]
+    done
+
+    for tag in v01.2.3 v1.02.3 v1.2.03 v1.2.3-01 v1.2.3- \
+        v1.2.3+ v1.2.3-alpha..1 v1.2.3+build..1; do
+        run bash "$INSTALL_SH" --validate-release-tag="$tag"
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"exact v-prefixed semantic version"* ]]
+    done
+}
+
 @test "--list lists plugins and doesn't install anything" {
     run bash "$INSTALL_SH" --list
     [ "$status" -eq 0 ]
@@ -182,7 +197,7 @@ setup() {
     [ "$status" -eq 0 ]
 
     # Mock claude was called with `marketplace add` + per-plugin `install`
-    assert_mock_called claude "marketplace add Opus-Aether-AI/legion-core"
+    assert_mock_called claude "marketplace add Opus-Aether-AI/legion-core@v0.0.0-test"
     assert_mock_called claude "plugin install plugin-with-skill@legion-core"
     assert_mock_called claude "plugin install plugin-nested@legion-core"
     assert_mock_called claude "plugin install plugin-claude-only@legion-core"
@@ -222,8 +237,9 @@ setup() {
 printf 'cursor-setup %s\n' "$*" >> "$MOCK_CALL_LOG"
 SH
     chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-cursor-setup"
+    commit_source_fixture "add cursor setup"
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron --no-cursor
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron --no-cursor
     [ "$status" -eq 0 ]
     if grep -F "cursor-setup" "$MOCK_CALL_LOG"; then false; fi
 }
@@ -235,8 +251,9 @@ SH
 printf 'opencode-setup %s\n' "$*" >> "$MOCK_CALL_LOG"
 SH
     chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup"
+    commit_source_fixture "add opencode setup"
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"opencode setup"* ]]
     grep -qF "opencode-setup all" "$MOCK_CALL_LOG"
@@ -249,8 +266,9 @@ SH
 printf 'opencode-setup %s\n' "$*" >> "$MOCK_CALL_LOG"
 SH
     chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup"
+    commit_source_fixture "add opencode setup"
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron --no-opencode
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron --no-opencode
     [ "$status" -eq 0 ]
     if grep -F "opencode-setup" "$MOCK_CALL_LOG"; then false; fi
 }
@@ -267,23 +285,74 @@ SH
 printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
 SH
     chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-opencode-setup" "$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
+    commit_source_fixture "add failing opencode setup"
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"opencode setup reported warnings"* ]]
     grep -qF "Installer opencode setup reported warnings." "$MOCK_CALL_LOG"
 }
 
-@test "source clone with local edits: install fetches but skips reset" {
+@test "source clone with tracked edits: install preserves files and exits incomplete" {
     bash "$INSTALL_SH" --refresh-symlinks   # establish clone
     # Hand-edit a tracked file in the source clone
     echo "user-edit" >> "$SOURCE_CLONE/plugin-with-skill/SKILL.md"
 
     run bash "$INSTALL_SH" all --no-claude --no-cron
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 3 ]
     [[ "$output" == *"local edits"* ]]
     # Edit survives
     grep -q "user-edit" "$SOURCE_CLONE/plugin-with-skill/SKILL.md"
+}
+
+@test "source clone with untracked files: install preserves files and exits incomplete" {
+    printf 'operator notes\n' > "$SOURCE_CLONE/operator-notes.txt"
+
+    run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"untracked files"* ]]
+    grep -q "operator notes" "$SOURCE_CLONE/operator-notes.txt"
+    [ ! -e "$AGENTS_SKILLS_DIR/plugin-with-skill" ]
+}
+
+@test "source clone with an ignored checkout collision is preserved" {
+    make_ignored_checkout_collision
+
+    LEGION_REF=v0.0.1-test run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"would overwrite local files"* ]]
+    [ "$(cat "$SOURCE_CLONE/release-collision.txt")" = "operator content" ]
+}
+
+@test "source clone update fails closed when Git cannot inspect status" {
+    local failing_git
+    failing_git="$(make_failing_git_wrapper status)"
+
+    PATH="$failing_git:$PATH" run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"Could not inspect source clone state"* ]]
+}
+
+@test "source clone path that is not a Git repository is preserved" {
+    rm -rf "$SOURCE_CLONE"
+    mkdir -p "$SOURCE_CLONE"
+    printf 'operator content\n' > "$SOURCE_CLONE/operator.txt"
+
+    run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"not a Git repository"* ]]
+    [ "$(cat "$SOURCE_CLONE/operator.txt")" = "operator content" ]
+}
+
+@test "install fetches an exact version tag when a branch has the same name" {
+    make_ambiguous_release_ref
+    local tag_sha
+    tag_sha="$(git -C "$SOURCE_CLONE" rev-parse refs/tags/v0.0.1-test)"
+
+    LEGION_REF=v0.0.1-test run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$SOURCE_CLONE" rev-parse HEAD)" = "$tag_sha" ]
+    [ ! -e "$SOURCE_CLONE/ambiguous-branch-only.txt" ]
 }
 
 # ── Cursor native setup / bridge ─────────────────────────────────────
@@ -295,8 +364,9 @@ SH
 printf 'cursor-setup %s\n' "$*" >> "$MOCK_CALL_LOG"
 SH
     chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-cursor-setup"
+    commit_source_fixture "add cursor setup"
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"Cursor native setup"* ]]
     grep -qF "cursor-setup all" "$MOCK_CALL_LOG"
@@ -314,8 +384,9 @@ SH
 printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
 SH
     chmod +x "$SOURCE_CLONE/legion-setup/bin/legion-cursor-setup" "$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
+    commit_source_fixture "add failing cursor setup"
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"Cursor setup reported warnings"* ]]
     grep -qF "Installer Cursor native setup reported warnings." "$MOCK_CALL_LOG"
@@ -328,8 +399,9 @@ SH
 print('{"count": 2}')
 PY
     chmod +x "$SOURCE_CLONE/legion-setup/scripts/legion-cursor-bridge.py"
+    commit_source_fixture "add cursor bridge"
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"Cursor agent bridge"* ]]
     [[ "$output" == *"bridged 2 Cursor agents"* ]]
@@ -347,8 +419,9 @@ PY
 printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
 SH
     chmod +x "$SOURCE_CLONE/legion-setup/scripts/legion-cursor-bridge.py" "$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
+    commit_source_fixture "add failing cursor bridge"
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"Cursor agent bridge failed"* ]]
     grep -qF "Installer Cursor agent bridge failed." "$MOCK_CALL_LOG"
@@ -428,26 +501,67 @@ SH
 
 # ── Idempotent install — already-installed branch ───────────────────
 
-@test "running install twice marks plugins as already installed (skips claude install)" {
+@test "running install twice updates cached Legion plugins instead of trusting the cache" {
     bash "$INSTALL_SH" all --no-cron   # First install — populates cache
     # Wipe the call log so we only see the second install's invocations
     : > "$MOCK_CALL_LOG"
 
     run bash "$INSTALL_SH" all --no-cron
     [ "$status" -eq 0 ]
-    [[ "$output" == *"already installed"* ]]
+    [[ "$output" == *"updated"* ]]
 
-    # No `plugin install` calls in the second run
+    # Existing plugins update from the refreshed marketplace; they are not
+    # considered current merely because a cache directory exists.
+    assert_mock_called claude "plugin update plugin-with-skill@legion-core"
+    assert_mock_called claude "plugin update plugin-nested@legion-core"
+    assert_mock_called claude "plugin update plugin-claude-only@legion-core"
     if grep -F "plugin install plugin-with-skill" "$MOCK_CALL_LOG"; then false; fi
 }
 
-@test "add_marketplace reports 'already added' on second run" {
+@test "add_marketplace rebinds the pinned source on a second run" {
     bash "$INSTALL_SH" all --no-cron --no-cross-harness  # marketplace registered
     : > "$MOCK_CALL_LOG"
 
     run bash "$INSTALL_SH" all --no-cron --no-cross-harness
     [ "$status" -eq 0 ]
-    [[ "$output" == *"already added"* ]]
+    assert_mock_called claude "marketplace add Opus-Aether-AI/legion-core@v0.0.0-test"
+    assert_mock_called claude "marketplace update legion-core"
+}
+
+@test "install migrates a persisted main-tracking marketplace without uninstalling cached plugins" {
+    cp "$BATS_TEST_DIRNAME/fixtures/claude-marketplace-legacy-source.txt" \
+        "$MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE"
+    printf 'legion-core\n' > "$HOME/.mock-claude-marketplaces"
+    mkdir -p "$HOME/.claude/plugins/cache/legion-core/plugin-with-skill/0.1.0"
+
+    run bash "$INSTALL_SH" all --no-cron --no-cross-harness
+    [ "$status" -eq 0 ]
+    [ "$(cat "$MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE")" = \
+        "Opus-Aether-AI/legion-core@v0.0.0-test" ]
+    assert_mock_called claude "plugin update plugin-with-skill@legion-core"
+    if grep -F 'plugin uninstall ' "$MOCK_CALL_LOG"; then false; fi
+}
+
+@test "install fails closed when no stable release can be resolved" {
+    export MOCK_RELEASE_RESPONSE='{}'
+
+    run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Could not resolve latest stable GitHub release"* ]]
+}
+
+@test "install rejects a non-version latest release response" {
+    export MOCK_RELEASE_TAG=main
+
+    run bash "$INSTALL_SH" all --no-claude --no-cross-harness --no-cron
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"must be an exact v-prefixed semantic version tag"* ]]
+}
+
+@test "install rejects invalid explicit SemVer before using it as a Git ref" {
+    LEGION_REF=v01.2.3 run bash "$INSTALL_SH" all --no-claude --no-cross-harness --no-cron
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"LEGION_REF must be 'main' or an exact"* ]]
 }
 
 # ── Preflight failures (missing tools) ──────────────────────────────
@@ -568,8 +682,17 @@ EOF
 
     local clean_path="${PATH//$BATS_TEST_DIRNAME\/mocks\/bin:/}"
     PATH="$broken_mocks:$clean_path" run bash "$INSTALL_SH" all --no-cron
-    [ "$status" -eq 0 ]
+    [ "$status" -ne 0 ]
     [[ "$output" == *"failed"* ]]
+}
+
+@test "install returns nonzero when a cached plugin update fails" {
+    mkdir -p "$HOME/.claude/plugins/cache/legion-core/plugin-with-skill/0.1.0"
+    export MOCK_CLAUDE_UPDATE_FAIL=1
+
+    run bash "$INSTALL_SH" all --no-cron --no-cross-harness
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"update failed"* ]]
 }
 
 @test "setup_source_clone calls git clone when source dir is missing" {
@@ -590,7 +713,7 @@ EOF
         git -c user.email=test@test -c user.name=test commit -q -m "init test remote"
     )
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"Cloning $remote"* ]]
     [ -d "$SOURCE_CLONE" ]
@@ -605,7 +728,7 @@ EOF
         git fetch origin --quiet 2>/dev/null && \
         git reset --hard HEAD --quiet)
 
-    run bash "$INSTALL_SH" all --no-claude --cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"not yet executable"* ]]
 }

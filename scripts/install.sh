@@ -31,7 +31,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash -s all
 #
 # Requires: curl, jq, git. claude CLI optional (only for Claude marketplace flow).
-# Idempotent: re-running skips already-installed plugins and updates symlinks.
+# Idempotent: re-running updates installed Legion plugins and updates symlinks.
 
 set -euo pipefail
 
@@ -46,16 +46,13 @@ if [ -z "$MARKETPLACE_CLONE_URL" ]; then
 fi
 # Install from the latest published release by default (reproducible — a bad
 # `main` commit can't break installs). Override with LEGION_REF=main (bleeding
-# edge) or LEGION_REF=<tag> to pin. Falls back to main if no release / offline.
+# edge) or LEGION_REF=<tag> to pin. Resolution fails closed when no stable
+# release is available; mutable main always requires an explicit opt-in.
 MARKETPLACE_REF="${LEGION_REF:-}"
-if [ -z "$MARKETPLACE_REF" ]; then
-    # `|| true` so a failed lookup (offline / rate-limit / non-GitHub repo) can't
-    # trip `set -e` — we simply fall back to `main` below.
-    MARKETPLACE_REF="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null \
-        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
-fi
-[ -z "$MARKETPLACE_REF" ] && MARKETPLACE_REF="main"
-MARKETPLACE_RAW_BASE="${LEGION_RAW_BASE:-https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${MARKETPLACE_REF}}"
+MARKETPLACE_RAW_BASE="${LEGION_RAW_BASE:-}"
+MARKETPLACE_GIT_REF=""
+MARKETPLACE_REF_EXPLICIT=0
+[ -n "$MARKETPLACE_REF" ] && MARKETPLACE_REF_EXPLICIT=1
 
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="$AGENTS_HOME/sources/legion-core"
@@ -69,6 +66,18 @@ yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
 dim()    { printf '\033[0;90m%s\033[0m\n' "$*"; }
 bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 
+# SemVer 2.0.0 with the repository's required `v` prefix. Numeric core and
+# prerelease identifiers reject leading zeroes; build identifiers may contain
+# them. Keep this validator in the standalone installer so workflows and the
+# refresh script can share it without downloading another file first.
+is_v_semver() {
+    local numeric_identifier='(0|[1-9][0-9]*)'
+    local prerelease_identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+    local build_identifier='[0-9A-Za-z-]+'
+    local pattern="^v${numeric_identifier}\\.${numeric_identifier}\\.${numeric_identifier}(-${prerelease_identifier}(\\.${prerelease_identifier})*)?(\\+${build_identifier}(\\.${build_identifier})*)?$"
+    [[ "${1:-}" =~ $pattern ]]
+}
+
 # ── Flag parsing ─────────────────────────────────────────────────────
 DO_CLAUDE=1
 DO_CROSS_HARNESS=1
@@ -79,6 +88,7 @@ DO_CRON=0
 [ "${LEGION_INSTALL_CRON:-0}" = "1" ] && DO_CRON=1
 CRON_HOUR=9
 MODE=""
+VALIDATE_RELEASE_TAG=""
 
 for arg in "$@"; do
     case "$arg" in
@@ -91,6 +101,9 @@ for arg in "$@"; do
         --cron)              DO_CRON=1 ;;
         --no-cron)           DO_CRON=0 ;;
         --cron-hour=*)       CRON_HOUR="${arg#--cron-hour=}" ;;
+        --validate-release-tag=*)
+                             MODE="validate-release-tag"
+                             VALIDATE_RELEASE_TAG="${arg#*=}" ;;
         --refresh-symlinks)  MODE="refresh-symlinks" ;;
         -h|--help|help)      MODE="help" ;;
         --list|-l|list)      MODE="list" ;;
@@ -120,6 +133,36 @@ preflight() {
     fi
 }
 
+resolve_marketplace_ref() {
+    if [ -z "$MARKETPLACE_REF" ]; then
+        # `|| true` keeps lookup failures under our explicit fail-closed handling.
+        local release_json
+        release_json="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null || true)"
+        MARKETPLACE_REF="$(printf '%s' "$release_json" \
+            | jq -r 'select(type == "object" and .draft == false and .prerelease == false) | .tag_name // empty' \
+                2>/dev/null || true)"
+    fi
+    if [ -z "$MARKETPLACE_REF" ]; then
+        red "Could not resolve latest stable GitHub release; set LEGION_REF explicitly to override."
+        exit 2
+    fi
+
+    if [ "$MARKETPLACE_REF" = "main" ] && [ "$MARKETPLACE_REF_EXPLICIT" = "1" ]; then
+        MARKETPLACE_GIT_REF="refs/heads/main"
+    elif is_v_semver "$MARKETPLACE_REF"; then
+        MARKETPLACE_GIT_REF="refs/tags/${MARKETPLACE_REF}"
+    elif [ "$MARKETPLACE_REF_EXPLICIT" = "0" ]; then
+        red "GitHub's latest stable release must be an exact v-prefixed semantic version tag."
+        exit 2
+    else
+        red "LEGION_REF must be 'main' or an exact v-prefixed semantic version tag."
+        exit 2
+    fi
+
+    [ -n "$MARKETPLACE_RAW_BASE" ] || \
+        MARKETPLACE_RAW_BASE="https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${MARKETPLACE_REF}"
+}
+
 # ── Public file fetch helper ─────────────────────────────────────────
 fetch_public_file() {
     local path="$1"
@@ -127,14 +170,23 @@ fetch_public_file() {
 }
 
 # ── Add marketplace (idempotent) ─────────────────────────────────────
+marketplace_source_for_ref() {
+    case "$MARKETPLACE_REPO" in
+        ./*|../*|/*) printf '%s\n' "$MARKETPLACE_REPO" ;;
+        http://*|https://*|git@*|file://*) printf '%s#%s\n' "$MARKETPLACE_CLONE_URL" "$MARKETPLACE_REF" ;;
+        *) printf '%s@%s\n' "$MARKETPLACE_REPO" "$MARKETPLACE_REF" ;;
+    esac
+}
+
 add_marketplace() {
     [ "$DO_CLAUDE" = "1" ] || return 0
-    if claude plugin marketplace list 2>/dev/null | grep -q "$MARKETPLACE_SLUG"; then
-        dim "Marketplace already added: $MARKETPLACE_SLUG"
-    else
-        bold "Adding marketplace: $MARKETPLACE_REPO"
-        claude plugin marketplace add "$MARKETPLACE_REPO"
-    fi
+    local marketplace_source
+    marketplace_source="$(marketplace_source_for_ref)"
+    bold "Registering marketplace: $marketplace_source"
+    # `add` is intentionally repeated: Claude updates an existing marketplace
+    # with the same manifest name to this source, migrating old main-tracking
+    # registrations without uninstalling their plugins.
+    claude plugin marketplace add "$marketplace_source"
     bold "Refreshing marketplace cache..."
     claude plugin marketplace update "$MARKETPLACE_SLUG" >/dev/null
 }
@@ -155,16 +207,25 @@ list_all() {
 # ── Install single Claude plugin ─────────────────────────────────────
 install_one() {
     local plugin="$1"
-    ALREADY_INSTALLED=0
+    local output
+    UPDATED_EXISTING=0
     if [ -d "$HOME/.claude/plugins/cache/$MARKETPLACE_SLUG/$plugin" ]; then
-        dim "  ↺ $plugin (already installed)"
-        ALREADY_INSTALLED=1
-        return 0
+        # A cache directory only says this plugin existed sometime in the past;
+        # it is not proof that it matches the freshly updated marketplace.
+        if output="$(claude plugin update "$plugin@$MARKETPLACE_SLUG" --scope user 2>&1)"; then
+            green "  ✔ $plugin (updated)"
+            UPDATED_EXISTING=1
+            return 0
+        fi
+        red "  ✘ $plugin (update failed)"
+        [ -n "$output" ] && dim "    $output"
+        return 1
     fi
-    if claude plugin install "$plugin@$MARKETPLACE_SLUG" --scope user 2>&1 | grep -q "✔"; then
+    if output="$(claude plugin install "$plugin@$MARKETPLACE_SLUG" --scope user 2>&1)"; then
         green "  ✔ $plugin"
     else
         red "  ✘ $plugin (failed)"
+        [ -n "$output" ] && dim "    $output"
         return 1
     fi
 }
@@ -176,11 +237,11 @@ install_many() {
     local total="${#plugins[@]}"
     bold ""
     bold "Installing $total plugins via Claude marketplace..."
-    local installed=0 skipped=0 fail=0
+    local installed=0 updated=0 fail=0
     for p in "${plugins[@]}"; do
         if install_one "$p"; then
-            if [ "${ALREADY_INSTALLED:-0}" = "1" ]; then
-                skipped=$((skipped + 1))
+            if [ "${UPDATED_EXISTING:-0}" = "1" ]; then
+                updated=$((updated + 1))
             else
                 installed=$((installed + 1))
             fi
@@ -191,35 +252,48 @@ install_many() {
     echo ""
     bold "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     [ "$installed" -gt 0 ] && green "  $installed newly installed"
-    [ "$skipped" -gt 0 ] && dim "  $skipped already installed (skipped)"
+    [ "$updated" -gt 0 ] && green "  $updated updated from marketplace"
     [ "$fail" -gt 0 ] && red "  $fail failed"
     echo ""
+    [ "$fail" -eq 0 ]
 }
 
 # ── Cross-harness: clone source + symlink into ~/.agents/skills/ ─────
 setup_source_clone() {
     mkdir -p "$AGENTS_HOME/sources"
     if [ -d "$SOURCE_CLONE/.git" ]; then
-        # Refuse to clobber a user's local edits with `reset --hard origin/main`.
-        # If the working tree or index is dirty, fetch but skip the reset and
-        # leave the user to reconcile.
-        local dirty=0
-        if ! git -C "$SOURCE_CLONE" diff --quiet 2>/dev/null; then dirty=1; fi
-        if ! git -C "$SOURCE_CLONE" diff --cached --quiet 2>/dev/null; then dirty=1; fi
+        # Treat tracked, staged, and untracked files as operator data. Fetching is
+        # safe, but never force-checkout across any of them.
+        local status_output
+        if ! status_output="$(git -C "$SOURCE_CLONE" status --porcelain --untracked-files=all 2>/dev/null)"; then
+            red "Could not inspect source clone state — refusing to update it."
+            return 3
+        fi
+        if [ -n "$status_output" ]; then
+            yellow "Source clone has local edits or untracked files — fetching but skipping reconciliation."
+            yellow "  (Commit, stash, or move those files in $SOURCE_CLONE before retrying.)"
+            git -C "$SOURCE_CLONE" fetch origin "$MARKETPLACE_GIT_REF" --depth 1 --quiet
+            return 3
+        fi
 
-        if [ "$dirty" = "1" ]; then
-            yellow "Source clone has local edits — fetching but not resetting."
-            yellow "  (Commit, stash, or 'git restore .' in $SOURCE_CLONE to allow auto-refresh next run.)"
-            git -C "$SOURCE_CLONE" fetch origin --quiet
-        else
-            dim "Source clone exists — syncing to $MARKETPLACE_REF"
-            git -C "$SOURCE_CLONE" fetch origin --tags --force --quiet
-            git -C "$SOURCE_CLONE" checkout --quiet --force "$MARKETPLACE_REF"
-            git -C "$SOURCE_CLONE" reset --hard --quiet "origin/$MARKETPLACE_REF" 2>/dev/null || true
+        dim "Source clone exists — syncing to $MARKETPLACE_REF"
+        git -C "$SOURCE_CLONE" fetch origin "$MARKETPLACE_GIT_REF" --depth 1 --quiet
+        local update_sha
+        update_sha="$(git -C "$SOURCE_CLONE" rev-parse --verify 'FETCH_HEAD^{commit}')"
+        if ! git -C "$SOURCE_CLONE" checkout --quiet --detach --no-overwrite-ignore "$update_sha"; then
+            red "Source clone update would overwrite local files — refusing to continue."
+            return 3
         fi
     else
+        if [ -e "$SOURCE_CLONE" ]; then
+            red "Source clone path exists but is not a Git repository: $SOURCE_CLONE"
+            return 3
+        fi
         bold "Cloning $MARKETPLACE_CLONE_URL @ $MARKETPLACE_REF → $SOURCE_CLONE"
-        git clone --depth 1 --branch "$MARKETPLACE_REF" --quiet "$MARKETPLACE_CLONE_URL" "$SOURCE_CLONE"
+        git init --quiet "$SOURCE_CLONE"
+        git -C "$SOURCE_CLONE" remote add origin "$MARKETPLACE_CLONE_URL"
+        git -C "$SOURCE_CLONE" fetch origin "$MARKETPLACE_GIT_REF" --depth 1 --quiet
+        git -C "$SOURCE_CLONE" checkout --quiet --detach --no-overwrite-ignore FETCH_HEAD
     fi
 }
 
@@ -635,11 +709,19 @@ refresh_symlinks_only() {
 # ── Preflight runs for all real modes ────────────────────────────────
 case "$MODE" in
     help)             print_help; exit 0 ;;
-    list)             preflight; print_list; exit 0 ;;
+    validate-release-tag)
+        if is_v_semver "$VALIDATE_RELEASE_TAG"; then
+            exit 0
+        fi
+        red "Release tag must be an exact v-prefixed semantic version."
+        exit 2
+        ;;
+    list)             preflight; resolve_marketplace_ref; print_list; exit 0 ;;
     refresh-symlinks) refresh_symlinks_only; exit 0 ;;
 esac
 
 preflight
+resolve_marketplace_ref
 
 case "$MODE" in
     all)

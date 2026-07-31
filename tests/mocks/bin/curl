@@ -6,8 +6,16 @@ set -euo pipefail
 
 echo "curl $*" >> "${MOCK_CALL_LOG:-/dev/null}"
 
-url="${@: -1}"
+url="${!#}"
 case "$url" in
+    *"/releases/latest")
+        if [ -n "${MOCK_RELEASE_RESPONSE:-}" ]; then
+            printf '%s\n' "$MOCK_RELEASE_RESPONSE"
+        else
+            printf '{"tag_name":"%s","draft":false,"prerelease":false}\n' "${MOCK_RELEASE_TAG:-v0.0.0-test}"
+        fi
+        exit 0
+        ;;
     *".claude-plugin/marketplace.json")
         if [ -n "${MOCK_CURL_FIXTURE:-}" ] && [ -f "$MOCK_CURL_FIXTURE" ]; then
             cat "$MOCK_CURL_FIXTURE"

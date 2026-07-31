@@ -14,6 +14,14 @@ on:
   push:
     branches:
       - main
+  # npmjs Trusted Publishing is bound to this workflow file. Keep recovery in
+  # the same workflow so a manual rerun receives the configured OIDC identity.
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable release tag to recover (for example, v0.19.0)
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -23,14 +31,34 @@ permissions:
   # Needed by await-checks to read other workflows' runs for this commit. A
   # workflow-level `permissions:` block zeroes every scope it does not list, so
   # this must be explicit even though the repo default would allow it.
-  actions: read
+  actions: write
 
 concurrency:
   group: release-please-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  # `needs:` cannot reference another workflow. Run this first so the
+  # release-please action cannot create a tag or GitHub Release until the two
+  # main-push workflows for this exact commit have succeeded. The helper only
+  # receives those other workflow names, so it never waits on this workflow.
+  await-checks:
+    name: Await required checks
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require validate + legion-ci green on this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: scripts/await-required-workflows.sh validate legion-ci
+
   release-please:
+    needs: await-checks
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -77,82 +105,34 @@ jobs:
           echo "Enabling auto-merge on Release PR #${pr_number}"
           gh pr merge "${pr_number}" --repo "${REPO}" --auto --squash
 
-  # Release PRs are opened by release-please using the default GITHUB_TOKEN, and
-  # GitHub does not trigger workflows for such PRs — their `validate` / `legion-ci`
-  # runs sit at `action_required` and never execute. v0.18.1 therefore merged and
-  # published with no CI having run on it. Nothing was broken, but the gate was
-  # absent.
-  #
-  # `needs:` cannot reference another workflow, so this job waits for validate and
-  # legion-ci to conclude on THIS commit (they start from the same push) and
-  # blocks the publish until they are green.
-  #
-  # It fails closed. A required workflow that is missing, still running at the
-  # deadline, cancelled or skipped all count as "not green" — absence is never
-  # read as success, which would silently reopen the hole this job exists to fix.
-  await-checks:
-    name: Await required checks
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Require validate + legion-ci green on this commit
+      # Pull requests opened with GITHUB_TOKEN do not emit pull_request events,
+      # so branch-required workflows would otherwise remain action_required.
+      # Explicit dispatches attach those checks to the release PR head SHA.
+      - name: Dispatch required checks on Release PR
+        if: ${{ steps.release.outputs.pr != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
           REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          required="validate legion-ci"
-          deadline=$(( SECONDS + 1500 ))
-
-          while :; do
-            runs="$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
-              --jq '.workflow_runs[] | [.name, .status, (.conclusion // "-")] | @tsv')"
-
-            pending=""
-            for wf in $required; do
-              line="$(printf '%s\n' "$runs" | awk -F'\t' -v w="$wf" '$1 == w { print; exit }')"
-
-              if [ -z "$line" ]; then
-                pending="${pending} ${wf}(not-started)"
-                continue
-              fi
-
-              status="$(printf '%s' "$line" | cut -f2)"
-              conclusion="$(printf '%s' "$line" | cut -f3)"
-
-              if [ "$status" != "completed" ]; then
-                pending="${pending} ${wf}(${status})"
-                continue
-              fi
-
-              if [ "$conclusion" != "success" ]; then
-                echo "::error::${wf} concluded '${conclusion}' for ${SHA} — refusing to publish"
-                exit 1
-              fi
-
-              echo "green: ${wf}"
-            done
-
-            [ -z "$pending" ] && break
-
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::error::timed out waiting for:${pending} — refusing to publish"
-              exit 1
-            fi
-
-            echo "waiting for:${pending}"
-            sleep 20
-          done
-
-          echo "all required checks green for ${SHA}"
+          pr_number="$(jq -r '.number // empty' <<<"${RELEASE_PR}")"
+          if [ -z "${pr_number}" ]; then
+            echo "::error::release-please output did not include a PR number"
+            exit 1
+          fi
+          head_ref="$(gh pr view "${pr_number}" --repo "${REPO}" --json headRefName --jq '.headRefName')"
+          if [ -z "${head_ref}" ]; then
+            echo "::error::Release PR #${pr_number} has no head branch"
+            exit 1
+          fi
+          gh workflow run validate.yml --repo "${REPO}" --ref "${head_ref}"
+          gh workflow run legion-ci.yml --repo "${REPO}" --ref "${head_ref}"
 
   publish:
     name: Publish package
-    needs: [release-please, await-checks]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: release-please
+    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -170,13 +150,24 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - name: Use latest npm
-        run: npm install -g npm@latest
+      - name: Use pinned npm
+        run: npm install -g npm@12.0.2
 
       - name: Version is in sync
+        id: release_ref
+        env:
+          GATED_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
           set -euo pipefail
+          bash scripts/install.sh --validate-release-tag="$RELEASE_TAG"
           tag_version="${{ needs.release-please.outputs.version }}"
+          head_sha="$(git rev-parse HEAD)"
+          tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [ "$head_sha" != "$GATED_SHA" ] || [ "$tag_sha" != "$GATED_SHA" ]; then
+            echo "::error::Gated SHA ${GATED_SHA}, checked-out SHA ${head_sha}, and ${RELEASE_TAG} SHA ${tag_sha} must match"
+            exit 1
+          fi
           pkg="$(jq -r '.version' package.json)"
           mkt="$(jq -r '.version' .claude-plugin/marketplace.json)"
           if [ "$tag_version" != "$pkg" ]; then
@@ -187,7 +178,15 @@ jobs:
             echo "::error::package.json ($pkg) != marketplace.json ($mkt)"
             exit 1
           fi
-          echo "version $pkg in sync"
+          echo "${RELEASE_TAG} resolves to gated SHA ${GATED_SHA}; version ${pkg} is in sync"
+
+      # Upload before registry publication so a transient registry failure cannot
+      # leave the newest stable GitHub release without its installer. `--clobber`
+      # is safe here because the bytes come from the exact gated release commit.
+      - name: Attach installer to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" scripts/install.sh --clobber
 
       - name: Publish to npm with provenance
         run: npm publish --provenance --access public --ignore-scripts --tag latest
@@ -205,9 +204,103 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Serve the installer from the release so `releases/latest/download/install.sh`
-      # always resolves to the released (immutable) script, not main HEAD.
+  recovery-publish:
+    name: Recover package publication
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    # Both checkouts live below GITHUB_WORKSPACE, so its root is not itself a
+    # repository. Give every recovery `gh` call an explicit repository target.
+    env:
+      GH_REPO: ${{ github.repository }}
+    environment:
+      name: release
+      url: https://www.npmjs.com/package/@opus-aether-ai/legion-core
+    steps:
+      # Recovery controls must come from the revision that defines this trusted
+      # workflow. Historical releases are package data only and may predate the
+      # validation and required-workflow helpers used below.
+      - name: Check out trusted recovery controls
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+
+      - name: Validate release tag before Git uses it as a ref
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash control/scripts/install.sh --validate-release-tag="$RELEASE_TAG"
+
+      - name: Check out immutable release contents
+        uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          fetch-depth: 0
+          path: release
+
+      - name: Verify immutable release tag and versions
+        id: recovery_ref
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash control/scripts/verify-release-recovery.sh "$RELEASE_TAG" "$GITHUB_WORKSPACE/release"
+
+      - name: Require validate + legion-ci green for release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.recovery_ref.outputs.sha }}
+        run: control/scripts/await-required-workflows.sh validate legion-ci
+
+      # Repair the installer before touching registries. `--clobber` makes a
+      # rerun idempotent for this exact validated tag.
       - name: Attach installer to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" scripts/install.sh --clobber
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" release/scripts/install.sh --clobber
+
+      - name: Set up Node for npmjs.com
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Use pinned npm
+        run: npm install -g npm@12.0.2
+
+      - name: Publish to npm with provenance
+        working-directory: release
+        env:
+          PACKAGE_NAME: ${{ steps.recovery_ref.outputs.package }}
+          PACKAGE_VERSION: ${{ steps.recovery_ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          published="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+          if [ "$published" = "$PACKAGE_VERSION" ]; then
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} already exists on npmjs; skipping."
+          else
+            npm publish --provenance --access public --ignore-scripts --tag latest
+          fi
+
+      - name: Set up Node for GitHub Packages
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@opus-aether-ai'
+          package-manager-cache: false
+
+      - name: Publish to GitHub Packages
+        working-directory: release
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_NAME: ${{ steps.recovery_ref.outputs.package }}
+          PACKAGE_VERSION: ${{ steps.recovery_ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          published="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://npm.pkg.github.com 2>/dev/null || true)"
+          if [ "$published" = "$PACKAGE_VERSION" ]; then
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} already exists on GitHub Packages; skipping."
+          else
+            npm publish --registry=https://npm.pkg.github.com --ignore-scripts
+          fi

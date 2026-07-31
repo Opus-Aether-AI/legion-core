@@ -26,9 +26,12 @@ setup_test_env() {
     # delete the source clone (e.g., "fetch_plugins falls back to raw GitHub")
     export MOCK_GH_FIXTURE="$TEST_TMPDIR/mock-gh-marketplace.json"
     export MOCK_CURL_FIXTURE="$MOCK_GH_FIXTURE"
+    export MOCK_RELEASE_TAG="${MOCK_RELEASE_TAG:-v0.0.0-test}"
+    export MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE="$TEST_TMPDIR/mock-claude-marketplace-source"
 
     mkdir -p "$AGENTS_HOME" "$HOME/.codex" "$HOME/.claude/plugins/cache"
     : > "$MOCK_CALL_LOG"
+    : > "$MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE"
 
     # Mocks shadow selected CLIs (claude, curl, gh, crontab); real git/jq/mkdir remain.
     # The mocks dir is *prepended* so real PATH still works for everything else.
@@ -72,11 +75,73 @@ make_source_clone() {
         git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
         git -c user.email=test@test -c user.name=test add -A
         git -c user.email=test@test -c user.name=test commit -q -m "init test source clone"
+        git tag v0.0.0-test
         # Configure a fake 'origin' that points to ourselves so `git fetch origin` no-ops cleanly
         git remote add origin "$SOURCE_CLONE" 2>/dev/null || true
         git fetch origin --quiet 2>/dev/null || true
         git branch -u origin/main main 2>/dev/null || true
     )
+}
+
+# Commit test-only source changes so safety-sensitive install/refresh paths see
+# a clean operator tree. Callers can then opt into LEGION_REF=main explicitly.
+commit_source_fixture() {
+    local message="${1:-update source fixture}"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q --allow-empty -m "$message"
+    )
+}
+
+# Create an ignored operator file that collides with a tracked path in the next
+# release. `git status` remains clean, so checkout's collision guard is tested.
+make_ignored_checkout_collision() {
+    (
+        cd "$SOURCE_CLONE"
+        git checkout -q -b collision-release
+        printf 'release content\n' > release-collision.txt
+        git -c user.email=test@test -c user.name=test add release-collision.txt
+        git -c user.email=test@test -c user.name=test commit -q -m "add collision path"
+        git tag v0.0.1-test
+        git checkout -q main
+        printf 'release-collision.txt\n' >> .git/info/exclude
+        printf 'operator content\n' > release-collision.txt
+    )
+}
+
+# Give a branch and tag the same short name but different commits. Update code
+# must fetch refs/tags/<version> exactly rather than letting Git disambiguate.
+make_ambiguous_release_ref() {
+    (
+        cd "$SOURCE_CLONE"
+        git tag v0.0.1-test
+        git checkout -q -b v0.0.1-test
+        printf 'branch content\n' > ambiguous-branch-only.txt
+        git -c user.email=test@test -c user.name=test add ambiguous-branch-only.txt
+        git -c user.email=test@test -c user.name=test commit -q -m "advance ambiguous branch"
+    )
+}
+
+# Put a narrow Git fault in front of the real binary. This lets safety tests
+# exercise fail-closed inspection/resolution paths without corrupting fixtures.
+make_failing_git_wrapper() {
+    local subcommand="$1"
+    local wrapper_dir="$TEST_TMPDIR/git-fails-$subcommand"
+    local real_git
+    real_git="$(command -v git)"
+    mkdir -p "$wrapper_dir"
+    cat > "$wrapper_dir/git" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+    if [ "\$arg" = "$subcommand" ]; then
+        exit 97
+    fi
+done
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$wrapper_dir/git"
+    printf '%s\n' "$wrapper_dir"
 }
 
 # Record the contents of $MOCK_CALL_LOG for assertions

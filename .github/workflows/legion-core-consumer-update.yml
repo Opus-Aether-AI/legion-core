@@ -25,6 +25,21 @@ on:
         required: false
         default: ""
         type: string
+      bun_version:
+        description: Optional exact Bun version required by the consumer
+        required: false
+        default: ""
+        type: string
+      python_version:
+        description: Optional exact Python version required by the consumer
+        required: false
+        default: ""
+        type: string
+      use_uv:
+        description: Install uv for a Python consumer
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -52,6 +67,19 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@v2
+        if: ${{ inputs.bun_version != '' }}
+        with:
+          bun-version: ${{ inputs.bun_version }}
+
+      - uses: actions/setup-python@v5
+        if: ${{ inputs.python_version != '' }}
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - uses: astral-sh/setup-uv@v6
+        if: ${{ inputs.use_uv }}
 
       - name: Validate immutable release payload
         run: |

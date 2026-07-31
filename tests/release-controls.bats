@@ -254,6 +254,11 @@ EOF
     grep -q 'legion-init --repo . --check' "$consumer"
     grep -q 'schema: "legion.core-pin.v1"' "$consumer"
     grep -q 'source_sha: $source_sha' "$consumer"
+    grep -q 'bun_version:' "$consumer"
+    grep -q 'python_version:' "$consumer"
+    grep -q 'use_uv:' "$consumer"
+    grep -q 'oven-sh/setup-bun@v2' "$consumer"
+    grep -q 'astral-sh/setup-uv@v6' "$consumer"
     grep -q 'git push --force-with-lease=' "$consumer"
     grep -q 'gh pr create' "$consumer"
 }

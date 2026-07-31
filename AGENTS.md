@@ -16,7 +16,7 @@ routing, delegation, observability, setup bridges, and harness guidance.
   do not add domain-specific plugins, skills, or copy here.
 
 <!-- legion:init:v1:agents:start -->
-<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=b926a0603aa8d716 -->
+<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=9cfef76d34f50fbc -->
 ## Legion workflow
 
 Legion is the mandatory default operating mode for coding tasks in this
@@ -30,6 +30,9 @@ delegated.
   workflow. Return to the parent if the slice needs re-planning.
 - Otherwise, before editing, invoke the applicable installed Legion skill or
   command and read relevant `legion-self-learn hints`.
+- When `.legion/legion-core.json` exists, its exact version and release commit
+  are this repository's declared Legion baseline. Update that managed pin only
+  through the Legion release workflow.
 - Use `legion-run` for substantial or multi-stage work that needs an explicit
   plan, deterministic validation, independent review, and retained evidence.
 - Use `legion-orchestrate` or `legion-fanout` for dependency-aware parallel

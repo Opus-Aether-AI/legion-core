@@ -27,13 +27,7 @@ deadline=$((SECONDS + timeout_seconds))
 
 while :; do
     if ! runs="$(gh api "repos/${repo}/actions/runs?head_sha=${sha}&per_page=100" \
-        --jq '.workflow_runs
-          | map(select(.event == "push"))
-          | sort_by(.created_at)
-          | reverse
-          | .[]
-          | [.name, .status, (.conclusion // "-")]
-          | @tsv')"; then
+        --jq '.workflow_runs | map(select(.event == "push")) | sort_by(.created_at) | reverse | .[] | [.name, .status, (.conclusion // "-")] | @tsv')"; then
         echo "::error::could not read workflow runs for ${sha} — refusing to release" >&2
         exit 1
     fi

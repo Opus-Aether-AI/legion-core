@@ -229,6 +229,60 @@ SH
     [ "$session_line" -lt "$self_line" ]
 }
 
+@test "refresh.sh records session feedback failures and continues" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-session-learn" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/refresh-recorder" <<'SH'
+#!/usr/bin/env bash
+printf 'refresh-record %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x \
+        "$SOURCE_CLONE/legion-observability/bin/legion-session-learn" \
+        "$SOURCE_CLONE/legion-observability/bin/refresh-recorder"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add failing session learner"
+    )
+
+    LEGION_UPDATE_REF=main \
+        LEGION_SELF_LEARN_BIN="$SOURCE_CLONE/legion-observability/bin/refresh-recorder" \
+        run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"session learning scan failed"* ]]
+    grep -qF "Daily session learning scan failed." "$MOCK_CALL_LOG"
+}
+
+@test "refresh.sh reports doctor and opt-in auto-heal failures without clobbering the refresh" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-doctor" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-heal" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x \
+        "$SOURCE_CLONE/legion-observability/bin/legion-doctor" \
+        "$SOURCE_CLONE/legion-observability/bin/legion-heal"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add failing health tools"
+    )
+
+    LEGION_UPDATE_REF=main LEGION_HEAL=1 run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"legion-doctor found issues"* ]]
+    [[ "$output" == *"auto-heal had failures"* ]]
+}
+
 @test "refresh.sh records self-learning failures" {
     make_source_clone marketplace-minimal.json
     mkdir -p "$SOURCE_CLONE/legion-observability/bin"

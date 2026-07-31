@@ -5,10 +5,43 @@ load 'helpers/setup'
 
 setup() {
     setup_test_env
-    unset GITHUB_WORKFLOW CHECK_TIMEOUT_SECONDS CHECK_POLL_INTERVAL_SECONDS
+    unset GITHUB_WORKFLOW CHECK_TIMEOUT_SECONDS CHECK_POLL_INTERVAL_SECONDS MOCK_GH_API_FAIL
     export AWAIT_REQUIRED_WORKFLOWS="$REPO_ROOT/scripts/await-required-workflows.sh"
     export REPO="Opus-Aether-AI/legion-core"
     export SHA="0123456789012345678901234567890123456789"
+}
+
+@test "required workflow gate requires at least one workflow" {
+    run bash "$AWAIT_REQUIRED_WORKFLOWS"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"at least one required workflow"* ]]
+}
+
+@test "required workflow gate rejects invalid timeout controls" {
+    export CHECK_TIMEOUT_SECONDS=soon
+
+    run bash "$AWAIT_REQUIRED_WORKFLOWS" validate
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"must be non-negative integers"* ]]
+}
+
+@test "required workflow gate fails closed when GitHub cannot be read" {
+    export MOCK_GH_API_FAIL=1
+
+    run bash "$AWAIT_REQUIRED_WORKFLOWS" validate
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not read workflow runs"* ]]
+}
+
+@test "required workflow gate polls before its deadline" {
+    export CHECK_TIMEOUT_SECONDS=1
+    export CHECK_POLL_INTERVAL_SECONDS=0
+    export MOCK_REQUIRED_WORKFLOW_RUNS=$'validate\tin_progress\t-'
+
+    run bash "$AWAIT_REQUIRED_WORKFLOWS" validate
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"waiting for: validate(in_progress)"* ]]
+    [[ "$output" == *"timed out waiting"* ]]
 }
 
 @test "required workflow gate accepts green validate and legion-ci push runs" {

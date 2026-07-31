@@ -41,10 +41,9 @@ fi
 # the only path to mutable main (or a specific rollback tag).
 if [ -z "$UPDATE_REF" ]; then
     release_json="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null || true)"
-    UPDATE_REF="$(printf '%s' "$release_json" | jq -r '
-        select(type == "object" and .draft == false and .prerelease == false)
-        | .tag_name // empty
-    ' 2>/dev/null || true)"
+    UPDATE_REF="$(printf '%s' "$release_json" \
+        | jq -r 'select(type == "object" and .draft == false and .prerelease == false) | .tag_name // empty' \
+            2>/dev/null || true)"
     if [ -z "$UPDATE_REF" ] || ! git check-ref-format --allow-onelevel "refs/tags/${UPDATE_REF}"; then
         printf 'legion refresh: could not resolve latest stable GitHub release tag; set LEGION_UPDATE_REF explicitly to override\n' >&2
         exit 2
@@ -97,10 +96,8 @@ reconcile_claude_plugins() {
             failed=1
             continue
         fi
-        installed_version="$(claude plugin list 2>/dev/null | awk -v id="$plugin@$MARKETPLACE_SLUG" '
-            index($0, id) { found=1; next }
-            found && $1 == "Version:" { print $2; exit }
-        ')"
+        installed_version="$(claude plugin list 2>/dev/null \
+            | awk -v id="$plugin@$MARKETPLACE_SLUG" 'index($0, id) { found=1; next } found && $1 == "Version:" { print $2; exit }')"
         if [ "$installed_version" != "$version" ]; then
             printf 'legion refresh: installed plugin %s is not at marketplace version %s (reported %s)\n' \
                 "$plugin" "$version" "${installed_version:-unknown}" >&2

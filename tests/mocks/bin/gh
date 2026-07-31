@@ -9,6 +9,12 @@ if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
     exit 0
 fi
 
+# `gh release view <tag>` -> configurable exact-release lookup.
+if [ "$1" = "release" ] && [ "$2" = "view" ]; then
+    [ "${MOCK_RELEASE_EXISTS:-0}" = "1" ]
+    exit $?
+fi
+
 # `gh api repos/.../contents/.claude-plugin/marketplace.json?ref=main --jq '.content' | base64 -d`
 # Return the marketplace.json content base64-encoded. Read from $MOCK_GH_FIXTURE
 # if set (test can point this at a fixture file independently of the source

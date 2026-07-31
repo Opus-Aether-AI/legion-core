@@ -9,6 +9,28 @@ setup() {
     export AWAIT_REQUIRED_WORKFLOWS="$REPO_ROOT/scripts/await-required-workflows.sh"
     export REPO="Opus-Aether-AI/legion-core"
     export SHA="0123456789012345678901234567890123456789"
+    unset MOCK_RELEASE_EXISTS
+}
+
+make_pending_release_fixture() {
+    local repo="$1"
+    mkdir -p "$repo"
+    printf '%s\n' '{"name":"@opus-aether-ai/legion-core","version":"0.19.0"}' > "$repo/package.json"
+    printf '%s\n' '{".":"0.19.0"}' > "$repo/.release-please-manifest.json"
+    (
+        cd "$repo"
+        git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "chore(main): release 0.19.0"
+        git tag v0.19.0
+    )
+    printf '%s\n' '{"name":"@opus-aether-ai/legion-core","version":"0.19.1"}' > "$repo/package.json"
+    printf '%s\n' '{".":"0.19.1"}' > "$repo/.release-please-manifest.json"
+    (
+        cd "$repo"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "chore(main): release 0.19.1"
+    )
 }
 
 make_legacy_release_fixture() {
@@ -137,7 +159,7 @@ EOF
     grep -q 'package.json' "$release"
     grep -q 'marketplace.json' "$release"
     grep -q 'npm@12.0.2' "$release"
-    grep -q 'GATED_SHA: ${{ github.sha }}' "$release"
+    grep -q 'GATED_SHA: ${{ needs.release-please.outputs.release_sha }}' "$release"
     grep -qF 'head_sha="$(git rev-parse HEAD)"' "$release"
     grep -qF 'tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"' "$release"
     grep -qF '[ "$head_sha" != "$GATED_SHA" ] || [ "$tag_sha" != "$GATED_SHA" ]' "$release"
@@ -152,6 +174,19 @@ EOF
     grep -q 'already exists on GitHub Packages; skipping' "$release"
     grep -q 'gh workflow run validate.yml' "$release"
     grep -q 'gh workflow run legion-ci.yml' "$release"
+    grep -q 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' "$release"
+    grep -q 'app-id: ${{ secrets.RELEASE_BOT_APP_ID }}' "$release"
+    grep -q 'private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}' "$release"
+    grep -q 'permission-contents: write' "$release"
+    grep -q 'scripts/prepare-pending-release.sh' "$release"
+    grep -q 'SHA: ${{ steps.pending_release.outputs.release_sha }}' "$release"
+    grep -q 'GH_TOKEN: ${{ steps.release_bot.outputs.token }}' "$release"
+    grep -q '^  fleet-update:' "$release"
+    local consumer
+    for consumer in legion-code automaker-autoslicer moneyball nemesis legion-landing storefronts webapp moneyball-product factory-ops; do
+        [ "$(grep -c "^            ${consumer}$" "$release")" -eq 2 ]
+    done
+    grep -q 'event_type: $event_type, client_payload:' "$release"
     grep -q 'workflow_dispatch:' "$REPO_ROOT/.github/workflows/validate.yml"
     grep -q 'workflow_dispatch:' "$REPO_ROOT/.github/workflows/legion-ci.yml"
 
@@ -163,7 +198,7 @@ EOF
     automatic_asset_line="$(grep -n 'gh release upload' "$release" | head -n1 | cut -d: -f1)"
     automatic_publish_line="$(grep -n 'npm publish --provenance' "$release" | head -n1 | cut -d: -f1)"
     recovery_job_line="$(grep -n '^  recovery-publish:' "$release" | cut -d: -f1)"
-    recovery_repo_line="$(grep -n 'GH_REPO: \${{ github.repository }}' "$release" | cut -d: -f1)"
+    recovery_repo_line="$(grep -n 'GH_REPO: \${{ github.repository }}' "$release" | tail -n1 | cut -d: -f1)"
     control_checkout_line="$(grep -n 'ref: \${{ github.workflow_sha }}' "$release" | cut -d: -f1)"
     validation_line="$(grep -n 'bash control/scripts/install.sh --validate-release-tag' "$release" | cut -d: -f1)"
     release_checkout_line="$(grep -n 'ref: refs/tags/\${{ inputs.release_tag }}' "$release" | cut -d: -f1)"
@@ -181,6 +216,46 @@ EOF
     [ "$recovery_verify_line" -lt "$recovery_gate_line" ]
     [ "$recovery_gate_line" -lt "$recovery_asset_line" ]
     [ "$recovery_asset_line" -lt "$recovery_publish_line" ]
+}
+
+@test "pending release finder identifies the exact Release Please merge commit" {
+    local repo="$TEST_TMPDIR/pending-release"
+    local outputs="$TEST_TMPDIR/pending-release.outputs"
+    make_pending_release_fixture "$repo"
+
+    run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" MOCK_RELEASE_EXISTS=0 \
+        bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$repo"
+    [ "$status" -eq 0 ]
+    grep -q '^pending=true$' "$outputs"
+    grep -q '^version=0.19.1$' "$outputs"
+    grep -q '^tag_name=v0.19.1$' "$outputs"
+    grep -q "^release_sha=$(git -C "$repo" rev-parse HEAD)$" "$outputs"
+    grep -q '^tag_exists=false$' "$outputs"
+}
+
+@test "pending release finder is idempotent when the GitHub Release exists" {
+    local repo="$TEST_TMPDIR/existing-release"
+    local outputs="$TEST_TMPDIR/existing-release.outputs"
+    make_pending_release_fixture "$repo"
+
+    run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" MOCK_RELEASE_EXISTS=1 \
+        bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$repo"
+    [ "$status" -eq 0 ]
+    grep -q '^pending=false$' "$outputs"
+    ! grep -q '^release_sha=' "$outputs"
+}
+
+@test "consumer update workflow pins immutable core identity and opens a validated PR" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+
+    grep -q 'workflow_call:' "$consumer"
+    grep -q 'permission-contents' "$REPO_ROOT/.github/workflows/release-please.yml"
+    grep -qF '"@opus-aether-ai/legion-core@$LEGION_CORE_VERSION"' "$consumer"
+    grep -q 'legion-init --repo . --check' "$consumer"
+    grep -q 'schema: "legion.core-pin.v1"' "$consumer"
+    grep -q 'source_sha: $source_sha' "$consumer"
+    grep -q 'git push --force-with-lease=' "$consumer"
+    grep -q 'gh pr create' "$consumer"
 }
 
 @test "recovery verifies a v0.19.0-style legacy tag with current controls" {

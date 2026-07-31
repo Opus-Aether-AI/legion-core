@@ -62,9 +62,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
+      release_created: ${{ steps.pending_release.outputs.pending }}
+      tag_name: ${{ steps.pending_release.outputs.tag_name }}
+      version: ${{ steps.pending_release.outputs.version }}
+      release_sha: ${{ steps.pending_release.outputs.release_sha }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -84,6 +85,51 @@ jobs:
           while IFS= read -r title; do
             scripts/validate-conventional-title.sh "${title}"
           done < <(git log --format=%s --reverse "${range}")
+
+      # The default Actions integration can open Release PRs but this repository
+      # rejects its release-creation request. Use the installed, contents-only
+      # release bot for that single mutation. The finder also repairs a merged
+      # Release PR on the next main push if the original release attempt failed.
+      - name: Identify a pending GitHub Release
+        id: pending_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/prepare-pending-release.sh
+
+      - name: Require checks on the pending release commit
+        if: ${{ steps.pending_release.outputs.pending == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.pending_release.outputs.release_sha }}
+        run: scripts/await-required-workflows.sh validate legion-ci
+
+      - name: Create release bot token
+        if: ${{ steps.pending_release.outputs.pending == 'true' }}
+        id: release_bot
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Create the pending GitHub Release
+        if: ${{ steps.pending_release.outputs.pending == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.release_bot.outputs.token }}
+          RELEASE_TAG: ${{ steps.pending_release.outputs.tag_name }}
+          RELEASE_SHA: ${{ steps.pending_release.outputs.release_sha }}
+          TAG_EXISTS: ${{ steps.pending_release.outputs.tag_exists }}
+        run: |
+          set -euo pipefail
+          args=("$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes)
+          if [ "$TAG_EXISTS" = "true" ]; then
+            args+=(--verify-tag)
+          else
+            args+=(--target "$RELEASE_SHA")
+          fi
+          gh release create "${args[@]}"
 
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
@@ -156,7 +202,7 @@ jobs:
       - name: Version is in sync
         id: release_ref
         env:
-          GATED_SHA: ${{ github.sha }}
+          GATED_SHA: ${{ needs.release-please.outputs.release_sha }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
           set -euo pipefail
@@ -203,6 +249,66 @@ jobs:
         run: npm publish --registry=https://npm.pkg.github.com --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  fleet-update:
+    name: Notify Legion consumers
+    needs: [release-please, publish]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Create fleet dispatch token
+        id: fleet_bot
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            legion-code
+            automaker-autoslicer
+            moneyball
+            nemesis
+            legion-landing
+            storefronts
+            webapp
+            moneyball-product
+            factory-ops
+          permission-contents: write
+
+      - name: Dispatch the immutable release to every consumer
+        env:
+          GH_TOKEN: ${{ steps.fleet_bot.outputs.token }}
+          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          RELEASE_SHA: ${{ needs.release-please.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          consumers=(
+            legion-code
+            automaker-autoslicer
+            moneyball
+            nemesis
+            legion-landing
+            storefronts
+            webapp
+            moneyball-product
+            factory-ops
+          )
+          payload="$(jq -n \
+            --arg event_type legion-core-released \
+            --arg version "$RELEASE_VERSION" \
+            --arg tag "$RELEASE_TAG" \
+            --arg source_sha "$RELEASE_SHA" \
+            '{event_type: $event_type, client_payload: {
+              version: $version, tag: $tag, source_sha: $source_sha
+            }}')"
+          for consumer in "${consumers[@]}"; do
+            echo "Dispatching $RELEASE_TAG to Opus-Aether-AI/$consumer"
+            gh api --method POST \
+              "repos/Opus-Aether-AI/$consumer/dispatches" \
+              --input - <<<"$payload"
+          done
 
   recovery-publish:
     name: Recover package publication

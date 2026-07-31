@@ -1,0 +1,160 @@
+name: Legion core consumer update
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Exact published legion-core version
+        required: true
+        type: string
+      tag:
+        description: Immutable legion-core release tag
+        required: true
+        type: string
+      source_sha:
+        description: Immutable legion-core release commit
+        required: true
+        type: string
+      update_command:
+        description: Optional repository-owned dependency or metadata update
+        required: false
+        default: ""
+        type: string
+      validation_command:
+        description: Optional repository-owned validation after the update
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    name: Open legion-core update PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LEGION_CORE_VERSION: ${{ inputs.version }}
+      LEGION_CORE_TAG: ${{ inputs.tag }}
+      LEGION_CORE_SHA: ${{ inputs.source_sha }}
+      UPDATE_COMMAND: ${{ inputs.update_command }}
+      VALIDATION_COMMAND: ${{ inputs.validation_command }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Validate immutable release payload
+        run: |
+          set -euo pipefail
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          [[ "$LEGION_CORE_VERSION" =~ $semver ]] || {
+            echo "::error::invalid legion-core version: $LEGION_CORE_VERSION"
+            exit 2
+          }
+          [ "$LEGION_CORE_TAG" = "v$LEGION_CORE_VERSION" ] || {
+            echo "::error::tag $LEGION_CORE_TAG does not match version $LEGION_CORE_VERSION"
+            exit 2
+          }
+          [[ "$LEGION_CORE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::invalid legion-core source SHA"
+            exit 2
+          }
+
+      - name: Apply the published Legion policy
+        run: |
+          npx --yes --package "@opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \
+            legion-init --repo .
+
+      - name: Record the repository core baseline
+        run: |
+          set -euo pipefail
+          mkdir -p .legion
+          temp="$(mktemp .legion/.legion-core.json.XXXXXX)"
+          jq -n \
+            --arg version "$LEGION_CORE_VERSION" \
+            --arg tag "$LEGION_CORE_TAG" \
+            --arg source_sha "$LEGION_CORE_SHA" \
+            '{
+              schema: "legion.core-pin.v1",
+              package: "@opus-aether-ai/legion-core",
+              version: $version,
+              tag: $tag,
+              source_sha: $source_sha
+            }' > "$temp"
+          mv "$temp" .legion/legion-core.json
+
+      - name: Apply repository-specific dependency metadata
+        if: ${{ inputs.update_command != '' }}
+        run: bash -euo pipefail -c "$UPDATE_COMMAND"
+
+      - name: Validate Legion policy and repository integration
+        run: |
+          set -euo pipefail
+          npx --yes --package "@opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \
+            legion-init --repo . --check
+          jq -e \
+            --arg version "$LEGION_CORE_VERSION" \
+            --arg tag "$LEGION_CORE_TAG" \
+            --arg source_sha "$LEGION_CORE_SHA" \
+            '.schema == "legion.core-pin.v1"
+             and .package == "@opus-aether-ai/legion-core"
+             and .version == $version
+             and .tag == $tag
+             and .source_sha == $source_sha' \
+            .legion/legion-core.json >/dev/null
+          if [ -n "$VALIDATION_COMMAND" ]; then
+            bash -euo pipefail -c "$VALIDATION_COMMAND"
+          fi
+
+      - name: Create or update the dependency PR
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Repository is already current at legion-core $LEGION_CORE_VERSION."
+            exit 0
+          fi
+
+          branch="chore/legion-core-v$LEGION_CORE_VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add -A
+          git add -f .legion/legion-core.json
+          git commit -m "chore(deps): update legion-core to $LEGION_CORE_VERSION"
+
+          expected="$(git ls-remote origin "refs/heads/$branch" | awk '{print $1}')"
+          if [ -n "$expected" ]; then
+            git push --force-with-lease="refs/heads/$branch:$expected" origin \
+              "HEAD:refs/heads/$branch"
+          else
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+
+          body="$(printf '%s\n\n%s\n%s\n%s\n\n%s' \
+            "Automated Legion fleet update from $LEGION_CORE_TAG." \
+            "- Package: @opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \
+            "- Release commit: $LEGION_CORE_SHA" \
+            "- Policy: applied non-destructively with legion-init" \
+            "Repository-owned validation completed before this PR was opened.")"
+          existing="$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" \
+              --title "chore(deps): update legion-core to $LEGION_CORE_VERSION" \
+              --body "$body"
+          else
+            gh pr create \
+              --base "${{ github.event.repository.default_branch }}" \
+              --head "$branch" \
+              --title "chore(deps): update legion-core to $LEGION_CORE_VERSION" \
+              --body "$body"
+          fi

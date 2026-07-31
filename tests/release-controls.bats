@@ -123,6 +123,7 @@ EOF
     grep -q 'needs: await-checks' "$release"
     grep -q 'workflow_dispatch:' "$release"
     grep -q 'recovery-publish:' "$release"
+    grep -q 'GH_REPO: ${{ github.repository }}' "$release"
     grep -q 'id-token: write' "$release"
     grep -q 'scripts/await-required-workflows.sh validate legion-ci' "$release"
     grep -q 'release_tag:' "$release"
@@ -155,12 +156,14 @@ EOF
     grep -q 'workflow_dispatch:' "$REPO_ROOT/.github/workflows/legion-ci.yml"
 
     local gate_line action_line automatic_asset_line automatic_publish_line
-    local control_checkout_line validation_line release_checkout_line recovery_verify_line
+    local recovery_job_line recovery_repo_line control_checkout_line validation_line release_checkout_line recovery_verify_line
     local recovery_gate_line recovery_asset_line recovery_publish_line
     gate_line="$(grep -n 'needs: await-checks' "$release" | head -n1 | cut -d: -f1)"
     action_line="$(grep -n 'googleapis/release-please-action' "$release" | head -n1 | cut -d: -f1)"
     automatic_asset_line="$(grep -n 'gh release upload' "$release" | head -n1 | cut -d: -f1)"
     automatic_publish_line="$(grep -n 'npm publish --provenance' "$release" | head -n1 | cut -d: -f1)"
+    recovery_job_line="$(grep -n '^  recovery-publish:' "$release" | cut -d: -f1)"
+    recovery_repo_line="$(grep -n 'GH_REPO: \${{ github.repository }}' "$release" | cut -d: -f1)"
     control_checkout_line="$(grep -n 'ref: \${{ github.workflow_sha }}' "$release" | cut -d: -f1)"
     validation_line="$(grep -n 'bash control/scripts/install.sh --validate-release-tag' "$release" | cut -d: -f1)"
     release_checkout_line="$(grep -n 'ref: refs/tags/\${{ inputs.release_tag }}' "$release" | cut -d: -f1)"
@@ -170,6 +173,8 @@ EOF
     recovery_publish_line="$(grep -n 'npm publish --provenance' "$release" | tail -n1 | cut -d: -f1)"
     [ "$gate_line" -lt "$action_line" ]
     [ "$automatic_asset_line" -lt "$automatic_publish_line" ]
+    [ "$recovery_job_line" -lt "$recovery_repo_line" ]
+    [ "$recovery_repo_line" -lt "$recovery_asset_line" ]
     [ "$control_checkout_line" -lt "$validation_line" ]
     [ "$validation_line" -lt "$release_checkout_line" ]
     [ "$release_checkout_line" -lt "$recovery_verify_line" ]

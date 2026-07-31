@@ -209,6 +209,10 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    # Both checkouts live below GITHUB_WORKSPACE, so its root is not itself a
+    # repository. Give every recovery `gh` call an explicit repository target.
+    env:
+      GH_REPO: ${{ github.repository }}
     environment:
       name: release
       url: https://www.npmjs.com/package/@opus-aether-ai/legion-core

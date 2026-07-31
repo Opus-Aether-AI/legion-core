@@ -213,45 +213,39 @@ jobs:
       name: release
       url: https://www.npmjs.com/package/@opus-aether-ai/legion-core
     steps:
-      - uses: actions/checkout@v5
+      # Recovery controls must come from the revision that defines this trusted
+      # workflow. Historical releases are package data only and may predate the
+      # validation and required-workflow helpers used below.
+      - name: Check out trusted recovery controls
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+
+      - name: Validate release tag before Git uses it as a ref
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash control/scripts/install.sh --validate-release-tag="$RELEASE_TAG"
+
+      - name: Check out immutable release contents
+        uses: actions/checkout@v5
         with:
           ref: refs/tags/${{ inputs.release_tag }}
           fetch-depth: 0
+          path: release
 
       - name: Verify immutable release tag and versions
         id: recovery_ref
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          set -euo pipefail
-          bash scripts/install.sh --validate-release-tag="$RELEASE_TAG"
-          git show-ref --tags --verify --quiet "refs/tags/${RELEASE_TAG}"
-          tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
-          head_sha="$(git rev-parse HEAD)"
-          if [ "$tag_sha" != "$head_sha" ]; then
-            echo "::error::${RELEASE_TAG} resolves to ${tag_sha}, not checked-out ${head_sha}"
-            exit 1
-          fi
-          tag_version="${RELEASE_TAG#v}"
-          pkg="$(jq -r '.version' package.json)"
-          marketplace="$(jq -r '.version' .claude-plugin/marketplace.json)"
-          if [ "$tag_version" != "$pkg" ] || [ "$tag_version" != "$marketplace" ]; then
-            echo "::error::${RELEASE_TAG} must match package.json (${pkg}) and marketplace.json (${marketplace})"
-            exit 1
-          fi
-          {
-            echo "sha=${head_sha}"
-            echo "package=$(jq -r '.name' package.json)"
-            echo "version=${tag_version}"
-          } >> "$GITHUB_OUTPUT"
-          echo "${RELEASE_TAG} resolves to ${head_sha}; versions are in sync"
+        run: bash control/scripts/verify-release-recovery.sh "$RELEASE_TAG" "$GITHUB_WORKSPACE/release"
 
       - name: Require validate + legion-ci green for release tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ steps.recovery_ref.outputs.sha }}
-        run: scripts/await-required-workflows.sh validate legion-ci
+        run: control/scripts/await-required-workflows.sh validate legion-ci
 
       # Repair the installer before touching registries. `--clobber` makes a
       # rerun idempotent for this exact validated tag.
@@ -259,7 +253,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: gh release upload "$RELEASE_TAG" scripts/install.sh --clobber
+        run: gh release upload "$RELEASE_TAG" release/scripts/install.sh --clobber
 
       - name: Set up Node for npmjs.com
         uses: actions/setup-node@v5
@@ -271,6 +265,7 @@ jobs:
         run: npm install -g npm@12.0.2
 
       - name: Publish to npm with provenance
+        working-directory: release
         env:
           PACKAGE_NAME: ${{ steps.recovery_ref.outputs.package }}
           PACKAGE_VERSION: ${{ steps.recovery_ref.outputs.version }}
@@ -292,6 +287,7 @@ jobs:
           package-manager-cache: false
 
       - name: Publish to GitHub Packages
+        working-directory: release
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PACKAGE_NAME: ${{ steps.recovery_ref.outputs.package }}

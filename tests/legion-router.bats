@@ -130,6 +130,48 @@ repos_file_for_repo() {
     grep -Eq '^codex active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
+@test "delegate run: forwards a preallocated run id to every non-Codex adapter" {
+    local executor repo run_id
+    for executor in claude cursor opencode; do
+      repo="$(make_test_repo "adopt-$executor")"
+      run_id="queued-slice-$executor"
+
+      PATH="$REPO_ROOT/legion-router/bin:$PATH" \
+        run "$DELEGATE" run --executor "$executor" --run-id "$run_id" \
+          --task "do the thing" --repo "$repo" --quiet
+
+      [ "$status" -eq 0 ]
+      echo "$output" | jq -e --arg run "$run_id" '.run_id == $run'
+      jq -e --arg run "$run_id" \
+        '.run_id == $run and .state_version >= 2 and .lifecycle.phase == "ok"' \
+        "$LEGION_REGISTRY_DIR/$run_id.json"
+    done
+}
+
+@test "delegate run: fails closed when an adapter cannot honor run identity" {
+    local repo; repo="$(make_test_repo legacy-adapter)"
+    local adapter_bin="$TEST_TMPDIR/legacy-adapter-bin"
+    mkdir -p "$adapter_bin"
+    cat > "$adapter_bin/legion-cursor" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'legacy-cursor %s\n' "$*" >> "$MOCK_CALL_LOG"
+case " $* " in
+  *" --run-id "*) printf 'legacy adapter does not support --run-id\n' >&2; exit 64 ;;
+esac
+printf '{"status":"ok","run_id":"fresh-id"}\n'
+SH
+    chmod +x "$adapter_bin/legion-cursor"
+
+    PATH="$adapter_bin:$PATH" run "$DELEGATE" run --executor cursor \
+      --run-id queued-slice-cursor --task "do the thing" --repo "$repo" --quiet
+
+    [ "$status" -eq 64 ]
+    [[ "$output" == *"does not support --run-id"* ]]
+    [ "$(grep -c '^legacy-cursor ' "$MOCK_CALL_LOG")" -eq 1 ]
+    grep -Fq -- "--run-id queued-slice-cursor" "$MOCK_CALL_LOG"
+}
+
 @test "delegate run: executor context does not leak into sandbox setup" {
     local repo; repo="$(make_test_repo executor-context)"
     mkdir -p "$repo/.legion"
@@ -393,6 +435,27 @@ $run_error" ]
     run "$DELEGATE" run --model test-model-beta --task "please rm -rf / now" --repo "$repo" --quiet
     [ "$status" -eq 2 ]
     [[ "$output" == *"dangerous"* || "$output" == *"injection"* ]]
+}
+
+@test "delegate run: preflight rejection terminalizes a preallocated run id" {
+    local repo; repo="$(make_test_repo preflight-terminal)"
+    local run_id="queued-delegate-preflight"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    run "$DELEGATE" run --model test-model-beta --run-id "$run_id" \
+      --task "please rm -rf / now" --repo "$repo" --quiet
+
+    [ "$status" -eq 2 ]
+    jq -e '
+      .run_id == "queued-delegate-preflight"
+      and .state_version >= 2
+      and .lifecycle.phase == "failed"
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
 }
 
 @test "task scanner: boundary fixtures allow embedded text and classify actual commands" {

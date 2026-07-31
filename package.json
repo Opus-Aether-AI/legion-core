@@ -37,6 +37,7 @@
     "legion-catalog": "legion-observability/bin/legion-catalog",
     "legion-console": "legion-observability/bin/legion-console",
     "legion-console-index": "legion-observability/bin/legion-console-index",
+    "legion-context-profile": "legion-observability/bin/legion-context-profile",
     "legion-context-tune": "legion-observability/bin/legion-context-tune",
     "legion-doctor": "legion-observability/bin/legion-doctor",
     "legion-eval": "legion-observability/bin/legion-eval",
@@ -44,6 +45,7 @@
     "legion-otel-export": "legion-observability/bin/legion-otel-export",
     "legion-report": "legion-observability/bin/legion-report",
     "legion-self-learn": "legion-observability/bin/legion-self-learn",
+    "legion-session-learn": "legion-observability/bin/legion-session-learn",
     "legion-share": "legion-observability/bin/legion-share",
     "legion-state": "legion-observability/bin/legion-state",
     "legion-trace": "legion-observability/bin/legion-trace",
@@ -55,12 +57,14 @@
     "legion-cursor": "legion-router/bin/legion-cursor",
     "legion-delegate": "legion-router/bin/legion-delegate",
     "legion-intake": "legion-router/bin/legion-intake",
+    "legion-opencode": "legion-router/bin/legion-opencode",
     "legion-optimize": "legion-router/bin/legion-optimize",
     "legion-route": "legion-router/bin/legion-route",
     "legion-router": "legion-router/bin/legion-router",
     "legion-codex-setup": "legion-setup/bin/legion-codex-setup",
     "legion-cursor-setup": "legion-setup/bin/legion-cursor-setup",
     "legion-init": "legion-setup/bin/legion-init",
+    "legion-opencode-setup": "legion-setup/bin/legion-opencode-setup",
     "legion-setup": "legion-setup/bin/legion-setup"
   },
   "files": [
@@ -71,6 +75,8 @@
     "legion-run/",
     "legion-setup/",
     "legion-codex-mode/",
+    "legion-opencode-mode/",
+    "legion-hermes-mode/",
     "scripts/",
     "docs/",
     ".claude-plugin/",
@@ -88,7 +94,7 @@
     "linux"
   ],
   "optionalDependencies": {
-    "@ai-hero/sandcastle": "latest"
+    "@ai-hero/sandcastle": "0.12.0"
   },
   "publishConfig": {
     "access": "public"

@@ -187,6 +187,7 @@ def _json_or_text(text: str) -> Any:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
@@ -194,6 +195,7 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, sort_keys=True, ensure_ascii=False))
         handle.write("\n")
+    path.chmod(0o600)
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -201,6 +203,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
         "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
         encoding="utf-8",
     )
+    path.chmod(0o600)
 
 
 def _slug(value: str) -> str:
@@ -215,6 +218,34 @@ def _stable_id(parts: list[Any]) -> str:
 
 def _iso_utc() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def reserve_run_directory(
+    state_root: Path,
+    runner_name: str,
+    *,
+    now: dt.datetime | None = None,
+) -> tuple[str, Path]:
+    """Atomically reserve a readable, collision-free legion-run directory."""
+
+    timestamp = now or dt.datetime.now(dt.timezone.utc)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(dt.timezone.utc)
+    base_id = timestamp.strftime("%Y%m%dT%H%M%SZ") + f"-{_slug(runner_name)}"
+    runs_root = state_root / "runs" / "legion-run"
+    runs_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    runs_root.chmod(0o700)
+
+    suffix = 1
+    while True:
+        run_id = base_id if suffix == 1 else f"{base_id}-{suffix}"
+        run_dir = runs_root / run_id
+        try:
+            run_dir.mkdir(mode=0o700)
+        except FileExistsError:
+            suffix += 1
+            continue
+        return run_id, run_dir
 
 
 def _short(text: Any, limit: int = 500) -> str:
@@ -1595,16 +1626,16 @@ def execute(
     stage_timeout_seconds: int,
     allow_generated_slices: bool,
 ) -> int:
+    os.umask(0o077)
     require_clean_review_source(repo, timeout_seconds=stage_timeout_seconds)
     state = legion_state.resolve_state(str(repo))
-    run_id = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + f"-{_slug(runner['name'])}"
-    run_dir = Path(state["state_root"]) / "runs" / "legion-run" / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_id, run_dir = reserve_run_directory(Path(state["state_root"]), runner["name"])
     profile = runner["pipeline"]["profile"]
     stages = _new_stage_records()
     current_stage = ""
 
     env = dict(os.environ)
+    trace_id = str(env.get("LEGION_TRACE_ID") or "").strip() or run_id
     env.update(
         {
             "LEGION_STATE_ROOT": state["state_root"],
@@ -1614,6 +1645,7 @@ def execute(
             "LEGION_BENCH_DIR": state["bench_dir"],
             "LEGION_REPORTS_DIR": state["reports_dir"],
             "LEGION_RUN_ID": run_id,
+            "LEGION_TRACE_ID": trace_id,
             "LEGION_RUN_DIR": str(run_dir),
             "LEGION_RUN_PLAN_FILE": str(run_dir / "plan.json"),
             "LEGION_RUN_SLICES_FILE": str(run_dir / "slices.jsonl"),
@@ -1745,7 +1777,7 @@ def execute(
         }
         _write_json(run_dir / "failure.json", failure)
         if not (run_dir / "legion-report.json").exists():
-            best_effort_process([_cmd("legion-report"), "--trace", "latest", "--json"], env, repo, run_dir / "legion-report.json")
+            best_effort_process([_cmd("legion-report"), "--trace", trace_id, "--json"], env, repo, run_dir / "legion-report.json")
         if failed_stage != "self-learn":
             finalize_self_learning(
                 summary_text=f"legion-run failed at {failed_stage}: {exc}",
@@ -1907,7 +1939,7 @@ def execute(
         else:
             stage_run("review", [_cmd("legion-delegate"), "run", "--executor", review_executor, "--model", str(review_route.get("model") or ""), "--sandbox", "read-only", "--repo", str(repo), "--base", review_input["head_sha"], "--task", review_task], run_dir / "review.json")
         eval_payload = stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True, hermetic=True)
-        stage_run("report", [_cmd("legion-report"), "--trace", "latest", "--json"], run_dir / "legion-report.json")
+        stage_run("report", [_cmd("legion-report"), "--trace", trace_id, "--json"], run_dir / "legion-report.json")
         stage_run("share", [_cmd("legion-share"), "--window", "1d", "--json"], run_dir / "share.json")
         finalize_self_learning(
             summary_text=f"legion-run completed profile {profile}",

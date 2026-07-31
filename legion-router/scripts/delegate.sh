@@ -96,7 +96,7 @@ cleanup_worktree_on_exit() {
   git -C "$LEGION_WT_REPO" worktree prune >/dev/null 2>&1 || true
   LEGION_WT_PATH=""
 }
-trap 'cleanup_sandbox_dev_on_exit; cleanup_worktree_on_exit' EXIT
+trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit; cleanup_sandbox_dev_on_exit; cleanup_worktree_on_exit' EXIT
 
 # codex is launched in the background and immediately waited on, so a terminating
 # signal to this wrapper interrupts the `wait` and runs this handler — otherwise a
@@ -172,6 +172,7 @@ on_terminating_signal() {
       "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" "$artifacts" || true
     ingest_usage "$REVIEW_RECEIPT_MODEL" "codex" 143 "$usage" "$cost" || true
     write_run_state failed || true
+    declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
     write_run_artifact_status "$REVIEW_ART_PATH" "$RUN_ID" "failed" \
       "$REVIEW_WT_PATH" "" "failed" || true
   fi
@@ -466,37 +467,10 @@ route_preflight() {
 write_run_state() {
   local phase="$1"
   {
-    mkdir -p "$LEGION_REGISTRY_DIR"
-    local f="$LEGION_REGISTRY_DIR/$RUN_ID.json"
-    local now started sv pgid host
+    local now
     now="$(_now)"
-    started="$now"; sv=0
-    if [[ -f "$f" ]]; then
-      local prev_started prev_sv
-      prev_started="$(jq -r '.lifecycle.started_at // empty' "$f" 2>/dev/null)"
-      prev_sv="$(jq -r '.state_version // 0' "$f" 2>/dev/null)"
-      [[ -n "$prev_started" ]] && started="$prev_started"
-      [[ "$prev_sv" =~ ^[0-9]+$ ]] && sv="$prev_sv"
-    fi
-    sv=$((sv + 1))
-    pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"; [[ "$pgid" =~ ^[0-9]+$ ]] || pgid=0
-    host="$(hostname 2>/dev/null || echo unknown)"
-    jq -cn \
-      --arg schema "legion.run-state.v1" --arg run "$RUN_ID" \
-      --arg trace "${LEGION_TRACE_ID:-$RUN_ID}" --arg parent "${LEGION_PARENT_ID:-}" \
-      --arg kind "${RUN_KIND:-run}" --arg repo "$repo" --arg run_dir "$art" \
-      --arg wt "$wt" --arg branch "$branch" --arg model "$model" --arg sandbox "$sandbox" \
-      --arg effort "$effort" --arg base "$base" --arg host "$host" --arg archetype "${archetype:-}" \
-      --argjson pid "$$" --argjson pgid "$pgid" \
-      --arg started "$started" --arg now "$now" --arg phase "$phase" --argjson sv "$sv" '
-      {schema:$schema, run_id:$run, trace_id:$trace,
-       parent_id:(if $parent=="" then null else $parent end),
-       kind:$kind, state_version:$sv,
-       repo_root:$repo, run_dir:$run_dir, worktree_dir:$wt, branch:$branch,
-       model:$model, archetype:$archetype, sandbox:$sandbox, reasoning_effort:$effort, base_ref:$base,
-       process:{pid:$pid, pgid:$pgid, started_at:$started, host:$host},
-       lifecycle:{phase:$phase, started_at:$started, updated_at:$now}}' \
-      > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f" && chmod 600 "$f" 2>/dev/null
+    legion_write_adapter_run_state "$phase" "$RUN_ID" "$repo" "$art" "$wt" \
+      "$branch" "$model" "$sandbox" "$base" "${archetype:-}" "$effort" "${RUN_KIND:-run}"
     # Register the repo for cross-repo discovery (dedup, best-effort).
     mkdir -p "$(dirname "$LEGION_REPOS_FILE")"
     if [[ ! -f "$LEGION_REPOS_FILE" ]] || ! grep -qF "$repo" "$LEGION_REPOS_FILE" 2>/dev/null; then
@@ -686,7 +660,9 @@ dispatch_adapter() {
   use_model="$explicit_model"
   [[ -n "$use_model" || -n "$forced_executor" || -z "$model" ]] || use_model="$model"
   [[ -n "$use_model" || -z "$model_ref" ]] || use_model="$(legion_model_ref "$model_ref" 2>/dev/null || true)"
-  local -a aargs=(run --repo "$repo" --task "$task")
+  # Identity is part of the adapter contract. Never retry without it: doing so
+  # would strand fanout's preallocated record in queued state.
+  local -a aargs=(run --repo "$repo" --task "$task" --run-id "$RUN_ID")
   [[ -n "$use_model" ]] && aargs+=(--model "$use_model")
   [[ "${QUIET:-0}" == "1" ]] && aargs+=(--quiet)
   case "$contract" in
@@ -738,6 +714,23 @@ cmd_run() {
       *) die "run: unknown arg '$1'" ;;
     esac
   done
+  if [[ -n "$preset_run_id" ]]; then
+    declare -F legion_write_adapter_run_state >/dev/null 2>&1 \
+      || die "run: shared run-state helper is unavailable"
+    legion_validate_run_id "$preset_run_id" \
+      || die "run: invalid --run-id '$preset_run_id'"
+  fi
+  repo="$(cd "$repo" && pwd)" || die "run: repo does not exist: $repo"
+  resolve_runtime_state "$repo"
+  RUN_ID="${preset_run_id:-$(_run_id)}"
+  local wt="$repo/.legion/worktrees/$RUN_ID"
+  local art="$repo/.legion/runs/$RUN_ID"
+  local branch="legion/delegate-$RUN_ID"
+  if [[ -n "$preset_run_id" ]]; then
+    legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
+      "$model" "${sandbox:-workspace-write}" "$base" "$archetype" "$effort"
+  fi
+  require_git_repo "$repo"
   # Archetype fills model/sandbox/effort/fallback from routing + model config; explicit flags win.
   local r_exec="" r_fallback=""
   if [[ -n "$archetype" ]]; then
@@ -777,8 +770,10 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"        # read from stdin if not given
   [[ -n "$task" ]] || die "run: empty task"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
-  RUN_ID="${preset_run_id:-$(_run_id)}"
+  if [[ -n "$preset_run_id" ]]; then
+    legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
+  fi
   route_preflight "${r_exec:-codex}" "$model" "$task" "$archetype" || return $?
   # Dispatch by executor. `self` is the primary's own inline work (never delegated);
   # codex (or an unclassified task) uses the native codex path below; any other
@@ -801,9 +796,6 @@ cmd_run() {
     die "run: --detach requires setsid or python3"
   fi
 
-  local wt="$repo/.legion/worktrees/$RUN_ID"
-  local art="$repo/.legion/runs/$RUN_ID"
-  local branch="legion/delegate-$RUN_ID"
   local sandbox_dev_pid=""
   if [[ "$detached_worker" -eq 1 ]]; then
     [[ -d "$art" && -d "$wt" ]] || die "run: detached worker setup is missing for '$RUN_ID'"
@@ -866,6 +858,7 @@ cmd_run() {
     write_run_artifact_status "$art" "$RUN_ID" "executing" "$wt" "$worker_pid"
     jq -cn --arg run "$RUN_ID" --arg wt "$wt" --arg dir "$art" \
       '{run_id:$run, worktree:$wt, run_dir:$dir, status:"detached"}'
+    declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
     return 0
   fi
 
@@ -984,6 +977,7 @@ cmd_run() {
   emit_span "codex" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
   write_run_state "$status"
+  declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
 
   if [[ "$do_apply" -eq 1 && "$status" == "ok" && -s "$art/diff.patch" ]]; then
     if git -C "$repo" apply --check "$art/diff.patch" 2>/dev/null; then

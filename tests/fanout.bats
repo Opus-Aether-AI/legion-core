@@ -9,7 +9,10 @@ setup() {
   # legion-claude's fallback tests) that would otherwise shadow the real one here.
   export LEGION_DELEGATE="$ROOT/legion-router/bin/legion-delegate"
   export LEGION_TELEMETRY="$ROOT/legion-observability/bin/legion-trace"
+  export LEGION_STATE_ROOT="$BATS_TEST_TMPDIR/state"
   export LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans"
+  export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
+  export LEGION_REPOS_FILE="$LEGION_STATE_ROOT/repos.jsonl"
   # Do not inherit whichever harness happens to run Bats. These policy tests
   # model a Claude-primary fanout unless a test overrides it explicitly.
   export LEGION_PRIMARY=claude
@@ -139,6 +142,19 @@ SH
   [ "$status" -eq 2 ]
 }
 
+@test "fanout: invalid DAG does not leave preallocated runs queued" {
+  printf '%s\n' \
+    '{"id":"a","depends_on":["b"],"archetype":"implement-feature","task":"build A"}' \
+    '{"id":"b","depends_on":["a"],"archetype":"write-tests","task":"test A"}' \
+    > "$BATS_TEST_TMPDIR/invalid-dag.jsonl"
+
+  run "$FANOUT" --slices "$BATS_TEST_TMPDIR/invalid-dag.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "error" and .stage == "dag"'
+  [ "$(find "$LEGION_REGISTRY_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
+}
+
 @test "fanout: route failures are returned as structured route-stage errors" {
   local bad_route="$BATS_TEST_TMPDIR/bad-legion-route"
   cat > "$bad_route" <<'SH'
@@ -212,6 +228,309 @@ SH
       and (.completed_at | length > 0)
     )
   ' "$ledger"
+}
+
+@test "adapter state updates serialize versions and never regress terminal state" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local registry="$BATS_TEST_TMPDIR/concurrent-registry"
+  local run_id="concurrent-adapter-state"
+  mkdir -p "$registry"
+  jq -cn --arg run "$run_id" '
+    {schema:"legion.run-state.v1",run_id:$run,state_version:1,
+     lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+  ' > "$registry/$run_id.json"
+
+  local i
+  for ((i = 0; i < 12; i++)); do
+    LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace" \
+      bash -c 'source "$1"; legion_write_adapter_run_state running "$2" /repo /run /wt branch model workspace-write HEAD arch' \
+        _ "$state_lib" "$run_id" &
+  done
+  wait
+
+  jq -e '.state_version == 13 and .lifecycle.phase == "running"' \
+    "$registry/$run_id.json"
+  LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace" \
+    bash -c 'source "$1"; legion_write_adapter_run_state ok "$2" /repo /run /wt branch model workspace-write HEAD arch' \
+      _ "$state_lib" "$run_id"
+  LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace" \
+    bash -c 'source "$1"; legion_write_adapter_run_state running "$2" /repo /run /wt branch model workspace-write HEAD arch' \
+      _ "$state_lib" "$run_id"
+  LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace" \
+    bash -c 'source "$1"; legion_write_adapter_run_state failed "$2" /repo /run /wt branch model workspace-write HEAD arch' \
+      _ "$state_lib" "$run_id"
+  jq -e '.state_version == 14 and .lifecycle.phase == "ok"' \
+    "$registry/$run_id.json"
+}
+
+@test "state lock keeps 40 contending Bash writers mutually exclusive" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local round root record completed guard overlap i
+
+  for ((round = 0; round < 5; round++)); do
+    root="$BATS_TEST_TMPDIR/lock-stress-$round"
+    record="$root/state.json"
+    completed="$root/completed"
+    guard="$root/critical-section"
+    overlap="$root/overlap"
+    mkdir -p "$root"
+    : > "$record"
+    mkdir "$record.lock"
+    printf '99999999\n' > "$record.lock/pid"
+
+    for ((i = 0; i < 40; i++)); do
+      bash -c '
+        source "$1"
+        lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+        if ! mkdir "$3" 2>/dev/null; then
+          : > "$4"
+        fi
+        sleep 0.02
+        rmdir "$3" 2>/dev/null || true
+        printf "%s\n" "$5" >> "$6"
+        legion_release_run_state_lock "$lock"
+      ' _ "$state_lib" "$record" "$guard" "$overlap" "$i" "$completed" &
+    done
+    wait
+
+    [ ! -e "$overlap" ]
+    [ "$(wc -l < "$completed" | tr -d ' ')" = "40" ]
+  done
+}
+
+@test "state lock recovery cannot delete a replacement owner generation" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-recovery-race"
+  local record="$root/state.json"
+  local guard="$root/critical-section"
+  local overlap="$root/overlap"
+  local recovery_ready="$root/recovery-ready"
+  local allow_dead="$root/allow-dead"
+  local quarantined="$root/quarantined"
+  local allow_cleanup="$root/allow-cleanup"
+  local recovery_done="$root/recovery-done"
+  local new_entered="$root/new-entered"
+  local release_new="$root/release-new"
+  local reclaimer_entered="$root/reclaimer-entered"
+  local release_reclaimer="$root/release-reclaimer"
+  local expected_owner=424242 reclaimer_pid new_pid held new_owner i
+  mkdir -p "$root"
+  : > "$record"
+  mkdir "$record.lock"
+  printf '%s\n' "$expected_owner" > "$record.lock/pid"
+
+  EXPECT_OWNER="$expected_owner" LOCK_PATH="$record.lock" \
+    RECOVERY_READY="$recovery_ready" ALLOW_DEAD="$allow_dead" \
+    QUARANTINED="$quarantined" ALLOW_CLEANUP="$allow_cleanup" \
+    RECOVERY_DONE="$recovery_done" RECLAIMER_ENTERED="$reclaimer_entered" \
+    RELEASE_RECLAIMER="$release_reclaimer" \
+    bash -c '
+      kill() {
+        if [[ "${1:-}" == "-0" && "${2:-}" == "$EXPECT_OWNER" ]]; then
+          [[ -d "$LOCK_PATH/.claim" && ! -L "$LOCK_PATH/.claim" ]] || return 0
+          : > "$RECOVERY_READY"
+          while [[ ! -e "$ALLOW_DEAD" ]]; do sleep 0.005; done
+          return 1
+        fi
+        builtin kill "$@"
+      }
+      mv() {
+        command mv "$@" || return
+        if [[ "${1:-}" == "$LOCK_PATH" ]]; then
+          : > "$QUARANTINED"
+          while [[ ! -e "$ALLOW_CLEANUP" ]]; do sleep 0.005; done
+        fi
+      }
+      source "$1"
+      legion_recover_dead_run_state_lock "$2.lock"
+      : > "$RECOVERY_DONE"
+      lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+      if ! mkdir "$3" 2>/dev/null; then : > "$4"; fi
+      : > "$RECLAIMER_ENTERED"
+      while [[ ! -e "$RELEASE_RECLAIMER" ]]; do sleep 0.005; done
+      rmdir "$3" 2>/dev/null || true
+      legion_release_run_state_lock "$lock"
+    ' _ "$state_lib" "$record" "$guard" "$overlap" &
+  reclaimer_pid=$!
+
+  for ((i = 0; i < 1000; i++)); do
+    [[ -e "$recovery_ready" ]] && break
+    sleep 0.005
+  done
+  [ -e "$recovery_ready" ]
+  [ -d "$record.lock/.claim" ]
+  [ "$(cat "$record.lock/pid")" = "$expected_owner" ]
+  : > "$allow_dead"
+
+  for ((i = 0; i < 1000; i++)); do
+    [[ -e "$quarantined" ]] && break
+    sleep 0.005
+  done
+  [ -e "$quarantined" ]
+  [ ! -e "$record.lock" ]
+  held="$(find "$root" -maxdepth 2 -path '*/.legion-lock-reap.*/held' -type d -print -quit)"
+  [ -n "$held" ]
+  [ -d "$held/.claim" ]
+  [ "$(cat "$held/pid")" = "$expected_owner" ]
+
+  NEW_ENTERED="$new_entered" RELEASE_NEW="$release_new" \
+    bash -c '
+      source "$1"
+      lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+      if ! mkdir "$3" 2>/dev/null; then : > "$4"; fi
+      : > "$NEW_ENTERED"
+      while [[ ! -e "$RELEASE_NEW" ]]; do sleep 0.005; done
+      rmdir "$3" 2>/dev/null || true
+      legion_release_run_state_lock "$lock"
+    ' _ "$state_lib" "$record" "$guard" "$overlap" &
+  new_pid=$!
+
+  for ((i = 0; i < 200; i++)); do
+    [[ -e "$new_entered" ]] && break
+    sleep 0.005
+  done
+  [ -e "$new_entered" ]
+  [ -d "$record.lock" ]
+  [ -f "$record.lock/pid" ]
+  new_owner="$(cat "$record.lock/pid")"
+  [ "$new_owner" = "$new_pid" ]
+  : > "$allow_cleanup"
+
+  for ((i = 0; i < 1000; i++)); do
+    [[ -e "$recovery_done" ]] && break
+    sleep 0.005
+  done
+  [ -e "$recovery_done" ]
+  [ ! -e "$held" ]
+  [ -d "$record.lock" ]
+  [ "$(cat "$record.lock/pid")" = "$new_owner" ]
+  for ((i = 0; i < 100; i++)); do
+    [[ -e "$reclaimer_entered" || -e "$overlap" ]] && break
+    sleep 0.005
+  done
+  [ ! -e "$reclaimer_entered" ]
+  [ ! -e "$overlap" ]
+
+  : > "$release_new"
+  wait "$new_pid"
+  for ((i = 0; i < 1000; i++)); do
+    [[ -e "$reclaimer_entered" ]] && break
+    sleep 0.005
+  done
+  [ -e "$reclaimer_entered" ]
+  : > "$release_reclaimer"
+  wait "$reclaimer_pid"
+
+  [ ! -e "$overlap" ]
+  [ -z "$(find "$root" -maxdepth 1 -name '.legion-lock-reap.*' -print -quit)" ]
+}
+
+@test "state lock recovery fails closed on incomplete and symlinked locks" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-fail-closed"
+  local empty="$root/empty.json.lock"
+  local invalid="$root/invalid.json.lock"
+  local linked="$root/linked.json.lock"
+  local claim_linked="$root/claim-linked.json.lock"
+  local target="$root/target"
+  mkdir -p "$empty" "$invalid" "$claim_linked" "$target"
+  printf 'not-a-pid\n' > "$invalid/pid"
+  printf '99999999\n' > "$claim_linked/pid"
+  ln -s "$target" "$linked"
+  ln -s "$target" "$claim_linked/.claim"
+  source "$state_lib"
+
+  legion_recover_dead_run_state_lock "$empty"
+  legion_recover_dead_run_state_lock "$invalid"
+  legion_recover_dead_run_state_lock "$claim_linked"
+  if legion_acquire_run_state_lock "${linked%.lock}"; then
+    false
+  fi
+
+  [ -d "$empty" ]
+  [ ! -e "$empty/pid" ]
+  [ "$(cat "$invalid/pid")" = "not-a-pid" ]
+  [ -L "$linked" ]
+  [ -L "$claim_linked/.claim" ]
+  [ "$(cat "$claim_linked/pid")" = "99999999" ]
+  [ -z "$(find "$root" -maxdepth 1 -name '.legion-lock-reap.*' -print -quit)" ]
+}
+
+@test "state lock PID metadata rejects symlinks and FIFOs without blocking" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-pid-types"
+  local recover_link="$root/recover-link.json.lock"
+  local release_link="$root/release-link.json.lock"
+  local recover_fifo="$root/recover-fifo.json.lock"
+  local release_fifo="$root/release-fifo.json.lock"
+  local dead_target="$root/dead-pid"
+  local self_target="$root/self-pid"
+  local operation lock done pid i blocked=0
+  mkdir -p "$recover_link" "$release_link" "$recover_fifo" "$release_fifo"
+  printf '99999999\n' > "$dead_target"
+  printf '%s\n' "$$" > "$self_target"
+  ln -s "$dead_target" "$recover_link/pid"
+  ln -s "$self_target" "$release_link/pid"
+  mkfifo "$recover_fifo/pid" "$release_fifo/pid"
+  source "$state_lib"
+
+  legion_recover_dead_run_state_lock "$recover_link"
+  legion_release_run_state_lock "$release_link"
+
+  for operation in legion_recover_dead_run_state_lock legion_release_run_state_lock; do
+    if [[ "$operation" == "legion_recover_dead_run_state_lock" ]]; then
+      lock="$recover_fifo"
+    else
+      lock="$release_fifo"
+    fi
+    done="$root/$operation.done"
+    bash -c 'source "$1"; "$2" "$3"; : > "$4"' \
+      _ "$state_lib" "$operation" "$lock" "$done" &
+    pid=$!
+    for ((i = 0; i < 200; i++)); do
+      [[ -e "$done" ]] && break
+      sleep 0.005
+    done
+    if [[ ! -e "$done" ]]; then
+      blocked=1
+      # Unblock a regressed reader so the failing test cannot leak a child cat.
+      printf 'not-a-pid\n' > "$lock/pid"
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
+
+  [ "$blocked" -eq 0 ]
+  [ -d "$recover_link" ]
+  [ -L "$recover_link/pid" ]
+  [ -d "$release_link" ]
+  [ -L "$release_link/pid" ]
+  [ -d "$recover_fifo" ]
+  [ -p "$recover_fifo/pid" ]
+  [ -d "$release_fifo" ]
+  [ -p "$release_fifo/pid" ]
+}
+
+@test "adapter state temp creation does not follow a predictable symlink" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local registry="$BATS_TEST_TMPDIR/symlink-registry"
+  local victim="$BATS_TEST_TMPDIR/victim.json"
+  local record="$registry/symlink-state.json"
+  mkdir -p "$registry"
+  printf 'do-not-overwrite\n' > "$victim"
+
+  jq -cn \
+    '{schema:"legion.run-state.v1",run_id:"symlink-state",state_version:1,
+      lifecycle:{phase:"queued",started_at:"",updated_at:"old"}}' > "$record"
+  ln -s "$victim" "$record.tmp.$$"
+  export LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace"
+  source "$state_lib"
+  legion_write_adapter_run_state ok symlink-state \
+    /repo /run /wt branch model workspace-write HEAD arch
+
+  [ "$(cat "$victim")" = "do-not-overwrite" ]
+  [ ! -L "$record" ]
+  jq -e '.state_version == 2 and .lifecycle.phase == "ok"' \
+    "$record"
 }
 
 @test "fanout: self/inline slices do NOT leave a queued record" {

@@ -4,7 +4,9 @@ load 'helpers/setup'
 
 setup() {
     setup_test_env
+    export LEGION_STATE_ROOT="$TEST_TMPDIR/state"
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
+    export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
     export LEGION_OPENCODE="$REPO_ROOT/legion-router/bin/legion-opencode"
     OPENCODE_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref opencode_default)"
 }
@@ -35,6 +37,61 @@ make_test_repo() {
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$output" = "opencode" ]
     grep -Eq '^opencode active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
+}
+
+@test "legion-opencode: adopts a preallocated run id and closes its queued lifecycle" {
+    local repo; repo="$(make_test_repo adopted-id)"
+    local run_id="queued-slice-opencode"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    LEGION_TRACE_ID=fanout-trace LEGION_PARENT_ID=fanout-root \
+      run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e --arg run "$run_id" \
+      '.run_id == $run and (.diff_path | endswith("/" + $run + "/diff.patch"))'
+    jq -e '
+      .run_id == "queued-slice-opencode"
+      and .trace_id == "fanout-trace"
+      and .parent_id == "fanout-root"
+      and .state_version >= 3
+      and .lifecycle.phase == "ok"
+      and (.lifecycle.started_at | length > 0)
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor == \"opencode\" and .run_id == \"$run_id\")'"
+    [ "$status" -eq 0 ]
+}
+
+@test "legion-opencode: closes a preallocated lifecycle when worktree setup fails" {
+    local repo; repo="$(make_test_repo worktree-fail)"
+    local run_id="queued-opencode-worktree-fail"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+    git -C "$repo" branch "legion/opencode-$run_id"
+
+    LEGION_TRACE_ID=fanout-trace LEGION_PARENT_ID=fanout-root \
+      run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --quiet
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"worktree add failed"* ]]
+    jq -e '
+      .run_id == "queued-opencode-worktree-fail"
+      and .trace_id == "fanout-trace"
+      and .parent_id == "fanout-root"
+      and .state_version >= 2
+      and .lifecycle.phase == "failed"
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
 }
 
 @test "legion-opencode: parses the JSONL event stream (cost summed across message ids, nested tokens)" {
@@ -101,6 +158,28 @@ make_test_repo() {
     [ "$status" -eq 2 ]
     [[ "$output" == *"nested Legion delegation is blocked"* ]]
     assert_mock_not_called opencode
+}
+
+@test "legion-opencode: missing CLI terminalizes a preallocated run id" {
+    local repo; repo="$(make_test_repo missing-cli)"
+    local run_id="queued-opencode-missing-cli"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    OPENCODE_BIN="$TEST_TMPDIR/missing-opencode" run "$LEGION_OPENCODE" run \
+      --task "x" --repo "$repo" --run-id "$run_id" --quiet
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"opencode CLI not found"* ]]
+    jq -e '
+      .run_id == "queued-opencode-missing-cli"
+      and .state_version >= 2
+      and .lifecycle.phase == "failed"
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
 }
 
 @test "legion-opencode: opencode failure yields status failed and non-zero exit" {

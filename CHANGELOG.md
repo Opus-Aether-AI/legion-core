@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.19.0...v0.19.1) (2026-07-31)
+
+
+### Fixed
+
+* harden release and update controls ([#108](https://github.com/Opus-Aether-AI/legion-core/issues/108)) ([bf17a30](https://github.com/Opus-Aether-AI/legion-core/commit/bf17a308d8cebb42db1ba59606d19ad10e9a2457))
+
 ## [0.19.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.18.2...v0.19.0) (2026-07-31)
 
 

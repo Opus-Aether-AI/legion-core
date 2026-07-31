@@ -1,7 +1,7 @@
 name: publish-package
 
 # Manual escape hatch to (re)publish @opus-aether-ai/legion-core to npmjs and
-# GitHub Packages from whatever ref this workflow is run against.
+# GitHub Packages from an explicit immutable release tag.
 #
 # The normal path is automatic: release-please.yml publishes when release-please
 # cuts a release (gated on `release_created`). This workflow is dispatch-only for
@@ -17,14 +17,20 @@ name: publish-package
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable release tag to publish (for example, v0.19.0)
+        required: true
+        type: string
 
 permissions:
+  actions: read
   contents: read
   id-token: write
   packages: write
 
 concurrency:
-  group: publish-package-${{ github.ref }}
+  group: publish-package-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
@@ -36,6 +42,43 @@ jobs:
       url: https://www.npmjs.com/package/@opus-aether-ai/legion-core
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Verify immutable release tag and versions
+        id: release_ref
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release_tag must be a v-prefixed semantic version tag"
+            exit 1
+          fi
+          git show-ref --tags --verify --quiet "refs/tags/${RELEASE_TAG}"
+          tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$head_sha" ]; then
+            echo "::error::${RELEASE_TAG} resolves to ${tag_sha}, not checked-out ${head_sha}"
+            exit 1
+          fi
+          tag_version="${RELEASE_TAG#v}"
+          pkg="$(jq -r '.version' package.json)"
+          marketplace="$(jq -r '.version' .claude-plugin/marketplace.json)"
+          if [ "$tag_version" != "$pkg" ] || [ "$tag_version" != "$marketplace" ]; then
+            echo "::error::${RELEASE_TAG} must match package.json (${pkg}) and marketplace.json (${marketplace})"
+            exit 1
+          fi
+          echo "sha=${head_sha}" >> "$GITHUB_OUTPUT"
+          echo "${RELEASE_TAG} resolves to ${head_sha}; versions are in sync"
+
+      - name: Require validate + legion-ci green for release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.release_ref.outputs.sha }}
+        run: scripts/await-required-workflows.sh validate legion-ci
 
       - name: Set up Node for npmjs.com
         uses: actions/setup-node@v5
@@ -43,19 +86,8 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - name: Use latest npm
-        run: npm install -g npm@latest
-
-      - name: Version is in sync with the marketplace
-        run: |
-          set -euo pipefail
-          pkg="$(jq -r '.version' package.json)"
-          mkt="$(jq -r '.version' .claude-plugin/marketplace.json)"
-          if [ "$pkg" != "$mkt" ]; then
-            echo "::error::package.json ($pkg) != marketplace.json ($mkt) — release-please keeps these in lockstep; do not edit by hand"
-            exit 1
-          fi
-          echo "version $pkg in sync"
+      - name: Use pinned npm
+        run: npm install -g npm@12.0.2
 
       - name: Publish to npm with provenance
         run: npm publish --provenance --access public --ignore-scripts --tag latest

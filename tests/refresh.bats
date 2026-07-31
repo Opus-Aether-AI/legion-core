@@ -26,6 +26,31 @@ setup() {
     [ "$(agents_skills_count)" = "3" ]
 }
 
+@test "refresh.sh defaults to the latest stable release tag instead of main" {
+    make_source_clone marketplace-minimal.json
+    (
+        cd "$SOURCE_CLONE"
+        printf 'main-only change\n' > main-only.txt
+        git add main-only.txt
+        git -c user.email=test@test -c user.name=test commit -q -m "main only"
+    )
+    local release_sha="$(git -C "$SOURCE_CLONE" rev-parse v0.0.0-test)"
+    export MOCK_RELEASE_TAG=v0.0.0-test
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$SOURCE_CLONE" rev-parse HEAD)" = "$release_sha" ]
+}
+
+@test "refresh.sh fails closed when no safe latest release can be resolved" {
+    make_source_clone marketplace-minimal.json
+    export MOCK_RELEASE_RESPONSE='{}'
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"could not resolve latest stable GitHub release tag"* ]]
+}
+
 @test "refresh.sh pulls latest from upstream + re-syncs symlinks" {
     make_source_clone marketplace-minimal.json
     bash "$INSTALL_SH" --refresh-symlinks
@@ -43,7 +68,7 @@ setup() {
         git -c user.email=test@test -c user.name=test commit -q -m "remove plugin"
     )
 
-    run bash "$REFRESH_SH"
+    LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
 
     # The stale symlink is gone
@@ -60,6 +85,7 @@ setup() {
         git config --add remote.origin.fetch '+refs/tags/v-test:refs/tags/v-test'
         git update-ref -d refs/remotes/origin/main
     )
+    export MOCK_RELEASE_TAG=v-test
 
     run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
@@ -95,13 +121,63 @@ SH
     grep -qF "Daily refresh symlink/Cursor bridge sync failed." "$MOCK_CALL_LOG"
 }
 
-@test "refresh.sh calls claude plugin marketplace update (best-effort)" {
+@test "refresh.sh calls claude plugin marketplace update" {
     make_source_clone marketplace-minimal.json
     bash "$INSTALL_SH" --refresh-symlinks
 
     run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
     assert_mock_called claude "marketplace update legion"
+}
+
+@test "refresh.sh updates each installed Legion plugin after refreshing the marketplace" {
+    make_source_clone marketplace-minimal.json
+    bash "$INSTALL_SH" all --no-cron
+    : > "$MOCK_CALL_LOG"
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    assert_mock_called claude "plugin update plugin-with-skill@legion-core"
+    assert_mock_called claude "plugin update plugin-nested@legion-core"
+    assert_mock_called claude "plugin update plugin-claude-only@legion-core"
+}
+
+@test "refresh.sh fails when an installed Legion plugin cannot be updated" {
+    make_source_clone marketplace-minimal.json
+    bash "$INSTALL_SH" all --no-cron
+    export MOCK_CLAUDE_UPDATE_FAIL=1
+
+    run bash "$REFRESH_SH"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"plugin reconciliation failed"* ]]
+}
+
+@test "refresh.sh fails when an installed Legion plugin remains version-drifted" {
+    make_source_clone marketplace-minimal.json
+    bash "$INSTALL_SH" all --no-cron
+    rm -rf "$HOME/.claude/plugins/cache/legion-core"/*/0.1.0
+    export MOCK_CLAUDE_PLUGIN_VERSION=0.0.9
+
+    run bash "$REFRESH_SH"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"is not at marketplace version"* ]]
+}
+
+@test "refresh.sh fails when the Claude marketplace cannot be refreshed" {
+    make_source_clone marketplace-minimal.json
+    export MOCK_CLAUDE_MARKETPLACE_UPDATE_FAIL=1
+
+    run bash "$REFRESH_SH"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"plugin reconciliation failed"* ]]
+}
+
+@test "refresh.sh does not require absent Legion plugins to be installed" {
+    make_source_clone marketplace-minimal.json
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    if grep -F 'claude plugin update ' "$MOCK_CALL_LOG"; then false; fi
 }
 
 @test "refresh.sh runs daily self-learning memory loop when present" {
@@ -118,7 +194,7 @@ SH
         git -c user.email=test@test -c user.name=test commit -q -m "add self learn"
     )
 
-    run bash "$REFRESH_SH"
+    LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
     grep -qF "self-learn run --repo $SOURCE_CLONE --apply-memory --quiet" "$MOCK_CALL_LOG"
 }
@@ -143,7 +219,7 @@ SH
         git -c user.email=test@test -c user.name=test commit -q -m "add learning bins"
     )
 
-    run bash "$REFRESH_SH"
+    LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
     grep -qF "session-learn --repo $SOURCE_CLONE --lookback-days 3 --session-limit 100 --max-file-mb 8 --record" "$MOCK_CALL_LOG"
     grep -qF "self-learn run --repo $SOURCE_CLONE --apply-memory --quiet" "$MOCK_CALL_LOG"

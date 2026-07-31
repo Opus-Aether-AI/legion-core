@@ -31,7 +31,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash -s all
 #
 # Requires: curl, jq, git. claude CLI optional (only for Claude marketplace flow).
-# Idempotent: re-running skips already-installed plugins and updates symlinks.
+# Idempotent: re-running updates installed Legion plugins and updates symlinks.
 
 set -euo pipefail
 
@@ -155,11 +155,17 @@ list_all() {
 # ── Install single Claude plugin ─────────────────────────────────────
 install_one() {
     local plugin="$1"
-    ALREADY_INSTALLED=0
+    UPDATED_EXISTING=0
     if [ -d "$HOME/.claude/plugins/cache/$MARKETPLACE_SLUG/$plugin" ]; then
-        dim "  ↺ $plugin (already installed)"
-        ALREADY_INSTALLED=1
-        return 0
+        # A cache directory only says this plugin existed sometime in the past;
+        # it is not proof that it matches the freshly updated marketplace.
+        if claude plugin update "$plugin@$MARKETPLACE_SLUG" --scope user 2>&1 | grep -q "✔"; then
+            green "  ✔ $plugin (updated)"
+            UPDATED_EXISTING=1
+            return 0
+        fi
+        red "  ✘ $plugin (update failed)"
+        return 1
     fi
     if claude plugin install "$plugin@$MARKETPLACE_SLUG" --scope user 2>&1 | grep -q "✔"; then
         green "  ✔ $plugin"
@@ -176,11 +182,11 @@ install_many() {
     local total="${#plugins[@]}"
     bold ""
     bold "Installing $total plugins via Claude marketplace..."
-    local installed=0 skipped=0 fail=0
+    local installed=0 updated=0 fail=0
     for p in "${plugins[@]}"; do
         if install_one "$p"; then
-            if [ "${ALREADY_INSTALLED:-0}" = "1" ]; then
-                skipped=$((skipped + 1))
+            if [ "${UPDATED_EXISTING:-0}" = "1" ]; then
+                updated=$((updated + 1))
             else
                 installed=$((installed + 1))
             fi
@@ -191,7 +197,7 @@ install_many() {
     echo ""
     bold "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     [ "$installed" -gt 0 ] && green "  $installed newly installed"
-    [ "$skipped" -gt 0 ] && dim "  $skipped already installed (skipped)"
+    [ "$updated" -gt 0 ] && green "  $updated updated from marketplace"
     [ "$fail" -gt 0 ] && red "  $fail failed"
     echo ""
 }

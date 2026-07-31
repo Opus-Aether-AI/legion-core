@@ -10,7 +10,7 @@
 # Exit codes:
 #   0 — refresh succeeded (or repo already up to date)
 #   1 — source clone missing (run install.sh first)
-#   2 — git pull failed
+#   2 — safe release resolution or git fetch failed
 #
 # All non-fatal warnings are printed to stderr; cron silences stdout/stderr
 # by default, so this only screams if something is truly broken.
@@ -20,7 +20,8 @@ set -euo pipefail
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="${SOURCE_CLONE:-$AGENTS_HOME/sources/legion-core}"
 MARKETPLACE_SLUG="legion-core"
-UPDATE_REF="${LEGION_UPDATE_REF:-main}"
+MARKETPLACE_REPO="${LEGION_REPO:-Opus-Aether-AI/legion-core}"
+UPDATE_REF="${LEGION_UPDATE_REF:-}"
 
 record_refresh_failure() {
     local summary="$1" evidence="${2:-}"
@@ -36,8 +37,22 @@ if [ ! -d "$SOURCE_CLONE/.git" ]; then
     exit 1
 fi
 
-# 1) Pull latest source. Fetch the update ref explicitly because release-tag
-# installs have a tag-only fetch refspec and therefore no origin/main.
+# 1) Resolve a stable release by default. `LEGION_UPDATE_REF` is deliberately
+# the only path to mutable main (or a specific rollback tag).
+if [ -z "$UPDATE_REF" ]; then
+    release_json="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null || true)"
+    UPDATE_REF="$(printf '%s' "$release_json" | jq -r '
+        select(type == "object" and .draft == false and .prerelease == false)
+        | .tag_name // empty
+    ' 2>/dev/null || true)"
+    if [ -z "$UPDATE_REF" ] || ! git check-ref-format --allow-onelevel "refs/tags/${UPDATE_REF}"; then
+        printf 'legion refresh: could not resolve latest stable GitHub release tag; set LEGION_UPDATE_REF explicitly to override\n' >&2
+        exit 2
+    fi
+fi
+
+# Fetch the update ref explicitly because release-tag installs have a tag-only
+# fetch refspec and therefore no origin/main.
 if ! git -C "$SOURCE_CLONE" fetch origin "$UPDATE_REF" --depth 1 --quiet 2>/dev/null; then
     printf 'legion refresh: git fetch failed\n' >&2
     exit 2
@@ -62,10 +77,45 @@ if ! bash "$SOURCE_CLONE/scripts/install.sh" --refresh-symlinks --no-claude --no
     record_refresh_failure "Daily refresh symlink/Cursor bridge sync failed." "install.sh --refresh-symlinks returned nonzero"
 fi
 
-# 3) Refresh Claude marketplace catalog (best-effort; ignored if claude is missing)
+# 3) Refresh the Claude marketplace and reconcile only installed Legion
+# plugins. Missing plugins are deliberately ignored; an installed plugin that
+# cannot reach the marketplace version is a failed refresh.
+refresh_status=0
+reconcile_claude_plugins() {
+    if ! claude plugin marketplace update "$MARKETPLACE_SLUG" >/dev/null 2>&1; then
+        printf 'legion refresh: claude marketplace update failed\n' >&2
+        return 1
+    fi
+
+    local failed=0
+    while IFS=$'\t' read -r plugin version; do
+        local cache_dir="$HOME/.claude/plugins/cache/$MARKETPLACE_SLUG/$plugin"
+        [ -d "$cache_dir" ] || continue
+
+        if ! claude plugin update "$plugin@$MARKETPLACE_SLUG" --scope user >/dev/null 2>&1; then
+            printf 'legion refresh: failed to update installed plugin %s\n' "$plugin" >&2
+            failed=1
+            continue
+        fi
+        installed_version="$(claude plugin list 2>/dev/null | awk -v id="$plugin@$MARKETPLACE_SLUG" '
+            index($0, id) { found=1; next }
+            found && $1 == "Version:" { print $2; exit }
+        ')"
+        if [ "$installed_version" != "$version" ]; then
+            printf 'legion refresh: installed plugin %s is not at marketplace version %s (reported %s)\n' \
+                "$plugin" "$version" "${installed_version:-unknown}" >&2
+            failed=1
+        fi
+    done < <(jq -r '.plugins[] | "\(.name)\t\(.version)"' "$SOURCE_CLONE/.claude-plugin/marketplace.json")
+
+    return "$failed"
+}
+
 if command -v claude >/dev/null 2>&1; then
-    claude plugin marketplace update "$MARKETPLACE_SLUG" >/dev/null 2>&1 || \
-        printf 'legion refresh: claude marketplace update failed (catalog may be stale)\n' >&2
+    if ! reconcile_claude_plugins; then
+        printf 'legion refresh: plugin reconciliation failed\n' >&2
+        refresh_status=1
+    fi
 fi
 
 # 3.5) Static health check. legion-doctor only validates artifacts; it learns
@@ -113,4 +163,4 @@ if [ "${LEGION_HEAL:-0}" = "1" ] && [ -x "$HEAL" ]; then
     fi
 fi
 
-exit 0
+exit "$refresh_status"

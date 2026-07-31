@@ -428,16 +428,20 @@ SH
 
 # ── Idempotent install — already-installed branch ───────────────────
 
-@test "running install twice marks plugins as already installed (skips claude install)" {
+@test "running install twice updates cached Legion plugins instead of trusting the cache" {
     bash "$INSTALL_SH" all --no-cron   # First install — populates cache
     # Wipe the call log so we only see the second install's invocations
     : > "$MOCK_CALL_LOG"
 
     run bash "$INSTALL_SH" all --no-cron
     [ "$status" -eq 0 ]
-    [[ "$output" == *"already installed"* ]]
+    [[ "$output" == *"updated"* ]]
 
-    # No `plugin install` calls in the second run
+    # Existing plugins update from the refreshed marketplace; they are not
+    # considered current merely because a cache directory exists.
+    assert_mock_called claude "plugin update plugin-with-skill@legion-core"
+    assert_mock_called claude "plugin update plugin-nested@legion-core"
+    assert_mock_called claude "plugin update plugin-claude-only@legion-core"
     if grep -F "plugin install plugin-with-skill" "$MOCK_CALL_LOG"; then false; fi
 }
 
@@ -590,7 +594,7 @@ EOF
         git -c user.email=test@test -c user.name=test commit -q -m "init test remote"
     )
 
-    run bash "$INSTALL_SH" all --no-claude --no-cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --no-cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"Cloning $remote"* ]]
     [ -d "$SOURCE_CLONE" ]
@@ -605,7 +609,7 @@ EOF
         git fetch origin --quiet 2>/dev/null && \
         git reset --hard HEAD --quiet)
 
-    run bash "$INSTALL_SH" all --no-claude --cron
+    LEGION_REF=main run bash "$INSTALL_SH" all --no-claude --cron
     [ "$status" -eq 0 ]
     [[ "$output" == *"not yet executable"* ]]
 }

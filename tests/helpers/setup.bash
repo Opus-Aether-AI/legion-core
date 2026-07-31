@@ -26,6 +26,7 @@ setup_test_env() {
     # delete the source clone (e.g., "fetch_plugins falls back to raw GitHub")
     export MOCK_GH_FIXTURE="$TEST_TMPDIR/mock-gh-marketplace.json"
     export MOCK_CURL_FIXTURE="$MOCK_GH_FIXTURE"
+    export MOCK_RELEASE_TAG="${MOCK_RELEASE_TAG:-v0.0.0-test}"
 
     mkdir -p "$AGENTS_HOME" "$HOME/.codex" "$HOME/.claude/plugins/cache"
     : > "$MOCK_CALL_LOG"
@@ -72,6 +73,7 @@ make_source_clone() {
         git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
         git -c user.email=test@test -c user.name=test add -A
         git -c user.email=test@test -c user.name=test commit -q -m "init test source clone"
+        git tag v0.0.0-test
         # Configure a fake 'origin' that points to ourselves so `git fetch origin` no-ops cleanly
         git remote add origin "$SOURCE_CLONE" 2>/dev/null || true
         git fetch origin --quiet 2>/dev/null || true

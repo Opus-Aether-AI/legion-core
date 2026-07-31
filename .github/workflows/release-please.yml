@@ -30,7 +30,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # `needs:` cannot reference another workflow. Run this first so the
+  # release-please action cannot create a tag or GitHub Release until the two
+  # main-push workflows for this exact commit have succeeded. The helper only
+  # receives those other workflow names, so it never waits on this workflow.
+  await-checks:
+    name: Await required checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require validate + legion-ci green on this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: scripts/await-required-workflows.sh validate legion-ci
+
   release-please:
+    needs: await-checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -77,81 +95,9 @@ jobs:
           echo "Enabling auto-merge on Release PR #${pr_number}"
           gh pr merge "${pr_number}" --repo "${REPO}" --auto --squash
 
-  # Release PRs are opened by release-please using the default GITHUB_TOKEN, and
-  # GitHub does not trigger workflows for such PRs — their `validate` / `legion-ci`
-  # runs sit at `action_required` and never execute. v0.18.1 therefore merged and
-  # published with no CI having run on it. Nothing was broken, but the gate was
-  # absent.
-  #
-  # `needs:` cannot reference another workflow, so this job waits for validate and
-  # legion-ci to conclude on THIS commit (they start from the same push) and
-  # blocks the publish until they are green.
-  #
-  # It fails closed. A required workflow that is missing, still running at the
-  # deadline, cancelled or skipped all count as "not green" — absence is never
-  # read as success, which would silently reopen the hole this job exists to fix.
-  await-checks:
-    name: Await required checks
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Require validate + legion-ci green on this commit
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          required="validate legion-ci"
-          deadline=$(( SECONDS + 1500 ))
-
-          while :; do
-            runs="$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
-              --jq '.workflow_runs[] | [.name, .status, (.conclusion // "-")] | @tsv')"
-
-            pending=""
-            for wf in $required; do
-              line="$(printf '%s\n' "$runs" | awk -F'\t' -v w="$wf" '$1 == w { print; exit }')"
-
-              if [ -z "$line" ]; then
-                pending="${pending} ${wf}(not-started)"
-                continue
-              fi
-
-              status="$(printf '%s' "$line" | cut -f2)"
-              conclusion="$(printf '%s' "$line" | cut -f3)"
-
-              if [ "$status" != "completed" ]; then
-                pending="${pending} ${wf}(${status})"
-                continue
-              fi
-
-              if [ "$conclusion" != "success" ]; then
-                echo "::error::${wf} concluded '${conclusion}' for ${SHA} — refusing to publish"
-                exit 1
-              fi
-
-              echo "green: ${wf}"
-            done
-
-            [ -z "$pending" ] && break
-
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::error::timed out waiting for:${pending} — refusing to publish"
-              exit 1
-            fi
-
-            echo "waiting for:${pending}"
-            sleep 20
-          done
-
-          echo "all required checks green for ${SHA}"
-
   publish:
     name: Publish package
-    needs: [release-please, await-checks]
+    needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -170,8 +116,8 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - name: Use latest npm
-        run: npm install -g npm@latest
+      - name: Use pinned npm
+        run: npm install -g npm@12.0.2
 
       - name: Version is in sync
         run: |
@@ -210,4 +156,4 @@ jobs:
       - name: Attach installer to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" scripts/install.sh --clobber
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" scripts/install.sh

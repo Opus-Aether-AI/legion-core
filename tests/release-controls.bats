@@ -89,48 +89,49 @@ setup() {
     [[ "$output" == *"refusing to wait on the current workflow"* ]]
 }
 
-@test "release workflows gate before tag creation and require a release tag for manual publishing" {
-    local automatic="$REPO_ROOT/.github/workflows/release-please.yml"
-    local manual="$REPO_ROOT/.github/workflows/publish-package.yml"
+@test "release workflow gates automatic publishing and keeps recovery on the trusted OIDC identity" {
+    local release="$REPO_ROOT/.github/workflows/release-please.yml"
+    local retired="$REPO_ROOT/.github/workflows/publish-package.yml"
 
-    grep -q 'needs: await-checks' "$automatic"
-    grep -q 'scripts/await-required-workflows.sh validate legion-ci' "$automatic"
-    grep -q 'scripts/await-required-workflows.sh validate legion-ci' "$manual"
-    grep -q 'release_tag:' "$manual"
-    grep -q 'ref: refs/tags/${{ inputs.release_tag }}' "$manual"
-    grep -q 'git show-ref --tags --verify' "$manual"
-    grep -q 'tag_sha=' "$manual"
-    grep -q 'sha=${head_sha}' "$manual"
-    grep -q 'SHA: ${{ steps.release_ref.outputs.sha }}' "$manual"
-    grep -q 'package.json' "$manual"
-    grep -q 'marketplace.json' "$manual"
-    grep -q 'npm@12.0.2' "$automatic"
-    grep -q 'npm@12.0.2' "$manual"
-    grep -q 'GATED_SHA: ${{ github.sha }}' "$automatic"
-    grep -qF 'head_sha="$(git rev-parse HEAD)"' "$automatic"
-    grep -qF 'tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"' "$automatic"
-    grep -qF '[ "$head_sha" != "$GATED_SHA" ] || [ "$tag_sha" != "$GATED_SHA" ]' "$automatic"
-    grep -q -- '--clobber' "$automatic"
-    grep -q -- '--clobber' "$manual"
-    grep -q 'contents: write' "$manual"
-    grep -qF 'npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://registry.npmjs.org' "$manual"
-    grep -qF 'npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://npm.pkg.github.com' "$manual"
-    grep -q 'already exists on npmjs; skipping' "$manual"
-    grep -q 'already exists on GitHub Packages; skipping' "$manual"
-    grep -q 'gh workflow run validate.yml' "$automatic"
-    grep -q 'gh workflow run legion-ci.yml' "$automatic"
+    [ ! -e "$retired" ]
+    grep -q 'needs: await-checks' "$release"
+    grep -q 'workflow_dispatch:' "$release"
+    grep -q 'recovery-publish:' "$release"
+    grep -q 'id-token: write' "$release"
+    grep -q 'scripts/await-required-workflows.sh validate legion-ci' "$release"
+    grep -q 'release_tag:' "$release"
+    grep -q 'ref: refs/tags/${{ inputs.release_tag }}' "$release"
+    grep -q 'git show-ref --tags --verify' "$release"
+    grep -q 'tag_sha=' "$release"
+    grep -q 'sha=${head_sha}' "$release"
+    grep -q 'SHA: ${{ steps.recovery_ref.outputs.sha }}' "$release"
+    grep -q 'package.json' "$release"
+    grep -q 'marketplace.json' "$release"
+    grep -q 'npm@12.0.2' "$release"
+    grep -q 'GATED_SHA: ${{ github.sha }}' "$release"
+    grep -qF 'head_sha="$(git rev-parse HEAD)"' "$release"
+    grep -qF 'tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"' "$release"
+    grep -qF '[ "$head_sha" != "$GATED_SHA" ] || [ "$tag_sha" != "$GATED_SHA" ]' "$release"
+    grep -q 'bash scripts/install.sh --validate-release-tag="$RELEASE_TAG"' "$release"
+    grep -q -- '--clobber' "$release"
+    grep -qF 'npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://registry.npmjs.org' "$release"
+    grep -qF 'npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://npm.pkg.github.com' "$release"
+    grep -q 'already exists on npmjs; skipping' "$release"
+    grep -q 'already exists on GitHub Packages; skipping' "$release"
+    grep -q 'gh workflow run validate.yml' "$release"
+    grep -q 'gh workflow run legion-ci.yml' "$release"
     grep -q 'workflow_dispatch:' "$REPO_ROOT/.github/workflows/validate.yml"
     grep -q 'workflow_dispatch:' "$REPO_ROOT/.github/workflows/legion-ci.yml"
 
     local gate_line action_line automatic_asset_line automatic_publish_line
-    local manual_asset_line manual_publish_line
-    gate_line="$(grep -n 'needs: await-checks' "$automatic" | head -n1 | cut -d: -f1)"
-    action_line="$(grep -n 'googleapis/release-please-action' "$automatic" | head -n1 | cut -d: -f1)"
-    automatic_asset_line="$(grep -n 'gh release upload' "$automatic" | head -n1 | cut -d: -f1)"
-    automatic_publish_line="$(grep -n 'npm publish --provenance' "$automatic" | head -n1 | cut -d: -f1)"
-    manual_asset_line="$(grep -n 'gh release upload' "$manual" | head -n1 | cut -d: -f1)"
-    manual_publish_line="$(grep -n 'npm publish --provenance' "$manual" | head -n1 | cut -d: -f1)"
+    local recovery_asset_line recovery_publish_line
+    gate_line="$(grep -n 'needs: await-checks' "$release" | head -n1 | cut -d: -f1)"
+    action_line="$(grep -n 'googleapis/release-please-action' "$release" | head -n1 | cut -d: -f1)"
+    automatic_asset_line="$(grep -n 'gh release upload' "$release" | head -n1 | cut -d: -f1)"
+    automatic_publish_line="$(grep -n 'npm publish --provenance' "$release" | head -n1 | cut -d: -f1)"
+    recovery_asset_line="$(grep -n 'gh release upload' "$release" | tail -n1 | cut -d: -f1)"
+    recovery_publish_line="$(grep -n 'npm publish --provenance' "$release" | tail -n1 | cut -d: -f1)"
     [ "$gate_line" -lt "$action_line" ]
     [ "$automatic_asset_line" -lt "$automatic_publish_line" ]
-    [ "$manual_asset_line" -lt "$manual_publish_line" ]
+    [ "$recovery_asset_line" -lt "$recovery_publish_line" ]
 }

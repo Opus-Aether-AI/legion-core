@@ -66,6 +66,18 @@ yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
 dim()    { printf '\033[0;90m%s\033[0m\n' "$*"; }
 bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 
+# SemVer 2.0.0 with the repository's required `v` prefix. Numeric core and
+# prerelease identifiers reject leading zeroes; build identifiers may contain
+# them. Keep this validator in the standalone installer so workflows and the
+# refresh script can share it without downloading another file first.
+is_v_semver() {
+    local numeric_identifier='(0|[1-9][0-9]*)'
+    local prerelease_identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+    local build_identifier='[0-9A-Za-z-]+'
+    local pattern="^v${numeric_identifier}\\.${numeric_identifier}\\.${numeric_identifier}(-${prerelease_identifier}(\\.${prerelease_identifier})*)?(\\+${build_identifier}(\\.${build_identifier})*)?$"
+    [[ "${1:-}" =~ $pattern ]]
+}
+
 # ── Flag parsing ─────────────────────────────────────────────────────
 DO_CLAUDE=1
 DO_CROSS_HARNESS=1
@@ -76,6 +88,7 @@ DO_CRON=0
 [ "${LEGION_INSTALL_CRON:-0}" = "1" ] && DO_CRON=1
 CRON_HOUR=9
 MODE=""
+VALIDATE_RELEASE_TAG=""
 
 for arg in "$@"; do
     case "$arg" in
@@ -88,6 +101,9 @@ for arg in "$@"; do
         --cron)              DO_CRON=1 ;;
         --no-cron)           DO_CRON=0 ;;
         --cron-hour=*)       CRON_HOUR="${arg#--cron-hour=}" ;;
+        --validate-release-tag=*)
+                             MODE="validate-release-tag"
+                             VALIDATE_RELEASE_TAG="${arg#*=}" ;;
         --refresh-symlinks)  MODE="refresh-symlinks" ;;
         -h|--help|help)      MODE="help" ;;
         --list|-l|list)      MODE="list" ;;
@@ -131,28 +147,17 @@ resolve_marketplace_ref() {
         exit 2
     fi
 
-    if [ "$MARKETPLACE_REF_EXPLICIT" = "0" ] && \
-        ! [[ "$MARKETPLACE_REF" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    if [ "$MARKETPLACE_REF" = "main" ] && [ "$MARKETPLACE_REF_EXPLICIT" = "1" ]; then
+        MARKETPLACE_GIT_REF="refs/heads/main"
+    elif is_v_semver "$MARKETPLACE_REF"; then
+        MARKETPLACE_GIT_REF="refs/tags/${MARKETPLACE_REF}"
+    elif [ "$MARKETPLACE_REF_EXPLICIT" = "0" ]; then
         red "GitHub's latest stable release must be an exact v-prefixed semantic version tag."
         exit 2
+    else
+        red "LEGION_REF must be 'main' or an exact v-prefixed semantic version tag."
+        exit 2
     fi
-
-    case "$MARKETPLACE_REF" in
-        main)
-            MARKETPLACE_GIT_REF="refs/heads/main"
-            ;;
-        v[0-9]*.[0-9]*.[0-9]*)
-            if ! [[ "$MARKETPLACE_REF" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-                red "LEGION_REF must be 'main' or an exact v-prefixed semantic version tag."
-                exit 2
-            fi
-            MARKETPLACE_GIT_REF="refs/tags/${MARKETPLACE_REF}"
-            ;;
-        *)
-            red "LEGION_REF must be 'main' or an exact v-prefixed semantic version tag."
-            exit 2
-            ;;
-    esac
 
     [ -n "$MARKETPLACE_RAW_BASE" ] || \
         MARKETPLACE_RAW_BASE="https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${MARKETPLACE_REF}"
@@ -704,6 +709,13 @@ refresh_symlinks_only() {
 # ── Preflight runs for all real modes ────────────────────────────────
 case "$MODE" in
     help)             print_help; exit 0 ;;
+    validate-release-tag)
+        if is_v_semver "$VALIDATE_RELEASE_TAG"; then
+            exit 0
+        fi
+        red "Release tag must be an exact v-prefixed semantic version."
+        exit 2
+        ;;
     list)             preflight; resolve_marketplace_ref; print_list; exit 0 ;;
     refresh-symlinks) refresh_symlinks_only; exit 0 ;;
 esac

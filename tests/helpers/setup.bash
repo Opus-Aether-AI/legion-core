@@ -123,6 +123,27 @@ make_ambiguous_release_ref() {
     )
 }
 
+# Put a narrow Git fault in front of the real binary. This lets safety tests
+# exercise fail-closed inspection/resolution paths without corrupting fixtures.
+make_failing_git_wrapper() {
+    local subcommand="$1"
+    local wrapper_dir="$TEST_TMPDIR/git-fails-$subcommand"
+    local real_git
+    real_git="$(command -v git)"
+    mkdir -p "$wrapper_dir"
+    cat > "$wrapper_dir/git" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+    if [ "\$arg" = "$subcommand" ]; then
+        exit 97
+    fi
+done
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$wrapper_dir/git"
+    printf '%s\n' "$wrapper_dir"
+}
+
 # Record the contents of $MOCK_CALL_LOG for assertions
 mock_calls() {
     cat "$MOCK_CALL_LOG" 2>/dev/null

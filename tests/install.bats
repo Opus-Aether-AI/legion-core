@@ -59,6 +59,21 @@ setup() {
     [[ "$output" == *"Unknown flag"* ]]
 }
 
+@test "release tag validator implements SemVer 2.0 identifiers" {
+    local tag
+    for tag in v0.0.0 v1.2.3-alpha.1+build.01 v1.2.3-0 v1.2.3-01a; do
+        run bash "$INSTALL_SH" --validate-release-tag="$tag"
+        [ "$status" -eq 0 ]
+    done
+
+    for tag in v01.2.3 v1.02.3 v1.2.03 v1.2.3-01 v1.2.3- \
+        v1.2.3+ v1.2.3-alpha..1 v1.2.3+build..1; do
+        run bash "$INSTALL_SH" --validate-release-tag="$tag"
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"exact v-prefixed semantic version"* ]]
+    done
+}
+
 @test "--list lists plugins and doesn't install anything" {
     run bash "$INSTALL_SH" --list
     [ "$status" -eq 0 ]
@@ -309,6 +324,26 @@ SH
     [ "$(cat "$SOURCE_CLONE/release-collision.txt")" = "operator content" ]
 }
 
+@test "source clone update fails closed when Git cannot inspect status" {
+    local failing_git
+    failing_git="$(make_failing_git_wrapper status)"
+
+    PATH="$failing_git:$PATH" run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"Could not inspect source clone state"* ]]
+}
+
+@test "source clone path that is not a Git repository is preserved" {
+    rm -rf "$SOURCE_CLONE"
+    mkdir -p "$SOURCE_CLONE"
+    printf 'operator content\n' > "$SOURCE_CLONE/operator.txt"
+
+    run bash "$INSTALL_SH" all --no-claude --no-cron
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"not a Git repository"* ]]
+    [ "$(cat "$SOURCE_CLONE/operator.txt")" = "operator content" ]
+}
+
 @test "install fetches an exact version tag when a branch has the same name" {
     make_ambiguous_release_ref
     local tag_sha
@@ -521,6 +556,12 @@ SH
     run bash "$INSTALL_SH" all --no-claude --no-cross-harness --no-cron
     [ "$status" -eq 2 ]
     [[ "$output" == *"must be an exact v-prefixed semantic version tag"* ]]
+}
+
+@test "install rejects invalid explicit SemVer before using it as a Git ref" {
+    LEGION_REF=v01.2.3 run bash "$INSTALL_SH" all --no-claude --no-cross-harness --no-cron
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"LEGION_REF must be 'main' or an exact"* ]]
 }
 
 # ── Preflight failures (missing tools) ──────────────────────────────

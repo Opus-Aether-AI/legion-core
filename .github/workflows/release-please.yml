@@ -14,6 +14,14 @@ on:
   push:
     branches:
       - main
+  # npmjs Trusted Publishing is bound to this workflow file. Keep recovery in
+  # the same workflow so a manual rerun receives the configured OIDC identity.
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable release tag to recover (for example, v0.19.0)
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -36,6 +44,7 @@ jobs:
   # receives those other workflow names, so it never waits on this workflow.
   await-checks:
     name: Await required checks
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -49,6 +58,7 @@ jobs:
 
   release-please:
     needs: await-checks
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -122,7 +132,7 @@ jobs:
   publish:
     name: Publish package
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -150,6 +160,7 @@ jobs:
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
           set -euo pipefail
+          bash scripts/install.sh --validate-release-tag="$RELEASE_TAG"
           tag_version="${{ needs.release-please.outputs.version }}"
           head_sha="$(git rev-parse HEAD)"
           tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
@@ -192,3 +203,104 @@ jobs:
         run: npm publish --registry=https://npm.pkg.github.com --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  recovery-publish:
+    name: Recover package publication
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment:
+      name: release
+      url: https://www.npmjs.com/package/@opus-aether-ai/legion-core
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Verify immutable release tag and versions
+        id: recovery_ref
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/install.sh --validate-release-tag="$RELEASE_TAG"
+          git show-ref --tags --verify --quiet "refs/tags/${RELEASE_TAG}"
+          tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$head_sha" ]; then
+            echo "::error::${RELEASE_TAG} resolves to ${tag_sha}, not checked-out ${head_sha}"
+            exit 1
+          fi
+          tag_version="${RELEASE_TAG#v}"
+          pkg="$(jq -r '.version' package.json)"
+          marketplace="$(jq -r '.version' .claude-plugin/marketplace.json)"
+          if [ "$tag_version" != "$pkg" ] || [ "$tag_version" != "$marketplace" ]; then
+            echo "::error::${RELEASE_TAG} must match package.json (${pkg}) and marketplace.json (${marketplace})"
+            exit 1
+          fi
+          {
+            echo "sha=${head_sha}"
+            echo "package=$(jq -r '.name' package.json)"
+            echo "version=${tag_version}"
+          } >> "$GITHUB_OUTPUT"
+          echo "${RELEASE_TAG} resolves to ${head_sha}; versions are in sync"
+
+      - name: Require validate + legion-ci green for release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.recovery_ref.outputs.sha }}
+        run: scripts/await-required-workflows.sh validate legion-ci
+
+      # Repair the installer before touching registries. `--clobber` makes a
+      # rerun idempotent for this exact validated tag.
+      - name: Attach installer to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" scripts/install.sh --clobber
+
+      - name: Set up Node for npmjs.com
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Use pinned npm
+        run: npm install -g npm@12.0.2
+
+      - name: Publish to npm with provenance
+        env:
+          PACKAGE_NAME: ${{ steps.recovery_ref.outputs.package }}
+          PACKAGE_VERSION: ${{ steps.recovery_ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          published="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+          if [ "$published" = "$PACKAGE_VERSION" ]; then
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} already exists on npmjs; skipping."
+          else
+            npm publish --provenance --access public --ignore-scripts --tag latest
+          fi
+
+      - name: Set up Node for GitHub Packages
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@opus-aether-ai'
+          package-manager-cache: false
+
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_NAME: ${{ steps.recovery_ref.outputs.package }}
+          PACKAGE_VERSION: ${{ steps.recovery_ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          published="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://npm.pkg.github.com 2>/dev/null || true)"
+          if [ "$published" = "$PACKAGE_VERSION" ]; then
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} already exists on GitHub Packages; skipping."
+          else
+            npm publish --registry=https://npm.pkg.github.com --ignore-scripts
+          fi

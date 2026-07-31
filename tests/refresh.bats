@@ -60,6 +60,14 @@ setup() {
     [[ "$output" == *"must be an exact v-prefixed semantic version tag"* ]]
 }
 
+@test "refresh.sh rejects invalid explicit SemVer before using it as a Git ref" {
+    make_source_clone marketplace-minimal.json
+
+    LEGION_UPDATE_REF=v1.2.3-01 run bash "$REFRESH_SH"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"release ref must be main or an exact"* ]]
+}
+
 @test "refresh.sh pulls latest from upstream + re-syncs symlinks" {
     make_source_clone marketplace-minimal.json
     bash "$INSTALL_SH" --refresh-symlinks
@@ -143,6 +151,28 @@ setup() {
     [ "$status" -eq 3 ]
     [[ "$output" == *"would overwrite local files"* ]]
     [ "$(cat "$SOURCE_CLONE/release-collision.txt")" = "operator content" ]
+    assert_mock_not_called claude
+}
+
+@test "refresh.sh fails closed when Git cannot inspect source status" {
+    make_source_clone marketplace-minimal.json
+    local failing_git
+    failing_git="$(make_failing_git_wrapper status)"
+
+    PATH="$failing_git:$PATH" run bash "$REFRESH_SH"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"could not inspect source clone state"* ]]
+    assert_mock_not_called claude
+}
+
+@test "refresh.sh rejects a fetched object that cannot resolve to a commit" {
+    make_source_clone marketplace-minimal.json
+    local failing_git
+    failing_git="$(make_failing_git_wrapper rev-parse)"
+
+    PATH="$failing_git:$PATH" run bash "$REFRESH_SH"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"fetched ref is not a commit"* ]]
     assert_mock_not_called claude
 }
 

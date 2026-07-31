@@ -18,6 +18,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_SCRIPT="${LEGION_INSTALL_SCRIPT:-$SCRIPT_DIR/install.sh}"
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="${SOURCE_CLONE:-$AGENTS_HOME/sources/legion-core}"
 MARKETPLACE_SLUG="legion-core"
@@ -50,28 +52,17 @@ if [ -z "$UPDATE_REF" ]; then
             2>/dev/null || true)"
 fi
 
-if [ "$UPDATE_REF_EXPLICIT" = "0" ] && \
-    ! [[ "$UPDATE_REF" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+if [ "$UPDATE_REF" = "main" ] && [ "$UPDATE_REF_EXPLICIT" = "1" ]; then
+    UPDATE_GIT_REF="refs/heads/main"
+elif bash "$INSTALL_SCRIPT" --validate-release-tag="$UPDATE_REF" >/dev/null 2>&1; then
+    UPDATE_GIT_REF="refs/tags/${UPDATE_REF}"
+elif [ "$UPDATE_REF_EXPLICIT" = "0" ]; then
     printf 'legion refresh: latest stable GitHub release must be an exact v-prefixed semantic version tag\n' >&2
     exit 2
+else
+    printf 'legion refresh: release ref must be main or an exact v-prefixed semantic version tag\n' >&2
+    exit 2
 fi
-
-case "$UPDATE_REF" in
-    main)
-        UPDATE_GIT_REF="refs/heads/main"
-        ;;
-    v[0-9]*.[0-9]*.[0-9]*)
-        if ! [[ "$UPDATE_REF" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            printf 'legion refresh: release ref must be main or an exact v-prefixed semantic version tag\n' >&2
-            exit 2
-        fi
-        UPDATE_GIT_REF="refs/tags/${UPDATE_REF}"
-        ;;
-    *)
-        printf 'legion refresh: could not resolve a safe stable release tag; set LEGION_UPDATE_REF=main or an exact vSemVer tag\n' >&2
-        exit 2
-        ;;
-esac
 
 # Fetch the update ref explicitly because release-tag installs have a tag-only
 # fetch refspec and therefore no origin/main.

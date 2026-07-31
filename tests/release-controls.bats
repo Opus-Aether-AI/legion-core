@@ -5,6 +5,7 @@ load 'helpers/setup'
 
 setup() {
     setup_test_env
+    unset GITHUB_WORKFLOW CHECK_TIMEOUT_SECONDS CHECK_POLL_INTERVAL_SECONDS
     export AWAIT_REQUIRED_WORKFLOWS="$REPO_ROOT/scripts/await-required-workflows.sh"
     export REPO="Opus-Aether-AI/legion-core"
     export SHA="0123456789012345678901234567890123456789"
@@ -75,7 +76,7 @@ setup() {
     ! grep -q -- '--clobber' "$automatic"
 
     local gate_line action_line
-    gate_line="$(rg -n 'needs: await-checks' "$automatic" | head -n1 | cut -d: -f1)"
-    action_line="$(rg -n 'googleapis/release-please-action' "$automatic" | head -n1 | cut -d: -f1)"
+    gate_line="$(grep -n 'needs: await-checks' "$automatic" | head -n1 | cut -d: -f1)"
+    action_line="$(grep -n 'googleapis/release-please-action' "$automatic" | head -n1 | cut -d: -f1)"
     [ "$gate_line" -lt "$action_line" ]
 }

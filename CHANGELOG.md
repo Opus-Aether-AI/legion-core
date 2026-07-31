@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.18.2...v0.19.0) (2026-07-31)
+
+
+### Added
+
+* **release:** recover Legion defaults and guard titles ([#106](https://github.com/Opus-Aether-AI/legion-core/issues/106)) ([1e710b5](https://github.com/Opus-Aether-AI/legion-core/commit/1e710b5504c149b364a5f1a48670c72ce167bc4a))
+
 ## [0.18.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.18.1...v0.18.2) (2026-07-30)
 
 

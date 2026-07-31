@@ -45,11 +45,16 @@ record_setup_failure() {
     --severity high --source "legion-codex-setup" --evidence "$evidence" >/dev/null 2>&1 || true
 }
 
-# Count immediate subdirectories, fail-safe under set -e/pipefail: find exits
-# nonzero when the dir is absent, which would otherwise abort the script.
+# Count immediate directories, including the symlinks produced by legion-setup.
+# A shell glob keeps this portable across BSD/GNU find while [[ -d ]] follows a
+# symlink only when its target is a directory.
 count_dirs() {
   [[ -d "$1" ]] || { printf '0'; return 0; }
-  find "$1" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' '
+  local entry count=0
+  for entry in "$1"/*; do
+    [[ -d "$entry" ]] && count=$((count + 1))
+  done
+  printf '%s' "$count"
 }
 
 # Collect every marketplace plugin's mcpServers into a single JSON object,

@@ -86,3 +86,16 @@ _mkt_with_mcp() {  # $1 = marketplace dir
   [[ "$output" == *"missing MCP dummy"* ]]
   [[ "$output" == *"skills available to opencode"* ]]
 }
+
+@test "opencode setup verify: counts installer-style symlinked skill directories" {
+  local target="$BATS_TEST_TMPDIR/linked-skill"
+  mkdir -p "$target"
+  printf -- '---\nname: linked\ndescription: d\n---\nbody\n' > "$target/SKILL.md"
+  rm -rf "$AGENTS_HOME/skills/alpha"
+  ln -s "$target" "$AGENTS_HOME/skills/alpha"
+
+  run "$SETUP_SH" verify
+
+  [[ "$output" == *"1 Legion skills available to opencode"* ]]
+  [[ "$output" != *"no mirrored skills"* ]]
+}

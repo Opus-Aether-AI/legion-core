@@ -39,7 +39,11 @@ record_setup_failure() {
 
 count_dirs() {
   [[ -d "$1" ]] || { printf '0'; return 0; }
-  find "$1" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' '
+  local entry count=0
+  for entry in "$1"/*; do
+    [[ -d "$entry" ]] && count=$((count + 1))
+  done
+  printf '%s' "$count"
 }
 
 opencode_bin() {

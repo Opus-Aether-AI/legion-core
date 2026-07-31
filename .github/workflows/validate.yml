@@ -73,7 +73,7 @@ jobs:
       - name: Legion engine plugins are vendored together
         run: |
           set -euo pipefail
-          required='["legion-router","legion-observability","legion-code-intel","legion-orchestrate","legion-run","legion-setup","legion-codex-mode"]'
+          required='["legion-router","legion-observability","legion-code-intel","legion-orchestrate","legion-run","legion-setup","legion-codex-mode","legion-opencode-mode","legion-hermes-mode"]'
           missing=$(jq -r --argjson required "$required" '
             [.plugins[].name] as $names
             | $required[]
@@ -156,6 +156,30 @@ jobs:
                 fi
               fi
             done
+
+      - name: Marketplace plugin versions match their manifests
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS=$'\t' read -r name source expected; do
+            manifest="$source/.claude-plugin/plugin.json"
+            if [ ! -f "$manifest" ]; then
+              echo "::error::Marketplace entry '$name' has no manifest: $manifest"
+              failed=1
+              continue
+            fi
+            actual="$(jq -r '.version // empty' "$manifest")"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::Marketplace entry '$name' version=$expected but $manifest version=$actual"
+              failed=1
+            fi
+          done < <(
+            jq -r '.plugins[]
+              | select(.source | type == "string")
+              | [.name, .source, .version]
+              | @tsv' .claude-plugin/marketplace.json
+          )
+          exit "$failed"
 
       - uses: actions/setup-python@v6
         with:

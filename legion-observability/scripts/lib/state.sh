@@ -46,14 +46,32 @@ legion_prepare_private_registry() {
   chmod 700 "$registry" || return 1
 }
 
-# Bash 3.2/macOS has no portable flock(1). An atomic mkdir is the lock; the PID
-# file lets a later writer recover a lock left by a killed process.
+# Bash 3.2/macOS has no portable flock(1). An atomic mkdir is the lock. Dead
+# owner recovery is serialized by a second mkdir so competing reclaimers cannot
+# delete a newly acquired lock. Empty locks are never reclaimed: they may be a
+# live writer between mkdir and its PID write, so failing closed preserves mutual
+# exclusion even if a kill in that tiny window leaves telemetry stuck.
+legion_recover_dead_run_state_lock() {
+  local lock="$1" recovery="$1.recover" owner=""
+  [[ ! -L "$recovery" ]] || return 0
+  (umask 077; mkdir "$recovery") 2>/dev/null || return 0
+
+  if [[ -d "$lock" && ! -L "$lock" ]]; then
+    owner="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [[ "$owner" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -f "$lock/pid" 2>/dev/null || true
+      rmdir "$lock" 2>/dev/null || true
+    fi
+  fi
+  rmdir "$recovery" 2>/dev/null || true
+}
+
 legion_acquire_run_state_lock() {
   local record="$1"
-  local lock="$record.lock" attempt=0 owner="" current=""
+  local lock="$record.lock" attempt=0
   while [[ "$attempt" -lt 500 ]]; do
     if (umask 077; mkdir "$lock") 2>/dev/null; then
-      if (umask 077; printf '%s\n' "$$" > "$lock/pid"); then
+      if (set -C; umask 077; printf '%s\n' "$$" > "$lock/pid") 2>/dev/null; then
         printf '%s\n' "$lock"
         return 0
       fi
@@ -66,18 +84,7 @@ legion_acquire_run_state_lock() {
       attempt=$((attempt + 1))
       continue
     fi
-    owner="$(cat "$lock/pid" 2>/dev/null || true)"
-    if [[ "$owner" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$owner" 2>/dev/null; then
-      current="$(cat "$lock/pid" 2>/dev/null || true)"
-      if [[ "$current" == "$owner" ]]; then
-        rm -f "$lock/pid" 2>/dev/null || true
-        rmdir "$lock" 2>/dev/null || true
-        continue
-      fi
-    elif [[ -z "$owner" && "$attempt" -ge 100 ]]; then
-      # A process killed between mkdir and writing its PID leaves an empty lock.
-      rmdir "$lock" 2>/dev/null || true
-    fi
+    legion_recover_dead_run_state_lock "$lock"
     attempt=$((attempt + 1))
     sleep 0.01
   done
@@ -138,7 +145,7 @@ legion_write_adapter_run_state() {
             or . == "timed_out";
           ($prior[0] // {}) as $old
           | ($old.lifecycle.phase // "") as $old_phase
-          | if (($old_phase | terminal) and ($phase == "queued" or $phase == "running")) then
+          | if ($old_phase | terminal) then
               $old
             else
               ($old.lifecycle.started_at // "") as $old_started

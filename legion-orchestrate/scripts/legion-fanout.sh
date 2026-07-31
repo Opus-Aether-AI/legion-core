@@ -237,14 +237,16 @@ PY
 task_ledger_finalized=0
 finalize_task_ledger_on_exit() {
   local rc=$?
-  [[ "$task_ledger_finalized" == "0" && -f "$work/task-ledger.json" ]] || return "$rc"
-  set +e
-  results="${results:-$work/results.jsonl}"
-  [[ -f "$results" ]] || : > "$results"
-  applied="${applied:-0}"
-  apply_conflicts="${apply_conflicts:-0}"
-  finalize_task_ledger
-  task_ledger_finalized=1
+  if [[ "$task_ledger_finalized" == "0" && -f "$work/task-ledger.json" ]]; then
+    set +e
+    results="${results:-$work/results.jsonl}"
+    [[ -f "$results" ]] || : > "$results"
+    applied="${applied:-0}"
+    apply_conflicts="${apply_conflicts:-0}"
+    finalize_task_ledger
+    task_ledger_finalized=1
+  fi
+  terminalize_interrupted_run_records
   return "$rc"
 }
 
@@ -415,19 +417,12 @@ FANOUT_INHERITED_PARENT="${LEGION_PARENT_ID:-}"   # non-empty only for a nested 
 export LEGION_TRACE_ID="$FANOUT_TRACE_ID"
 export LEGION_PARENT_ID="$FANOUT_RUN_ID"
 
-# Read slices into numbered files (portable; tolerates blank lines). Preallocate a
-# run_id per slice and write a queued record up-front, so pending slices show as
-# "queued / up-next" in the Console while earlier batches run.
+# Read slices into numbered files (portable; tolerates blank lines). Run-state
+# identities are not preallocated until the complete dependency graph validates.
 n=0
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
   printf '%s\n' "$line" > "$work/slice-$n.in"
-  s_arch="$(jq -r '.archetype // ""' <<<"$line" 2>/dev/null || echo "")"
-  s_model="$(jq -r '.model // ""' <<<"$line" 2>/dev/null || echo "")"
-  s_task="$(jq -r '.task // ""' <<<"$line" 2>/dev/null || echo "")"
-  rid="$(date -u +%Y%m%d-%H%M%S)-${RANDOM}${RANDOM}-s$n"
-  printf '%s\n' "$rid" > "$work/slice-$n.runid"
-  [[ -n "$s_task" ]] && write_queued_record "$rid" "$s_arch" "$s_model" "$s_task"
   n=$((n + 1))
 done < "$slices_src"
 [[ "$n" -gt 0 ]] || { echo "legion-fanout: no slices" >&2; exit 2; }
@@ -508,6 +503,20 @@ then
     || echo '{"status":"error","stage":"dag","error":"invalid dependency graph"}'
   exit 0
 fi
+
+# With a valid graph, preallocate every slice identity before execution so later
+# batches are visible as queued. Install the EXIT guard first so any subsequent
+# setup failure terminalizes records already written by a partial loop.
+trap finalize_task_ledger_on_exit EXIT
+for ((i = 0; i < n; i++)); do
+  line="$(cat "$work/slice-$i.in")"
+  s_arch="$(jq -r '.archetype // ""' <<<"$line" 2>/dev/null || echo "")"
+  s_model="$(jq -r '.model // ""' <<<"$line" 2>/dev/null || echo "")"
+  s_task="$(jq -r '.task // ""' <<<"$line" 2>/dev/null || echo "")"
+  rid="$(date -u +%Y%m%d-%H%M%S)-${RANDOM}${RANDOM}-s$i"
+  printf '%s\n' "$rid" > "$work/slice-$i.runid"
+  [[ -n "$s_task" ]] && write_queued_record "$rid" "$s_arch" "$s_model" "$s_task"
+done
 
 launch_slice() {
   local i="$1" base_ref="${2:-HEAD}" base_sha="" line arch model task ex rid
@@ -590,7 +599,6 @@ launch_slice() {
 has_dependencies="$(jq -r '.has_dependencies' "$work/dag.json")"
 base_head="$(git -C "$repo" rev-parse HEAD)"
 init_task_ledger
-trap finalize_task_ledger_on_exit EXIT
 integration_branch=""
 integration_wt=""
 integrated=0

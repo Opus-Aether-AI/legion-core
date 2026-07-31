@@ -142,6 +142,19 @@ SH
   [ "$status" -eq 2 ]
 }
 
+@test "fanout: invalid DAG does not leave preallocated runs queued" {
+  printf '%s\n' \
+    '{"id":"a","depends_on":["b"],"archetype":"implement-feature","task":"build A"}' \
+    '{"id":"b","depends_on":["a"],"archetype":"write-tests","task":"test A"}' \
+    > "$BATS_TEST_TMPDIR/invalid-dag.jsonl"
+
+  run "$FANOUT" --slices "$BATS_TEST_TMPDIR/invalid-dag.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "error" and .stage == "dag"'
+  [ "$(find "$LEGION_REGISTRY_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
+}
+
 @test "fanout: route failures are returned as structured route-stage errors" {
   local bad_route="$BATS_TEST_TMPDIR/bad-legion-route"
   cat > "$bad_route" <<'SH'
@@ -243,33 +256,66 @@ SH
   LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace" \
     bash -c 'source "$1"; legion_write_adapter_run_state running "$2" /repo /run /wt branch model workspace-write HEAD arch' \
       _ "$state_lib" "$run_id"
+  LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace" \
+    bash -c 'source "$1"; legion_write_adapter_run_state failed "$2" /repo /run /wt branch model workspace-write HEAD arch' \
+      _ "$state_lib" "$run_id"
   jq -e '.state_version == 14 and .lifecycle.phase == "ok"' \
     "$registry/$run_id.json"
+}
+
+@test "state lock keeps 40 contending Bash writers mutually exclusive" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-stress"
+  local record="$root/state.json"
+  local completed="$root/completed"
+  local guard="$root/critical-section"
+  local overlap="$root/overlap"
+  local i
+  mkdir -p "$root"
+  : > "$record"
+  mkdir "$record.lock"
+  printf '99999999\n' > "$record.lock/pid"
+
+  for ((i = 0; i < 40; i++)); do
+    bash -c '
+      source "$1"
+      lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+      if ! mkdir "$3" 2>/dev/null; then
+        : > "$4"
+      fi
+      sleep 0.03
+      rmdir "$3" 2>/dev/null || true
+      printf "%s\n" "$5" >> "$6"
+      legion_release_run_state_lock "$lock"
+    ' _ "$state_lib" "$record" "$guard" "$overlap" "$i" "$completed" &
+  done
+  wait
+
+  [ ! -e "$overlap" ]
+  [ "$(wc -l < "$completed" | tr -d ' ')" = "40" ]
 }
 
 @test "adapter state temp creation does not follow a predictable symlink" {
   local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
   local registry="$BATS_TEST_TMPDIR/symlink-registry"
   local victim="$BATS_TEST_TMPDIR/victim.json"
+  local record="$registry/symlink-state.json"
   mkdir -p "$registry"
   printf 'do-not-overwrite\n' > "$victim"
 
-  run bash -c '
-    set -euo pipefail
-    registry="$1"; victim="$2"; state_lib="$3"
-    record="$registry/symlink-state.json"
-    jq -cn '\''{schema:"legion.run-state.v1",run_id:"symlink-state",state_version:1,lifecycle:{phase:"queued",started_at:"",updated_at:"old"}}'\'' > "$record"
-    ln -s "$victim" "$record.tmp.$$"
-    export LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace"
-    source "$state_lib"
-    legion_write_adapter_run_state ok symlink-state /repo /run /wt branch model workspace-write HEAD arch
-  ' _ "$registry" "$victim" "$state_lib"
+  jq -cn \
+    '{schema:"legion.run-state.v1",run_id:"symlink-state",state_version:1,
+      lifecycle:{phase:"queued",started_at:"",updated_at:"old"}}' > "$record"
+  ln -s "$victim" "$record.tmp.$$"
+  export LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace"
+  source "$state_lib"
+  legion_write_adapter_run_state ok symlink-state \
+    /repo /run /wt branch model workspace-write HEAD arch
 
-  [ "$status" -eq 0 ]
   [ "$(cat "$victim")" = "do-not-overwrite" ]
-  [ ! -L "$registry/symlink-state.json" ]
+  [ ! -L "$record" ]
   jq -e '.state_version == 2 and .lifecycle.phase == "ok"' \
-    "$registry/symlink-state.json"
+    "$record"
 }
 
 @test "fanout: self/inline slices do NOT leave a queued record" {

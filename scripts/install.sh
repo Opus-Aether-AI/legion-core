@@ -50,6 +50,9 @@ fi
 # release is available; mutable main always requires an explicit opt-in.
 MARKETPLACE_REF="${LEGION_REF:-}"
 MARKETPLACE_RAW_BASE="${LEGION_RAW_BASE:-}"
+MARKETPLACE_GIT_REF=""
+MARKETPLACE_REF_EXPLICIT=0
+[ -n "$MARKETPLACE_REF" ] && MARKETPLACE_REF_EXPLICIT=1
 
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 SOURCE_CLONE="$AGENTS_HOME/sources/legion-core"
@@ -117,13 +120,40 @@ preflight() {
 resolve_marketplace_ref() {
     if [ -z "$MARKETPLACE_REF" ]; then
         # `|| true` keeps lookup failures under our explicit fail-closed handling.
-        MARKETPLACE_REF="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null \
-            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
+        local release_json
+        release_json="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null || true)"
+        MARKETPLACE_REF="$(printf '%s' "$release_json" \
+            | jq -r 'select(type == "object" and .draft == false and .prerelease == false) | .tag_name // empty' \
+                2>/dev/null || true)"
     fi
     if [ -z "$MARKETPLACE_REF" ]; then
         red "Could not resolve latest stable GitHub release; set LEGION_REF explicitly to override."
         exit 2
     fi
+
+    if [ "$MARKETPLACE_REF_EXPLICIT" = "0" ] && \
+        ! [[ "$MARKETPLACE_REF" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+        red "GitHub's latest stable release must be an exact v-prefixed semantic version tag."
+        exit 2
+    fi
+
+    case "$MARKETPLACE_REF" in
+        main)
+            MARKETPLACE_GIT_REF="refs/heads/main"
+            ;;
+        v[0-9]*.[0-9]*.[0-9]*)
+            if ! [[ "$MARKETPLACE_REF" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+                red "LEGION_REF must be 'main' or an exact v-prefixed semantic version tag."
+                exit 2
+            fi
+            MARKETPLACE_GIT_REF="refs/tags/${MARKETPLACE_REF}"
+            ;;
+        *)
+            red "LEGION_REF must be 'main' or an exact v-prefixed semantic version tag."
+            exit 2
+            ;;
+    esac
+
     [ -n "$MARKETPLACE_RAW_BASE" ] || \
         MARKETPLACE_RAW_BASE="https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${MARKETPLACE_REF}"
 }
@@ -172,22 +202,25 @@ list_all() {
 # ── Install single Claude plugin ─────────────────────────────────────
 install_one() {
     local plugin="$1"
+    local output
     UPDATED_EXISTING=0
     if [ -d "$HOME/.claude/plugins/cache/$MARKETPLACE_SLUG/$plugin" ]; then
         # A cache directory only says this plugin existed sometime in the past;
         # it is not proof that it matches the freshly updated marketplace.
-        if claude plugin update "$plugin@$MARKETPLACE_SLUG" --scope user 2>&1 | grep -q "✔"; then
+        if output="$(claude plugin update "$plugin@$MARKETPLACE_SLUG" --scope user 2>&1)"; then
             green "  ✔ $plugin (updated)"
             UPDATED_EXISTING=1
             return 0
         fi
         red "  ✘ $plugin (update failed)"
+        [ -n "$output" ] && dim "    $output"
         return 1
     fi
-    if claude plugin install "$plugin@$MARKETPLACE_SLUG" --scope user 2>&1 | grep -q "✔"; then
+    if output="$(claude plugin install "$plugin@$MARKETPLACE_SLUG" --scope user 2>&1)"; then
         green "  ✔ $plugin"
     else
         red "  ✘ $plugin (failed)"
+        [ -n "$output" ] && dim "    $output"
         return 1
     fi
 }
@@ -217,32 +250,45 @@ install_many() {
     [ "$updated" -gt 0 ] && green "  $updated updated from marketplace"
     [ "$fail" -gt 0 ] && red "  $fail failed"
     echo ""
+    [ "$fail" -eq 0 ]
 }
 
 # ── Cross-harness: clone source + symlink into ~/.agents/skills/ ─────
 setup_source_clone() {
     mkdir -p "$AGENTS_HOME/sources"
     if [ -d "$SOURCE_CLONE/.git" ]; then
-        # Refuse to clobber a user's local edits with `reset --hard origin/main`.
-        # If the working tree or index is dirty, fetch but skip the reset and
-        # leave the user to reconcile.
-        local dirty=0
-        if ! git -C "$SOURCE_CLONE" diff --quiet 2>/dev/null; then dirty=1; fi
-        if ! git -C "$SOURCE_CLONE" diff --cached --quiet 2>/dev/null; then dirty=1; fi
+        # Treat tracked, staged, and untracked files as operator data. Fetching is
+        # safe, but never force-checkout across any of them.
+        local status_output
+        if ! status_output="$(git -C "$SOURCE_CLONE" status --porcelain --untracked-files=all 2>/dev/null)"; then
+            red "Could not inspect source clone state — refusing to update it."
+            return 3
+        fi
+        if [ -n "$status_output" ]; then
+            yellow "Source clone has local edits or untracked files — fetching but skipping reconciliation."
+            yellow "  (Commit, stash, or move those files in $SOURCE_CLONE before retrying.)"
+            git -C "$SOURCE_CLONE" fetch origin "$MARKETPLACE_GIT_REF" --depth 1 --quiet
+            return 3
+        fi
 
-        if [ "$dirty" = "1" ]; then
-            yellow "Source clone has local edits — fetching but not resetting."
-            yellow "  (Commit, stash, or 'git restore .' in $SOURCE_CLONE to allow auto-refresh next run.)"
-            git -C "$SOURCE_CLONE" fetch origin --quiet
-        else
-            dim "Source clone exists — syncing to $MARKETPLACE_REF"
-            git -C "$SOURCE_CLONE" fetch origin --tags --force --quiet
-            git -C "$SOURCE_CLONE" checkout --quiet --force "$MARKETPLACE_REF"
-            git -C "$SOURCE_CLONE" reset --hard --quiet "origin/$MARKETPLACE_REF" 2>/dev/null || true
+        dim "Source clone exists — syncing to $MARKETPLACE_REF"
+        git -C "$SOURCE_CLONE" fetch origin "$MARKETPLACE_GIT_REF" --depth 1 --quiet
+        local update_sha
+        update_sha="$(git -C "$SOURCE_CLONE" rev-parse --verify 'FETCH_HEAD^{commit}')"
+        if ! git -C "$SOURCE_CLONE" checkout --quiet --detach --no-overwrite-ignore "$update_sha"; then
+            red "Source clone update would overwrite local files — refusing to continue."
+            return 3
         fi
     else
+        if [ -e "$SOURCE_CLONE" ]; then
+            red "Source clone path exists but is not a Git repository: $SOURCE_CLONE"
+            return 3
+        fi
         bold "Cloning $MARKETPLACE_CLONE_URL @ $MARKETPLACE_REF → $SOURCE_CLONE"
-        git clone --depth 1 --branch "$MARKETPLACE_REF" --quiet "$MARKETPLACE_CLONE_URL" "$SOURCE_CLONE"
+        git init --quiet "$SOURCE_CLONE"
+        git -C "$SOURCE_CLONE" remote add origin "$MARKETPLACE_CLONE_URL"
+        git -C "$SOURCE_CLONE" fetch origin "$MARKETPLACE_GIT_REF" --depth 1 --quiet
+        git -C "$SOURCE_CLONE" checkout --quiet --detach --no-overwrite-ignore FETCH_HEAD
     fi
 }
 

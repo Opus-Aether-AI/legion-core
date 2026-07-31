@@ -11,6 +11,7 @@
 #   0 — refresh succeeded (or repo already up to date)
 #   1 — source clone missing (run install.sh first)
 #   2 — safe release resolution or git fetch failed
+#   3 — update fetched, but local files made reconciliation unsafe
 #
 # All non-fatal warnings are printed to stderr; cron silences stdout/stderr
 # by default, so this only screams if something is truly broken.
@@ -22,6 +23,9 @@ SOURCE_CLONE="${SOURCE_CLONE:-$AGENTS_HOME/sources/legion-core}"
 MARKETPLACE_SLUG="legion-core"
 MARKETPLACE_REPO="${LEGION_REPO:-Opus-Aether-AI/legion-core}"
 UPDATE_REF="${LEGION_UPDATE_REF:-}"
+UPDATE_GIT_REF=""
+UPDATE_REF_EXPLICIT=0
+[ -n "$UPDATE_REF" ] && UPDATE_REF_EXPLICIT=1
 
 record_refresh_failure() {
     local summary="$1" evidence="${2:-}"
@@ -44,15 +48,34 @@ if [ -z "$UPDATE_REF" ]; then
     UPDATE_REF="$(printf '%s' "$release_json" \
         | jq -r 'select(type == "object" and .draft == false and .prerelease == false) | .tag_name // empty' \
             2>/dev/null || true)"
-    if [ -z "$UPDATE_REF" ] || ! git check-ref-format --allow-onelevel "refs/tags/${UPDATE_REF}"; then
-        printf 'legion refresh: could not resolve latest stable GitHub release tag; set LEGION_UPDATE_REF explicitly to override\n' >&2
-        exit 2
-    fi
 fi
+
+if [ "$UPDATE_REF_EXPLICIT" = "0" ] && \
+    ! [[ "$UPDATE_REF" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    printf 'legion refresh: latest stable GitHub release must be an exact v-prefixed semantic version tag\n' >&2
+    exit 2
+fi
+
+case "$UPDATE_REF" in
+    main)
+        UPDATE_GIT_REF="refs/heads/main"
+        ;;
+    v[0-9]*.[0-9]*.[0-9]*)
+        if ! [[ "$UPDATE_REF" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            printf 'legion refresh: release ref must be main or an exact v-prefixed semantic version tag\n' >&2
+            exit 2
+        fi
+        UPDATE_GIT_REF="refs/tags/${UPDATE_REF}"
+        ;;
+    *)
+        printf 'legion refresh: could not resolve a safe stable release tag; set LEGION_UPDATE_REF=main or an exact vSemVer tag\n' >&2
+        exit 2
+        ;;
+esac
 
 # Fetch the update ref explicitly because release-tag installs have a tag-only
 # fetch refspec and therefore no origin/main.
-if ! git -C "$SOURCE_CLONE" fetch origin "$UPDATE_REF" --depth 1 --quiet 2>/dev/null; then
+if ! git -C "$SOURCE_CLONE" fetch origin "$UPDATE_GIT_REF" --depth 1 --quiet 2>/dev/null; then
     printf 'legion refresh: git fetch failed\n' >&2
     exit 2
 fi
@@ -61,13 +84,17 @@ if [ -z "$update_sha" ]; then
     printf 'legion refresh: fetched ref is not a commit: %s\n' "$UPDATE_REF" >&2
     exit 2
 fi
-dirty=0
-if ! git -C "$SOURCE_CLONE" diff --quiet 2>/dev/null; then dirty=1; fi
-if ! git -C "$SOURCE_CLONE" diff --cached --quiet 2>/dev/null; then dirty=1; fi
-if [ "$dirty" = "1" ]; then
-    printf 'legion refresh: source clone has local edits; fetched but skipped reset\n' >&2
-else
-    git -C "$SOURCE_CLONE" reset --hard "$update_sha" --quiet
+if ! status_output="$(git -C "$SOURCE_CLONE" status --porcelain --untracked-files=all 2>/dev/null)"; then
+    printf 'legion refresh: could not inspect source clone state; skipped reconciliation\n' >&2
+    exit 3
+fi
+if [ -n "$status_output" ]; then
+    printf 'legion refresh: source clone has local edits or untracked files; fetched but skipped reconciliation\n' >&2
+    exit 3
+fi
+if ! git -C "$SOURCE_CLONE" checkout --quiet --detach --no-overwrite-ignore "$update_sha"; then
+    printf 'legion refresh: update would overwrite local files; skipped reconciliation\n' >&2
+    exit 3
 fi
 
 # 2) Re-sync ~/.agents/skills/ symlinks (handles added/removed plugins)
@@ -110,6 +137,7 @@ reconcile_claude_plugins() {
             failed=1
             continue
         fi
+        local installed_version
         installed_version="$(claude plugin list 2>/dev/null \
             | awk -v id="$plugin@$MARKETPLACE_SLUG" 'index($0, id) { found=1; next } found && $1 == "Version:" { print $2; exit }')"
         if [ "$installed_version" != "$version" ]; then

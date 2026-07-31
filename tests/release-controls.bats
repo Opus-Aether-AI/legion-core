@@ -106,14 +106,31 @@ setup() {
     grep -q 'marketplace.json' "$manual"
     grep -q 'npm@12.0.2' "$automatic"
     grep -q 'npm@12.0.2' "$manual"
-    ! grep -q -- '--clobber' "$automatic"
+    grep -q 'GATED_SHA: ${{ github.sha }}' "$automatic"
+    grep -qF 'head_sha="$(git rev-parse HEAD)"' "$automatic"
+    grep -qF 'tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"' "$automatic"
+    grep -qF '[ "$head_sha" != "$GATED_SHA" ] || [ "$tag_sha" != "$GATED_SHA" ]' "$automatic"
+    grep -q -- '--clobber' "$automatic"
+    grep -q -- '--clobber' "$manual"
+    grep -q 'contents: write' "$manual"
+    grep -qF 'npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://registry.npmjs.org' "$manual"
+    grep -qF 'npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://npm.pkg.github.com' "$manual"
+    grep -q 'already exists on npmjs; skipping' "$manual"
+    grep -q 'already exists on GitHub Packages; skipping' "$manual"
     grep -q 'gh workflow run validate.yml' "$automatic"
     grep -q 'gh workflow run legion-ci.yml' "$automatic"
     grep -q 'workflow_dispatch:' "$REPO_ROOT/.github/workflows/validate.yml"
     grep -q 'workflow_dispatch:' "$REPO_ROOT/.github/workflows/legion-ci.yml"
 
-    local gate_line action_line
+    local gate_line action_line automatic_asset_line automatic_publish_line
+    local manual_asset_line manual_publish_line
     gate_line="$(grep -n 'needs: await-checks' "$automatic" | head -n1 | cut -d: -f1)"
     action_line="$(grep -n 'googleapis/release-please-action' "$automatic" | head -n1 | cut -d: -f1)"
+    automatic_asset_line="$(grep -n 'gh release upload' "$automatic" | head -n1 | cut -d: -f1)"
+    automatic_publish_line="$(grep -n 'npm publish --provenance' "$automatic" | head -n1 | cut -d: -f1)"
+    manual_asset_line="$(grep -n 'gh release upload' "$manual" | head -n1 | cut -d: -f1)"
+    manual_publish_line="$(grep -n 'npm publish --provenance' "$manual" | head -n1 | cut -d: -f1)"
     [ "$gate_line" -lt "$action_line" ]
+    [ "$automatic_asset_line" -lt "$automatic_publish_line" ]
+    [ "$manual_asset_line" -lt "$manual_publish_line" ]
 }

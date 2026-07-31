@@ -144,9 +144,19 @@ jobs:
         run: npm install -g npm@12.0.2
 
       - name: Version is in sync
+        id: release_ref
+        env:
+          GATED_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
           set -euo pipefail
           tag_version="${{ needs.release-please.outputs.version }}"
+          head_sha="$(git rev-parse HEAD)"
+          tag_sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [ "$head_sha" != "$GATED_SHA" ] || [ "$tag_sha" != "$GATED_SHA" ]; then
+            echo "::error::Gated SHA ${GATED_SHA}, checked-out SHA ${head_sha}, and ${RELEASE_TAG} SHA ${tag_sha} must match"
+            exit 1
+          fi
           pkg="$(jq -r '.version' package.json)"
           mkt="$(jq -r '.version' .claude-plugin/marketplace.json)"
           if [ "$tag_version" != "$pkg" ]; then
@@ -157,7 +167,15 @@ jobs:
             echo "::error::package.json ($pkg) != marketplace.json ($mkt)"
             exit 1
           fi
-          echo "version $pkg in sync"
+          echo "${RELEASE_TAG} resolves to gated SHA ${GATED_SHA}; version ${pkg} is in sync"
+
+      # Upload before registry publication so a transient registry failure cannot
+      # leave the newest stable GitHub release without its installer. `--clobber`
+      # is safe here because the bytes come from the exact gated release commit.
+      - name: Attach installer to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" scripts/install.sh --clobber
 
       - name: Publish to npm with provenance
         run: npm publish --provenance --access public --ignore-scripts --tag latest
@@ -174,10 +192,3 @@ jobs:
         run: npm publish --registry=https://npm.pkg.github.com --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Serve the installer from the release so `releases/latest/download/install.sh`
-      # always resolves to the released (immutable) script, not main HEAD.
-      - name: Attach installer to the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" scripts/install.sh

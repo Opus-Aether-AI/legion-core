@@ -25,7 +25,7 @@ on:
 
 permissions:
   actions: read
-  contents: read
+  contents: write
   id-token: write
   packages: write
 
@@ -70,7 +70,11 @@ jobs:
             echo "::error::${RELEASE_TAG} must match package.json (${pkg}) and marketplace.json (${marketplace})"
             exit 1
           fi
-          echo "sha=${head_sha}" >> "$GITHUB_OUTPUT"
+          {
+            echo "sha=${head_sha}"
+            echo "package=$(jq -r '.name' package.json)"
+            echo "version=${tag_version}"
+          } >> "$GITHUB_OUTPUT"
           echo "${RELEASE_TAG} resolves to ${head_sha}; versions are in sync"
 
       - name: Require validate + legion-ci green for release tag
@@ -79,6 +83,14 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ steps.release_ref.outputs.sha }}
         run: scripts/await-required-workflows.sh validate legion-ci
+
+      # Keep the public release installer independently recoverable. A rerun is
+      # idempotent and replaces only this exact tag's validated installer asset.
+      - name: Attach installer to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" scripts/install.sh --clobber
 
       - name: Set up Node for npmjs.com
         uses: actions/setup-node@v5
@@ -90,7 +102,17 @@ jobs:
         run: npm install -g npm@12.0.2
 
       - name: Publish to npm with provenance
-        run: npm publish --provenance --access public --ignore-scripts --tag latest
+        env:
+          PACKAGE_NAME: ${{ steps.release_ref.outputs.package }}
+          PACKAGE_VERSION: ${{ steps.release_ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          published="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+          if [ "$published" = "$PACKAGE_VERSION" ]; then
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} already exists on npmjs; skipping."
+          else
+            npm publish --provenance --access public --ignore-scripts --tag latest
+          fi
 
       - name: Set up Node for GitHub Packages
         uses: actions/setup-node@v5
@@ -101,6 +123,15 @@ jobs:
           package-manager-cache: false
 
       - name: Publish to GitHub Packages
-        run: npm publish --registry=https://npm.pkg.github.com --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_NAME: ${{ steps.release_ref.outputs.package }}
+          PACKAGE_VERSION: ${{ steps.release_ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          published="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://npm.pkg.github.com 2>/dev/null || true)"
+          if [ "$published" = "$PACKAGE_VERSION" ]; then
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} already exists on GitHub Packages; skipping."
+          else
+            npm publish --registry=https://npm.pkg.github.com --ignore-scripts
+          fi

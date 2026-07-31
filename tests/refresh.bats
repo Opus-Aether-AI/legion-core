@@ -48,7 +48,16 @@ setup() {
 
     run bash "$REFRESH_SH"
     [ "$status" -eq 2 ]
-    [[ "$output" == *"could not resolve latest stable GitHub release tag"* ]]
+    [[ "$output" == *"must be an exact v-prefixed semantic version tag"* ]]
+}
+
+@test "refresh.sh rejects a non-version latest release response" {
+    make_source_clone marketplace-minimal.json
+    export MOCK_RELEASE_TAG=main
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"must be an exact v-prefixed semantic version tag"* ]]
 }
 
 @test "refresh.sh pulls latest from upstream + re-syncs symlinks" {
@@ -80,26 +89,61 @@ setup() {
     make_source_clone marketplace-minimal.json
     (
         cd "$SOURCE_CLONE"
-        git tag v-test
+        git tag v0.0.1-test
         git config --unset-all remote.origin.fetch
-        git config --add remote.origin.fetch '+refs/tags/v-test:refs/tags/v-test'
+        git config --add remote.origin.fetch '+refs/tags/v0.0.1-test:refs/tags/v0.0.1-test'
         git update-ref -d refs/remotes/origin/main
     )
-    export MOCK_RELEASE_TAG=v-test
+    export MOCK_RELEASE_TAG=v0.0.1-test
 
     run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
     [ "$(git -C "$SOURCE_CLONE" rev-parse HEAD)" = "$(git -C "$SOURCE_CLONE" rev-parse main)" ]
 }
 
-@test "refresh.sh skips reset when source clone has local edits" {
+@test "refresh.sh fetches an exact version tag when a branch has the same name" {
+    make_source_clone marketplace-minimal.json
+    make_ambiguous_release_ref
+    local tag_sha
+    tag_sha="$(git -C "$SOURCE_CLONE" rev-parse refs/tags/v0.0.1-test)"
+
+    LEGION_UPDATE_REF=v0.0.1-test run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$SOURCE_CLONE" rev-parse HEAD)" = "$tag_sha" ]
+    [ ! -e "$SOURCE_CLONE/ambiguous-branch-only.txt" ]
+}
+
+@test "refresh.sh preserves tracked edits, skips reconciliation, and exits incomplete" {
     make_source_clone marketplace-minimal.json
     echo "operator edit" >> "$SOURCE_CLONE/plugin-with-skill/SKILL.md"
 
     run bash "$REFRESH_SH"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"local edits"* ]]
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"skipped reconciliation"* ]]
     grep -q "operator edit" "$SOURCE_CLONE/plugin-with-skill/SKILL.md"
+    assert_mock_not_called claude
+}
+
+@test "refresh.sh preserves untracked files, skips reconciliation, and exits incomplete" {
+    make_source_clone marketplace-minimal.json
+    printf 'operator notes\n' > "$SOURCE_CLONE/operator-notes.txt"
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"untracked files"* ]]
+    grep -q "operator notes" "$SOURCE_CLONE/operator-notes.txt"
+    assert_mock_not_called claude
+}
+
+@test "refresh.sh preserves an ignored checkout collision and skips reconciliation" {
+    make_source_clone marketplace-minimal.json
+    make_ignored_checkout_collision
+
+    LEGION_UPDATE_REF=v0.0.1-test run bash "$REFRESH_SH"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"would overwrite local files"* ]]
+    [ "$(cat "$SOURCE_CLONE/release-collision.txt")" = "operator content" ]
+    assert_mock_not_called claude
 }
 
 @test "refresh.sh records symlink sync failures for self-learning" {
@@ -114,8 +158,13 @@ SH
 printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
 SH
     chmod +x "$SOURCE_CLONE/scripts/install.sh" "$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add failing sync"
+    )
 
-    run bash "$REFRESH_SH"
+    LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
     [[ "$output" == *"symlink sync had warnings"* ]]
     grep -qF "Daily refresh symlink/Cursor bridge sync failed." "$MOCK_CALL_LOG"
@@ -305,8 +354,13 @@ fi
 printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
 SH
     chmod +x "$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add failing self learn"
+    )
 
-    run bash "$REFRESH_SH"
+    LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
     [[ "$output" == *"self-learning loop failed"* ]]
     grep -qF "Daily self-learning loop failed." "$MOCK_CALL_LOG"

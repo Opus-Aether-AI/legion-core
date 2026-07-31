@@ -187,6 +187,7 @@ def _json_or_text(text: str) -> Any:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
@@ -194,6 +195,7 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, sort_keys=True, ensure_ascii=False))
         handle.write("\n")
+    path.chmod(0o600)
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -201,6 +203,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
         "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
         encoding="utf-8",
     )
+    path.chmod(0o600)
 
 
 def _slug(value: str) -> str:
@@ -230,14 +233,15 @@ def reserve_run_directory(
         timestamp = timestamp.astimezone(dt.timezone.utc)
     base_id = timestamp.strftime("%Y%m%dT%H%M%SZ") + f"-{_slug(runner_name)}"
     runs_root = state_root / "runs" / "legion-run"
-    runs_root.mkdir(parents=True, exist_ok=True)
+    runs_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    runs_root.chmod(0o700)
 
     suffix = 1
     while True:
         run_id = base_id if suffix == 1 else f"{base_id}-{suffix}"
         run_dir = runs_root / run_id
         try:
-            run_dir.mkdir()
+            run_dir.mkdir(mode=0o700)
         except FileExistsError:
             suffix += 1
             continue
@@ -1622,6 +1626,7 @@ def execute(
     stage_timeout_seconds: int,
     allow_generated_slices: bool,
 ) -> int:
+    os.umask(0o077)
     require_clean_review_source(repo, timeout_seconds=stage_timeout_seconds)
     state = legion_state.resolve_state(str(repo))
     run_id, run_dir = reserve_run_directory(Path(state["state_root"]), runner["name"])

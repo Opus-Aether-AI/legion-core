@@ -189,12 +189,26 @@ make_test_repo() {
 
 @test "legion-claude: non-git repo fails closed before invoking Claude" {
     local repo="$TEST_TMPDIR/not-git"
+    local run_id="queued-claude-non-git"
     mkdir -p "$repo"
-    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+      --run-id "$run_id" --quiet
     [ "$status" -eq 1 ]
     echo "$output" | jq -e \
         '.status == "failed" and .reason == "worktree_setup_failed" and .fell_back == false'
     assert_mock_not_called claude
+    jq -e '
+      .run_id == "queued-claude-non-git"
+      and .state_version >= 2
+      and .lifecycle.phase == "failed"
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
 }
 
 @test "legion-claude: --no-fallback blocks on usage limit" {

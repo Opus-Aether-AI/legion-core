@@ -63,26 +63,30 @@ fi
 # "queued / up-next" in the Console before they launch. The delegate adopts the id
 # (--run-id) and rewrites it running->terminal. Best-effort (never block on telemetry).
 write_queued_record() {
-  local rid="$1" arch="$2" model="$3" task="$4" temp record
-  mkdir -p "$LEGION_REGISTRY_DIR" 2>/dev/null || return 0
-  chmod 700 "$LEGION_REGISTRY_DIR" 2>/dev/null || true
-  record="$LEGION_REGISTRY_DIR/$rid.json"
-  temp="$record.tmp.$$"
-  if (
-    umask 077
+  local rid="$1" arch="$2" model="$3" task="$4"
+  {
+    (
+    local temp="" record lock=""
+    legion_validate_run_id "$rid" || return 0
+    legion_prepare_private_registry "$LEGION_REGISTRY_DIR" || return 0
+    record="$LEGION_REGISTRY_DIR/$rid.json"
+    [[ ! -L "$record" && ( ! -e "$record" || -f "$record" ) ]] || return 0
+    lock="$(legion_acquire_run_state_lock "$record")" || return 0
+    trap 'rm -f "${temp:-}" 2>/dev/null || true; legion_release_run_state_lock "$lock"' EXIT
+    [[ ! -L "$record" && ( ! -e "$record" || -f "$record" ) ]] || return 0
+    temp="$(legion_create_run_state_temp "$record")" || return 0
     jq -cn --arg run "$rid" --arg trace "$FANOUT_TRACE_ID" --arg parent "$FANOUT_RUN_ID" \
       --arg repo "$repo" --arg arch "$arch" --arg model "$model" --arg task "$task" \
       --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
       {schema:"legion.run-state.v1", run_id:$run, trace_id:$trace, parent_id:$parent,
        kind:"run", state_version:1, repo_root:$repo, archetype:$arch, model:$model, task:$task,
        process:{pid:0,pgid:0,started_at:""},
-       lifecycle:{phase:"queued", started_at:"", updated_at:$now}}' > "$temp" 2>/dev/null
-  ); then
-    chmod 600 "$temp" 2>/dev/null || true
-    mv -f "$temp" "$record" 2>/dev/null || rm -f "$temp"
-  else
-    rm -f "$temp"
-  fi
+       lifecycle:{phase:"queued", started_at:"", updated_at:$now}}' > "$temp" || return 0
+    chmod 600 "$temp" || return 0
+    mv -f "$temp" "$record"
+    temp=""
+    )
+  } 2>/dev/null || true
 }
 
 init_task_ledger() {
@@ -244,39 +248,46 @@ finalize_task_ledger_on_exit() {
   return "$rc"
 }
 
-terminalize_interrupted_run_records() {
-  local i rid record temp now
-  [[ -d "${LEGION_REGISTRY_DIR:-}" ]] || return 0
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-  for ((i = 0; i < n; i++)); do
-    rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
-    [[ -n "$rid" ]] || continue
+terminalize_unfinished_run_record() {
+  local rid="$1"
+  {
+    (
+    local record temp="" lock="" now
+    legion_validate_run_id "$rid" || return 0
+    legion_prepare_private_registry "$LEGION_REGISTRY_DIR" || return 0
     record="$LEGION_REGISTRY_DIR/$rid.json"
-    [[ -f "$record" ]] || continue
-    if ! jq -e --arg run "$rid" '
+    [[ -f "$record" && ! -L "$record" ]] || return 0
+    lock="$(legion_acquire_run_state_lock "$record")" || return 0
+    trap 'rm -f "${temp:-}" 2>/dev/null || true; legion_release_run_state_lock "$lock"' EXIT
+    [[ -f "$record" && ! -L "$record" ]] || return 0
+    jq -e --arg run "$rid" '
       .schema == "legion.run-state.v1"
       and .run_id == $run
       and ((.lifecycle.phase // "") == "queued"
            or (.lifecycle.phase // "") == "running")
-    ' "$record" >/dev/null 2>&1; then
-      continue
-    fi
+    ' "$record" >/dev/null || return 0
+    temp="$(legion_create_run_state_temp "$record")" || return 0
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq --arg now "$now" '
+      .state_version = ((.state_version // 0) + 1)
+      | .lifecycle.phase = "failed"
+      | .lifecycle.updated_at = $now
+    ' "$record" > "$temp" || return 0
+    chmod 600 "$temp" || return 0
+    mv -f "$temp" "$record"
+    temp=""
+    )
+  } 2>/dev/null || true
+}
 
-    temp="$record.tmp.$$"
-    if (
-      umask 077
-      jq --arg now "$now" '
-        .state_version = ((.state_version // 0) + 1)
-        | .lifecycle.phase = "failed"
-        | .lifecycle.updated_at = $now
-      ' "$record" > "$temp" 2>/dev/null
-    ); then
-      chmod 600 "$temp" 2>/dev/null || true
-      mv -f "$temp" "$record" || rm -f "$temp"
-    else
-      rm -f "$temp"
-    fi
+terminalize_interrupted_run_records() {
+  local i rid
+  [[ -d "${LEGION_REGISTRY_DIR:-}" ]] || return 0
+
+  for ((i = 0; i < n; i++)); do
+    rid="$(cat "$work/slice-$i.runid" 2>/dev/null || echo "")"
+    [[ -n "$rid" ]] || continue
+    terminalize_unfinished_run_record "$rid"
   done
 }
 
@@ -572,6 +583,7 @@ launch_slice() {
   result_status="$(jq -r '.status // "error"' "$work/slice-$i.out" 2>/dev/null || echo error)"
   ledger_state="failed"
   [[ "$result_status" == "ok" ]] && ledger_state="completed"
+  [[ "$ledger_state" == "completed" || -z "$rid" ]] || terminalize_unfinished_run_record "$rid"
   update_task_ledger "$i" "$ledger_state" "$result_status" "$base_ref"
 }
 

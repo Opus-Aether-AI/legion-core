@@ -217,6 +217,61 @@ SH
   ' "$ledger"
 }
 
+@test "adapter state updates serialize versions and never regress terminal state" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local registry="$BATS_TEST_TMPDIR/concurrent-registry"
+  local run_id="concurrent-adapter-state"
+  mkdir -p "$registry"
+  jq -cn --arg run "$run_id" '
+    {schema:"legion.run-state.v1",run_id:$run,state_version:1,
+     lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+  ' > "$registry/$run_id.json"
+
+  local i
+  for ((i = 0; i < 12; i++)); do
+    LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace" \
+      bash -c 'source "$1"; legion_write_adapter_run_state running "$2" /repo /run /wt branch model workspace-write HEAD arch' \
+        _ "$state_lib" "$run_id" &
+  done
+  wait
+
+  jq -e '.state_version == 13 and .lifecycle.phase == "running"' \
+    "$registry/$run_id.json"
+  LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace" \
+    bash -c 'source "$1"; legion_write_adapter_run_state ok "$2" /repo /run /wt branch model workspace-write HEAD arch' \
+      _ "$state_lib" "$run_id"
+  LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace" \
+    bash -c 'source "$1"; legion_write_adapter_run_state running "$2" /repo /run /wt branch model workspace-write HEAD arch' \
+      _ "$state_lib" "$run_id"
+  jq -e '.state_version == 14 and .lifecycle.phase == "ok"' \
+    "$registry/$run_id.json"
+}
+
+@test "adapter state temp creation does not follow a predictable symlink" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local registry="$BATS_TEST_TMPDIR/symlink-registry"
+  local victim="$BATS_TEST_TMPDIR/victim.json"
+  mkdir -p "$registry"
+  printf 'do-not-overwrite\n' > "$victim"
+
+  run bash -c '
+    set -euo pipefail
+    registry="$1"; victim="$2"; state_lib="$3"
+    record="$registry/symlink-state.json"
+    jq -cn '\''{schema:"legion.run-state.v1",run_id:"symlink-state",state_version:1,lifecycle:{phase:"queued",started_at:"",updated_at:"old"}}'\'' > "$record"
+    ln -s "$victim" "$record.tmp.$$"
+    export LEGION_REGISTRY_DIR="$registry" LEGION_TRACE_ID="trace"
+    source "$state_lib"
+    legion_write_adapter_run_state ok symlink-state /repo /run /wt branch model workspace-write HEAD arch
+  ' _ "$registry" "$victim" "$state_lib"
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$victim")" = "do-not-overwrite" ]
+  [ ! -L "$registry/symlink-state.json" ]
+  jq -e '.state_version == 2 and .lifecycle.phase == "ok"' \
+    "$registry/symlink-state.json"
+}
+
 @test "fanout: self/inline slices do NOT leave a queued record" {
   export LEGION_REGISTRY_DIR="$BATS_TEST_TMPDIR/registry"
   printf '%s\n' '{"archetype":"deep-reasoning","task":"decide design"}' > "$BATS_TEST_TMPDIR/s.jsonl"

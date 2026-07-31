@@ -1,6 +1,8 @@
 import datetime as dt
 import importlib.util
+import os
 import re
+import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -52,3 +54,23 @@ def test_same_second_run_reservations_are_atomic_and_unique(tmp_path):
         )
         for run_id in run_ids
     )
+
+
+def test_run_directory_and_artifacts_are_private_under_permissive_umask(tmp_path):
+    legion_run = load_legion_run()
+    previous_umask = os.umask(0)
+    try:
+        _run_id, run_dir = legion_run.reserve_run_directory(
+            tmp_path,
+            "private-run",
+            now=dt.datetime(2026, 7, 31, 10, 25, 17, tzinfo=dt.timezone.utc),
+        )
+        artifact = run_dir / "plan.json"
+        legion_run._write_json(artifact, {"task": "sensitive"})
+    finally:
+        os.umask(previous_umask)
+
+    runs_root = tmp_path / "runs" / "legion-run"
+    assert stat.S_IMODE(runs_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(artifact.stat().st_mode) == 0o600

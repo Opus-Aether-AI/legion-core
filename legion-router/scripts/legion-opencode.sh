@@ -33,6 +33,7 @@ OPENCODE_BIN="${OPENCODE_BIN:-}"
 
 die() { printf 'legion-opencode: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
+trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit' EXIT
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
@@ -125,10 +126,8 @@ parse_opencode_output() {
 }
 
 cmd_run() {
-  local default_model
-  default_model="$(legion_model_ref opencode_default)" || die "could not resolve opencode_default in models.toml"
-
-  local task="" model="${LEGION_OPENCODE_MODEL:-${OPENCODE_MODEL:-$default_model}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
+  local default_model=""
+  local task="" model="${LEGION_OPENCODE_MODEL:-${OPENCODE_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 oc_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
 
@@ -148,30 +147,40 @@ cmd_run() {
     esac
   done
 
-  [[ -n "$task" ]] || task="$(cat)"
-  [[ -n "$task" ]] || die "run: empty task"
-  legion_require_top_level_executor "opencode" || return $?
-  validate_sandbox "$sandbox"
-  [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  oc_bin="$(resolve_opencode_bin)" || die "opencode CLI not found. Install opencode or set OPENCODE_BIN (expected \$HOME/.opencode/bin/opencode)."
-  repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"
-  if declare -F legion_resolve_state >/dev/null 2>&1; then
-    legion_resolve_state "$repo"
-  else
-    export LEGION_STATE_ROOT="${LEGION_STATE_ROOT:-$HOME/.legion/projects/default}"
-    export LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$LEGION_STATE_ROOT/spans}"
-  fi
-
   if [[ -n "$preset_run_id" ]]; then
     declare -F legion_write_adapter_run_state >/dev/null 2>&1 \
       || die "run: --run-id requires adapter lifecycle-state support"
     legion_validate_run_id "$preset_run_id" \
       || die "run: invalid --run-id '$preset_run_id'"
   fi
+  repo="$(cd "$repo" && pwd)" || die "run: repo does not exist: $repo"
+  if declare -F legion_resolve_state >/dev/null 2>&1; then
+    legion_resolve_state "$repo"
+  else
+    export LEGION_STATE_ROOT="${LEGION_STATE_ROOT:-$HOME/.legion/projects/default}"
+    export LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$LEGION_STATE_ROOT/spans}"
+  fi
   RUN_ID="${preset_run_id:-$(_run_id)}"
   local wt="$repo/.legion/worktrees/$RUN_ID"
   local art="$repo/.legion/runs/$RUN_ID"
   local branch="legion/opencode-$RUN_ID"
+  if [[ -n "$preset_run_id" ]]; then
+    legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" ""
+  fi
+  default_model="$(legion_model_ref opencode_default)" || die "could not resolve opencode_default in models.toml"
+  [[ -n "$model" ]] || model="$default_model"
+  if [[ -n "$preset_run_id" ]]; then
+    legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" ""
+  fi
+  require_git_repo "$repo"
+  [[ -n "$task" ]] || task="$(cat)"
+  [[ -n "$task" ]] || die "run: empty task"
+  legion_require_top_level_executor "opencode" || return $?
+  validate_sandbox "$sandbox"
+  [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
+  oc_bin="$(resolve_opencode_bin)" || die "opencode CLI not found. Install opencode or set OPENCODE_BIN (expected \$HOME/.opencode/bin/opencode)."
   mkdir -p "$art"
   printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
 
@@ -180,6 +189,7 @@ cmd_run() {
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       failed "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
       "$base" "$archetype"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
     die "worktree add failed"
   fi
   [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
@@ -268,6 +278,7 @@ cmd_run() {
   [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
     "$status" "$RUN_ID" "$repo" "$art" "$wt_report" "$branch" "$actual_model" \
     "$sandbox" "$base" "$archetype"
+  [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
 
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \

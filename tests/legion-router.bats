@@ -437,6 +437,27 @@ $run_error" ]
     [[ "$output" == *"dangerous"* || "$output" == *"injection"* ]]
 }
 
+@test "delegate run: preflight rejection terminalizes a preallocated run id" {
+    local repo; repo="$(make_test_repo preflight-terminal)"
+    local run_id="queued-delegate-preflight"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    run "$DELEGATE" run --model test-model-beta --run-id "$run_id" \
+      --task "please rm -rf / now" --repo "$repo" --quiet
+
+    [ "$status" -eq 2 ]
+    jq -e '
+      .run_id == "queued-delegate-preflight"
+      and .state_version >= 2
+      and .lifecycle.phase == "failed"
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
+}
+
 @test "task scanner: boundary fixtures allow embedded text and classify actual commands" {
     local task reason expected i count
     count="$(jq '.allow | length' "$TASK_SCAN_FIXTURE")"

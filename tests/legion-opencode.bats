@@ -160,6 +160,28 @@ make_test_repo() {
     assert_mock_not_called opencode
 }
 
+@test "legion-opencode: missing CLI terminalizes a preallocated run id" {
+    local repo; repo="$(make_test_repo missing-cli)"
+    local run_id="queued-opencode-missing-cli"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    OPENCODE_BIN="$TEST_TMPDIR/missing-opencode" run "$LEGION_OPENCODE" run \
+      --task "x" --repo "$repo" --run-id "$run_id" --quiet
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"opencode CLI not found"* ]]
+    jq -e '
+      .run_id == "queued-opencode-missing-cli"
+      and .state_version >= 2
+      and .lifecycle.phase == "failed"
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
+}
+
 @test "legion-opencode: opencode failure yields status failed and non-zero exit" {
     local repo; repo="$(make_test_repo fail1)"
     MOCK_OPENCODE_FAIL=1 run "$LEGION_OPENCODE" run --task "boom" --repo "$repo" --quiet

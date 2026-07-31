@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic core/stable harness benchmarks plus A/B corpus runs with repeated-run flake detection, legion-catalog marketplace inventory, legion-self-learn daily failure mining + command/agent/skill improvement memory/proposals, legion-trace, legion-otel-export, and legion-doctor install verification.",
-      "version": "0.2.5",
+      "version": "0.2.6",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -109,7 +109,7 @@
       "name": "legion-setup",
       "source": "./legion-setup",
       "description": "Install and update Legion, wire Codex/Cursor/opencode bridges, and make Legion the repository-default workflow without replacing existing instructions. Ships `legion-setup`, `legion-init`, and the native harness setup commands; daily refresh/self-learning is opt-in.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "category": "productivity",
       "keywords": [
         "install",

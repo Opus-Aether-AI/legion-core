@@ -251,6 +251,76 @@ SH
   echo "$json" | jq -e '.ok == true and .pipeline.profile == "legion.full_app.v1"'
 }
 
+@test "legion-run: concurrent runs report only their own exact trace" {
+  install_fake_pipeline_bins
+  export REPORT_BARRIER="$BATS_TEST_TMPDIR/report-barrier"
+  cat > "$BATS_TEST_TMPDIR/bin/legion-report" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+trace=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --trace) trace="$2"; shift 2 ;;
+    --json) shift ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$REPORT_BARRIER"
+printf '%s\n' "$LEGION_RUN_ID" > "$REPORT_BARRIER/$LEGION_RUN_ID"
+python3 - "$REPORT_BARRIER" <<'PY'
+import sys
+import time
+from pathlib import Path
+
+barrier = Path(sys.argv[1])
+deadline = time.monotonic() + 5
+while len(list(barrier.iterdir())) < 2:
+    if time.monotonic() >= deadline:
+        raise SystemExit("timed out waiting for concurrent report stage")
+    time.sleep(0.01)
+PY
+latest="$(find "$REPORT_BARRIER" -type f -maxdepth 1 -exec basename {} \; | sort | tail -n 1)"
+resolved="$trace"
+[[ "$trace" != "latest" ]] || resolved="$latest"
+jq -cn \
+  --arg requested "$trace" \
+  --arg resolved "$resolved" \
+  --arg env_trace "${LEGION_TRACE_ID-unset}" \
+  '{trace:{requested:$requested,resolved:$resolved},env_trace:$env_trace}'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-report"
+  manifest="$(make_plugin)"
+
+  "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build alpha" --json \
+    > "$BATS_TEST_TMPDIR/alpha.out" 2>&1 &
+  alpha_pid=$!
+  "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build beta" --json \
+    > "$BATS_TEST_TMPDIR/beta.out" 2>&1 &
+  beta_pid=$!
+  wait "$alpha_pid"
+  alpha_status=$?
+  wait "$beta_pid"
+  beta_status=$?
+
+  [ "$alpha_status" -eq 0 ]
+  [ "$beta_status" -eq 0 ]
+  alpha_json="$(json_from_output < "$BATS_TEST_TMPDIR/alpha.out")"
+  beta_json="$(json_from_output < "$BATS_TEST_TMPDIR/beta.out")"
+  alpha_run_id="$(jq -r .run_id <<<"$alpha_json")"
+  beta_run_id="$(jq -r .run_id <<<"$beta_json")"
+  alpha_run_dir="$(jq -r .run_dir <<<"$alpha_json")"
+  beta_run_dir="$(jq -r .run_dir <<<"$beta_json")"
+
+  [ "$alpha_run_id" != "$beta_run_id" ]
+  [ "$alpha_run_dir" != "$beta_run_dir" ]
+  jq -e --arg run "$alpha_run_id" \
+    '.env_trace == $run and .trace.requested == $run and .trace.resolved == $run' \
+    "$alpha_run_dir/legion-report.json"
+  jq -e --arg run "$beta_run_id" \
+    '.env_trace == $run and .trace.requested == $run and .trace.resolved == $run' \
+    "$beta_run_dir/legion-report.json"
+}
+
 @test "legion-run: generates default TDD slices when plugin plan emits only a brief" {
   install_fake_pipeline_bins
   cat > "$BATS_TEST_TMPDIR/bin/fieldops-plan" <<'SH'

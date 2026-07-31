@@ -686,7 +686,9 @@ dispatch_adapter() {
   use_model="$explicit_model"
   [[ -n "$use_model" || -n "$forced_executor" || -z "$model" ]] || use_model="$model"
   [[ -n "$use_model" || -z "$model_ref" ]] || use_model="$(legion_model_ref "$model_ref" 2>/dev/null || true)"
-  local -a aargs=(run --repo "$repo" --task "$task")
+  # Identity is part of the adapter contract. Never retry without it: doing so
+  # would strand fanout's preallocated record in queued state.
+  local -a aargs=(run --repo "$repo" --task "$task" --run-id "$RUN_ID")
   [[ -n "$use_model" ]] && aargs+=(--model "$use_model")
   [[ "${QUIET:-0}" == "1" ]] && aargs+=(--quiet)
   case "$contract" in

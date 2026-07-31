@@ -4,7 +4,9 @@ load 'helpers/setup'
 
 setup() {
     setup_test_env
+    export LEGION_STATE_ROOT="$TEST_TMPDIR/state"
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
+    export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
     export LEGION_COSTS_FILE="$REPO_ROOT/legion-router/config/costs.json"
     export LEGION_CLAUDE="$REPO_ROOT/legion-router/bin/legion-claude"
     CLAUDE_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref claude_default)"
@@ -36,6 +38,60 @@ make_test_repo() {
     [ "$status" -eq 0 ]
     [ "$output" = "claude" ]
     grep -Eq '^claude active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
+}
+
+@test "legion-claude: adopts a preallocated run id and closes its queued lifecycle" {
+    local repo; repo="$(make_test_repo adopted-id)"
+    local run_id="queued-slice-claude"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    LEGION_TRACE_ID=fanout-trace LEGION_PARENT_ID=fanout-root \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e --arg run "$run_id" \
+      '.run_id == $run and (.diff_path | endswith("/" + $run + "/diff.patch"))'
+    jq -e '
+      .run_id == "queued-slice-claude"
+      and .trace_id == "fanout-trace"
+      and .parent_id == "fanout-root"
+      and .state_version >= 3
+      and .lifecycle.phase == "ok"
+      and (.lifecycle.started_at | length > 0)
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor == \"claude\" and .run_id == \"$run_id\")'"
+    [ "$status" -eq 0 ]
+}
+
+@test "legion-claude: preserves a preallocated run id through Codex fallback" {
+    local repo; repo="$(make_test_repo adopted-fallback)"
+    local run_id="queued-fallback-claude"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    LEGION_TRACE_ID=fanout-trace LEGION_PARENT_ID=fanout-root MOCK_CLAUDE_LIMIT=1 \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e --arg run "$run_id" \
+      '.run_id == $run and .executor == "codex" and .fell_back == true'
+    assert_mock_called legion-delegate "--run-id $run_id"
+    jq -e '
+      .run_id == "queued-fallback-claude"
+      and .state_version >= 3
+      and .lifecycle.phase == "ok"
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
 }
 
 @test "legion-claude: passes --effort/--append-system-prompt/--dangerously-skip-permissions through to claude" {

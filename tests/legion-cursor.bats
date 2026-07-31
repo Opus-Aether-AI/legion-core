@@ -4,7 +4,9 @@ load 'helpers/setup'
 
 setup() {
     setup_test_env
+    export LEGION_STATE_ROOT="$TEST_TMPDIR/state"
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
+    export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
     export LEGION_CURSOR="$REPO_ROOT/legion-router/bin/legion-cursor"
     CURSOR_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref cursor_default)"
 }
@@ -35,6 +37,61 @@ make_test_repo() {
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$output" = "cursor" ]
     grep -Eq '^agent active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
+}
+
+@test "legion-cursor: adopts a preallocated run id and closes its queued lifecycle" {
+    local repo; repo="$(make_test_repo adopted-id)"
+    local run_id="queued-slice-cursor"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    LEGION_TRACE_ID=fanout-trace LEGION_PARENT_ID=fanout-root \
+      run "$LEGION_CURSOR" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e --arg run "$run_id" \
+      '.run_id == $run and (.diff_path | endswith("/" + $run + "/diff.patch"))'
+    jq -e '
+      .run_id == "queued-slice-cursor"
+      and .trace_id == "fanout-trace"
+      and .parent_id == "fanout-root"
+      and .state_version >= 3
+      and .lifecycle.phase == "ok"
+      and (.lifecycle.started_at | length > 0)
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor == \"cursor\" and .run_id == \"$run_id\")'"
+    [ "$status" -eq 0 ]
+}
+
+@test "legion-cursor: closes a preallocated lifecycle when worktree setup fails" {
+    local repo; repo="$(make_test_repo worktree-fail)"
+    local run_id="queued-cursor-worktree-fail"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+    git -C "$repo" branch "legion/cursor-$run_id"
+
+    LEGION_TRACE_ID=fanout-trace LEGION_PARENT_ID=fanout-root \
+      run "$LEGION_CURSOR" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --quiet
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"worktree add failed"* ]]
+    jq -e '
+      .run_id == "queued-cursor-worktree-fail"
+      and .trace_id == "fanout-trace"
+      and .parent_id == "fanout-root"
+      and .state_version >= 2
+      and .lifecycle.phase == "failed"
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
 }
 
 @test "legion-cursor: read-only sandbox does not force writes" {

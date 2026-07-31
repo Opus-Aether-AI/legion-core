@@ -130,7 +130,7 @@ cmd_run() {
 
   local task="" model="${LEGION_OPENCODE_MODEL:-${OPENCODE_MODEL:-$default_model}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
-  local do_apply=0 keep=0 oc_bin="" start_ms=0 end_ms=0 dur=0 rc=0
+  local do_apply=0 keep=0 oc_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -140,6 +140,7 @@ cmd_run() {
       --repo) repo="$2"; shift 2 ;;
       --base) base="$2"; shift 2 ;;
       --sandbox) sandbox="$2"; shift 2 ;;
+      --run-id) preset_run_id="$2"; shift 2 ;;
       --apply) do_apply=1; shift ;;
       --keep) keep=1; shift ;;
       --quiet) QUIET=1; shift ;;
@@ -161,7 +162,13 @@ cmd_run() {
     export LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$LEGION_STATE_ROOT/spans}"
   fi
 
-  RUN_ID="$(_run_id)"
+  if [[ -n "$preset_run_id" ]]; then
+    declare -F legion_write_adapter_run_state >/dev/null 2>&1 \
+      || die "run: --run-id requires adapter lifecycle-state support"
+    legion_validate_run_id "$preset_run_id" \
+      || die "run: invalid --run-id '$preset_run_id'"
+  fi
+  RUN_ID="${preset_run_id:-$(_run_id)}"
   local wt="$repo/.legion/worktrees/$RUN_ID"
   local art="$repo/.legion/runs/$RUN_ID"
   local branch="legion/opencode-$RUN_ID"
@@ -169,7 +176,15 @@ cmd_run() {
   printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
 
   note "-> opencode worktree $wt (branch $branch, base $base)"
-  git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" || die "worktree add failed"
+  if ! git -C "$repo" worktree add -q -b "$branch" "$wt" "$base"; then
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      failed "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+      "$base" "$archetype"
+    die "worktree add failed"
+  fi
+  [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+    running "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+    "$base" "$archetype"
 
   local out_file="$art/opencode.out.jsonl"
   local err_file="$art/opencode.err"
@@ -250,6 +265,10 @@ cmd_run() {
     wt_report="(removed; rerun with --keep to retain the worktree)"
   fi
 
+  [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+    "$status" "$RUN_ID" "$repo" "$art" "$wt_report" "$branch" "$actual_model" \
+    "$sandbox" "$base" "$archetype"
+
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg result "$result" --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
@@ -264,7 +283,7 @@ usage() {
 legion-opencode — delegate a scoped task to opencode headless.
 
 Usage:
-  legion-opencode run --task "TASK" [--model provider/model] [--archetype NAME] [--repo DIR]
+  legion-opencode run --task "TASK" [--model provider/model] [--archetype NAME] [--repo DIR] [--run-id ID]
                       [--base REF] [--sandbox read-only|workspace-write] [--apply] [--keep] [--quiet]
   legion-opencode run [--repo DIR] < task.txt
 

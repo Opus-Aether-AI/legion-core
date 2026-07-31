@@ -9,7 +9,10 @@ setup() {
   # legion-claude's fallback tests) that would otherwise shadow the real one here.
   export LEGION_DELEGATE="$ROOT/legion-router/bin/legion-delegate"
   export LEGION_TELEMETRY="$ROOT/legion-observability/bin/legion-trace"
+  export LEGION_STATE_ROOT="$BATS_TEST_TMPDIR/state"
   export LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans"
+  export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
+  export LEGION_REPOS_FILE="$LEGION_STATE_ROOT/repos.jsonl"
   # Do not inherit whichever harness happens to run Bats. These policy tests
   # model a Claude-primary fanout unless a test overrides it explicitly.
   export LEGION_PRIMARY=claude

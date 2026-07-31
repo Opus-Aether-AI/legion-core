@@ -113,20 +113,29 @@ emit_terminal_json() {
 run_fallback() {
   local reason="$1" task="$2" model="$3" repo="$4" sandbox="$5" base="$6"
   local delegate_bin out rc fallback_status fallback_model fallback_usage fallback_cost fallback_result last_path
+  local fallback_art="$repo/.legion/runs/$RUN_ID"
+  local fallback_wt="$repo/.legion/worktrees/$RUN_ID"
+  local fallback_branch="legion/delegate-$RUN_ID"
 
   delegate_bin="$(resolve_delegate_bin)" || {
+    [[ -z "${preset_run_id:-}" ]] || legion_write_adapter_run_state \
+      failed "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
+      "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
     emit_terminal_json "codex" "$model" "failed" "" "{}" 0 true "$reason"
     return 1
   }
 
   note "→ legion-delegate run --model $model --sandbox $sandbox --base $base"
+  [[ -z "${preset_run_id:-}" ]] || legion_write_adapter_run_state \
+    running "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
+    "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
   set +e
   if [[ "${QUIET:-0}" == "1" ]]; then
     out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" \
-      --sandbox "$sandbox" --base "$base" --quiet)"
+      --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID" --quiet)"
   else
     out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" \
-      --sandbox "$sandbox" --base "$base")"
+      --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID")"
   fi
   rc=$?
   set -e
@@ -145,6 +154,9 @@ run_fallback() {
     fi
   fi
 
+  [[ -z "${preset_run_id:-}" ]] || legion_write_adapter_run_state \
+    "$fallback_status" "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
+    "$fallback_model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
   emit_terminal_json "codex" "$fallback_model" "$fallback_status" "$fallback_result" "$fallback_usage" "$fallback_cost" true "$reason"
   return "$rc"
 }
@@ -159,7 +171,7 @@ cmd_run() {
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
   local effort="" append_sys="" skip_perms=0
-  local base="HEAD" do_apply=0 keep=0 sandbox="" archetype=""
+  local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="" preset_run_id=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
   local read_only_violation=0
 
@@ -179,6 +191,7 @@ cmd_run() {
       --keep) keep=1; shift ;;                                # retain the worktree after the run
       --sandbox) sandbox="$2"; shift 2 ;;                     # accepted for diff-contract parity
       --archetype) archetype="$2"; shift 2 ;;                 # accepted for diff-contract parity
+      --run-id) preset_run_id="$2"; shift 2 ;;                # adopt fanout's queued identity
       *) die "run: unknown arg '$1'" ;;
     esac
   done
@@ -202,7 +215,13 @@ cmd_run() {
     export LEGION_STATE_ROOT="${LEGION_STATE_ROOT:-$HOME/.legion/projects/default}"
     export LEGION_TELEMETRY_DIR="${LEGION_TELEMETRY_DIR:-$LEGION_STATE_ROOT/spans}"
   fi
-  RUN_ID="$(_run_id)"
+  if [[ -n "$preset_run_id" ]]; then
+    declare -F legion_write_adapter_run_state >/dev/null 2>&1 \
+      || die "run: --run-id requires adapter lifecycle-state support"
+    legion_validate_run_id "$preset_run_id" \
+      || die "run: invalid --run-id '$preset_run_id'"
+  fi
+  RUN_ID="${preset_run_id:-$(_run_id)}"
 
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/legion-claude.${RUN_ID}.XXXXXX")"
   LEGION_CLAUDE_TMPDIR="$tmpdir"
@@ -224,6 +243,9 @@ cmd_run() {
       return $?
     fi
     emit_span "claude" "$model" "failed" 0 0 "{}" "$task" "$artifacts"
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      failed "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "" "" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
     emit_terminal_json "claude" "$model" "failed" "" "{}" 0 false "$reason"
     return 1
   fi
@@ -245,10 +267,16 @@ cmd_run() {
     # the diff is the reviewable output of the run.
     mkdir -p "$repo/.legion/runs/$RUN_ID"
     diff_path="$repo/.legion/runs/$RUN_ID/diff.patch"
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      running "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
     note "→ claude worktree $wt (branch $branch, base $base)"
   else
     note "⚠ worktree add failed"
     emit_span "claude" "$model" "failed" 0 0 "{}" "$task" "$artifacts"
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      failed "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
     emit_terminal_json "claude" "$model" "failed" "" "{}" 0 false "worktree_setup_failed"
     return 1
   fi
@@ -323,6 +351,9 @@ cmd_run() {
     [[ -n "$result" ]] && result="${result}"$'\n'
     result="${result}Claude produced file changes during a read-only run."
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
     emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
     return 1
   fi
@@ -330,6 +361,9 @@ cmd_run() {
   if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" ]]; then
     status="ok"
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
     emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false
     return 0
   fi
@@ -354,6 +388,9 @@ cmd_run() {
     status="failed"
   fi
   emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+  [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+    "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+    "$model" "$sandbox" "$base" "$archetype" "$effort"
   emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
   return 1
 }
@@ -364,7 +401,7 @@ legion-claude — delegate a scoped task to Claude headless, with fallback to Co
 
 Usage:
   legion-claude run --task "TASK" [--model MODEL] [--repo DIR] [--effort LEVEL]
-                    [--base REF] [--apply] [--keep]
+                    [--base REF] [--run-id ID] [--apply] [--keep]
                     [--sandbox read-only|workspace-write] [--archetype NAME]
                     [--append-system-prompt TEXT] [--dangerously-skip-permissions]
                     [--quiet] [--no-fallback] [--fallback-model MODEL]

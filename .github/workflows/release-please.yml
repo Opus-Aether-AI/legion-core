@@ -136,6 +136,10 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          # GitHub Release creation is handled above by the release bot. This
+          # keeps release-please focused on maintaining the next Release PR and
+          # prevents it from retrying a release which has already been repaired.
+          skip-github-release: true
       - name: Enable auto-merge on Release PR
         if: ${{ steps.release.outputs.pr != '' }}
         env:

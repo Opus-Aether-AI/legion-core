@@ -181,6 +181,7 @@ EOF
     grep -q 'scripts/prepare-pending-release.sh' "$release"
     grep -q 'SHA: ${{ steps.pending_release.outputs.release_sha }}' "$release"
     grep -q 'GH_TOKEN: ${{ steps.release_bot.outputs.token }}' "$release"
+    grep -q 'skip-github-release: true' "$release"
     grep -q '^  fleet-update:' "$release"
     local consumer
     for consumer in legion-code automaker-autoslicer moneyball nemesis legion-landing storefronts webapp moneyball-product factory-ops; do

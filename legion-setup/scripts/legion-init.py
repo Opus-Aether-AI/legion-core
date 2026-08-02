@@ -44,6 +44,9 @@ delegated.
   workflow. Return to the parent if the slice needs re-planning.
 - Otherwise, before editing, invoke the applicable installed Legion skill or
   command and read relevant `legion-self-learn hints`.
+- When `.legion/legion-core.json` exists, its exact version and release commit
+  are this repository's declared Legion baseline. Update that managed pin only
+  through the Legion release workflow.
 - Use `legion-run` for substantial or multi-stage work that needs an explicit
   plan, deterministic validation, independent review, and retained evidence.
 - Use `legion-orchestrate` or `legion-fanout` for dependency-aware parallel

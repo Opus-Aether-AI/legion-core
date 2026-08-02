@@ -142,6 +142,17 @@ legion_acquire_run_state_lock() {
       sleep 0.01
       continue
     fi
+    # `mkdir` makes the directory visible just before its owner writes pid.
+    # Treat that short, incomplete generation as live rather than making every
+    # contender claim and release `.claim`; the resulting claim storm can starve
+    # the owner on a busy CI host. Non-regular metadata is never trusted.
+    [[ ! -L "$lock/pid" ]] || return 1
+    [[ ! -e "$lock/pid" || -f "$lock/pid" ]] || return 1
+    if [[ ! -f "$lock/pid" ]]; then
+      attempt=$((attempt + 1))
+      sleep 0.01
+      continue
+    fi
     legion_recover_dead_run_state_lock "$lock"
     attempt=$((attempt + 1))
     sleep 0.01

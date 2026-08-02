@@ -123,7 +123,11 @@ legion_recover_dead_run_state_lock() {
 legion_acquire_run_state_lock() {
   local record="$1"
   local lock="$record.lock" attempt=0
-  while [[ "$attempt" -lt 500 ]]; do
+  # A coverage-instrumented or heavily contended host can spend several seconds
+  # just starting the competing shells. Keep the lock bounded, but give every
+  # writer a realistic chance to observe a release instead of silently dropping
+  # a state transition after the previous five-second retry window.
+  while [[ "$attempt" -lt 3000 ]]; do
     if (umask 077; mkdir "$lock") 2>/dev/null; then
       if (set -C; umask 077; printf '%s\n' "$$" > "$lock/pid") 2>/dev/null; then
         printf '%s\n' "$lock"

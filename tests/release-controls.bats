@@ -184,7 +184,7 @@ EOF
     grep -q 'skip-github-release: true' "$release"
     grep -q '^  fleet-update:' "$release"
     local consumer
-    for consumer in legion-code automaker-autoslicer moneyball nemesis legion-landing storefronts webapp moneyball-product factory-ops; do
+    for consumer in legion-code nidavellir moneyball nemesis legion-landing storefronts webapp moneyball-product factory-ops; do
         [ "$(grep -c "^            ${consumer}$" "$release")" -eq 2 ]
     done
     grep -q 'event_type: $event_type, client_payload:' "$release"

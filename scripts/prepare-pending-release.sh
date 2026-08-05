@@ -29,22 +29,17 @@ fi
 
 tag="v$package_version"
 bash "$script_dir/install.sh" --validate-release-tag="$tag" >/dev/null
-
-{
-    printf 'version=%s\n' "$package_version"
-    printf 'tag_name=%s\n' "$tag"
-} >> "$output"
-
-if gh release view "$tag" --repo "$gh_repo" >/dev/null 2>&1; then
-    printf 'pending=false\n' >> "$output"
-    echo "$tag already has a GitHub Release"
-    exit 0
-fi
-
 expected_title="chore(main): release $package_version"
 release_sha=""
 while IFS=$'\t' read -r sha title; do
-    if [ "$title" = "$expected_title" ]; then
+    # GitHub's squash merge appends the PR number to the configured PR title.
+    # Accept only that exact suffix; arbitrary subjects must not select a
+    # release commit merely because they share the expected prefix.
+    normalized_title="$title"
+    if [[ "$title" =~ \ \(#[0-9]+\)$ ]]; then
+        normalized_title="${title%"${BASH_REMATCH[0]}"}"
+    fi
+    if [ "$normalized_title" = "$expected_title" ]; then
         release_sha="$sha"
         break
     fi
@@ -74,6 +69,46 @@ if git -C "$repo" show-ref --verify --quiet "refs/tags/$tag"; then
         exit 1
     fi
     tag_exists=true
+fi
+
+{
+    printf 'version=%s\n' "$package_version"
+    printf 'tag_name=%s\n' "$tag"
+} >> "$output"
+
+if gh release view "$tag" --repo "$gh_repo" >/dev/null 2>&1; then
+    if [ "$tag_exists" != true ]; then
+        echo "::error::$tag has a GitHub Release but no fetched tag ref" >&2
+        exit 1
+    fi
+    # skip-github-release leaves Release Please's PR labeled `autorelease:
+    # pending` when the release bot creates the GitHub Release. Release Please
+    # treats that stale label as an untagged merged release and silently aborts
+    # every later release. Reconcile only the exact title + merge commit pair.
+    pending_prs="$(
+        gh pr list --repo "$gh_repo" --state merged \
+            --label 'autorelease: pending' --search "\"$expected_title\" in:title" \
+            --limit 20 --json number,title,mergeCommit
+    )" || {
+        echo "::error::could not inspect pending Release Please labels" >&2
+        exit 1
+    }
+    release_pr="$(
+        jq -r --arg title "$expected_title" --arg sha "$release_sha" \
+            '[.[] | select(.title == $title and .mergeCommit.oid == $sha) | .number] | first // empty' \
+            <<<"$pending_prs"
+    )"
+    if [ -n "$release_pr" ]; then
+        # gh implements add/remove as separate mutations. Add first so a
+        # partial failure leaves `pending` discoverable and the next run can
+        # retry safely; removing first could strand the PR with neither label.
+        gh pr edit "$release_pr" --repo "$gh_repo" --add-label 'autorelease: tagged'
+        gh pr edit "$release_pr" --repo "$gh_repo" --remove-label 'autorelease: pending'
+        echo "reconciled Release PR #$release_pr to autorelease: tagged"
+    fi
+    printf 'pending=false\n' >> "$output"
+    echo "$tag already has a GitHub Release"
+    exit 0
 fi
 
 {

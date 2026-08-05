@@ -15,6 +15,28 @@ if [ "$1" = "release" ] && [ "$2" = "view" ]; then
     exit $?
 fi
 
+# Release-label reconciliation queries merged, pending Release Please PRs.
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+    if [ -n "${MOCK_RELEASE_PR_NUMBER:-}" ]; then
+        jq -cn \
+            --argjson number "$MOCK_RELEASE_PR_NUMBER" \
+            --arg title "${MOCK_RELEASE_PR_TITLE:-chore(main): release 0.19.1}" \
+            --arg sha "${MOCK_RELEASE_PR_SHA:-}" \
+            '[{number:$number,title:$title,mergeCommit:{oid:$sha}}]'
+    else
+        printf '[]\n'
+    fi
+    exit 0
+fi
+
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+    if [[ "$*" == *"--remove-label autorelease: pending"* ]] \
+        && [ "${MOCK_PR_REMOVE_LABEL_FAIL:-0}" = "1" ]; then
+        exit 1
+    fi
+    exit 0
+fi
+
 # `gh api repos/.../contents/.claude-plugin/marketplace.json?ref=main --jq '.content' | base64 -d`
 # Return the marketplace.json content base64-encoded. Read from $MOCK_GH_FIXTURE
 # if set (test can point this at a fixture file independently of the source

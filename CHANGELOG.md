@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.20.0...v0.20.1) (2026-08-05)
+
+
+### Fixed
+
+* **state:** tolerate contended lock acquisition ([#113](https://github.com/Opus-Aether-AI/legion-core/issues/113)) ([59d991a](https://github.com/Opus-Aether-AI/legion-core/commit/59d991a9ef04932034f4703c3894fbfa872db0a9))
+
 ## [0.20.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.19.1...v0.20.0) (2026-08-05)
 
 

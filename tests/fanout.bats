@@ -456,6 +456,35 @@ SH
   [ -z "$(find "$root" -maxdepth 1 -name '.legion-lock-reap.*' -print -quit)" ]
 }
 
+@test "state lock contender retries a transient non-regular PID generation" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-pid-turnover"
+  local record="$root/state.json"
+  local acquired="$root/acquired"
+  local contender
+  mkdir -p "$record.lock"
+  : > "$record"
+  mkfifo "$record.lock/pid"
+
+  bash -c '
+    source "$1"
+    lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+    : > "$3"
+    legion_release_run_state_lock "$lock"
+  ' _ "$state_lib" "$record" "$acquired" &
+  contender=$!
+
+  # A malformed generation is never read. Once it disappears, the waiting
+  # contender must remain eligible to acquire the next cooperative generation.
+  sleep 0.05
+  rm "$record.lock/pid"
+  rmdir "$record.lock"
+  wait "$contender"
+
+  [ -e "$acquired" ]
+  [ ! -e "$record.lock" ]
+}
+
 @test "state lock PID metadata rejects symlinks and FIFOs without blocking" {
   local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
   local root="$BATS_TEST_TMPDIR/lock-pid-types"

@@ -143,12 +143,11 @@ legion_acquire_run_state_lock() {
       continue
     fi
     # `mkdir` makes the directory visible just before its owner writes pid.
-    # Treat that short, incomplete generation as live rather than making every
-    # contender claim and release `.claim`; the resulting claim storm can starve
-    # the owner on a busy CI host. Non-regular metadata is never trusted.
-    [[ ! -L "$lock/pid" ]] || return 1
-    [[ ! -e "$lock/pid" || -f "$lock/pid" ]] || return 1
-    if [[ ! -f "$lock/pid" ]]; then
+    # Treat incomplete or unsafe metadata as a retryable, fail-closed snapshot:
+    # separate existence/type checks can straddle a normal generation turnover
+    # and must not reject an otherwise valid contender. Recovery revalidates a
+    # regular, non-symlink pid file under that generation's mutation claim.
+    if [[ ! -f "$lock/pid" || -L "$lock/pid" ]]; then
       attempt=$((attempt + 1))
       sleep 0.01
       continue

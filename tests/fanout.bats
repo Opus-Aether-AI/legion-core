@@ -456,6 +456,75 @@ SH
   [ -z "$(find "$root" -maxdepth 1 -name '.legion-lock-reap.*' -print -quit)" ]
 }
 
+@test "state lock contender retries a transient non-regular PID generation" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-pid-turnover"
+  local record="$root/state.json"
+  local acquired="$root/acquired"
+  local retrying="$root/retrying"
+  local contender i
+  mkdir -p "$record.lock"
+  : > "$record"
+  mkdir "$record.lock/pid"
+
+  RETRYING="$retrying" bash -c '
+    sleep() {
+      [[ -e "$RETRYING" ]] || : > "$RETRYING"
+      command sleep "$@"
+    }
+    source "$1"
+    lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+    : > "$3"
+    legion_release_run_state_lock "$lock"
+  ' _ "$state_lib" "$record" "$acquired" &
+  contender=$!
+
+  # A malformed generation is never read. Once it disappears, the waiting
+  # contender must remain eligible to acquire the next cooperative generation.
+  for ((i = 0; i < 200; i++)); do
+    [[ -e "$retrying" ]] && break
+    sleep 0.005
+  done
+  if [[ ! -e "$retrying" ]]; then
+    rmdir "$record.lock/pid"
+    rmdir "$record.lock"
+    wait "$contender" 2>/dev/null || true
+    false
+  fi
+  rmdir "$record.lock/pid"
+  rmdir "$record.lock"
+  wait "$contender"
+
+  [ -e "$acquired" ]
+  [ ! -e "$record.lock" ]
+}
+
+@test "state lock acquisition enforces a wall-clock deadline" {
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-deadline"
+  local record="$root/state.json"
+  local retries="$root/retries"
+  mkdir -p "$record.lock"
+  : > "$record"
+  : > "$retries"
+  printf '%s\n' "$$" > "$record.lock/pid"
+
+  RETRIES="$retries" bash -c '
+    sleep() {
+      printf x >> "$RETRIES"
+      SECONDS=$((SECONDS + 31))
+    }
+    source "$1"
+    if legion_acquire_run_state_lock "$2"; then
+      exit 4
+    fi
+  ' _ "$state_lib" "$record"
+
+  [ "$(wc -c < "$retries" | tr -d ' ')" = "1" ]
+  [ -d "$record.lock" ]
+  [ "$(cat "$record.lock/pid")" = "$$" ]
+}
+
 @test "state lock PID metadata rejects symlinks and FIFOs without blocking" {
   local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
   local root="$BATS_TEST_TMPDIR/lock-pid-types"

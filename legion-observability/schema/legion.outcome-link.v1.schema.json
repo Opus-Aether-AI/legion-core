@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.outcome-link.v1.schema.json",
+  "title": "legion.outcome-link.v1",
+  "type": "object",
+  "required": ["schema", "id", "decision_id", "episode_id", "status", "confidence", "evidence_ids"],
+  "properties": {
+    "schema": {"const": "legion.outcome-link.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "decision_id": {"type": "string", "minLength": 1},
+    "episode_id": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "enum": ["verified", "failed", "no_evidence"]},
+    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+    "evidence_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "evidence_excerpt": {"type": "string", "maxLength": 700}
+  },
+  "additionalProperties": true
+}

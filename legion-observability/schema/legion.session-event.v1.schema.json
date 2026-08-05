@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.session-event.v1.schema.json",
+  "title": "legion.session-event.v1",
+  "type": "object",
+  "required": ["schema", "id", "session_id", "source", "project", "sequence", "role", "event_type", "excerpt"],
+  "properties": {
+    "schema": {"const": "legion.session-event.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "session_id": {"type": "string", "minLength": 1},
+    "source": {"type": "string", "enum": ["claude", "codex", "cursor", "opencode", "gemini", "unknown"]},
+    "project": {"type": "string", "minLength": 1},
+    "ts": {"type": "string"},
+    "sequence": {"type": "integer", "minimum": 0},
+    "role": {"type": "string"},
+    "event_type": {"type": "string", "enum": ["message", "dispatch"]},
+    "excerpt": {"type": "string", "maxLength": 700},
+    "dispatch_hash": {"type": "string"},
+    "run_in_background": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}

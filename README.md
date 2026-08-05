@@ -78,7 +78,7 @@ use `--remove` for an exact rollback. `legion-setup init` is the same entrypoint
 | Plugin | Purpose |
 |---|---|
 | `legion-router` | Routes scoped work to configured executors and captures metered, reviewable diffs. |
-| `legion-observability` | Doctor, spans, reports, benchmarks, self-learning, and heal planning. |
+| `legion-observability` | Doctor, spans, reports, benchmarks, evidence-linked learning, and heal planning. |
 | `legion-orchestrate` | Decomposition, parallel fan-out, cross-review, synthesis, and gates. |
 | `legion-run` | Evidence-backed lifecycle for substantial tasks. |
 | `legion-setup` | Marketplace installation, updates, and harness bridges. |
@@ -95,7 +95,7 @@ use `--remove` for an exact rollback. `legion-setup init` is the same entrypoint
 | Parallel independent slices | `legion-fanout` |
 | Multi-step work requiring decomposition and cross-checks | `legion-orchestrate` |
 | A substantial task with explicit plan, validation, and evidence | `legion-run` |
-| Health, cost, reports, or future-run hints | `legion-doctor`, `legion-report`, `legion-self-learn` |
+| Health, cost, reports, or future-run hints | `legion-doctor`, `legion-report`, `legion-learn`, `legion-self-learn` |
 
 Check a repository before work:
 

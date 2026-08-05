@@ -180,6 +180,7 @@ def test_build_report_scores_only_requested_day(tmp_path, monkeypatch):
     monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
     monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
     monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
 
     report = self_learn.build_report(str(repo), str(logs), "2026-06-19")
 
@@ -215,6 +216,46 @@ def test_build_report_scan_all_keeps_late_manual_outcomes(tmp_path, monkeypatch)
 
     assert report["scan_scope"] == "all"
     assert report["outcomes"][0]["id"] == "late"
+
+
+def test_build_report_turns_promoted_learning_laws_into_proposals(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    logs = tmp_path / "logs"
+    learning = tmp_path / "global-learning"
+    repo.mkdir()
+    learning.mkdir()
+    (learning / "laws.json").write_text(
+        json.dumps(
+            {
+                "schema": "legion.learning-laws.v1",
+                "laws": [
+                    {
+                        "schema": "legion.learning-law.v1",
+                        "key": "test-real-workflow",
+                        "status": "active",
+                        "confidence": 0.91,
+                        "support": {"episodes": 5, "projects": 3},
+                        "evidence_ids": ["d1", "d2", "d3"],
+                        "guidance": "Validate the real user workflow before changing its docs or UI.",
+                        "validation": "Run a representative end-to-end workflow.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LEGION_GLOBAL_LEARNING_DIR", str(learning))
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
+    monkeypatch.setattr(self_learn, "run_scorecard", lambda _repo: self_learn.empty_scorecard(str(repo)))
+
+    report = self_learn.build_report(str(repo), str(logs), "2026-08-05")
+
+    assert report["outcomes"][0]["source"] == "learning-law"
+    assert report["outcomes"][0]["metadata"]["law_key"] == "test-real-workflow"
+    assert report["proposals"][0]["kind"] == "learned_behavior_guardrail"
+    assert "end-to-end" in report["proposals"][0]["validation"]
 
 
 def test_over_budget_span_becomes_learning_outcome(tmp_path):
@@ -408,6 +449,7 @@ def test_apply_memory_keeps_unresolved_outcomes_active(tmp_path, monkeypatch):
     monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
     monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
     monkeypatch.setattr(self_learn, "run_scorecard", lambda _repo: self_learn.empty_scorecard(str(repo)))
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
     outcome = {
         "schema": self_learn.OUTCOME_SCHEMA,
         "id": "processed-once",
@@ -497,6 +539,19 @@ def _score(value, *, ok=True, pass_count=1, cases=1):
             {"name": "legion-doctor", "ok": ok},
         ],
     }
+
+
+def test_compare_scorecards_rejects_negative_metric_regression():
+    baseline = _score(0.5, pass_count=1, cases=2)
+    candidate = _score(0.8, pass_count=2, cases=2)
+    baseline["metrics"].update({"cost_usd": 0.1, "tokens": 100, "safety_regressions": 0})
+    candidate["metrics"].update({"cost_usd": 0.1, "tokens": 100, "safety_regressions": 1})
+
+    result = self_learn.compare_scorecards(baseline, candidate)
+
+    assert result["status"] == "discard"
+    assert result["decision"] == "metric_regression"
+    assert "safety_regressions" in result["regressions"]
 
 
 def test_candidate_experiment_discards_non_improving_source_patch(tmp_path, monkeypatch):

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 from typing import Any
 
 try:
@@ -30,6 +31,8 @@ STATE_KEYS = {
     "LEGION_REPOS_FILE",
     "LEGION_BENCH_DIR",
     "LEGION_REPORTS_DIR",
+    "LEGION_PROJECT_LEARNING_DIR",
+    "LEGION_GLOBAL_LEARNING_DIR",
 }
 
 
@@ -75,10 +78,46 @@ def _slug(text: str) -> str:
     return slug or "repo"
 
 
-def project_id(repo: str) -> str:
+def _normalize_remote(remote: str) -> str:
+    """Return a credential-free, clone-independent repository identity."""
+    value = remote.strip()
+    if not value:
+        return ""
+    value = re.sub(r"^[a-z][a-z0-9+.-]*://", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^[^/@]+@", "", value)
+    if re.match(r"^[^/:]+:[^/].*", value):
+        value = value.replace(":", "/", 1)
+    value = value.split("?", 1)[0].split("#", 1)[0]
+    value = value.rstrip("/")
+    if value.lower().endswith(".git"):
+        value = value[:-4]
+    return value.lower()
+
+
+def repository_identity(repo: str) -> str:
     repo_abs = os.path.abspath(os.path.expanduser(repo))
-    digest = hashlib.sha256(repo_abs.encode("utf-8")).hexdigest()[:12]
-    return f"{_slug(os.path.basename(repo_abs))}-{digest}"
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_abs, "config", "--get", "remote.origin.url"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        identity = _normalize_remote(result.stdout) if result.returncode == 0 else ""
+        if identity:
+            return identity
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return repo_abs
+
+
+def project_id(repo: str, identity: str | None = None) -> str:
+    repo_abs = os.path.abspath(os.path.expanduser(repo))
+    stable_identity = identity or repository_identity(repo_abs)
+    digest = hashlib.sha256(stable_identity.encode("utf-8")).hexdigest()[:12]
+    name = stable_identity.rstrip("/").rsplit("/", 1)[-1] if stable_identity else ""
+    return f"{_slug(name or os.path.basename(repo_abs))}-{digest}"
 
 
 def _simple_toml(path: str) -> dict[str, Any]:
@@ -152,8 +191,11 @@ def _configured_reports(repo: str, config: dict[str, Any]) -> str:
 def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ if env is None else env)
     repo_abs = _abs(repo or os.getcwd())
+    identity = repository_identity(repo_abs)
+    stable_project_id = project_id(repo_abs, identity)
     config_file = _config_path(repo_abs, env)
     config = _read_config(config_file)
+    legion_home = _abs(env.get("LEGION_HOME", os.path.join(env.get("HOME", "~"), ".legion")))
 
     configured_root = _configured_root(repo_abs, config)
     if env.get("LEGION_STATE_ROOT"):
@@ -163,8 +205,7 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
         state_root = configured_root
         source = "config"
     else:
-        legion_home = _abs(env.get("LEGION_HOME", os.path.join(env.get("HOME", "~"), ".legion")))
-        state_root = os.path.join(legion_home, "projects", project_id(repo_abs))
+        state_root = os.path.join(legion_home, "projects", stable_project_id)
         source = "auto"
 
     reports_root = (
@@ -175,7 +216,8 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
 
     return {
         "repo": repo_abs,
-        "project_id": project_id(repo_abs),
+        "repository_identity": identity,
+        "project_id": stable_project_id,
         "source": source,
         "config_file": config_file if os.path.exists(config_file) else "",
         "state_root": state_root,
@@ -184,6 +226,15 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
         "repos_file": _abs(env.get("LEGION_REPOS_FILE") or os.path.join(state_root, "repos.jsonl"), repo_abs),
         "bench_dir": _abs(env.get("LEGION_BENCH_DIR") or os.path.join(state_root, "bench"), repo_abs),
         "reports_dir": reports_root,
+        "project_learning_dir": _abs(
+            env.get("LEGION_PROJECT_LEARNING_DIR") or os.path.join(state_root, "learning"),
+            repo_abs,
+        ),
+        "global_learning_dir": _abs(
+            env.get("LEGION_GLOBAL_LEARNING_DIR")
+            or os.path.join(legion_home, "global", "learning"),
+            repo_abs,
+        ),
     }
 
 
@@ -195,6 +246,8 @@ def shell_exports(state: dict[str, str]) -> str:
         "LEGION_REPOS_FILE": state["repos_file"],
         "LEGION_BENCH_DIR": state["bench_dir"],
         "LEGION_REPORTS_DIR": state["reports_dir"],
+        "LEGION_PROJECT_LEARNING_DIR": state["project_learning_dir"],
+        "LEGION_GLOBAL_LEARNING_DIR": state["global_learning_dir"],
         "LEGION_PROJECT_ID": state["project_id"],
     }
     return "\n".join(f"export {key}={shlex.quote(value)}" for key, value in mapping.items())

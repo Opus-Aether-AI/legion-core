@@ -41,8 +41,12 @@ implicitly.
 
 Core refresh is opt-in (`--cron` or `LEGION_INSTALL_CRON=1`). An aggregate
 `legion-code` refresh should run core refresh first and code refresh second in
-one owned job so session learning and bridges stay coherent. Until that contract
-is implemented in `legion-code`, update the two installations explicitly.
+one owned job so evidence-linked learning, compatibility outcomes, and bridges
+stay coherent. `legion-core` owns the `legion-learn` schemas, global law store,
+promotion policy, and self-learning integration; `legion-code` may invoke and
+document these surfaces but must not fork their implementation. Until that
+contract is implemented in `legion-code`, update the two installations
+explicitly.
 
 Uninstallers must also respect shared ownership: removing `legion-code` should
 not remove a separately installed core unless the operator explicitly requests

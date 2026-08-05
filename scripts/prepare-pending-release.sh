@@ -99,8 +99,11 @@ if gh release view "$tag" --repo "$gh_repo" >/dev/null 2>&1; then
             <<<"$pending_prs"
     )"
     if [ -n "$release_pr" ]; then
-        gh pr edit "$release_pr" --repo "$gh_repo" \
-            --remove-label 'autorelease: pending' --add-label 'autorelease: tagged'
+        # gh implements add/remove as separate mutations. Add first so a
+        # partial failure leaves `pending` discoverable and the next run can
+        # retry safely; removing first could strand the PR with neither label.
+        gh pr edit "$release_pr" --repo "$gh_repo" --add-label 'autorelease: tagged'
+        gh pr edit "$release_pr" --repo "$gh_repo" --remove-label 'autorelease: pending'
         echo "reconciled Release PR #$release_pr to autorelease: tagged"
     fi
     printf 'pending=false\n' >> "$output"

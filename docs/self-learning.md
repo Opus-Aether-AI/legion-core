@@ -78,8 +78,9 @@ inspect the output before sharing it. Durable outcomes remain transcript-free.
 
 `legion-learn` streams raw JSONL and discards it. Durable v2 reports contain
 bounded, best-effort-redacted excerpts and hashed dispatch prompts; credentials,
-email addresses, connection URLs, and home paths are removed before state is
-written. Reports remain local unless the operator exports or shares them.
+private-key blocks, email addresses, connection URLs, and local absolute paths
+are removed before state is written. Reports remain local unless the operator
+exports or shares them.
 Review any export before sending it elsewhere.
 
 The behavior axes are execution leverage, steering, engineering quality,
@@ -119,8 +120,10 @@ legion-self-learn run --repo ~/.agents/sources/legion-core --apply-memory --quie
 
 The first step writes the project report under
 `<state_root>/learning/reports/` and the cross-project law store under
-`~/.legion/global/learning/`. Repository identity comes from a normalized Git
-remote when available, so separate clones share project state.
+`~/.legion/global/learning/`. Evidence provenance and cross-project aggregation
+use a normalized Git remote when available. Existing operational state remains
+path-keyed for upgrade compatibility; `legion-state` exposes both the legacy
+`project_id` and clone-stable `repository_project_id` identities.
 
 This writes under the project `state_root` reported by
 `legion-state --repo ~/.agents/sources/legion-core`:
@@ -137,8 +140,14 @@ exact UTC-day report window for reproducible audits and tests. Durable memory
 preserves unresolved hints until a kept source experiment resolves them.
 
 The evidence and compatibility session-learning steps are separately bounded.
-Set `LEGION_EVIDENCE_LEARN=0` or `LEGION_SESSION_LEARN=0` to disable either
-refresh lane. The compatibility lane uses the newest 100 eligible sources. Run
+The evidence lane defaults to the newest 100 eligible files, 64 MiB in aggregate,
+and 20,000 normalized events; tune those limits with
+`LEGION_EVIDENCE_LEARN_MAX_FILES`, `LEGION_EVIDENCE_LEARN_MAX_TOTAL_MB`, and
+`LEGION_EVIDENCE_LEARN_MAX_EVENTS`. Repository-only analysis applies those limits
+after provenance filtering while bounding candidate discovery to the newest 1,000
+files and 256 MiB. Set `LEGION_EVIDENCE_LEARN=0` or `LEGION_SESSION_LEARN=0` to
+disable either refresh lane. The compatibility lane uses the newest 100 eligible
+sources. Run
 `legion-session-learn --session-limit 0` manually only for an intentional
 unbounded audit.
 
@@ -174,9 +183,10 @@ the candidate with:
 Only candidates with a positive score delta and no metric regressions are
 eligible to be kept. Legion applies the best kept candidate to the real checkout,
 reruns the scorecard, and rolls back if the final checkout fails or regresses.
-The no-regression gate covers eval cases/accuracy plus misses, collisions,
-false-success signals, safety regressions, cost, tokens, and gross latency
-regressions.
+The no-regression gate covers measured eval cases/accuracy plus misses,
+collisions, false-success signals, safety regressions, and gross latency
+regressions. Cost and token usage are not scorecard gates because these local
+deterministic subprocesses do not currently report either metric.
 
 Vendored files are skipped unless `--allow-vendored` is passed.
 

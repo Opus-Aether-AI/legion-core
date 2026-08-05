@@ -698,9 +698,7 @@ def empty_scorecard(repo: str, *, reason: str = "") -> dict[str, Any]:
             "pass_rate": 0.0,
             "false_success": 0,
             "safety_regressions": 0,
-            "cost_usd": 0.0,
             "duration_ms": 0,
-            "tokens": 0,
         },
         "checks": [],
         "reason": reason,
@@ -768,9 +766,7 @@ def run_scorecard(repo: str) -> dict[str, Any]:
             "safety_regressions": sum(
                 1 for check in checks if check.get("name") == "legion-doctor" and not check.get("ok")
             ),
-            "cost_usd": 0.0,
             "duration_ms": sum(int(check.get("duration_ms") or 0) for check in checks),
-            "tokens": 0,
         }
     )
     ok = bool(summaries) and all(bool(check.get("ok")) for check in checks)
@@ -809,8 +805,6 @@ def compare_scorecards(
         "miss",
         "false_success",
         "safety_regressions",
-        "cost_usd",
-        "tokens",
     ]
     delta = round(_score_metric(candidate, "score") - _score_metric(baseline, "score"), 6)
     if not candidate.get("ok"):
@@ -895,6 +889,8 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
     entity = _entity_index(catalog).get(f"{target_type}:{target_name}", {})
     source = _text(outcome.get("source"))
     source_path = _text(entity.get("source_path"))
+    proposal_identity = outcome.get("id")
+    law_key = ""
 
     if source == "trigger-eval":
         kind = "trigger_description_fix"
@@ -923,6 +919,9 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
     elif source == "learning-law":
         kind = "learned_behavior_guardrail"
         metadata = _dict(outcome.get("metadata"))
+        law_key = _text(metadata.get("law_key"))
+        if law_key:
+            proposal_identity = f"learning-law:{law_key}"
         suggested = _text(metadata.get("guidance")) or (
             "Turn the promoted cross-project behavior into a scoped, durable harness guardrail."
         )
@@ -945,7 +944,7 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
         validation = "Run the target entity's normal validation before source mutation."
 
     proposal = {
-        "id": _stable_id(["proposal", outcome.get("id"), kind]),
+        "id": _stable_id(["proposal", proposal_identity, kind]),
         "kind": kind,
         "status": "proposed",
         "target_type": target_type,
@@ -958,6 +957,8 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
         "validation": validation,
         "outcome_id": outcome.get("id"),
     }
+    if law_key:
+        proposal["law_key"] = law_key
     return proposal
 
 
@@ -1083,6 +1084,14 @@ def apply_memory(report: dict[str, Any], log_root: str) -> dict[str, Any]:
         if proposal.get("id") not in entry["proposal_ids"]:
             entry["proposal_ids"].append(proposal.get("id"))
         hint = _hint_from_proposal(proposal)
+        law_key = _text(proposal.get("law_key"))
+        if law_key:
+            marker = f"learning law '{law_key}'"
+            entry["hints"] = [
+                existing_hint
+                for existing_hint in _list(entry.get("hints"))
+                if marker not in _text(existing_hint).lower()
+            ]
         if hint and hint not in entry["hints"]:
             entry["hints"].append(hint)
         if proposal.get("source_path") and proposal.get("source_path") not in entry["source_paths"]:
@@ -1845,7 +1854,7 @@ def render_hints(payload: dict[str, Any]) -> str:
     lines = [f"Legion self-learning hints (updated {payload.get('updated_at')})"]
     for key, entry in entities.items():
         lines.append(f"\n{key} [{entry.get('severity', 'info')}]")
-        for hint in _list(entry.get("hints"))[:5]:
+        for hint in list(reversed(_list(entry.get("hints"))))[:5]:
             lines.append(f"- {hint}")
     return "\n".join(lines)
 

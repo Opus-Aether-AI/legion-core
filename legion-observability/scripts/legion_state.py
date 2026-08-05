@@ -112,7 +112,14 @@ def repository_identity(repo: str) -> str:
     return repo_abs
 
 
-def project_id(repo: str, identity: str | None = None) -> str:
+def project_id(repo: str) -> str:
+    repo_abs = os.path.abspath(os.path.expanduser(repo))
+    digest = hashlib.sha256(repo_abs.encode("utf-8")).hexdigest()[:12]
+    return f"{_slug(os.path.basename(repo_abs))}-{digest}"
+
+
+def repository_project_id(repo: str, identity: str | None = None) -> str:
+    """Return a clone-independent project ID for cross-repository learning."""
     repo_abs = os.path.abspath(os.path.expanduser(repo))
     stable_identity = identity or repository_identity(repo_abs)
     digest = hashlib.sha256(stable_identity.encode("utf-8")).hexdigest()[:12]
@@ -192,7 +199,8 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
     env = dict(os.environ if env is None else env)
     repo_abs = _abs(repo or os.getcwd())
     identity = repository_identity(repo_abs)
-    stable_project_id = project_id(repo_abs, identity)
+    path_project_id = project_id(repo_abs)
+    stable_repository_project_id = repository_project_id(repo_abs, identity)
     config_file = _config_path(repo_abs, env)
     config = _read_config(config_file)
     legion_home = _abs(env.get("LEGION_HOME", os.path.join(env.get("HOME", "~"), ".legion")))
@@ -205,7 +213,7 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
         state_root = configured_root
         source = "config"
     else:
-        state_root = os.path.join(legion_home, "projects", stable_project_id)
+        state_root = os.path.join(legion_home, "projects", path_project_id)
         source = "auto"
 
     reports_root = (
@@ -217,7 +225,8 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
     return {
         "repo": repo_abs,
         "repository_identity": identity,
-        "project_id": stable_project_id,
+        "repository_project_id": stable_repository_project_id,
+        "project_id": path_project_id,
         "source": source,
         "config_file": config_file if os.path.exists(config_file) else "",
         "state_root": state_root,
@@ -249,6 +258,7 @@ def shell_exports(state: dict[str, str]) -> str:
         "LEGION_PROJECT_LEARNING_DIR": state["project_learning_dir"],
         "LEGION_GLOBAL_LEARNING_DIR": state["global_learning_dir"],
         "LEGION_PROJECT_ID": state["project_id"],
+        "LEGION_REPOSITORY_PROJECT_ID": state["repository_project_id"],
     }
     return "\n".join(f"export {key}={shlex.quote(value)}" for key, value in mapping.items())
 

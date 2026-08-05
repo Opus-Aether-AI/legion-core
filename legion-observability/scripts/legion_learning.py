@@ -36,6 +36,11 @@ OUTCOME_LINK_SCHEMA = "legion.outcome-link.v1"
 LAW_SCHEMA = "legion.learning-law.v1"
 REPORT_SCHEMA = "legion.learning.report.v2"
 MAX_EXCERPT_CHARS = 700
+DEFAULT_MAX_SESSION_FILES = 100
+DEFAULT_MAX_SESSION_TOTAL_MB = 64.0
+DEFAULT_MAX_EVENTS = 20_000
+DEFAULT_MAX_REPO_CANDIDATE_FILES = 1_000
+DEFAULT_MAX_REPO_CANDIDATE_TOTAL_MB = 256.0
 
 BEHAVIOR_AXES = (
     "execution_leverage",
@@ -291,12 +296,24 @@ _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
 _CREDENTIAL_RES = (
     re.compile(r"\bgh[oprsu]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\bxox[a-z]-[A-Za-z0-9-]{10,}\b", re.IGNORECASE),
     re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b"),
     re.compile(r"(?i)\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}"),
 )
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?"
+    r"(?:-----END [^-\r\n]*PRIVATE KEY-----|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_FILE_URI_RE = re.compile(
+    r"\bfile://[^\s'\"`<>{}\[\](),;]+",
+    re.IGNORECASE,
+)
 _PATH_RE = re.compile(
-    r"(?:(?:/Users|/home)/[^\s'\"`:,;]+|[A-Za-z]:\\Users\\[^\s'\"`:,;]+)"
+    r"(?:(?<![A-Za-z0-9:/])/(?!/)(?:[^/\s'\"`<>{}\[\](),;:]+/)+"
+    r"[^/\s'\"`<>{}\[\](),;:]+"
+    r"|(?<![A-Za-z0-9])[A-Za-z]:\\[^\s'\"`<>{}\[\](),;:]+)"
 )
 _CONNECTION_RE = re.compile(
     r"\b(?:postgres(?:ql)?|redis|mongodb(?:\+srv)?|mysql|mssql|amqp)://[^\s]+",
@@ -313,6 +330,23 @@ _FAILED_RE = re.compile(
     r"|\b(?:rollback|regression|no[- ]go)\b",
     re.IGNORECASE,
 )
+_VERIFIED_CUE_RE = re.compile(
+    r"\b(?:pass(?:ed|ing)?|green|ok|complete|verified|validated)\b",
+    re.IGNORECASE,
+)
+_FAILED_CUE_RE = re.compile(
+    r"\b(?:fail(?:ed|ing)?|red|error|broken|rollback|regression|no[- ]go)\b",
+    re.IGNORECASE,
+)
+_NEGATION_BEFORE_CUE_RE = re.compile(
+    r"(?:\b(?:no|not|never|cannot)\b|n['’]t\b)(?:\W+\w+){0,4}\W*$",
+    re.IGNORECASE,
+)
+_NEGATION_BOUNDARY_RE = re.compile(
+    r"[.!?;]|\b(?:but|however|later|subsequently|then|afterwards)\b",
+    re.IGNORECASE,
+)
+_NOT_ONLY_RE = re.compile(r"\bnot\s+only\b", re.IGNORECASE)
 
 
 def _now() -> datetime:
@@ -338,6 +372,8 @@ def redact_text(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
     value = str(text or "")
     value = _CONNECTION_RE.sub("[credential-url]", value)
     value = _BEARER_RE.sub("Bearer [credential]", value)
+    value = _PRIVATE_KEY_RE.sub("[private-key]", value)
+    value = _FILE_URI_RE.sub("file://[path]", value)
     for pattern in _CREDENTIAL_RES:
         value = pattern.sub("[credential]", value)
     value = _EMAIL_RE.sub("[email]", value)
@@ -395,12 +431,15 @@ def _project_for_path(path: Path, home: Path | None = None) -> str:
 @lru_cache(maxsize=2048)
 def _project_for_cwd(cwd: str) -> str:
     path = Path(cwd).expanduser()
-    if not path.is_dir():
-        return path.name or "unknown"
-    identity = legion_state.repository_identity(str(path))
+    return _durable_repository_identity(str(path))
+
+
+def _durable_repository_identity(repo: str) -> str:
+    identity = legion_state.repository_identity(repo)
     if os.path.isabs(identity):
-        return path.name or "unknown"
-    return identity.rstrip("/").rsplit("/", 1)[-1] or path.name or "unknown"
+        opaque_id = legion_state.repository_project_id(repo, identity)
+        return f"local:{opaque_id}"
+    return identity or Path(repo).expanduser().name or "unknown"
 
 
 def safe_project_component(value: str) -> str:
@@ -473,16 +512,28 @@ def _message_text(payload: dict[str, Any]) -> str:
 def _dispatches(payload: dict[str, Any]) -> list[dict[str, Any]]:
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, list):
-        return []
+    items = list(content) if isinstance(content, list) else []
+    body = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    if payload.get("type") == "response_item" and body.get("type") == "function_call":
+        items.append(body)
     out: list[dict[str, Any]] = []
-    for item in content:
+    for item in items:
         if not isinstance(item, dict) or item.get("type") not in {"tool_use", "function_call"}:
             continue
         name = str(item.get("name") or "")
         if name.lower() not in {"agent", "task", "spawn_agent", "delegate", "legion-delegate"}:
             continue
         tool_input = item.get("input") if isinstance(item.get("input"), dict) else {}
+        arguments = item.get("arguments")
+        if not tool_input and isinstance(arguments, dict):
+            tool_input = arguments
+        elif not tool_input and isinstance(arguments, str):
+            try:
+                parsed_arguments = json.loads(arguments)
+            except ValueError:
+                parsed_arguments = {}
+            if isinstance(parsed_arguments, dict):
+                tool_input = parsed_arguments
         prompt = str(
             tool_input.get("prompt")
             or tool_input.get("task")
@@ -575,12 +626,7 @@ def filter_events_for_repo(
 ) -> list[dict[str, Any]]:
     """Select events attributed to one repository without transcript search."""
     target = _project_for_cwd(repo)
-    aliases = {target, Path(repo).expanduser().name}
-    identity = legion_state.repository_identity(repo)
-    if identity and not os.path.isabs(identity):
-        aliases.add(identity)
-        aliases.add(identity.rstrip("/").rsplit("/", 1)[-1])
-    return [event for event in events if str(event.get("project") or "") in aliases]
+    return [event for event in events if str(event.get("project") or "") == target]
 
 
 def classify_decision_law(text: str) -> tuple[str, list[str]]:
@@ -612,27 +658,50 @@ def _intent(events: list[dict[str, Any]]) -> str:
     return "ambiguous"
 
 
-def _outcome_for(decision: dict[str, Any], session_events: list[dict[str, Any]]) -> dict[str, Any]:
-    later = [
-        event
-        for event in session_events
-        if int(event.get("sequence") or 0) >= int(decision.get("sequence") or 0)
-        and event.get("id") != decision.get("event_id")
-    ]
+def _cue_is_negated(excerpt: str, cue_start: int) -> bool:
+    prefix = excerpt[:cue_start]
+    boundaries = list(_NEGATION_BOUNDARY_RE.finditer(prefix))
+    clause = prefix[boundaries[-1].end() :] if boundaries else prefix
+    clause = _NOT_ONLY_RE.sub("", clause)
+    return bool(_NEGATION_BEFORE_CUE_RE.search(clause))
+
+
+def _latest_outcome_evidence(
+    events: list[dict[str, Any]],
+    *,
+    min_sequence: int | None = None,
+    exclude_event_id: str = "",
+) -> tuple[str, dict[str, Any] | None]:
     candidates: list[tuple[int, int, str, dict[str, Any]]] = []
-    for event in later:
-        if event.get("role") == "user":
+    for event in events:
+        sequence = int(event.get("sequence") or 0)
+        if min_sequence is not None and sequence < min_sequence:
             continue
-        excerpt = event.get("excerpt", "")
-        for status, pattern in (("verified", _VERIFIED_RE), ("failed", _FAILED_RE)):
-            match = pattern.search(excerpt)
-            if match:
-                candidates.append(
-                    (int(event.get("sequence") or 0), match.end(), status, event)
-                )
+        if event.get("id") == exclude_event_id or event.get("role") == "user":
+            continue
+        excerpt = str(event.get("excerpt") or "")
+        for status, pattern, cue_pattern in (
+            ("verified", _VERIFIED_RE, _VERIFIED_CUE_RE),
+            ("failed", _FAILED_RE, _FAILED_CUE_RE),
+        ):
+            for match in pattern.finditer(excerpt):
+                for cue in cue_pattern.finditer(excerpt, match.start(), match.end()):
+                    cue_status = status
+                    if _cue_is_negated(excerpt, cue.start()):
+                        cue_status = "failed" if status == "verified" else "verified"
+                    candidates.append((sequence, cue.end(), cue_status, event))
     selected = max(candidates, default=None, key=lambda item: (item[0], item[1]))
-    status = selected[2] if selected else "no_evidence"
-    evidence = selected[3] if selected else None
+    if not selected:
+        return "no_evidence", None
+    return selected[2], selected[3]
+
+
+def _outcome_for(decision: dict[str, Any], session_events: list[dict[str, Any]]) -> dict[str, Any]:
+    status, evidence = _latest_outcome_evidence(
+        session_events,
+        min_sequence=int(decision.get("sequence") or 0),
+        exclude_event_id=str(decision.get("event_id") or ""),
+    )
     confidence = "high" if evidence else "low"
     return {
         "schema": OUTCOME_LINK_SCHEMA,
@@ -851,8 +920,7 @@ def analyze_events(events: list[dict[str, Any]], *, repo: str, project: str) -> 
         work_stream_id = _stable_id([session_project, primary_law, day])
         episode_id = _stable_id(["episode", session_id, work_stream_id])
         session_episode[session_id] = episode_id
-        verified = any(_VERIFIED_RE.search(event.get("excerpt", "")) for event in session_events)
-        failed = any(_FAILED_RE.search(event.get("excerpt", "")) for event in session_events)
+        episode_status, _episode_evidence = _latest_outcome_evidence(session_events)
         episodes.append(
             {
                 "schema": EPISODE_SCHEMA,
@@ -862,7 +930,7 @@ def analyze_events(events: list[dict[str, Any]], *, repo: str, project: str) -> 
                 "session_ids": [session_id],
                 "intent": intent,
                 "primary_law": primary_law,
-                "outcome_status": "verified" if verified else "failed" if failed else "no_evidence",
+                "outcome_status": episode_status,
                 "evidence_ids": [event["id"] for event in session_events[-5:]],
             }
         )
@@ -904,8 +972,7 @@ def analyze_events(events: list[dict[str, Any]], *, repo: str, project: str) -> 
     }
     dispatches = [event for event in events if event.get("event_type") == "dispatch"]
     linked = sum(link.get("status") != "no_evidence" for link in outcome_links)
-    repo_identity = legion_state.repository_identity(repo)
-    durable_repo = repo_identity if not os.path.isabs(repo_identity) else "[local-repo]"
+    durable_repo = _durable_repository_identity(repo)
     return {
         "schema": REPORT_SCHEMA,
         "generated_at": _iso_now(),
@@ -1004,6 +1071,34 @@ def _atomic_json(path: Path, payload: Any) -> None:
             pass
 
 
+def _latest_repository_reports(
+    directory: Path,
+    current_report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    latest: dict[str, tuple[tuple[str, str], dict[str, Any]]] = {}
+    for path in sorted(directory.glob("*.json")):
+        payload = _read_json(path)
+        if not isinstance(payload, dict) or payload.get("schema") != REPORT_SCHEMA:
+            continue
+        repository = str(payload.get("repo") or "")
+        # Pre-0.2.9 local snapshots carried one shared placeholder, so they
+        # cannot be attributed without mixing unrelated repositories. Ignore
+        # them rather than letting anonymous historical evidence live forever.
+        if not repository or repository == "[local-repo]":
+            continue
+        rank = (str(payload.get("generated_at") or ""), path.name)
+        if repository not in latest or rank > latest[repository][0]:
+            latest[repository] = (rank, payload)
+
+    current_repository = str(current_report.get("repo") or "")
+    if current_repository:
+        latest[current_repository] = (
+            (str(current_report.get("generated_at") or ""), ""),
+            current_report,
+        )
+    return [latest[key][1] for key in sorted(latest)]
+
+
 def merge_law_store(path: Path, laws: list[dict[str, Any]]) -> dict[str, Any]:
     path = Path(path)
     existing = _read_json(path)
@@ -1016,22 +1111,9 @@ def merge_law_store(path: Path, laws: list[dict[str, Any]]) -> dict[str, Any]:
         key = str(law.get("key") or "")
         if not key:
             continue
-        current = by_key.get(key)
-        if current is None:
-            by_key[key] = law
-            continue
-        current_support = current.get("support") if isinstance(current.get("support"), dict) else {}
-        new_support = law.get("support") if isinstance(law.get("support"), dict) else {}
-        if (
-            int(new_support.get("episodes") or 0),
-            int(new_support.get("projects") or 0),
-            float(law.get("confidence") or 0.0),
-        ) >= (
-            int(current_support.get("episodes") or 0),
-            int(current_support.get("projects") or 0),
-            float(current.get("confidence") or 0.0),
-        ):
-            by_key[key] = law
+        # ``laws`` is computed from the latest snapshot per repository, so its
+        # support may legitimately decrease as stale evidence ages out.
+        by_key[key] = law
     active_keys = {str(law.get("key")) for law in laws if law.get("key")}
     for key, law in by_key.items():
         if key not in active_keys and law.get("status") == "active":
@@ -1046,7 +1128,14 @@ def merge_law_store(path: Path, laws: list[dict[str, Any]]) -> dict[str, Any]:
     return payload
 
 
-def _iter_session_files(home: Path, lookback_days: int, max_file_mb: float) -> list[Path]:
+def _iter_session_files(
+    home: Path,
+    lookback_days: int,
+    max_file_mb: float,
+    *,
+    max_files: int = 0,
+    max_total_mb: float = 0,
+) -> list[Path]:
     roots = [
         home / ".claude" / "projects",
         home / ".codex" / "sessions",
@@ -1056,7 +1145,8 @@ def _iter_session_files(home: Path, lookback_days: int, max_file_mb: float) -> l
     ]
     cutoff = (_now() - timedelta(days=lookback_days)).timestamp() if lookback_days > 0 else 0
     max_bytes = int(max_file_mb * 1024 * 1024) if max_file_mb > 0 else 0
-    out: list[Path] = []
+    max_total_bytes = int(max_total_mb * 1024 * 1024) if max_total_mb > 0 else 0
+    candidates: dict[Path, tuple[int, int]] = {}
     for root in roots:
         if not root.exists():
             continue
@@ -1071,8 +1161,22 @@ def _iter_session_files(home: Path, lookback_days: int, max_file_mb: float) -> l
             # machine-generated logs in non-standard roots.
             if max_bytes and stat.st_size > max_bytes:
                 continue
-            out.append(path)
-    return sorted(set(out))
+            candidates[path] = (stat.st_mtime_ns, stat.st_size)
+
+    ordered = sorted(
+        candidates.items(),
+        key=lambda item: (-item[1][0], str(item[0])),
+    )
+    out: list[Path] = []
+    total_bytes = 0
+    for path, (_mtime_ns, size) in ordered:
+        if max_files > 0 and len(out) >= max_files:
+            break
+        if max_total_bytes and total_bytes + size > max_total_bytes:
+            continue
+        out.append(path)
+        total_bytes += size
+    return out
 
 
 def _state_dirs(repo: str, state_root: str) -> tuple[Path, Path]:
@@ -1085,12 +1189,53 @@ def _state_dirs(repo: str, state_root: str) -> tuple[Path, Path]:
 
 def analyze_command(args: argparse.Namespace) -> int:
     home = Path(args.home).expanduser()
-    files = _iter_session_files(home, args.lookback_days, args.max_file_mb)
-    events: list[dict[str, Any]] = []
-    for path in files:
-        events.extend(normalize_session_file(path, home=home))
+    candidate_max_files = args.max_files
+    candidate_max_total_mb = args.max_total_mb
     if args.repo_only:
-        events = filter_events_for_repo(events, args.repo)
+        candidate_max_files = max(
+            args.max_files,
+            DEFAULT_MAX_REPO_CANDIDATE_FILES,
+        )
+        candidate_max_total_mb = max(
+            args.max_total_mb,
+            DEFAULT_MAX_REPO_CANDIDATE_TOTAL_MB,
+        )
+    files = _iter_session_files(
+        home,
+        args.lookback_days,
+        args.max_file_mb,
+        max_files=candidate_max_files,
+        max_total_mb=candidate_max_total_mb,
+    )
+    events: list[dict[str, Any]] = []
+    files_scanned = 0
+    matched_files = 0
+    matched_bytes = 0
+    max_matched_bytes = (
+        int(args.max_total_mb * 1024 * 1024) if args.max_total_mb > 0 else 0
+    )
+    for path in files:
+        if args.max_events > 0 and len(events) >= args.max_events:
+            break
+        if args.repo_only and args.max_files > 0 and matched_files >= args.max_files:
+            break
+        normalized = normalize_session_file(path, home=home)
+        files_scanned += 1
+        if args.repo_only:
+            normalized = filter_events_for_repo(normalized, args.repo)
+            if not normalized:
+                continue
+            try:
+                file_size = path.stat().st_size
+            except OSError:
+                continue
+            if max_matched_bytes and matched_bytes + file_size > max_matched_bytes:
+                continue
+            matched_files += 1
+            matched_bytes += file_size
+        if args.max_events > 0:
+            normalized = normalized[: max(0, args.max_events - len(events))]
+        events.extend(normalized)
     project = safe_project_component(args.project or _project_for_cwd(args.repo))
     report = analyze_events(events, repo=args.repo, project=project)
     project_dir, global_dir = _state_dirs(args.repo, args.state_root)
@@ -1098,19 +1243,14 @@ def analyze_command(args: argparse.Namespace) -> int:
     report_path = project_dir / "reports" / f"{day}.json"
     _atomic_json(report_path, report)
 
-    # Include the current report plus the latest reports from other projects
-    # when a shared global state is used. Duplicate decision IDs are harmless.
-    reports = [report]
+    # Cross-project promotion uses one current snapshot per repository. Historical
+    # daily snapshots remain readable, but cannot keep retired evidence active.
     global_reports = global_dir / "project-reports"
     global_reports.mkdir(parents=True, exist_ok=True)
-    snapshot_path = global_reports / f"{project}-{day}.json"
+    snapshot_id = legion_state.repository_project_id(args.repo)
+    snapshot_path = global_reports / f"{snapshot_id}.json"
     _atomic_json(snapshot_path, report)
-    for path in sorted(global_reports.glob("*.json")):
-        if path == snapshot_path:
-            continue
-        payload = _read_json(path)
-        if isinstance(payload, dict) and payload.get("schema") == REPORT_SCHEMA:
-            reports.append(payload)
+    reports = _latest_repository_reports(global_reports, report)
     promoted = promote_laws(reports)
     laws_path = global_dir / "laws.json"
     law_store = merge_law_store(laws_path, promoted)
@@ -1118,7 +1258,7 @@ def analyze_command(args: argparse.Namespace) -> int:
         "schema": "legion.learning.run.v1",
         "report_path": str(report_path),
         "laws_path": str(laws_path),
-        "files_scanned": len(files),
+        "files_scanned": files_scanned,
         "events_processed": len(events),
         "sessions": len(report["sessions"]),
         "episodes": len(report["episodes"]),
@@ -1218,6 +1358,13 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--project", default="")
     analyze.add_argument("--lookback-days", type=int, default=3)
     analyze.add_argument("--max-file-mb", type=float, default=8.0)
+    analyze.add_argument("--max-files", type=int, default=DEFAULT_MAX_SESSION_FILES)
+    analyze.add_argument(
+        "--max-total-mb",
+        type=float,
+        default=DEFAULT_MAX_SESSION_TOTAL_MB,
+    )
+    analyze.add_argument("--max-events", type=int, default=DEFAULT_MAX_EVENTS)
     analyze.add_argument(
         "--repo-only",
         action="store_true",

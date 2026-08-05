@@ -32,7 +32,14 @@ bash "$script_dir/install.sh" --validate-release-tag="$tag" >/dev/null
 expected_title="chore(main): release $package_version"
 release_sha=""
 while IFS=$'\t' read -r sha title; do
-    if [ "$title" = "$expected_title" ]; then
+    # GitHub's squash merge appends the PR number to the configured PR title.
+    # Accept only that exact suffix; arbitrary subjects must not select a
+    # release commit merely because they share the expected prefix.
+    normalized_title="$title"
+    if [[ "$title" =~ \ \(#[0-9]+\)$ ]]; then
+        normalized_title="${title%"${BASH_REMATCH[0]}"}"
+    fi
+    if [ "$normalized_title" = "$expected_title" ]; then
         release_sha="$sha"
         break
     fi
@@ -66,7 +73,7 @@ if gh release view "$tag" --repo "$gh_repo" >/dev/null 2>&1; then
     # every later release. Reconcile only the exact title + merge commit pair.
     pending_prs="$(
         gh pr list --repo "$gh_repo" --state merged \
-            --label 'autorelease: pending' --search "$expected_title in:title" \
+            --label 'autorelease: pending' --search "\"$expected_title\" in:title" \
             --limit 20 --json number,title,mergeCommit
     )" || {
         echo "::error::could not inspect pending Release Please labels" >&2

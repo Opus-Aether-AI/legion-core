@@ -29,7 +29,7 @@ make_pending_release_fixture() {
     (
         cd "$repo"
         git -c user.email=test@test -c user.name=test add -A
-        git -c user.email=test@test -c user.name=test commit -q -m "chore(main): release 0.19.1"
+        git -c user.email=test@test -c user.name=test commit -q -m "chore(main): release 0.19.1 (#110)"
     )
 }
 
@@ -259,6 +259,7 @@ EOF
     [ "$status" -eq 0 ]
     grep -q '^pending=false$' "$outputs"
     [[ "$output" == *"reconciled Release PR #110 to autorelease: tagged"* ]]
+    assert_mock_called gh '--search "chore(main): release 0.19.1" in:title'
     assert_mock_called gh "pr edit 110 --repo $REPO --remove-label autorelease: pending --add-label autorelease: tagged"
 }
 

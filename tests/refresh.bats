@@ -345,7 +345,7 @@ SH
 
     LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
     [ "$status" -eq 0 ]
-    grep -qF "learn analyze --repo $SOURCE_CLONE --lookback-days 3 --max-file-mb 8" "$MOCK_CALL_LOG"
+    grep -qF "learn analyze --repo $SOURCE_CLONE --lookback-days 3 --max-file-mb 8 --max-files 100 --max-total-mb 64 --max-events 20000" "$MOCK_CALL_LOG"
 
     learn_line="$(grep -nF "learn analyze --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"
     session_line="$(grep -nF "session-learn --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"

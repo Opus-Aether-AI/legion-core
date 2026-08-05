@@ -165,7 +165,10 @@ EVIDENCE_LEARN="${LEGION_EVIDENCE_LEARN_BIN:-$SOURCE_CLONE/legion-observability/
 if [ "${LEGION_EVIDENCE_LEARN:-1}" = "1" ] && [ -x "$EVIDENCE_LEARN" ]; then
     if ! "$EVIDENCE_LEARN" analyze --repo "$SOURCE_CLONE" \
         --lookback-days "${LEGION_SESSION_LEARN_DAYS:-3}" \
-        --max-file-mb "${LEGION_SESSION_LEARN_MAX_FILE_MB:-8}" >/dev/null 2>&1; then
+        --max-file-mb "${LEGION_SESSION_LEARN_MAX_FILE_MB:-8}" \
+        --max-files "${LEGION_EVIDENCE_LEARN_MAX_FILES:-100}" \
+        --max-total-mb "${LEGION_EVIDENCE_LEARN_MAX_TOTAL_MB:-64}" \
+        --max-events "${LEGION_EVIDENCE_LEARN_MAX_EVENTS:-20000}" >/dev/null 2>&1; then
         printf 'legion refresh: evidence-linked learning scan failed (legacy learning still running)\n' >&2
         record_refresh_failure "Daily evidence-linked learning scan failed." "legion-learn analyze returned nonzero"
     fi

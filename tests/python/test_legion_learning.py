@@ -40,6 +40,48 @@ def test_redact_text_is_fail_closed_for_credentials_identity_and_paths():
     assert "[path]" in redacted
 
 
+def test_redact_text_removes_slack_pem_and_non_home_absolute_paths():
+    slack_token = "xox" + "b-" + "123456789012-123456789012-SyntheticTokenValue"
+    raw = (
+        f"Slack {slack_token} "
+        "-----BEGIN PRIVATE KEY-----\n"
+        "cHJpdmF0ZS1rZXktbWF0ZXJpYWw=\n"
+        "-----END PRIVATE KEY----- "
+        "from /var/lib/legion/private/config.json and C:\\ProgramData\\Legion\\secret.txt "
+        "while retaining https://example.com/docs"
+    )
+
+    redacted = learning.redact_text(raw)
+
+    assert slack_token not in redacted
+    assert "PRIVATE KEY" not in redacted
+    assert "cHJpdmF0ZS1rZXktbWF0ZXJpYWw" not in redacted
+    assert "/var/lib/legion" not in redacted
+    assert "C:\\ProgramData\\Legion" not in redacted
+    assert "[credential]" in redacted
+    assert "[private-key]" in redacted
+    assert "[path]" in redacted
+
+
+def test_redact_text_preserves_urls_and_single_segment_slash_commands():
+    raw = "Run /ultra-review and inspect https://example.com/docs/review."
+
+    redacted = learning.redact_text(raw)
+
+    assert "/ultra-review" in redacted
+    assert "https://example.com/docs/review" in redacted
+
+
+def test_redact_text_removes_local_file_urls():
+    redacted = learning.redact_text(
+        "Inspect file:///Users/alice/private/secret.txt before sharing."
+    )
+
+    assert "alice" not in redacted
+    assert "private/secret" not in redacted
+    assert "file://[path]" in redacted
+
+
 def test_normalize_session_preserves_roles_and_hashes_dispatch_prompts(tmp_path):
     session = _session(
         tmp_path / ".codex" / "sessions" / "webapp.jsonl",
@@ -78,6 +120,38 @@ def test_normalize_session_preserves_roles_and_hashes_dispatch_prompts(tmp_path)
     assert "/Users/alice" not in serialized
 
 
+def test_normalize_session_records_top_level_codex_spawn_dispatch(tmp_path):
+    session = _session(
+        tmp_path / ".codex" / "sessions" / "repo" / "run.jsonl",
+        [
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-05T09:00:00Z",
+                "payload": {
+                    "type": "function_call",
+                    "name": "spawn_agent",
+                    "arguments": json.dumps(
+                        {
+                            "task_name": "audit",
+                            "message": "Audit /var/lib/legion/private/config.json",
+                        }
+                    ),
+                    "call_id": "call-1",
+                },
+            }
+        ],
+    )
+
+    normalized = learning.normalize_session_file(session, home=tmp_path)
+
+    assert len(normalized) == 1
+    assert normalized[0]["role"] == "assistant"
+    assert normalized[0]["event_type"] == "dispatch"
+    assert normalized[0]["excerpt"] == "spawn_agent dispatch"
+    assert normalized[0]["dispatch_hash"]
+    assert "private/config" not in json.dumps(normalized)
+
+
 def test_normalize_session_uses_session_cwd_for_project_attribution(tmp_path):
     repo = tmp_path / "Hackerman" / "webapp"
     repo.mkdir(parents=True)
@@ -97,7 +171,8 @@ def test_normalize_session_uses_session_cwd_for_project_attribution(tmp_path):
 
     normalized = learning.normalize_session_file(session, home=tmp_path)
 
-    assert normalized[0]["project"] == "webapp"
+    expected = f"local:{learning.legion_state.repository_project_id(str(repo))}"
+    assert normalized[0]["project"] == expected
 
 
 def test_analyze_session_links_correction_to_verified_outcome_and_scores_axes(tmp_path):
@@ -168,6 +243,53 @@ def test_outcome_link_uses_latest_execution_evidence(tmp_path):
 
     assert report["outcome_links"][0]["status"] == "failed"
     assert "failed" in report["outcome_links"][0]["evidence_excerpt"].lower()
+    assert report["episodes"][0]["outcome_status"] == "failed"
+
+
+def test_outcome_link_inverts_negated_execution_evidence(tmp_path):
+    examples = [
+        ("Tests did not pass.", "failed"),
+        ("Validation did not fail.", "verified"),
+    ]
+    for index, (evidence, expected) in enumerate(examples):
+        session = _session(
+            tmp_path / ".codex" / "sessions" / "repo" / f"{index}.jsonl",
+            [
+                {"payload": {"type": "user_message", "message": "Audit all references."}},
+                {"payload": {"type": "agent_message", "message": evidence}},
+            ],
+        )
+        report = learning.analyze_events(
+            learning.normalize_session_file(session, home=tmp_path),
+            repo=str(tmp_path),
+            project="repo",
+        )
+
+        assert report["outcome_links"][0]["status"] == expected
+        assert report["episodes"][0]["outcome_status"] == expected
+
+
+def test_outcome_link_scopes_negation_to_each_execution_cue(tmp_path):
+    examples = [
+        ("Tests did not pass but later passed.", "verified"),
+        ("Tests not only passed; they exceeded the quality bar.", "verified"),
+    ]
+    for index, (evidence, expected) in enumerate(examples):
+        session = _session(
+            tmp_path / ".codex" / "sessions" / "repo" / f"scoped-{index}.jsonl",
+            [
+                {"payload": {"type": "user_message", "message": "Audit all references."}},
+                {"payload": {"type": "agent_message", "message": evidence}},
+            ],
+        )
+        report = learning.analyze_events(
+            learning.normalize_session_file(session, home=tmp_path),
+            repo=str(tmp_path),
+            project="repo",
+        )
+
+        assert report["outcome_links"][0]["status"] == expected
+        assert report["episodes"][0]["outcome_status"] == expected
 
 
 def test_webapp_feedback_laws_are_classified_independently():
@@ -252,15 +374,114 @@ def test_merge_law_store_retires_laws_no_longer_supported(tmp_path):
     assert payload["laws"][0]["retired_at"]
 
 
+def test_merge_law_store_replaces_active_law_with_current_support(tmp_path):
+    path = tmp_path / "laws.json"
+    previous = {
+        "schema": learning.LAW_SCHEMA,
+        "key": "audit-completeness",
+        "status": "active",
+        "confidence": 0.95,
+        "support": {"episodes": 8, "projects": 4},
+        "evidence_ids": ["old"],
+        "guidance": "Use stale support.",
+        "validation": "Replay stale evidence.",
+    }
+    current = {
+        **previous,
+        "confidence": 0.84,
+        "support": {"episodes": 3, "projects": 2},
+        "evidence_ids": ["current"],
+        "guidance": "Use current support.",
+    }
+    learning.merge_law_store(path, [previous])
+
+    payload = learning.merge_law_store(path, [current])
+
+    assert payload["laws"][0]["support"] == {"episodes": 3, "projects": 2}
+    assert payload["laws"][0]["evidence_ids"] == ["current"]
+    assert payload["laws"][0]["guidance"] == "Use current support."
+
+
 def test_filter_events_for_repo_keeps_only_matching_project(tmp_path):
     repo = tmp_path / "webapp"
     repo.mkdir()
+    project = f"local:{learning.legion_state.repository_project_id(str(repo))}"
     events = [
-        {"id": "one", "project": "webapp"},
+        {"id": "one", "project": project},
         {"id": "two", "project": "other"},
     ]
 
     assert learning.filter_events_for_repo(events, str(repo)) == [events[0]]
+
+
+def test_repo_only_distinguishes_remotes_with_the_same_basename(tmp_path):
+    repos = []
+    events = []
+    for owner in ("alpha", "beta"):
+        repo = tmp_path / owner / "shared"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                f"https://github.com/{owner}/shared.git",
+            ],
+            check=True,
+        )
+        session = _session(
+            tmp_path / ".codex" / "sessions" / owner / "run.jsonl",
+            [
+                {"type": "session_meta", "payload": {"cwd": str(repo)}},
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": f"Audit all {owner} references.",
+                    },
+                },
+            ],
+        )
+        repos.append(repo)
+        events.extend(learning.normalize_session_file(session, home=tmp_path))
+
+    filtered = learning.filter_events_for_repo(events, str(repos[0]))
+
+    assert {event["project"] for event in filtered} == {"github.com/alpha/shared"}
+    assert all("alpha" in event["excerpt"] for event in filtered)
+
+
+def test_repo_only_distinguishes_local_repositories_with_the_same_basename(tmp_path):
+    repos = []
+    events = []
+    for owner in ("alpha", "beta"):
+        repo = tmp_path / owner / "shared"
+        repo.mkdir(parents=True)
+        session = _session(
+            tmp_path / ".codex" / "sessions" / f"local-{owner}" / "run.jsonl",
+            [
+                {"type": "session_meta", "payload": {"cwd": str(repo)}},
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": f"Audit all local {owner} references.",
+                    },
+                },
+            ],
+        )
+        repos.append(repo)
+        events.extend(learning.normalize_session_file(session, home=tmp_path))
+
+    filtered = learning.filter_events_for_repo(events, str(repos[0]))
+
+    assert len(filtered) == 1
+    assert filtered[0]["project"].startswith("local:shared-")
+    assert "alpha" in filtered[0]["excerpt"]
 
 
 def test_project_component_cannot_escape_learning_state():
@@ -273,6 +494,34 @@ def test_session_file_scan_honors_size_cap(tmp_path):
     path.write_text("x" * 2048, encoding="utf-8")
 
     assert learning._iter_session_files(tmp_path, 0, 0.001) == []
+
+
+def test_session_file_scan_honors_deterministic_aggregate_caps(tmp_path):
+    paths = []
+    for index in range(3):
+        path = tmp_path / ".codex" / "sessions" / f"{index}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x" * 100, encoding="utf-8")
+        os.utime(path, (100 + index, 100 + index))
+        paths.append(path)
+
+    file_limited = learning._iter_session_files(
+        tmp_path,
+        0,
+        0,
+        max_files=2,
+        max_total_mb=0,
+    )
+    byte_limited = learning._iter_session_files(
+        tmp_path,
+        0,
+        0,
+        max_files=0,
+        max_total_mb=0.00015,
+    )
+
+    assert file_limited == [paths[2], paths[1]]
+    assert byte_limited == [paths[2]]
 
 
 def test_cli_analyze_writes_redacted_project_report_and_global_laws(tmp_path):
@@ -326,6 +575,339 @@ def test_cli_analyze_writes_redacted_project_report_and_global_laws(tmp_path):
         serialized = handle.read()
     assert "ghp_" not in serialized
     assert json.loads(serialized)["schema"] == "legion.learning.report.v2"
+
+
+def test_cli_analyze_honors_aggregate_event_cap(tmp_path):
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    for index in range(2):
+        _session(
+            home / ".codex" / "sessions" / "repo" / f"{index}.jsonl",
+            [
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": f"Audit all references for event {event}.",
+                    },
+                }
+                for event in range(5)
+            ],
+        )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            SCRIPT,
+            "analyze",
+            "--home",
+            str(home),
+            "--repo",
+            str(repo),
+            "--state-root",
+            str(state),
+            "--lookback-days",
+            "0",
+            "--max-files",
+            "2",
+            "--max-total-mb",
+            "1",
+            "--max-events",
+            "3",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["files_scanned"] == 1
+    assert payload["events_processed"] == 3
+
+
+def test_cli_repo_only_applies_event_cap_after_repository_filter(tmp_path):
+    home = tmp_path / "home"
+    state = tmp_path / "state"
+    target_repo = tmp_path / "target" / "shared"
+    other_repo = tmp_path / "other" / "shared"
+    for owner, repo in (("target", target_repo), ("other", other_repo)):
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                f"https://github.com/example/{owner}.git",
+            ],
+            check=True,
+        )
+
+    target_session = _session(
+        home / ".codex" / "sessions" / "target.jsonl",
+        [
+            {"type": "session_meta", "payload": {"cwd": str(target_repo)}},
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Audit all target references.",
+                },
+            },
+        ],
+    )
+    other_session = _session(
+        home / ".codex" / "sessions" / "other.jsonl",
+        [
+            {"type": "session_meta", "payload": {"cwd": str(other_repo)}},
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Audit all unrelated references.",
+                },
+            },
+        ],
+    )
+    os.utime(target_session, (100, 100))
+    os.utime(other_session, (200, 200))
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            SCRIPT,
+            "analyze",
+            "--home",
+            str(home),
+            "--repo",
+            str(target_repo),
+            "--state-root",
+            str(state),
+            "--repo-only",
+            "--lookback-days",
+            "0",
+            "--max-files",
+            "2",
+            "--max-total-mb",
+            "1",
+            "--max-events",
+            "1",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["events_processed"] == 1
+    assert payload["sessions"] == 1
+
+
+def test_cli_repo_only_applies_file_cap_to_matching_sessions(tmp_path):
+    home = tmp_path / "home"
+    state = tmp_path / "state"
+    target_repo = tmp_path / "target"
+    other_repo = tmp_path / "other"
+    for name, repo in (("target", target_repo), ("other", other_repo)):
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                f"https://github.com/example/{name}.git",
+            ],
+            check=True,
+        )
+
+    target_session = _session(
+        home / ".codex" / "sessions" / "target.jsonl",
+        [
+            {"type": "session_meta", "payload": {"cwd": str(target_repo)}},
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Audit all target references.",
+                },
+            },
+        ],
+    )
+    os.utime(target_session, (100, 100))
+    for index in range(100):
+        session = _session(
+            home / ".codex" / "sessions" / f"other-{index}.jsonl",
+            [
+                {"type": "session_meta", "payload": {"cwd": str(other_repo)}},
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": f"Audit unrelated references {index}.",
+                    },
+                },
+            ],
+        )
+        os.utime(session, (200 + index, 200 + index))
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            SCRIPT,
+            "analyze",
+            "--home",
+            str(home),
+            "--repo",
+            str(target_repo),
+            "--state-root",
+            str(state),
+            "--repo-only",
+            "--lookback-days",
+            "0",
+            "--max-files",
+            "100",
+            "--max-total-mb",
+            "1",
+            "--max-events",
+            "1000",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["events_processed"] == 1
+    assert payload["sessions"] == 1
+
+
+def test_latest_repository_reports_ignore_unattributed_legacy_local_snapshots(
+    tmp_path,
+):
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    legacy = {
+        "schema": learning.REPORT_SCHEMA,
+        "generated_at": "2026-01-01T00:00:00Z",
+        "repo": "[local-repo]",
+        "decisions": [
+            {"id": "old", "episode_id": "old", "law_key": "audit-completeness"},
+        ],
+    }
+    current = {
+        "schema": learning.REPORT_SCHEMA,
+        "generated_at": "2026-08-05T00:00:00Z",
+        "repo": "local:repo-current",
+        "decisions": [],
+    }
+    (reports / "legacy.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    selected = learning._latest_repository_reports(reports, current)
+
+    assert selected == [current]
+
+
+def test_cli_analyze_promotes_from_only_latest_snapshot_per_repository(tmp_path):
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    global_learning = state / "global" / "learning"
+    snapshots = global_learning / "project-reports"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/current.git",
+        ],
+        check=True,
+    )
+    snapshots.mkdir(parents=True)
+
+    stale_local = {
+        "schema": learning.REPORT_SCHEMA,
+        "generated_at": "2026-01-01T00:00:00Z",
+        "repo": "github.com/example/current",
+        "project": "one",
+        "decisions": [
+            {"id": "d1", "episode_id": "e1", "law_key": "audit-completeness"},
+            {"id": "d2", "episode_id": "e2", "law_key": "audit-completeness"},
+        ],
+    }
+    other_repo = {
+        "schema": learning.REPORT_SCHEMA,
+        "generated_at": "2026-01-02T00:00:00Z",
+        "repo": "github.com/example/other",
+        "project": "two",
+        "decisions": [
+            {"id": "d3", "episode_id": "e3", "law_key": "audit-completeness"},
+        ],
+    }
+    (snapshots / "local-old.json").write_text(json.dumps(stale_local), encoding="utf-8")
+    (snapshots / "other.json").write_text(json.dumps(other_repo), encoding="utf-8")
+    (global_learning / "laws.json").write_text(
+        json.dumps(
+            {
+                "schema": "legion.learning-laws.v1",
+                "laws": [
+                    {
+                        "schema": learning.LAW_SCHEMA,
+                        "key": "audit-completeness",
+                        "status": "active",
+                        "confidence": 0.84,
+                        "support": {"episodes": 3, "projects": 2},
+                        "evidence_ids": ["d1", "d2", "d3"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            SCRIPT,
+            "analyze",
+            "--home",
+            str(home),
+            "--repo",
+            str(repo),
+            "--state-root",
+            str(state),
+            "--lookback-days",
+            "0",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    laws = json.loads((global_learning / "laws.json").read_text(encoding="utf-8"))
+    audit_law = next(law for law in laws["laws"] if law["key"] == "audit-completeness")
+    assert audit_law["status"] == "retired"
 
 
 def test_learning_schemas_are_versioned_valid_json():

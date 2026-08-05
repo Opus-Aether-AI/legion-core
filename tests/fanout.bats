@@ -461,12 +461,17 @@ SH
   local root="$BATS_TEST_TMPDIR/lock-pid-turnover"
   local record="$root/state.json"
   local acquired="$root/acquired"
-  local contender
+  local retrying="$root/retrying"
+  local contender i
   mkdir -p "$record.lock"
   : > "$record"
   mkfifo "$record.lock/pid"
 
-  bash -c '
+  RETRYING="$retrying" bash -c '
+    sleep() {
+      [[ -e "$RETRYING" ]] || : > "$RETRYING"
+      command sleep "$@"
+    }
     source "$1"
     lock="$(legion_acquire_run_state_lock "$2")" || exit 3
     : > "$3"
@@ -476,7 +481,16 @@ SH
 
   # A malformed generation is never read. Once it disappears, the waiting
   # contender must remain eligible to acquire the next cooperative generation.
-  sleep 0.05
+  for ((i = 0; i < 200; i++)); do
+    [[ -e "$retrying" ]] && break
+    sleep 0.005
+  done
+  if [[ ! -e "$retrying" ]]; then
+    rm "$record.lock/pid"
+    rmdir "$record.lock"
+    wait "$contender" 2>/dev/null || true
+    false
+  fi
   rm "$record.lock/pid"
   rmdir "$record.lock"
   wait "$contender"

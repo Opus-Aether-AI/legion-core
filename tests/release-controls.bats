@@ -238,6 +238,7 @@ EOF
     local repo="$TEST_TMPDIR/existing-release"
     local outputs="$TEST_TMPDIR/existing-release.outputs"
     make_pending_release_fixture "$repo"
+    git -C "$repo" tag v0.19.1
 
     run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" MOCK_RELEASE_EXISTS=1 \
         bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$repo"
@@ -252,6 +253,7 @@ EOF
     local release_sha
     make_pending_release_fixture "$repo"
     release_sha="$(git -C "$repo" rev-parse HEAD)"
+    git -C "$repo" tag v0.19.1
 
     run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" MOCK_RELEASE_EXISTS=1 \
         MOCK_RELEASE_PR_NUMBER=110 MOCK_RELEASE_PR_SHA="$release_sha" \
@@ -261,6 +263,22 @@ EOF
     [[ "$output" == *"reconciled Release PR #110 to autorelease: tagged"* ]]
     assert_mock_called gh '--search "chore(main): release 0.19.1" in:title'
     assert_mock_called gh "pr edit 110 --repo $REPO --remove-label autorelease: pending --add-label autorelease: tagged"
+}
+
+@test "pending release finder never reconciles a Release on the wrong tag commit" {
+    local repo="$TEST_TMPDIR/existing-release-wrong-tag"
+    local outputs="$TEST_TMPDIR/existing-release-wrong-tag.outputs"
+    local release_sha
+    make_pending_release_fixture "$repo"
+    release_sha="$(git -C "$repo" rev-parse HEAD)"
+    git -C "$repo" tag v0.19.1 HEAD~1
+
+    run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" MOCK_RELEASE_EXISTS=1 \
+        MOCK_RELEASE_PR_NUMBER=110 MOCK_RELEASE_PR_SHA="$release_sha" \
+        bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"expected release commit $release_sha"* ]]
+    assert_mock_not_called "gh pr edit"
 }
 
 @test "pending release finder rejects package and manifest drift" {

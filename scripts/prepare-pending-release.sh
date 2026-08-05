@@ -61,12 +61,26 @@ if [ "$release_package" != "$package_version" ] || [ "$release_manifest" != "$pa
     exit 1
 fi
 
+tag_exists=false
+if git -C "$repo" show-ref --verify --quiet "refs/tags/$tag"; then
+    tag_sha="$(git -C "$repo" rev-parse --verify "refs/tags/$tag^{commit}")"
+    if [ "$tag_sha" != "$release_sha" ]; then
+        echo "::error::$tag resolves to $tag_sha, expected release commit $release_sha" >&2
+        exit 1
+    fi
+    tag_exists=true
+fi
+
 {
     printf 'version=%s\n' "$package_version"
     printf 'tag_name=%s\n' "$tag"
 } >> "$output"
 
 if gh release view "$tag" --repo "$gh_repo" >/dev/null 2>&1; then
+    if [ "$tag_exists" != true ]; then
+        echo "::error::$tag has a GitHub Release but no fetched tag ref" >&2
+        exit 1
+    fi
     # skip-github-release leaves Release Please's PR labeled `autorelease:
     # pending` when the release bot creates the GitHub Release. Release Please
     # treats that stale label as an untagged merged release and silently aborts
@@ -92,16 +106,6 @@ if gh release view "$tag" --repo "$gh_repo" >/dev/null 2>&1; then
     printf 'pending=false\n' >> "$output"
     echo "$tag already has a GitHub Release"
     exit 0
-fi
-
-tag_exists=false
-if git -C "$repo" show-ref --verify --quiet "refs/tags/$tag"; then
-    tag_sha="$(git -C "$repo" rev-parse --verify "refs/tags/$tag^{commit}")"
-    if [ "$tag_sha" != "$release_sha" ]; then
-        echo "::error::$tag resolves to $tag_sha, expected release commit $release_sha" >&2
-        exit 1
-    fi
-    tag_exists=true
 fi
 
 {

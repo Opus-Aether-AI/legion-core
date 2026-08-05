@@ -29,18 +29,6 @@ fi
 
 tag="v$package_version"
 bash "$script_dir/install.sh" --validate-release-tag="$tag" >/dev/null
-
-{
-    printf 'version=%s\n' "$package_version"
-    printf 'tag_name=%s\n' "$tag"
-} >> "$output"
-
-if gh release view "$tag" --repo "$gh_repo" >/dev/null 2>&1; then
-    printf 'pending=false\n' >> "$output"
-    echo "$tag already has a GitHub Release"
-    exit 0
-fi
-
 expected_title="chore(main): release $package_version"
 release_sha=""
 while IFS=$'\t' read -r sha title; do
@@ -64,6 +52,39 @@ release_manifest="$(git -C "$repo" show "$release_sha:.release-please-manifest.j
 if [ "$release_package" != "$package_version" ] || [ "$release_manifest" != "$package_version" ]; then
     echo "::error::release commit $release_sha does not contain synchronized version $package_version" >&2
     exit 1
+fi
+
+{
+    printf 'version=%s\n' "$package_version"
+    printf 'tag_name=%s\n' "$tag"
+} >> "$output"
+
+if gh release view "$tag" --repo "$gh_repo" >/dev/null 2>&1; then
+    # skip-github-release leaves Release Please's PR labeled `autorelease:
+    # pending` when the release bot creates the GitHub Release. Release Please
+    # treats that stale label as an untagged merged release and silently aborts
+    # every later release. Reconcile only the exact title + merge commit pair.
+    pending_prs="$(
+        gh pr list --repo "$gh_repo" --state merged \
+            --label 'autorelease: pending' --search "$expected_title in:title" \
+            --limit 20 --json number,title,mergeCommit
+    )" || {
+        echo "::error::could not inspect pending Release Please labels" >&2
+        exit 1
+    }
+    release_pr="$(
+        jq -r --arg title "$expected_title" --arg sha "$release_sha" \
+            '[.[] | select(.title == $title and .mergeCommit.oid == $sha) | .number] | first // empty' \
+            <<<"$pending_prs"
+    )"
+    if [ -n "$release_pr" ]; then
+        gh pr edit "$release_pr" --repo "$gh_repo" \
+            --remove-label 'autorelease: pending' --add-label 'autorelease: tagged'
+        echo "reconciled Release PR #$release_pr to autorelease: tagged"
+    fi
+    printf 'pending=false\n' >> "$output"
+    echo "$tag already has a GitHub Release"
+    exit 0
 fi
 
 tag_exists=false

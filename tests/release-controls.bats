@@ -9,7 +9,7 @@ setup() {
     export AWAIT_REQUIRED_WORKFLOWS="$REPO_ROOT/scripts/await-required-workflows.sh"
     export REPO="Opus-Aether-AI/legion-core"
     export SHA="0123456789012345678901234567890123456789"
-    unset MOCK_RELEASE_EXISTS
+    unset MOCK_RELEASE_EXISTS MOCK_RELEASE_PR_NUMBER MOCK_RELEASE_PR_TITLE MOCK_RELEASE_PR_SHA
 }
 
 make_pending_release_fixture() {
@@ -244,6 +244,22 @@ EOF
     [ "$status" -eq 0 ]
     grep -q '^pending=false$' "$outputs"
     ! grep -q '^release_sha=' "$outputs"
+}
+
+@test "pending release finder reconciles the exact merged Release PR label" {
+    local repo="$TEST_TMPDIR/existing-release-pending-label"
+    local outputs="$TEST_TMPDIR/existing-release-pending-label.outputs"
+    local release_sha
+    make_pending_release_fixture "$repo"
+    release_sha="$(git -C "$repo" rev-parse HEAD)"
+
+    run env GITHUB_OUTPUT="$outputs" GH_REPO="$REPO" MOCK_RELEASE_EXISTS=1 \
+        MOCK_RELEASE_PR_NUMBER=110 MOCK_RELEASE_PR_SHA="$release_sha" \
+        bash "$REPO_ROOT/scripts/prepare-pending-release.sh" "$repo"
+    [ "$status" -eq 0 ]
+    grep -q '^pending=false$' "$outputs"
+    [[ "$output" == *"reconciled Release PR #110 to autorelease: tagged"* ]]
+    assert_mock_called gh "pr edit 110 --repo $REPO --remove-label autorelease: pending --add-label autorelease: tagged"
 }
 
 @test "pending release finder rejects package and manifest drift" {

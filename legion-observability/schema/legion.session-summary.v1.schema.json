@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.session-summary.v1.schema.json",
+  "title": "legion.session-summary.v1",
+  "type": "object",
+  "required": ["schema", "id", "project", "source", "intent", "event_count", "evidence_ids"],
+  "properties": {
+    "schema": {"const": "legion.session-summary.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "project": {"type": "string", "minLength": 1},
+    "source": {"type": "string"},
+    "started_at": {"type": "string"},
+    "intent": {"type": "string", "enum": ["shipping", "exploration", "ambiguous"]},
+    "event_count": {"type": "integer", "minimum": 0},
+    "first_prompt_excerpt": {"type": "string", "maxLength": 240},
+    "evidence_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  },
+  "additionalProperties": true
+}

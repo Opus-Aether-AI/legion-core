@@ -1,6 +1,6 @@
 import importlib.util
 import os
-
+import subprocess
 
 HERE = os.path.dirname(__file__)
 PATH = os.path.join(
@@ -37,6 +37,39 @@ def test_resolve_state_defaults_to_global_project_root(tmp_path, monkeypatch):
     assert resolved["repos_file"] == os.path.join(resolved["state_root"], "repos.jsonl")
     assert resolved["bench_dir"] == os.path.join(resolved["state_root"], "bench")
     assert resolved["reports_dir"] == os.path.join(resolved["state_root"], "reports")
+    assert resolved["project_learning_dir"] == os.path.join(
+        resolved["state_root"], "learning"
+    )
+    assert resolved["global_learning_dir"] == os.path.join(
+        str(home / ".legion"), "global", "learning"
+    )
+
+
+def test_project_identity_is_stable_across_clones_with_same_remote(tmp_path):
+    home = tmp_path / "home"
+    first = tmp_path / "clone-one"
+    second = tmp_path / "clone-two"
+    for repo in (first, second):
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Example/Shared.git",
+            ],
+            check=True,
+        )
+
+    first_state = state.resolve_state(str(first), {"HOME": str(home)})
+    second_state = state.resolve_state(str(second), {"HOME": str(home)})
+
+    assert first_state["project_id"] == second_state["project_id"]
+    assert first_state["repository_identity"] == "github.com/example/shared"
 
 
 def test_resolve_state_honors_env_overrides(tmp_path, monkeypatch):

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.learning.report.v2.schema.json",
+  "title": "legion.learning.report.v2",
+  "type": "object",
+  "required": ["schema", "generated_at", "repo", "project", "events_processed", "sessions", "episodes", "decisions", "outcome_links", "behavior_scores", "code_quality", "evidence_coverage"],
+  "properties": {
+    "schema": {"const": "legion.learning.report.v2"},
+    "generated_at": {"type": "string"},
+    "repo": {"type": "string"},
+    "project": {"type": "string"},
+    "events_processed": {"type": "integer", "minimum": 0},
+    "sessions": {"type": "array", "items": {"$ref": "legion.session-summary.v1.schema.json"}},
+    "episodes": {"type": "array", "items": {"$ref": "legion.episode.v1.schema.json"}},
+    "decisions": {"type": "array", "items": {"$ref": "legion.decision.v1.schema.json"}},
+    "outcome_links": {"type": "array", "items": {"$ref": "legion.outcome-link.v1.schema.json"}},
+    "behavior_scores": {"type": "object", "minProperties": 5},
+    "code_quality": {"type": "object", "minProperties": 14},
+    "questionable_prompts": {"type": "array"},
+    "dispatch_metadata": {"type": "object"},
+    "evidence_coverage": {
+      "type": "object",
+      "required": ["decisions", "linked_decisions", "unlinked_decisions", "coverage"]
+    }
+  },
+  "additionalProperties": true
+}

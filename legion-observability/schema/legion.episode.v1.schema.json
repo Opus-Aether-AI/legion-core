@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.episode.v1.schema.json",
+  "title": "legion.episode.v1",
+  "type": "object",
+  "required": ["schema", "id", "work_stream_id", "project", "session_ids", "intent", "outcome_status", "evidence_ids"],
+  "properties": {
+    "schema": {"const": "legion.episode.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "work_stream_id": {"type": "string", "minLength": 1},
+    "project": {"type": "string", "minLength": 1},
+    "session_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
+    "intent": {"type": "string", "enum": ["shipping", "exploration", "ambiguous"]},
+    "primary_law": {"type": "string"},
+    "outcome_status": {"type": "string", "enum": ["verified", "failed", "no_evidence"]},
+    "evidence_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  },
+  "additionalProperties": true
+}

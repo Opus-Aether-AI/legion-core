@@ -122,12 +122,12 @@ legion_recover_dead_run_state_lock() {
 
 legion_acquire_run_state_lock() {
   local record="$1"
-  local lock="$record.lock" attempt=0
+  local lock="$record.lock" deadline=$((SECONDS + 30))
   # A coverage-instrumented or heavily contended host can spend several seconds
-  # just starting the competing shells. Keep the lock bounded, but give every
-  # writer a realistic chance to observe a release instead of silently dropping
-  # a state transition after the previous five-second retry window.
-  while [[ "$attempt" -lt 3000 ]]; do
+  # just starting the competing shells. Give every writer a realistic chance to
+  # observe a release, but use a wall-clock deadline so filesystem/recovery work
+  # cannot stretch the nominal 30-second ceiling into minutes.
+  while [[ "$SECONDS" -lt "$deadline" ]]; do
     if (umask 077; mkdir "$lock") 2>/dev/null; then
       if (set -C; umask 077; printf '%s\n' "$$" > "$lock/pid") 2>/dev/null; then
         printf '%s\n' "$lock"
@@ -138,7 +138,6 @@ legion_acquire_run_state_lock() {
     fi
     [[ ! -L "$lock" ]] || return 1
     if [[ ! -d "$lock" ]]; then
-      attempt=$((attempt + 1))
       sleep 0.01
       continue
     fi
@@ -148,12 +147,10 @@ legion_acquire_run_state_lock() {
     # and must not reject an otherwise valid contender. Recovery revalidates a
     # regular, non-symlink pid file under that generation's mutation claim.
     if [[ ! -f "$lock/pid" || -L "$lock/pid" ]]; then
-      attempt=$((attempt + 1))
       sleep 0.01
       continue
     fi
     legion_recover_dead_run_state_lock "$lock"
-    attempt=$((attempt + 1))
     sleep 0.01
   done
   return 1

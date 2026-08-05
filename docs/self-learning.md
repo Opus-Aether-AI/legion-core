@@ -19,6 +19,14 @@ and discard failed or regressing mutations.
 
 Legion implements that protocol locally:
 
+- normalize Claude, Codex, Cursor, opencode, and Gemini session JSONL into
+  versioned, harness-neutral events;
+- group events into sessions and episodes, classify explicit user decisions,
+  and link each decision to later verification or failure evidence;
+- score five behavior axes and 14 repository-quality dimensions with named,
+  deterministic scorers;
+- promote a behavior into a global law only after at least three episodes in
+  two projects, retiring laws when the current evidence no longer supports them;
 - mine spans, review findings, trigger misses, routing advice, and manual bugs;
 - attach every outcome to a catalog entity;
 - write durable entity-scoped hints and proposals;
@@ -31,6 +39,9 @@ Legion implements that protocol locally:
 
 ## What It Observes
 
+- Evidence-linked reports produced by `legion-learn analyze`, including promoted
+  `legion.learning-law.v1` records. Stable schemas live under
+  `legion-observability/schema/`.
 - `legion.span.v1` telemetry from the `telemetry_dir` reported by
   `legion-state --repo .`
 - Review verdict artifacts referenced by spans
@@ -50,6 +61,11 @@ legion-self-learn record --entity TYPE:NAME --summary "..."
 For a repository-specific audit:
 
 ```bash
+legion-learn analyze --repo . --repo-only --lookback-days 30 --json
+legion-learn report --repo .
+legion-learn laws --repo .
+legion-learn explain test-real-workflow --repo .
+legion-learn export --repo . > redacted-learning-report.json
 legion-session-learn --repo . --harness codex --role user --query "wrong source" --json
 legion-session-learn --repo . --query "review was interrupted" --show-evidence
 ```
@@ -59,6 +75,20 @@ transcript text for a project name. System/developer messages and tool results
 are excluded unless explicitly selected. `--show-evidence` displays
 best-effort-redacted snippets and home-relative paths for local inspection;
 inspect the output before sharing it. Durable outcomes remain transcript-free.
+
+`legion-learn` streams raw JSONL and discards it. Durable v2 reports contain
+bounded, best-effort-redacted excerpts and hashed dispatch prompts; credentials,
+private-key blocks, email addresses, connection URLs, and local absolute paths
+are removed before state is written. Reports remain local unless the operator
+exports or shares them.
+Review any export before sending it elsewhere.
+
+The behavior axes are execution leverage, steering, engineering quality,
+product thinking, and planning. Repository scoring covers commit discipline,
+tests, code quality, error handling, security, architecture, documentation,
+agent configuration, infrastructure, dependencies, Git workflow, evolution,
+performance awareness, and production readiness. Every behavior score carries
+evidence IDs, a confidence level, and its scorer name.
 
 ## What It Improves
 
@@ -83,9 +113,17 @@ Otherwise Legion falls back to catalog token matching and manual records.
 When enabled at install time, the `legion-core-refresh` cron runs:
 
 ```bash
+legion-learn analyze --repo ~/.agents/sources/legion-core
 legion-session-learn --repo ~/.agents/sources/legion-core --record
 legion-self-learn run --repo ~/.agents/sources/legion-core --apply-memory --quiet
 ```
+
+The first step writes the project report under
+`<state_root>/learning/reports/` and the cross-project law store under
+`~/.legion/global/learning/`. Evidence provenance and cross-project aggregation
+use a normalized Git remote when available. Existing operational state remains
+path-keyed for upgrade compatibility; `legion-state` exposes both the legacy
+`project_id` and clone-stable `repository_project_id` identities.
 
 This writes under the project `state_root` reported by
 `legion-state --repo ~/.agents/sources/legion-core`:
@@ -101,8 +139,15 @@ after yesterday's cron are still ingested. Passing `--day YYYY-MM-DD` keeps an
 exact UTC-day report window for reproducible audits and tests. Durable memory
 preserves unresolved hints until a kept source experiment resolves them.
 
-The preceding session-learning step is separately bounded to the newest 100
-eligible sources. Set `LEGION_SESSION_LEARN=0` to disable it; run
+The evidence and compatibility session-learning steps are separately bounded.
+The evidence lane defaults to the newest 100 eligible files, 64 MiB in aggregate,
+and 20,000 normalized events; tune those limits with
+`LEGION_EVIDENCE_LEARN_MAX_FILES`, `LEGION_EVIDENCE_LEARN_MAX_TOTAL_MB`, and
+`LEGION_EVIDENCE_LEARN_MAX_EVENTS`. Repository-only analysis applies those limits
+after provenance filtering while bounding candidate discovery to the newest 1,000
+files and 256 MiB. Set `LEGION_EVIDENCE_LEARN=0` or `LEGION_SESSION_LEARN=0` to
+disable either refresh lane. The compatibility lane uses the newest 100 eligible
+sources. Run
 `legion-session-learn --session-limit 0` manually only for an intentional
 unbounded audit.
 
@@ -138,6 +183,10 @@ the candidate with:
 Only candidates with a positive score delta and no metric regressions are
 eligible to be kept. Legion applies the best kept candidate to the real checkout,
 reruns the scorecard, and rolls back if the final checkout fails or regresses.
+The no-regression gate covers measured eval cases/accuracy plus misses,
+collisions, false-success signals, safety regressions, and gross latency
+regressions. Cost and token usage are not scorecard gates because these local
+deterministic subprocesses do not currently report either metric.
 
 Vendored files are skipped unless `--allow-vendored` is passed.
 
@@ -175,8 +224,8 @@ Two mutation families are supported today:
 - Add hook and MCP-specific eval datasets once there are enough stable examples.
 - Expand source mutators beyond markdown guardrails and marketplace descriptions
   only when each mutator has a scorecard that can prove improvement.
-- Persist richer Pareto-frontier trade-offs if future scorecards add independent
-  quality, cost, and latency criteria.
+- Add evidence-backed scorers for new dimensions without changing existing
+  versioned schema meanings.
 
 ## Consumption
 

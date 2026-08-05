@@ -20,8 +20,8 @@ and routing optimizer; this script connects those pieces.
 from __future__ import annotations
 
 import argparse
-import copy
 import concurrent.futures
+import copy
 import glob
 import hashlib
 import importlib.util
@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -583,18 +584,70 @@ def routing_outcomes(
     return outcomes
 
 
+def learning_law_outcomes(repo: str) -> list[dict[str, Any]]:
+    """Translate promoted, cross-project laws into the existing proposal lane."""
+    state = legion_state.resolve_state(repo)
+    payload = _json_file(os.path.join(state["global_learning_dir"], "laws.json"))
+    laws = _list(payload.get("laws")) if isinstance(payload, dict) else []
+    outcomes: list[dict[str, Any]] = []
+    for law in laws:
+        if not isinstance(law, dict) or law.get("status") != "active":
+            continue
+        key = _text(law.get("key"))
+        if not key:
+            continue
+        support = _dict(law.get("support"))
+        episodes = int(support.get("episodes") or 0)
+        projects = int(support.get("projects") or 0)
+        confidence = float(law.get("confidence") or 0.0)
+        outcomes.append(
+            _outcome(
+                source="learning-law",
+                target_type="plugin",
+                target_name="legion-observability",
+                severity="high" if confidence >= 0.9 else "medium",
+                summary=(
+                    f"Promoted learning law '{key}' from {episodes} episode(s) "
+                    f"across {projects} project(s)."
+                ),
+                evidence=json.dumps(
+                    {
+                        "support": support,
+                        "evidence_ids": _list(law.get("evidence_ids"))[:20],
+                    },
+                    sort_keys=True,
+                ),
+                metadata={
+                    "law_key": key,
+                    "confidence": confidence,
+                    "support": support,
+                    "guidance": _text(law.get("guidance")),
+                    "validation": _text(law.get("validation")),
+                },
+            )
+        )
+    return outcomes
+
+
 def _proc_result(name: str, argv: list[str], repo: str, timeout: int = 60) -> dict[str, Any]:
+    started = time.monotonic()
     try:
         proc = subprocess.run(
             argv,
             cwd=repo,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=timeout,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"name": name, "cmd": argv, "ok": False, "error": str(exc)}
+        return {
+            "name": name,
+            "cmd": argv,
+            "ok": False,
+            "error": str(exc),
+            "duration_ms": round((time.monotonic() - started) * 1000),
+        }
     return {
         "name": name,
         "cmd": argv,
@@ -602,6 +655,7 @@ def _proc_result(name: str, argv: list[str], repo: str, timeout: int = 60) -> di
         "returncode": proc.returncode,
         "stdout": proc.stdout[-20000:],
         "stderr": proc.stderr[-20000:],
+        "duration_ms": round((time.monotonic() - started) * 1000),
     }
 
 
@@ -642,6 +696,9 @@ def empty_scorecard(repo: str, *, reason: str = "") -> dict[str, Any]:
             "precision_at_1": 0.0,
             "hit_at_k": 0.0,
             "pass_rate": 0.0,
+            "false_success": 0,
+            "safety_regressions": 0,
+            "duration_ms": 0,
         },
         "checks": [],
         "reason": reason,
@@ -703,6 +760,15 @@ def run_scorecard(repo: str) -> dict[str, Any]:
         checks.append(_proc_result("legion-doctor", ["bash", doctor_script, "--repo", repo], repo))
 
     metrics = _aggregate_eval_summaries(summaries)
+    metrics.update(
+        {
+            "false_success": metrics["collision"],
+            "safety_regressions": sum(
+                1 for check in checks if check.get("name") == "legion-doctor" and not check.get("ok")
+            ),
+            "duration_ms": sum(int(check.get("duration_ms") or 0) for check in checks),
+        }
+    )
     ok = bool(summaries) and all(bool(check.get("ok")) for check in checks)
     return {
         "schema": SCORECARD_SCHEMA,
@@ -733,7 +799,13 @@ def compare_scorecards(
     *,
     min_score_delta: float = DEFAULT_MIN_SCORE_DELTA,
 ) -> dict[str, Any]:
-    positive_metrics = ["score", "precision_at_1", "hit_at_k", "pass_rate"]
+    positive_metrics = ["score", "cases", "precision_at_1", "hit_at_k", "pass_rate"]
+    negative_metrics = [
+        "collision",
+        "miss",
+        "false_success",
+        "safety_regressions",
+    ]
     delta = round(_score_metric(candidate, "score") - _score_metric(baseline, "score"), 6)
     if not candidate.get("ok"):
         return {
@@ -747,6 +819,17 @@ def compare_scorecards(
         for key in positive_metrics
         if _score_metric(candidate, key) + 1e-9 < _score_metric(baseline, key)
     ]
+    regressions.extend(
+        key
+        for key in negative_metrics
+        if _score_metric(candidate, key) > _score_metric(baseline, key) + 1e-9
+    )
+    baseline_duration = _score_metric(baseline, "duration_ms")
+    candidate_duration = _score_metric(candidate, "duration_ms")
+    if baseline_duration > 0 and candidate_duration > max(
+        baseline_duration * 2.0, baseline_duration + 2500.0
+    ):
+        regressions.append("duration_ms")
     if regressions:
         return {
             "status": "discard",
@@ -806,6 +889,8 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
     entity = _entity_index(catalog).get(f"{target_type}:{target_name}", {})
     source = _text(outcome.get("source"))
     source_path = _text(entity.get("source_path"))
+    proposal_identity = outcome.get("id")
+    law_key = ""
 
     if source == "trigger-eval":
         kind = "trigger_description_fix"
@@ -831,6 +916,18 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
             "so future runs catch this finding before final review."
         )
         validation = "Replay the relevant workflow or run the smallest affected eval/test."
+    elif source == "learning-law":
+        kind = "learned_behavior_guardrail"
+        metadata = _dict(outcome.get("metadata"))
+        law_key = _text(metadata.get("law_key"))
+        if law_key:
+            proposal_identity = f"learning-law:{law_key}"
+        suggested = _text(metadata.get("guidance")) or (
+            "Turn the promoted cross-project behavior into a scoped, durable harness guardrail."
+        )
+        validation = _text(metadata.get("validation")) or (
+            "Replay representative supporting workflows before source mutation."
+        )
     elif source == "span-status":
         kind = "run_failure_guardrail"
         suggested = (
@@ -847,7 +944,7 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
         validation = "Run the target entity's normal validation before source mutation."
 
     proposal = {
-        "id": _stable_id(["proposal", outcome.get("id"), kind]),
+        "id": _stable_id(["proposal", proposal_identity, kind]),
         "kind": kind,
         "status": "proposed",
         "target_type": target_type,
@@ -860,6 +957,8 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
         "validation": validation,
         "outcome_id": outcome.get("id"),
     }
+    if law_key:
+        proposal["law_key"] = law_key
     return proposal
 
 
@@ -915,6 +1014,7 @@ def build_report(
         + trigger_eval_outcomes(repo, catalog)
         + routing_outcomes(repo, log_root, spans)
         + load_manual_outcomes(log_root, scan_day)
+        + learning_law_outcomes(repo)
     )
     if not include_processed:
         processed = set(_list(load_memory(log_root).get("processed_outcome_ids")))
@@ -984,6 +1084,14 @@ def apply_memory(report: dict[str, Any], log_root: str) -> dict[str, Any]:
         if proposal.get("id") not in entry["proposal_ids"]:
             entry["proposal_ids"].append(proposal.get("id"))
         hint = _hint_from_proposal(proposal)
+        law_key = _text(proposal.get("law_key"))
+        if law_key:
+            marker = f"learning law '{law_key}'"
+            entry["hints"] = [
+                existing_hint
+                for existing_hint in _list(entry.get("hints"))
+                if marker not in _text(existing_hint).lower()
+            ]
         if hint and hint not in entry["hints"]:
             entry["hints"].append(hint)
         if proposal.get("source_path") and proposal.get("source_path") not in entry["source_paths"]:
@@ -1746,7 +1854,7 @@ def render_hints(payload: dict[str, Any]) -> str:
     lines = [f"Legion self-learning hints (updated {payload.get('updated_at')})"]
     for key, entry in entities.items():
         lines.append(f"\n{key} [{entry.get('severity', 'info')}]")
-        for hint in _list(entry.get("hints"))[:5]:
+        for hint in list(reversed(_list(entry.get("hints"))))[:5]:
             lines.append(f"- {hint}")
     return "\n".join(lines)
 

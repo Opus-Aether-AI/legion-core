@@ -14,6 +14,7 @@ See everything Legion's multi-model runs do — per-executor **cost, success rat
 | `legion-otel-export` | `scripts/legion-otel-export.py` | Map `legion.span.v1` → OTLP/HTTP; POST to `$OTEL_EXPORTER_OTLP_ENDPOINT` (no-op until set; `--dry-run` to preview). |
 | `legion-doctor` | `scripts/legion-doctor.sh` | CI-usable verifier; exits nonzero on any hard-check failure. |
 | `legion-catalog` | `scripts/legion-catalog.py` | Read-only inventory of plugins, skills, agents, commands, hooks, and MCPs. |
+| `legion-learn` | `scripts/legion_learning.py` | Stream and redact cross-harness sessions into versioned sessions, episodes, decisions, outcome links, five behavior axes, 14 code-quality dimensions, and cross-project learning laws. |
 | `legion-self-learn` | `scripts/legion-self-learn.py` | Daily self-learning loop: spans + review findings + trigger evals + benchmark misses + session feedback + manual bug records -> entity-scoped memory/proposals; optional source candidates run in isolated copies and are kept only on measured scorecard improvement. |
 | `legion-context-profile` | `scripts/legion-context-profile.py` | Reversibly shape active Codex/.agents skills and Claude plugins from external context profiles and skill groups when context budget gets noisy. |
 | `legion-session-learn` | `scripts/legion-session-learn.py` | Mine bounded, provenance-aware Claude/Codex/Cursor sessions and project memories for recurring gotchas and explicit corrections; output and recorded outcomes use hashes/counts instead of transcript text by default. |
@@ -33,6 +34,9 @@ legion-bench gate --baseline runs/base/run.json --candidate runs/new/run.json
 legion-report --by model --html > report.html
 legion-state --repo . --field telemetry_dir
 cat "$(legion-state --repo . --field telemetry_dir)"/*.jsonl | legion-otel-export --dry-run | jq .
+legion-learn analyze --repo . --repo-only --json
+legion-learn report --repo .
+legion-learn laws --repo .
 legion-session-learn --repo . --record     # scoped, privacy-safe session corrections
 legion-self-learn run --apply-memory       # synthesize safe memory/proposals
 legion-self-learn hints                    # active learned guardrails
@@ -64,7 +68,7 @@ The loop follows the
 [autoresearch](https://github.com/karpathy/autoresearch) shape:
 observe -> analyze -> propose -> baseline -> isolate -> mutate -> score -> keep/discard.
 
-- **Observe:** read durable spans, review verdict artifacts, trigger eval misses, routing optimizer advice, benchmark misses, session feedback, and manual `legion-self-learn record` bug reports.
+- **Observe:** normalize cross-harness sessions with `legion-learn`, then read durable spans, review verdict artifacts, trigger eval misses, routing optimizer advice, benchmark misses, compatibility session feedback, and manual `legion-self-learn record` bug reports.
 - **Analyze:** attach every outcome to a catalog entity (`plugin`, `skill`, `command`, `agent`, `hook`, or `mcp`) so slash commands and sub-agents improve too.
 - **Score:** run plugin + entity `legion-eval` datasets and `legion-doctor`, then persist metrics in `experiments.tsv`.
 - **Experiment:** source edits are opt-in (`--apply-source`); candidates run in isolated temp copies and only the best measured improvement is applied to the real checkout. Trigger fixes update markdown frontmatter or marketplace descriptions so the scorecard can measure them.
@@ -73,9 +77,14 @@ When the optional daily `legion-refresh` cron is enabled, it first records
 recent session feedback, then runs the self-learning synthesis:
 
 ```bash
+legion-learn analyze --repo .
 legion-session-learn --repo . --record
 legion-self-learn run --apply-memory --quiet
 ```
+
+Promoted laws require three independent episodes across two projects. Active
+laws become proposals in `legion-self-learn`; laws unsupported by the current
+report set are retired instead of silently remaining active.
 
 The scan is bounded to the newest 100 eligible sources by default. It excludes
 system/developer catalogs, tool results, collaboration subagents, and sources
@@ -90,7 +99,8 @@ home-relative paths to command output for an intentional local audit; inspect
 that output before sharing it. Raw snippets are never copied into durable
 self-learning outcomes. That keeps the daily mode conservative while still
 turning corrections and review gotchas into memory/proposals. Set
-`LEGION_SESSION_LEARN=0` to skip the session scan during refresh.
+`LEGION_EVIDENCE_LEARN=0` or `LEGION_SESSION_LEARN=0` to skip the corresponding
+refresh scan.
 
 ## Layout
 
@@ -98,7 +108,7 @@ turning corrections and review gotchas into memory/proposals. Set
 legion-observability/
 ├── bin/{legion-report,legion-doctor,legion-trace,...} # PATH shims
 ├── bench/core.json                                    # offline benchmark suite
-├── schema/legion.span.v1.schema.json                 # the telemetry contract
+├── schema/*.schema.json                              # telemetry + learning contracts
 ├── scripts/
 │   ├── legion-telemetry.sh     # emit + validate spans
 │   ├── legion-aggregate.py     # roll up spans -> per-group metrics
@@ -107,6 +117,7 @@ legion-observability/
 │   ├── legion-report.sh         # aggregate | render
 │   ├── legion-otel-export.py    # spans -> OTLP/HTTP trace tree
 │   ├── legion-self-learn.py     # daily self-learning memory/proposals
+│   ├── legion_learning.py       # evidence-linked session learning v2
 │   └── legion-doctor.sh         # install verifier
 └── SKILL.md
 ```
@@ -126,6 +137,9 @@ legion-observability/
   source.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — enables real OTLP export; unset = no-op.
 - `LEGION_SESSION_LEARN=0` — disable refresh-time session mining.
+- `LEGION_EVIDENCE_LEARN=0` — disable refresh-time evidence-linked learning.
+- `LEGION_PROJECT_LEARNING_DIR`, `LEGION_GLOBAL_LEARNING_DIR` — override the
+  project report and cross-project law roots.
 - `LEGION_SESSION_LEARN_DAYS`, `LEGION_SESSION_LEARN_LIMIT`, and
   `LEGION_SESSION_LEARN_MAX_FILE_MB` — bound the repo-scoped refresh scan
   (defaults: 3 days, 100 sources, 8 MiB for non-JSONL files).

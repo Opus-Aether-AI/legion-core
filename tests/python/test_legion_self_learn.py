@@ -180,6 +180,7 @@ def test_build_report_scores_only_requested_day(tmp_path, monkeypatch):
     monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
     monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
     monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
 
     report = self_learn.build_report(str(repo), str(logs), "2026-06-19")
 
@@ -215,6 +216,79 @@ def test_build_report_scan_all_keeps_late_manual_outcomes(tmp_path, monkeypatch)
 
     assert report["scan_scope"] == "all"
     assert report["outcomes"][0]["id"] == "late"
+
+
+def test_build_report_turns_promoted_learning_laws_into_proposals(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    logs = tmp_path / "logs"
+    learning = tmp_path / "global-learning"
+    repo.mkdir()
+    learning.mkdir()
+    (learning / "laws.json").write_text(
+        json.dumps(
+            {
+                "schema": "legion.learning-laws.v1",
+                "laws": [
+                    {
+                        "schema": "legion.learning-law.v1",
+                        "key": "test-real-workflow",
+                        "status": "active",
+                        "confidence": 0.91,
+                        "support": {"episodes": 5, "projects": 3},
+                        "evidence_ids": ["d1", "d2", "d3"],
+                        "guidance": "Validate the real user workflow before changing its docs or UI.",
+                        "validation": "Run a representative end-to-end workflow.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LEGION_GLOBAL_LEARNING_DIR", str(learning))
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
+    monkeypatch.setattr(self_learn, "run_scorecard", lambda _repo: self_learn.empty_scorecard(str(repo)))
+
+    report = self_learn.build_report(str(repo), str(logs), "2026-08-05")
+
+    assert report["outcomes"][0]["source"] == "learning-law"
+    assert report["outcomes"][0]["metadata"]["law_key"] == "test-real-workflow"
+    assert report["proposals"][0]["kind"] == "learned_behavior_guardrail"
+    assert "end-to-end" in report["proposals"][0]["validation"]
+
+
+def test_learning_law_proposal_id_is_stable_across_revisions(tmp_path):
+    original = {
+        "id": "outcome-v1",
+        "source": "learning-law",
+        "target_type": "plugin",
+        "target_name": "legion-observability",
+        "severity": "medium",
+        "summary": "Promoted learning law 'test-real-workflow' from 3 episodes.",
+        "evidence": "first evidence set",
+        "metadata": {
+            "law_key": "test-real-workflow",
+            "guidance": "Validate the representative workflow.",
+            "validation": "Run the workflow once.",
+        },
+    }
+    revised = {
+        **original,
+        "id": "outcome-v2",
+        "severity": "high",
+        "summary": "Promoted learning law 'test-real-workflow' from 8 episodes.",
+        "evidence": "expanded evidence set",
+        "metadata": {
+            **original["metadata"],
+            "guidance": "Validate the complete live workflow.",
+        },
+    }
+
+    first = self_learn.proposal_for_outcome(original, _catalog(tmp_path))
+    second = self_learn.proposal_for_outcome(revised, _catalog(tmp_path))
+
+    assert first["id"] == second["id"]
 
 
 def test_over_budget_span_becomes_learning_outcome(tmp_path):
@@ -400,6 +474,60 @@ def test_apply_memory_preserves_existing_entity_hints(tmp_path):
     assert "skill:workflow-orchestrator" in memory["entities"]
 
 
+def test_apply_memory_replaces_legacy_law_hint_and_renders_revision_first(tmp_path):
+    logs = str(tmp_path / "logs")
+    existing = self_learn._empty_memory()
+    existing["entities"]["plugin:legion-observability"] = {
+        "target_type": "plugin",
+        "target_name": "legion-observability",
+        "severity": "medium",
+        "hints": [
+            (
+                "Promoted learning law 'test-real-workflow' from 3 episodes. "
+                "Suggested: Validate the representative workflow."
+            ),
+            "Existing hint two.",
+            "Existing hint three.",
+            "Existing hint four.",
+            "Existing hint five.",
+        ],
+        "proposal_ids": ["legacy-law-proposal"],
+        "source_paths": [],
+    }
+    self_learn._write_json(self_learn.memory_path(logs), existing)
+    revised_outcome = {
+        "id": "revised-law-outcome",
+        "source": "learning-law",
+        "target_type": "plugin",
+        "target_name": "legion-observability",
+        "severity": "high",
+        "summary": "Promoted learning law 'test-real-workflow' from 8 episodes.",
+        "evidence": "expanded evidence set",
+        "metadata": {
+            "law_key": "test-real-workflow",
+            "guidance": "Validate the complete live workflow.",
+            "validation": "Run the complete workflow.",
+        },
+    }
+    proposal = self_learn.proposal_for_outcome(revised_outcome, _catalog(tmp_path))
+    report = {
+        "generated_at": "2026-08-05T00:00:00Z",
+        "day": "2026-08-05",
+        "outcomes": [revised_outcome],
+        "proposals": [proposal],
+    }
+
+    memory = self_learn.apply_memory(report, logs)
+    rendered = self_learn.render_hints(
+        self_learn.hints(logs, "plugin:legion-observability")
+    )
+
+    stored_hints = memory["entities"]["plugin:legion-observability"]["hints"]
+    assert all("Validate the representative workflow." not in hint for hint in stored_hints)
+    assert "Validate the complete live workflow." in rendered
+    assert "Validate the representative workflow." not in rendered
+
+
 def test_apply_memory_keeps_unresolved_outcomes_active(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     logs = str(tmp_path / "logs")
@@ -408,6 +536,7 @@ def test_apply_memory_keeps_unresolved_outcomes_active(tmp_path, monkeypatch):
     monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
     monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
     monkeypatch.setattr(self_learn, "run_scorecard", lambda _repo: self_learn.empty_scorecard(str(repo)))
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
     outcome = {
         "schema": self_learn.OUTCOME_SCHEMA,
         "id": "processed-once",
@@ -496,6 +625,47 @@ def _score(value, *, ok=True, pass_count=1, cases=1):
             {"name": "legion-eval", "ok": ok, "summary": {"precision_at_1": value}},
             {"name": "legion-doctor", "ok": ok},
         ],
+    }
+
+
+def test_scorecards_omit_unmeasured_cost_and_token_metrics():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    scorecards = [
+        self_learn.empty_scorecard(repo, reason="unavailable"),
+        self_learn.run_scorecard(repo),
+    ]
+
+    for scorecard in scorecards:
+        assert "cost_usd" not in scorecard["metrics"]
+        assert "tokens" not in scorecard["metrics"]
+
+
+def test_compare_scorecards_rejects_negative_metric_regression():
+    baseline = _score(0.5, pass_count=1, cases=2)
+    candidate = _score(0.8, pass_count=2, cases=2)
+    baseline["metrics"].update({"cost_usd": 0.1, "tokens": 100, "safety_regressions": 0})
+    candidate["metrics"].update({"cost_usd": 0.1, "tokens": 100, "safety_regressions": 1})
+
+    result = self_learn.compare_scorecards(baseline, candidate)
+
+    assert result["status"] == "discard"
+    assert result["decision"] == "metric_regression"
+    assert "safety_regressions" in result["regressions"]
+
+
+def test_compare_scorecards_ignores_unmeasured_cost_and_token_fields():
+    baseline = _score(0.5, pass_count=1, cases=2)
+    candidate = _score(1.0, pass_count=2, cases=2)
+    baseline["metrics"].update({"cost_usd": 0.1, "tokens": 100})
+    candidate["metrics"].update({"cost_usd": 5.0, "tokens": 5000})
+
+    result = self_learn.compare_scorecards(baseline, candidate)
+
+    assert result == {
+        "status": "keep",
+        "decision": "measured_improvement",
+        "delta": 0.5,
+        "regressions": [],
     }
 
 

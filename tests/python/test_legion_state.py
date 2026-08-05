@@ -1,6 +1,6 @@
 import importlib.util
 import os
-
+import subprocess
 
 HERE = os.path.dirname(__file__)
 PATH = os.path.join(
@@ -23,6 +23,8 @@ def test_resolve_state_defaults_to_global_project_root(tmp_path, monkeypatch):
         "LEGION_REPOS_FILE",
         "LEGION_BENCH_DIR",
         "LEGION_REPORTS_DIR",
+        "LEGION_PROJECT_LEARNING_DIR",
+        "LEGION_GLOBAL_LEARNING_DIR",
         "LEGION_CONFIG_FILE",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -37,6 +39,78 @@ def test_resolve_state_defaults_to_global_project_root(tmp_path, monkeypatch):
     assert resolved["repos_file"] == os.path.join(resolved["state_root"], "repos.jsonl")
     assert resolved["bench_dir"] == os.path.join(resolved["state_root"], "bench")
     assert resolved["reports_dir"] == os.path.join(resolved["state_root"], "reports")
+    assert resolved["project_learning_dir"] == os.path.join(
+        resolved["state_root"], "learning"
+    )
+    assert resolved["global_learning_dir"] == os.path.join(
+        str(home / ".legion"), "global", "learning"
+    )
+
+
+def test_state_stays_path_keyed_while_repository_id_is_stable_across_clones(
+    tmp_path,
+):
+    home = tmp_path / "home"
+    first = tmp_path / "clone-one"
+    second = tmp_path / "clone-two"
+    for repo in (first, second):
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Example/Shared.git",
+            ],
+            check=True,
+        )
+
+    first_state = state.resolve_state(str(first), {"HOME": str(home)})
+    second_state = state.resolve_state(str(second), {"HOME": str(home)})
+
+    assert first_state["project_id"].startswith("clone-one-")
+    assert second_state["project_id"].startswith("clone-two-")
+    assert first_state["project_id"] != second_state["project_id"]
+    assert first_state["state_root"] == os.path.join(
+        str(home / ".legion" / "projects"), first_state["project_id"]
+    )
+    assert second_state["state_root"] == os.path.join(
+        str(home / ".legion" / "projects"), second_state["project_id"]
+    )
+    assert (
+        first_state["repository_project_id"]
+        == second_state["repository_project_id"]
+    )
+    assert first_state["repository_project_id"].startswith("shared-")
+    assert first_state["repository_identity"] == "github.com/example/shared"
+
+
+def test_shell_exports_stable_repository_project_id_for_learning(tmp_path):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:Example/Shared.git",
+        ],
+        check=True,
+    )
+
+    exports = state.shell_exports(
+        state.resolve_state(str(repo), {"HOME": str(tmp_path / "home")})
+    )
+
+    assert "export LEGION_REPOSITORY_PROJECT_ID=shared-e7ba5b748696" in exports
 
 
 def test_resolve_state_honors_env_overrides(tmp_path, monkeypatch):

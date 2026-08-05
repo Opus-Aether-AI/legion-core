@@ -270,7 +270,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: |
             legion-code
-            automaker-autoslicer
+            nidavellir
             moneyball
             nemesis
             legion-landing
@@ -290,7 +290,7 @@ jobs:
           set -euo pipefail
           consumers=(
             legion-code
-            automaker-autoslicer
+            nidavellir
             moneyball
             nemesis
             legion-landing

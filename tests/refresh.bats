@@ -319,6 +319,41 @@ SH
     [ "$session_line" -lt "$self_line" ]
 }
 
+@test "refresh.sh builds evidence-linked learning before legacy outcomes and synthesis" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-learn" <<'SH'
+#!/usr/bin/env bash
+printf 'learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-session-learn" <<'SH'
+#!/usr/bin/env bash
+printf 'session-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-self-learn" <<'SH'
+#!/usr/bin/env bash
+printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x "$SOURCE_CLONE/legion-observability/bin/legion-learn" \
+        "$SOURCE_CLONE/legion-observability/bin/legion-session-learn" \
+        "$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add evidence learning bins"
+    )
+
+    LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    grep -qF "learn analyze --repo $SOURCE_CLONE --lookback-days 3 --max-file-mb 8 --max-files 100 --max-total-mb 64 --max-events 20000" "$MOCK_CALL_LOG"
+
+    learn_line="$(grep -nF "learn analyze --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"
+    session_line="$(grep -nF "session-learn --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"
+    self_line="$(grep -nF "self-learn run --repo" "$MOCK_CALL_LOG" | cut -d: -f1)"
+    [ "$learn_line" -lt "$session_line" ]
+    [ "$session_line" -lt "$self_line" ]
+}
+
 @test "refresh.sh records session feedback failures and continues" {
     make_source_clone marketplace-minimal.json
     mkdir -p "$SOURCE_CLONE/legion-observability/bin"

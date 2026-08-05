@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.20.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.19.1...v0.20.0) (2026-08-05)
+
+
+### Added
+
+* **learning:** add evidence-linked self-improvement loop ([#115](https://github.com/Opus-Aether-AI/legion-core/issues/115)) ([a547dba](https://github.com/Opus-Aether-AI/legion-core/commit/a547dbad8b4167242504438f6e6b01871bafc42b))
+
+
+### Fixed
+
+* complete runtime surface and preserve trace identity ([#109](https://github.com/Opus-Aether-AI/legion-core/issues/109)) ([3334d89](https://github.com/Opus-Aether-AI/legion-core/commit/3334d89539540382d6ef74713cbac70040a47fe2))
+* **learning:** remediate evidence review findings ([#116](https://github.com/Opus-Aether-AI/legion-core/issues/116)) ([003ccd4](https://github.com/Opus-Aether-AI/legion-core/commit/003ccd4ea8405dcc88ebe051047b57866360ce5c))
+* **release:** avoid retrying repaired GitHub releases ([#112](https://github.com/Opus-Aether-AI/legion-core/issues/112)) ([1ed494e](https://github.com/Opus-Aether-AI/legion-core/commit/1ed494e913371c721d1766a8802e89e450c76f92))
+* **release:** reconcile tagged Release PR labels ([#118](https://github.com/Opus-Aether-AI/legion-core/issues/118)) ([05f6e5f](https://github.com/Opus-Aether-AI/legion-core/commit/05f6e5f851d953c72859dbb4fe5f79dfae64e500))
+* **release:** recover publication and notify consumers ([#111](https://github.com/Opus-Aether-AI/legion-core/issues/111)) ([5819db5](https://github.com/Opus-Aether-AI/legion-core/commit/5819db55f3a774ff6b74b3e3878f0321fbd1f702))
+* **release:** target renamed Nidavellir consumer ([#114](https://github.com/Opus-Aether-AI/legion-core/issues/114)) ([26395f3](https://github.com/Opus-Aether-AI/legion-core/commit/26395f38d221b69b225ac34c11542b3f65a47993))
+
 ## [0.19.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.19.0...v0.19.1) (2026-07-31)
 
 

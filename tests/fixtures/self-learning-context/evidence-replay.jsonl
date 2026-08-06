@@ -1,0 +1,3 @@
+{"schema":"legion.learning-evidence.v1","id":"evidence-one","repository_identity":"github.com/acme/release-tools","entity":"skill:release","outcome":"verified","digest":"sha256:111"}
+{"schema":"legion.learning-evidence.v1","id":"evidence-one","repository_identity":"github.com/acme/release-tools","entity":"skill:release","outcome":"verified","digest":"sha256:111"}
+{"schema":"legion.learning-evidence.v1","id":"evidence-two","repository_identity":"github.com/acme/release-tools","entity":"skill:release","outcome":"verified","digest":"sha256:222"}

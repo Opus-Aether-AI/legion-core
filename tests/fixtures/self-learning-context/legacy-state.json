@@ -1,0 +1,10 @@
+{
+  "schema": "legion.learning-state.v1",
+  "repository": "/Users/example/src/release-tools",
+  "entities": {
+    "skill:release": {
+      "evidence_ids": ["evidence-one"],
+      "hints": ["Use the repository release checklist for this plan."]
+    }
+  }
+}

@@ -238,5 +238,25 @@ legion-self-learn hints --entity skill:workflow-orchestrator
 legion-self-learn hints --entity plugin:legion-router
 ```
 
+## Typed executor context
+
+Use the context compiler when a runner needs learning guidance. It reads project
+and global `hints.json` collections, selects only trusted active hints, applies
+exact/selector/global scope in that order, and emits a deterministic token- and
+hint-bounded JSON document. Evidence, transcripts, excerpts, and other source
+payload fields are intentionally never included.
+
+```bash
+legion-self-learn compile-context --repo . --entity skill:release --stage plan --json
+```
+
+`reconcile` migrates only legacy path identities whose repository basename
+matches the canonical remote identity, deduplicates replayed evidence by ID, and
+replaces the resulting state file atomically:
+
+```bash
+legion-self-learn reconcile --repo . --legacy-state legacy-state.json --evidence evidence.jsonl --json
+```
+
 These hints are failure evidence. They do not override the user, the repository's
 `AGENTS.md`, or normal validation gates.

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.learning-hint.v1.schema.json",
+  "title": "legion.learning-hint.v1",
+  "type": "object",
+  "required": ["schema", "id", "scope", "status", "trusted", "guidance"],
+  "properties": {
+    "schema": {"const": "legion.learning-hint.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "scope": {"type": "string", "enum": ["global", "selector", "exact"]},
+    "status": {"type": "string", "enum": ["active", "retired", "superseded"]},
+    "trusted": {"type": "boolean"},
+    "guidance": {"type": "string", "minLength": 1},
+    "entity": {"type": "string"},
+    "stage": {"type": "string"},
+    "selector": {"type": "object"},
+    "evidence_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "superseded_by": {"type": "string"},
+    "expires_at": {"type": "string"}
+  },
+  "additionalProperties": true
+}

@@ -40,6 +40,8 @@ legion-learn laws --repo .
 legion-session-learn --repo . --record     # scoped, privacy-safe session corrections
 legion-self-learn run --apply-memory       # synthesize safe memory/proposals
 legion-self-learn hints                    # active learned guardrails
+legion-self-learn compile-context --repo . --entity skill:release --stage plan --json
+legion-self-learn reconcile --repo . --legacy-state legacy-state.json --evidence evidence.jsonl --json
 legion-context-profile list                # discover external profiles
 legion-context-profile groups              # inspect reusable skill/plugin groups
 legion-context-profile suggest --query "frontend monorepo tests"

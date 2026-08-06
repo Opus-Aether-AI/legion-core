@@ -39,6 +39,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
+import legion_learning_context  # noqa: E402
 
 SPAN_SCHEMA = "legion.span.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
@@ -227,10 +228,7 @@ def _json_file(path: str) -> Any:
 
 
 def _write_json(path: str, payload: Any) -> None:
-    _ensure_dir(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    legion_learning_context.atomic_write_json(path, payload)
 
 
 def _append_jsonl(path: str, payload: dict[str, Any]) -> None:
@@ -242,8 +240,13 @@ def _append_jsonl(path: str, payload: dict[str, Any]) -> None:
 
 def load_spans(log_root: str, day: str | None = None) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
-    spans_dir = os.environ.get("LEGION_TELEMETRY_DIR") or os.path.join(
-        os.path.expanduser(log_root), "spans"
+    # An explicit log root is a caller contract (and keeps report/test runs
+    # isolated); only fall back to the process telemetry directory when no root
+    # was supplied at all.
+    spans_dir = (
+        os.path.join(os.path.expanduser(log_root), "spans")
+        if log_root
+        else os.environ.get("LEGION_TELEMETRY_DIR") or "spans"
     )
     spans_dir = os.path.expanduser(spans_dir)
     paths = (
@@ -1944,6 +1947,32 @@ def run_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def compile_context_command(args: argparse.Namespace) -> int:
+    state = legion_state.resolve_state(args.repo)
+    payload = legion_learning_context.compile_context(
+        repository_identity=state["repository_identity"],
+        entity=args.entity,
+        stage=args.stage,
+        hint_directories=[state["project_learning_dir"], state["global_learning_dir"]],
+        max_hints=args.max_hints,
+        max_tokens=args.max_tokens,
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def reconcile_command(args: argparse.Namespace) -> int:
+    state = legion_state.resolve_state(args.repo)
+    payload = legion_learning_context.reconcile_state(
+        repository_identity=state["repository_identity"],
+        state_path=os.path.join(state["project_learning_dir"], "state.json"),
+        legacy_state_path=args.legacy_state,
+        evidence_path=args.evidence,
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="legion-self-learn")
     sub = parser.add_subparsers(dest="cmd")
@@ -1977,6 +2006,20 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--evidence", default="")
     rec.add_argument("--json", action="store_true")
 
+    context = sub.add_parser("compile-context", help="compile trusted typed learning guidance")
+    context.add_argument("--repo", default=default_repo())
+    context.add_argument("--entity", required=True, help="TYPE:NAME target receiving guidance")
+    context.add_argument("--stage", required=True, help="lifecycle stage receiving guidance")
+    context.add_argument("--max-hints", type=int, default=20)
+    context.add_argument("--max-tokens", type=int, default=1200)
+    context.add_argument("--json", action="store_true", help="reserved for CLI compatibility; output is JSON")
+
+    reconcile = sub.add_parser("reconcile", help="rehome compatible legacy learning state")
+    reconcile.add_argument("--repo", default=default_repo())
+    reconcile.add_argument("--legacy-state", default="")
+    reconcile.add_argument("--evidence", default="")
+    reconcile.add_argument("--json", action="store_true", help="reserved for CLI compatibility; output is JSON")
+
     args = parser.parse_args(argv)
     if hasattr(args, "logs") and not args.logs:
         repo_for_state = getattr(args, "repo", os.getcwd())
@@ -1999,6 +2042,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"recorded {outcome['id']} -> {outcome['target_type']}:{outcome['target_name']}")
         return 0
+    if args.cmd == "compile-context":
+        return compile_context_command(args)
+    if args.cmd == "reconcile":
+        return reconcile_command(args)
     parser.print_help()
     return 2
 

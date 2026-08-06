@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.learning-context.v1.schema.json",
+  "title": "legion.learning-context.v1",
+  "type": "object",
+  "required": ["schema", "repository_identity", "entity", "stage", "limits", "usage", "selected_hints", "excluded_hints"],
+  "properties": {
+    "schema": {"const": "legion.learning-context.v1"},
+    "repository_identity": {"type": "string", "minLength": 1},
+    "entity": {"type": "string", "minLength": 1},
+    "stage": {"type": "string", "minLength": 1},
+    "limits": {
+      "type": "object",
+      "required": ["max_hints", "max_tokens"],
+      "properties": {"max_hints": {"type": "integer", "minimum": 0}, "max_tokens": {"type": "integer", "minimum": 0}},
+      "additionalProperties": false
+    },
+    "usage": {"$ref": "legion.learning-usage.v1.schema.json"},
+    "selected_hints": {"type": "array"},
+    "excluded_hints": {"type": "array"}
+  },
+  "additionalProperties": false
+}

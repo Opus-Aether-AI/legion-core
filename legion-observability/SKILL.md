@@ -29,6 +29,8 @@ Every Legion executor (the configured Claude, Codex, Cursor, and other provider 
 | `legion-self-learn run --apply-memory` | Mine spans, review verdicts, trigger evals, benchmark misses, manual bug records, and routing optimizer advice; attach failures to catalog entities (plugin/skill/command/agent/hook/MCP); write durable daily memory, proposals, scorecard metrics, and experiment ledgers. Source mutation is opt-in via `--apply-source`; candidates run isolated and are kept only on measured improvement. |
 | `legion-self-learn hints [--entity TYPE:NAME]` | Read the active self-learning memory before changing Legion harness pieces or running workflow commands. |
 | `legion-self-learn record --entity TYPE:NAME --summary "..."` | Record a bug or mistake found during a session so the daily loop can turn it into memory/proposals. |
+| `legion-self-learn compile-context --repo . --entity TYPE:NAME --stage STAGE --json` | Compile a byte-stable, bounded context document from trusted active hints. It explains selected/excluded hints without passing evidence, transcript, or excerpt fields to an executor. |
+| `legion-self-learn reconcile --repo . --legacy-state FILE --evidence FILE --json` | Atomically rehome same-repository legacy state and replay canonical evidence with ID deduplication. |
 
 ## When to reach for this
 

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.learning-evidence.v1.schema.json",
+  "title": "legion.learning-evidence.v1",
+  "type": "object",
+  "required": ["schema", "id", "repository_identity", "entity", "outcome", "digest"],
+  "properties": {
+    "schema": {"const": "legion.learning-evidence.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "repository_identity": {"type": "string", "minLength": 1},
+    "entity": {"type": "string", "minLength": 1},
+    "outcome": {"type": "string", "minLength": 1},
+    "digest": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": true
+}

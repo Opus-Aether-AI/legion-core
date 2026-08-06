@@ -32,10 +32,8 @@ Legion implements that protocol locally:
 - write durable entity-scoped hints and proposals;
 - run a deterministic baseline scorecard (`legion-eval` plugin + entity datasets
   and `legion-doctor`);
-- optionally test source mutations in isolated temp copies;
-- keep only the best candidate that improves the score without metric
-  regressions; and
-- roll back the real checkout if the final scorecard fails or regresses.
+- keep source proposals typed and maintainer-eligible; and
+- hand source changes to the separate, review-only `legion-improve` engine.
 
 ## What It Observes
 
@@ -116,6 +114,8 @@ When enabled at install time, the `legion-core-refresh` cron runs:
 legion-learn analyze --repo ~/.agents/sources/legion-core
 legion-session-learn --repo ~/.agents/sources/legion-core --record
 legion-self-learn run --repo ~/.agents/sources/legion-core --apply-memory --quiet
+# Only when explicitly configured:
+legion-improve queue --repo ~/.agents/sources/legion-core --base-ref main --mode draft --max 1 --json
 ```
 
 The first step writes the project report under
@@ -132,6 +132,8 @@ This writes under the project `state_root` reported by
 - `self-learn/reports/<date>.json`
 - `self-learn/experiments.md`
 - `self-learn/experiments.tsv`
+- `self-learn/improvement-queue/<proposal-fingerprint>.json`
+- `improve/runs/<proposal-fingerprint>.json` after an improvement mode processes it
 
 Memory mode is intentionally safe: it does not rewrite source or vendored skills.
 The default cron run scans all available spans and manual records so bugs recorded
@@ -166,38 +168,47 @@ Setup bridges record failures into the same memory stream when Codex/Cursor MCP,
 agent, skill, or CLI verification fails. That lets daily refresh learn from broken
 installation paths, not only from model execution spans.
 
-## Source Mutation Mode
+## Review-only source improvement
 
-Source mutation is explicit:
+`legion-self-learn --apply-source` is retained only as a compatibility dry-run
+and cannot mutate a checkout. To evaluate an approved typed proposal, use:
 
 ```bash
-legion-self-learn run --apply-source
+legion-improve run --repo . --proposal proposal.json --state-dir .legion/improve --mode draft --json
 ```
 
-It creates isolated candidate copies, applies each mutable proposal, and scores
-the candidate with:
+`legion-improve` defaults to `off`; `dry-run` never creates a PR; and `draft`
+is the only publishing mode. It freezes the remote identity and base SHA,
+creates an isolated worktree, allows only a native Markdown-guardrail mutation,
+checks a bounded single-file diff, and runs immutable baseline and candidate
+gates repeatedly. Any baseline/candidate variance or candidate regression is
+rejected. The proposal cannot supply a command. A bounded receipt from the
+external `legion-delegate review` boundary over exact base/head SHAs is required
+before an idempotent draft PR is created through `gh`. It never merges, deploys,
+or writes to the operator checkout.
 
-- `legion-eval --repo <repo> --json`
-- `legion-doctor --repo <repo>`
+Only active cross-project laws with confidence at least `0.9`, five supporting
+episodes, three projects, a bounded guidance string, and a safe non-vendored
+Markdown target enter this queue. Other observations still improve executor
+outputs through scoped memory, but cannot propose source changes.
 
-Only candidates with a positive score delta and no metric regressions are
-eligible to be kept. Legion applies the best kept candidate to the real checkout,
-reruns the scorecard, and rolls back if the final checkout fails or regresses.
-The no-regression gate covers measured eval cases/accuracy plus misses,
-collisions, false-success signals, safety regressions, and gross latency
-regressions. Cost and token usage are not scorecard gates because these local
-deterministic subprocesses do not currently report either metric.
+The daily refresh processes no source proposal by default. To enable the
+review-only automation explicitly:
 
-Vendored files are skipped unless `--allow-vendored` is passed.
+```bash
+export LEGION_IMPROVE_MODE=dry-run  # evaluate + independent review, no PR
+export LEGION_IMPROVE_MODE=draft    # additionally create a draft PR
+export LEGION_IMPROVE_MAX=1         # bounded proposals per refresh
+```
 
-Two mutation families are supported today:
+The refresh bases candidates on the exact remote `main` tip even when the
+installed source clone is detached at a stable release tag. Auto-update remains
+the separate release-pinned refresh step. A draft improvement still needs a
+working reviewer/model login and `gh` authentication.
 
-- command, agent, and skill trigger fixes patch markdown frontmatter
-  `description` fields with measured trigger terms so entity scorecards can see
-  the improvement;
-- non-trigger markdown proposals get a `Learned Guardrails` block; and
-- marketplace plugin trigger fixes patch `.claude-plugin/marketplace.json`
-  descriptions with measured trigger terms.
+Durable state stores only bounded IDs, hashes, and summaries, so it is safe to
+inspect/replay after interruption without preserving prompts, outputs,
+credentials, or local checkout paths.
 
 ## Harness Parity Features
 
@@ -205,25 +216,24 @@ Two mutation families are supported today:
   `collision`, `precision_at_1`, `hit_at_k`, and `doctor_ok`.
 - **Entity scorecards:** `legion-eval` covers marketplace plugins plus command,
   agent, and skill routing cases.
-- **Candidate isolation:** source proposals run in isolated temp copies before
-  touching the real checkout.
+- **Candidate isolation:** `legion-improve` runs eligible source proposals in
+  isolated worktrees and never touches the real checkout.
 - **Hypothesis log:** every candidate records target, proposal IDs, hypothesis,
   score delta, status, and decision.
-- **Keep/discard gate:** Legion keeps only measured improvements and discards
-  failed, neutral, or regressing candidates.
+- **Keep/discard gate:** a candidate may only become a draft PR after stable,
+  non-regressing repeated gates and an independent receipt.
 - **Pass/fail contrast:** reports include success and failure examples by entity
   so future proposals can compare good and bad traces.
-- **Resolved-state tracking:** outcome IDs are marked processed only after a
-  kept source experiment resolves them. Unresolved bugs stay active in daily
-  reports; `--include-processed` restores audit visibility for resolved items.
+- **Resolved-state tracking:** outcomes remain evidence for future proposals;
+  a draft PR does not silently resolve or apply them.
 
 ## Remaining Extensions
 
 - Expand the Harness Bench-style workbench beyond the offline `core` suite; see
   [benchmarking.md](benchmarking.md).
 - Add hook and MCP-specific eval datasets once there are enough stable examples.
-- Expand source mutators beyond markdown guardrails and marketplace descriptions
-  only when each mutator has a scorecard that can prove improvement.
+- Add new typed mutators only when their path allowlists and scorecards
+  can prove safety and improvement.
 - Add evidence-backed scorers for new dimensions without changing existing
   versioned schema meanings.
 

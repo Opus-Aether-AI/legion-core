@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.improvement-proposal.v1.schema.json",
+  "title": "legion.improvement-proposal.v1",
+  "description": "A maintainer-eligible, typed review-only source improvement proposal.",
+  "type": "object",
+  "required": ["schema", "id", "revision", "maintainer_eligible", "kind", "summary", "target", "candidate", "validation"],
+  "properties": {
+    "schema": {"const": "legion.improvement-proposal.v1"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "revision": {"type": "integer", "minimum": 1},
+    "maintainer_eligible": {"const": true},
+    "kind": {"const": "documentation_guardrail"},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "target": {"type": "object", "required": ["path"], "properties": {"path": {"type": "string", "minLength": 1}}, "additionalProperties": false},
+    "candidate": {
+      "type": "object",
+      "required": ["operation", "content"],
+      "properties": {
+        "operation": {"const": "append_markdown_guardrail"},
+        "content": {"type": "string", "minLength": 1, "maxLength": 1000}
+      },
+      "additionalProperties": false
+    },
+    "validation": {
+      "type": "object",
+      "required": ["profile"],
+      "properties": {"profile": {"const": "documentation"}},
+      "additionalProperties": false
+    },
+    "limits": {"type": "object", "properties": {"max_changed_lines": {"type": "integer", "minimum": 0, "maximum": 500}}, "additionalProperties": false},
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "source": {"type": "string", "maxLength": 80},
+        "source_id": {"type": "string", "maxLength": 160},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "support": {
+          "type": "object",
+          "properties": {
+            "episodes": {"type": "integer", "minimum": 0},
+            "projects": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        },
+        "evidence_ids": {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 160}}
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"source": {"const": "learning-law"}}, "required": ["source"]},
+          "then": {
+            "required": ["confidence", "support"],
+            "properties": {
+              "confidence": {"minimum": 0.9},
+              "support": {
+                "required": ["episodes", "projects"],
+                "properties": {
+                  "episodes": {"minimum": 5},
+                  "projects": {"minimum": 3}
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

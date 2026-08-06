@@ -761,6 +761,36 @@ SH
   jq -e '.status == "unavailable"' "$run_dir/task-ledger.json"
 }
 
+@test "legion-run: immutable review snapshot excludes ignored runtime state" {
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'generated\n' > generated.txt
+ledger="$LEGION_RUN_DIR/fanout-task-ledger.json"
+printf '{"schema":"legion.task-ledger.v1","status":"completed","tasks":[]}\n' > "$ledger"
+jq -cn --arg ledger "$ledger" \
+  '{ok:1,slices:1,failed:0,applied:1,results:[],task_ledger_path:$ledger}'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-fanout"
+  mkdir -p "$REPO/.legion"
+  printf '*\n' > "$REPO/.legion/.gitignore"
+  printf 'local runtime secret\n' > "$REPO/.legion/runtime.json"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  head_sha="$(jq -r .head_sha "$run_dir/review-input.json")"
+  git -C "$REPO" cat-file -e "$head_sha:generated.txt"
+  run git -C "$REPO" cat-file -e "$head_sha:.legion/.gitignore"
+  [ "$status" -ne 0 ]
+  run git -C "$REPO" cat-file -e "$head_sha:.legion/runtime.json"
+  [ "$status" -ne 0 ]
+}
+
 @test "legion-run: refuses a dirty source before reviewer snapshotting" {
   install_fake_pipeline_bins
   printf 'local secret material\n' > "$REPO/private-local.txt"

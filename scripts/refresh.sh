@@ -188,8 +188,8 @@ if [ "${LEGION_SESSION_LEARN:-1}" = "1" ] && [ -x "$SESSION_LEARN" ]; then
     fi
 fi
 
-# 6) Daily self-learning loop. Memory/proposals are safe to apply automatically;
-# source mutations remain opt-in via `legion-self-learn run --apply-source`.
+# 6) Daily self-learning loop. Memory and the bounded typed improvement queue are
+# safe to write automatically; this command never mutates source.
 SELF_LEARN="$SOURCE_CLONE/legion-observability/bin/legion-self-learn"
 if [ -x "$SELF_LEARN" ]; then
     if ! "$SELF_LEARN" run --repo "$SOURCE_CLONE" --apply-memory --quiet >/dev/null 2>&1; then
@@ -198,7 +198,35 @@ if [ -x "$SELF_LEARN" ]; then
     fi
 fi
 
-# 7) Auto-heal (OPT-IN: export LEGION_HEAL=1). Delegates a fix for each doctor
+# 7) Review-only source improvements (OPT-IN). The default is off. `dry-run`
+# builds, repeats gates, and obtains an immutable independent review; `draft`
+# additionally opens an idempotent draft PR. The candidate base defaults to the
+# remote main tip so stable release-tag installs never have to move their own
+# detached checkout. No mode can merge or deploy.
+IMPROVE_MODE="${LEGION_IMPROVE_MODE:-off}"
+IMPROVE="$SOURCE_CLONE/legion-observability/bin/legion-improve"
+case "$IMPROVE_MODE" in
+    off) ;;
+    dry-run|draft)
+        if [ -x "$IMPROVE" ]; then
+            if ! "$IMPROVE" queue --repo "$SOURCE_CLONE" \
+                --base-ref "${LEGION_IMPROVE_BASE_REF:-main}" \
+                --mode "$IMPROVE_MODE" \
+                --max "${LEGION_IMPROVE_MAX:-1}" \
+                --evaluation-repeats "${LEGION_IMPROVE_REPEATS:-2}" \
+                --json >/dev/null 2>&1; then
+                printf 'legion refresh: review-only improvement queue had failures\n' >&2
+                record_refresh_failure "Daily review-only improvement queue failed." "legion-improve queue returned nonzero"
+            fi
+        fi
+        ;;
+    *)
+        printf 'legion refresh: invalid LEGION_IMPROVE_MODE=%s (expected off, dry-run, or draft)\n' "$IMPROVE_MODE" >&2
+        record_refresh_failure "Daily improvement mode was invalid." "$IMPROVE_MODE"
+        ;;
+esac
+
+# 8) Auto-heal (OPT-IN: export LEGION_HEAL=1). Delegates a fix for each doctor
 # finding to codex in an isolated worktree, gates it (doctor + bats + cross-model
 # review), and opens a PR — never auto-merged. Off by default so the daily refresh
 # stays read-only unless you opt in. Bounded by LEGION_HEAL_MAX (default 3).

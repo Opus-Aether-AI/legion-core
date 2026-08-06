@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.improvement-review-receipt.v1.schema.json",
+  "title": "legion.improvement-review-receipt.v1",
+  "type": "object",
+  "required": ["schema", "id", "independent", "verdict", "reviewed_base_sha", "reviewed_head_sha", "diff_digest", "reviewer", "attempts"],
+  "properties": {
+    "schema": {"const": "legion.improvement-review-receipt.v1"},
+    "id": {"type": "string", "pattern": "^[a-f0-9]{24}$"},
+    "independent": {"const": true},
+    "verdict": {"const": "approved"},
+    "reviewed_base_sha": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+    "reviewed_head_sha": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+    "diff_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "reviewer": {
+      "type": "object",
+      "required": ["kind", "model"],
+      "properties": {
+        "kind": {"const": "legion-delegate"},
+        "model": {"type": "string", "minLength": 1, "maxLength": 96}
+      },
+      "additionalProperties": false
+    },
+    "attempts": {"type": "integer", "minimum": 1, "maximum": 10}
+  },
+  "additionalProperties": false
+}

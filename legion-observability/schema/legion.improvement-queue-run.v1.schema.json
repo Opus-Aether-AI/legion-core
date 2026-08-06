@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.improvement-queue-run.v1.schema.json",
+  "title": "legion.improvement-queue-run.v1",
+  "type": "object",
+  "required": ["schema", "mode", "attempted", "failed", "skipped_terminal", "results"],
+  "properties": {
+    "schema": {"const": "legion.improvement-queue-run.v1"},
+    "mode": {"enum": ["off", "dry-run", "draft"]},
+    "attempted": {"type": "integer", "minimum": 0, "maximum": 10},
+    "failed": {"type": "integer", "minimum": 0, "maximum": 10},
+    "skipped_terminal": {"type": "integer", "minimum": 0, "maximum": 1000},
+    "results": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["fingerprint", "state", "status"],
+        "properties": {
+          "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "state": {"type": "string"},
+          "status": {"enum": ["processed", "failed"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

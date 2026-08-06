@@ -9,7 +9,8 @@ This is intentionally local-first and validation-first:
    MCP) instead of only to a model route.
 3. Write a durable memory/proposal queue every day. This is the safe default the
    daily cron uses.
-4. Optionally test source candidates when an operator opts into --apply-source.
+4. Leave source proposals for the separate review-only ``legion-improve``
+   engine; this command only mines and records learning evidence.
 
 The shape is inspired by harness-bench and autoresearch style loops: establish a
 baseline, run a bounded experiment, record the score, keep safe improvements, and
@@ -26,6 +27,7 @@ import glob
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -45,6 +47,7 @@ SPAN_SCHEMA = "legion.span.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
 MEMORY_SCHEMA = "legion.self-learning.memory.v1"
 SCORECARD_SCHEMA = "legion.self-learning.scorecard.v1"
+IMPROVEMENT_PROPOSAL_SCHEMA = "legion.improvement-proposal.v1"
 DEFAULT_LOG_ROOT = ""
 SAFE_SOURCE_TYPES = {"skill", "command", "agent", "plugin"}
 SUCCESS_STATUSES = {"ok"}
@@ -213,6 +216,10 @@ def candidate_pool_path(log_root: str) -> str:
 
 def outcomes_path(log_root: str) -> str:
     return os.path.join(self_learn_dir(log_root), "outcomes.jsonl")
+
+
+def improvement_queue_dir(log_root: str) -> str:
+    return os.path.join(self_learn_dir(log_root), "improvement-queue")
 
 
 def daily_report_path(log_root: str, day: str | None = None) -> str:
@@ -600,9 +607,14 @@ def learning_law_outcomes(repo: str) -> list[dict[str, Any]]:
         if not key:
             continue
         support = _dict(law.get("support"))
-        episodes = int(support.get("episodes") or 0)
-        projects = int(support.get("projects") or 0)
-        confidence = float(law.get("confidence") or 0.0)
+        try:
+            episodes = int(support.get("episodes") or 0)
+            projects = int(support.get("projects") or 0)
+            confidence = float(law.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(confidence) or episodes < 0 or projects < 0:
+            continue
         outcomes.append(
             _outcome(
                 source="learning-law",
@@ -965,6 +977,117 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
     return proposal
 
 
+def _improvement_target(repo: str, source_path: str) -> str:
+    """Return a safe repo-relative Markdown target or an empty string."""
+    repo_abs = os.path.abspath(repo)
+    candidate = (
+        os.path.abspath(
+            source_path if os.path.isabs(source_path) else os.path.join(repo_abs, source_path)
+        )
+        if source_path
+        else ""
+    )
+    if candidate and os.path.isdir(candidate):
+        for name in ("SKILL.md", "README.md"):
+            nested = os.path.join(candidate, name)
+            if os.path.isfile(nested):
+                candidate = nested
+                break
+    if (
+        not candidate
+        or not os.path.isfile(candidate)
+        or not candidate.endswith(".md")
+        or not _path_in_repo(candidate, repo_abs)
+        or _path_uses_symlink(candidate, repo_abs)
+        or f"{os.sep}vendored{os.sep}" in candidate
+    ):
+        return ""
+    relative = os.path.relpath(candidate, repo_abs)
+    if relative == ".." or relative.startswith(f"..{os.sep}") or relative.startswith(f".legion{os.sep}"):
+        return ""
+    return relative.replace(os.sep, "/")
+
+
+def typed_improvement_proposal(
+    outcome: dict[str, Any], proposal: dict[str, Any], repo: str
+) -> dict[str, Any] | None:
+    """Promote only well-supported learning laws into the review-only queue.
+
+    Ordinary failures and model prose remain memory. The first source-changing
+    lane requires an active cross-project law with high confidence, at least
+    five episodes, and at least three independent projects.
+    """
+    if _text(outcome.get("source")) != "learning-law":
+        return None
+    metadata = _dict(outcome.get("metadata"))
+    support = _dict(metadata.get("support"))
+    try:
+        confidence = float(metadata.get("confidence") or 0.0)
+        episodes = int(support.get("episodes") or 0)
+        projects = int(support.get("projects") or 0)
+    except (TypeError, ValueError):
+        return None
+    guidance = _short(_text(metadata.get("guidance")), 500)
+    target = _improvement_target(repo, _text(proposal.get("source_path")))
+    if (
+        not math.isfinite(confidence)
+        or confidence < 0.9
+        or episodes < 5
+        or projects < 3
+        or not guidance
+        or not target
+    ):
+        return None
+    try:
+        evidence = json.loads(_text(outcome.get("evidence")))
+    except ValueError:
+        evidence = {}
+    evidence_ids = [
+        _short(_text(value), 160)
+        for value in _list(_dict(evidence).get("evidence_ids"))[:20]
+        if _text(value)
+    ]
+    law_key = _text(metadata.get("law_key"))
+    return {
+        "schema": IMPROVEMENT_PROPOSAL_SCHEMA,
+        "id": f"learning-law:{_stable_id([law_key or proposal.get('id')])}",
+        "revision": episodes,
+        "maintainer_eligible": True,
+        "kind": "documentation_guardrail",
+        "summary": _short(_text(proposal.get("summary")), 500),
+        "target": {"path": target},
+        "candidate": {
+            "operation": "append_markdown_guardrail",
+            "content": guidance,
+        },
+        "validation": {"profile": "documentation"},
+        "limits": {"max_changed_lines": 40},
+        "provenance": {
+            "source": "learning-law",
+            "source_id": _stable_id(["learning-law", law_key]),
+            "confidence": confidence,
+            "support": {"episodes": episodes, "projects": projects},
+            "evidence_ids": evidence_ids,
+        },
+    }
+
+
+def write_improvement_queue(report: dict[str, Any], log_root: str) -> list[str]:
+    written: list[str] = []
+    for proposal in _list(report.get("improvement_proposals")):
+        if not isinstance(proposal, dict):
+            continue
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                proposal, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        ).hexdigest()
+        path = os.path.join(improvement_queue_dir(log_root), f"{fingerprint}.json")
+        _write_json(path, proposal)
+        written.append(path)
+    return written
+
+
 def trace_contrast(spans: list[dict[str, Any]], catalog: dict[str, Any]) -> dict[str, Any]:
     """Summarize pass/fail patterns by entity for future proposal generation."""
     entities: dict[str, dict[str, Any]] = {}
@@ -1023,6 +1146,11 @@ def build_report(
         processed = set(_list(load_memory(log_root).get("processed_outcome_ids")))
         outcomes = [outcome for outcome in outcomes if outcome.get("id") not in processed]
     proposals = [proposal_for_outcome(outcome, catalog) for outcome in outcomes]
+    improvement_proposals = [
+        typed
+        for outcome, proposal in zip(outcomes, proposals)
+        if (typed := typed_improvement_proposal(outcome, proposal, repo)) is not None
+    ]
     by_entity: dict[str, int] = defaultdict(int)
     for outcome in outcomes:
         by_entity[f"{outcome['target_type']}:{outcome['target_name']}"] += 1
@@ -1038,6 +1166,7 @@ def build_report(
         "catalog_entities": len(_list(catalog.get("entities"))),
         "outcomes": outcomes,
         "proposals": proposals,
+        "improvement_proposals": improvement_proposals,
         "by_entity": dict(sorted(by_entity.items())),
         "scorecard": run_scorecard(repo),
         "trace_contrast": contrast,
@@ -1881,6 +2010,17 @@ def record_manual_outcome(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_command(args: argparse.Namespace) -> int:
+    # Kept solely so old automation gets a clear, safe migration response.
+    # In particular, it must not re-enable the historical path that eventually
+    # copied a candidate back into the operator checkout.
+    if args.apply_source:
+        payload = {
+            "status": "compatibility_dry_run",
+            "source_mutation": False,
+            "message": "--apply-source is compatibility-only; submit an eligible typed proposal to legion-improve run --mode dry-run or --mode draft.",
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json else payload["message"])
+        return 2
     day = args.day or _date_utc()
     report = build_report(
         args.repo,
@@ -1906,6 +2046,7 @@ def run_command(args: argparse.Namespace) -> int:
         changed = _list(experiments.get("changed_source"))
 
     _write_json(report_path, report)
+    improvement_queue = write_improvement_queue(report, args.logs)
 
     memory = None
     if args.apply_memory or args.apply_source:
@@ -1917,12 +2058,14 @@ def run_command(args: argparse.Namespace) -> int:
         "applied_memory": memory is not None,
         "changed_source": changed,
         "experiments": experiments,
+        "improvement_queue": improvement_queue,
         "scorecard": report.get("scorecard"),
         "summary": {
             "spans": report["spans"],
             "catalog_entities": report["catalog_entities"],
             "outcomes": len(report["outcomes"]),
             "proposals": len(report["proposals"]),
+            "improvement_proposals": len(report["improvement_proposals"]),
         },
         "by_entity": report["by_entity"],
     }

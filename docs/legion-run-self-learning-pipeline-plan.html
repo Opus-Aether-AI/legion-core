@@ -508,7 +508,7 @@
         <article class="card span-6">
           <div class="label">Safety</div>
           <h3>Always learn, do not always patch</h3>
-          <p>Automatic durable memory is safe. Automatic source mutation is not. Legion should always record and apply memory. Source edits from self-learning should remain opt-in and scorecard-gated.</p>
+          <p>Automatic durable memory is safe. Source proposals remain opt-in and must pass the typed, review-only <code>legion-improve</code> state machine before a draft PR can be opened.</p>
           <p>This keeps the system business-safe: failures become future guardrails without silently rewriting the toolchain.</p>
         </article>
       </div>
@@ -595,7 +595,7 @@ For every terminal run:
           </tr>
           <tr>
             <td>Not always source-mutating</td>
-            <td>Memory is automatic. Source patching remains explicit with <code>--apply-source</code> or a controlled auto-heal mode.</td>
+            <td>Memory is automatic. Source proposals use an explicit <code>LEGION_IMPROVE_MODE=dry-run|draft</code>; <code>legion-heal</code> remains limited to doctor findings.</td>
           </tr>
         </tbody>
       </table>
@@ -845,7 +845,7 @@ For every terminal run:
         <li><strong>Add semantic stage validators.</strong> Current pass makes stage pass/fail depend on output contracts, not exit code alone.</li>
         <li><strong>Add timeouts and interrupt finalization.</strong> Prevent stuck runs from bypassing learning.</li>
         <li><strong>Add bad-path benchmark suite.</strong> Fail the build if any official bad path skips memory application.</li>
-        <li><strong>Update docs.</strong> Document the exact guarantee: outcomes and durable memory are automatic; source mutation remains opt-in.</li>
+        <li><strong>Update docs.</strong> Document the exact guarantee: outcomes and durable memory are automatic; typed source proposals are opt-in, independently reviewed, and draft-only.</li>
         <li><strong>Only then market it.</strong> The business story becomes defensible: Legion does not only run agents; it turns validation, review, and failure evidence into reusable operational memory.</li>
       </ol>
 

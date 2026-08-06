@@ -616,6 +616,7 @@ def _git_output(
     env: dict[str, str] | None = None,
     stdin: str = "",
     timeout_seconds: int = 1800,
+    strip: bool = True,
 ) -> str:
     process = subprocess.Popen(
         ["git", "-C", str(repo), *args],
@@ -651,7 +652,7 @@ def _git_output(
     if process.returncode != 0:
         detail = _short(stderr or stdout, 1000)
         raise LegionRunError(f"could not create immutable review input: git {' '.join(args)}: {detail}", 1)
-    return stdout.strip()
+    return stdout.strip() if strip else stdout
 
 
 def require_clean_review_source(repo: Path, *, timeout_seconds: int) -> None:
@@ -718,12 +719,48 @@ def create_review_snapshot(
             env=snapshot_env,
             timeout_seconds=timeout_seconds,
         )
+        # Update tracked paths separately, then feed only Git's non-ignored
+        # untracked set through a NUL-delimited pathspec. `git add -A` can try
+        # to force an ignored `.legion/` runtime tree into the temporary index
+        # before a negative pathspec is applied, making otherwise valid review
+        # snapshots fail. This also preserves unusual filenames exactly.
         _git_output(
             repo,
-            ["add", "-A", "--", ".", ":(exclude).legion"],
+            [
+                "add",
+                "-u",
+                "--",
+                ".",
+                ":(exclude).legion",
+                ":(exclude).legion/**",
+            ],
             env=snapshot_env,
             timeout_seconds=timeout_seconds,
         )
+        untracked = _git_output(
+            repo,
+            [
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+                ":(exclude).legion",
+                ":(exclude).legion/**",
+            ],
+            env=snapshot_env,
+            timeout_seconds=timeout_seconds,
+            strip=False,
+        )
+        if untracked:
+            _git_output(
+                repo,
+                ["add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                env=snapshot_env,
+                stdin=untracked,
+                timeout_seconds=timeout_seconds,
+            )
         tree_sha = _git_output(
             repo, ["write-tree"], env=snapshot_env, timeout_seconds=timeout_seconds
         )
@@ -762,6 +799,16 @@ def hermetic_stage_env(env: dict[str, str]) -> dict[str, str]:
         "LEGION_DEPTH",
         "LEGION_FORCE_DELEGATE",
         "LEGION_LOW_CREDIT",
+        "LEGION_STATE_ROOT",
+        "LEGION_TELEMETRY_DIR",
+        "LEGION_REGISTRY_DIR",
+        "LEGION_REPOS_FILE",
+        "LEGION_BENCH_DIR",
+        "LEGION_REPORTS_DIR",
+        "LEGION_PROJECT_LEARNING_DIR",
+        "LEGION_GLOBAL_LEARNING_DIR",
+        "LEGION_PROJECT_ID",
+        "LEGION_REPOSITORY_PROJECT_ID",
     ):
         clean.pop(key, None)
     clean.update(

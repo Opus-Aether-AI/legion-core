@@ -74,3 +74,27 @@ def test_run_directory_and_artifacts_are_private_under_permissive_umask(tmp_path
     assert stat.S_IMODE(runs_root.stat().st_mode) == 0o700
     assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(artifact.stat().st_mode) == 0o600
+
+
+def test_hermetic_stage_environment_drops_runner_state_overrides():
+    legion_run = load_legion_run()
+    env = {
+        "HOME": "/safe-home",
+        "LEGION_STATE_ROOT": "/outer/state",
+        "LEGION_REGISTRY_DIR": "/outer/registry",
+        "LEGION_PROJECT_LEARNING_DIR": "/outer/learning",
+        "LEGION_GLOBAL_LEARNING_DIR": "/outer/global-learning",
+        "LEGION_PROJECT_ID": "outer-project",
+        "LEGION_TRACE_ID": "trace-kept",
+    }
+
+    clean = legion_run.hermetic_stage_env(env)
+
+    assert clean["HOME"] == "/safe-home"
+    assert clean["LEGION_TRACE_ID"] == "trace-kept"
+    assert clean["LEGION_VALIDATION"] == "1"
+    assert "LEGION_STATE_ROOT" not in clean
+    assert "LEGION_REGISTRY_DIR" not in clean
+    assert "LEGION_PROJECT_LEARNING_DIR" not in clean
+    assert "LEGION_GLOBAL_LEARNING_DIR" not in clean
+    assert "LEGION_PROJECT_ID" not in clean

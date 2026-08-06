@@ -289,6 +289,53 @@ SH
     grep -qF "self-learn run --repo $SOURCE_CLONE --apply-memory --quiet" "$MOCK_CALL_LOG"
 }
 
+@test "refresh.sh processes typed improvements only in an explicit bounded mode" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-self-learn" <<'SH'
+#!/usr/bin/env bash
+printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-improve" <<'SH'
+#!/usr/bin/env bash
+printf 'improve %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x \
+        "$SOURCE_CLONE/legion-observability/bin/legion-self-learn" \
+        "$SOURCE_CLONE/legion-observability/bin/legion-improve"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add improvement queue"
+    )
+
+    LEGION_UPDATE_REF=main LEGION_IMPROVE_MODE=draft LEGION_IMPROVE_MAX=2 \
+        run bash "$REFRESH_SH"
+
+    [ "$status" -eq 0 ]
+    grep -qF "improve queue --repo $SOURCE_CLONE --base-ref main --mode draft --max 2 --evaluation-repeats 2 --json" "$MOCK_CALL_LOG"
+}
+
+@test "refresh.sh leaves source improvement publication off by default" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-improve" <<'SH'
+#!/usr/bin/env bash
+printf 'improve %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x "$SOURCE_CLONE/legion-observability/bin/legion-improve"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add improve"
+    )
+
+    LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
+
+    [ "$status" -eq 0 ]
+    if grep -F "improve queue" "$MOCK_CALL_LOG"; then false; fi
+}
+
 @test "refresh.sh records session feedback before self-learning" {
     make_source_clone marketplace-minimal.json
     mkdir -p "$SOURCE_CLONE/legion-observability/bin"

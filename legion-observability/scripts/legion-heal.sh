@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# legion-heal — detect → delegate-fix → gate → open PR. Auto-healing built ONLY
-# from Legion's own primitives; it invents no fixer of its own:
+# legion-heal — detect → delegate-fix → gate → open PR for legion-doctor
+# findings only. Typed learning proposals belong to legion-improve.
 #
 #   detect  : legion-doctor --json   (the static guards)
 #   fix     : legion-delegate run --apply   (codex in an isolated worktree → diff)

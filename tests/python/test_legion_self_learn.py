@@ -291,6 +291,67 @@ def test_learning_law_proposal_id_is_stable_across_revisions(tmp_path):
     assert first["id"] == second["id"]
 
 
+def test_supported_learning_law_emits_bounded_typed_improvement_queue(tmp_path):
+    repo = tmp_path / "repo"
+    plugin = repo / "legion-observability"
+    logs = tmp_path / "logs"
+    plugin.mkdir(parents=True)
+    (plugin / "SKILL.md").write_text("# Observability\n", encoding="utf-8")
+    outcome = {
+        "id": "law-outcome",
+        "source": "learning-law",
+        "summary": "Promoted a reliable workflow law.",
+        "evidence": json.dumps({"evidence_ids": ["e1", "e2", "e3"]}),
+        "metadata": {
+            "law_key": "real-workflow",
+            "confidence": 0.93,
+            "support": {"episodes": 7, "projects": 4},
+            "guidance": "Validate the real user workflow before declaring success.",
+        },
+    }
+    legacy = {
+        "id": "legacy-proposal",
+        "summary": outcome["summary"],
+        "source_path": str(plugin),
+    }
+
+    typed = self_learn.typed_improvement_proposal(outcome, legacy, str(repo))
+
+    assert typed["schema"] == "legion.improvement-proposal.v1"
+    assert typed["revision"] == 7
+    assert typed["target"] == {"path": "legion-observability/SKILL.md"}
+    assert typed["candidate"]["operation"] == "append_markdown_guardrail"
+    assert "command" not in typed["candidate"]
+    paths = self_learn.write_improvement_queue(
+        {"improvement_proposals": [typed]}, str(logs)
+    )
+    assert len(paths) == 1
+    queued = json.loads(open(paths[0], encoding="utf-8").read())
+    assert queued == typed
+    assert str(repo) not in json.dumps(queued, sort_keys=True)
+
+
+def test_weak_or_single_project_learning_never_enters_improvement_queue(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = repo / "SKILL.md"
+    target.write_text("# Skill\n", encoding="utf-8")
+    outcome = {
+        "source": "learning-law",
+        "summary": "Weak law.",
+        "evidence": "{}",
+        "metadata": {
+            "law_key": "weak",
+            "confidence": 0.99,
+            "support": {"episodes": 20, "projects": 1},
+            "guidance": "Do a thing.",
+        },
+    }
+    legacy = {"id": "weak", "summary": "Weak law.", "source_path": str(target)}
+
+    assert self_learn.typed_improvement_proposal(outcome, legacy, str(repo)) is None
+
+
 def test_over_budget_span_becomes_learning_outcome(tmp_path):
     catalog = _catalog(tmp_path)
     spans = [

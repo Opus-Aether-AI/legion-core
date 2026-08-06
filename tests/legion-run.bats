@@ -205,6 +205,241 @@ SH
   chmod +x "$BATS_TEST_TMPDIR/bin"/*
 }
 
+# This is deliberately a command-boundary fake, not an implementation stub.  The
+# runner must compile one safe, typed context document and make its immutable
+# path/revision available to every downstream lifecycle boundary.
+install_learning_context_boundary_fake() {
+  cat > "$BATS_TEST_TMPDIR/bin/legion-self-learn" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$1" in
+  compile-context)
+    mkdir -p "$LEGION_RUN_DIR/boundary-inputs"
+    jq -cn '$ARGS.positional' --args "$@" > "$LEGION_RUN_DIR/boundary-inputs/compile-context.args.json"
+    case "${LEARNING_CONTEXT_CASE:-no-hints}" in
+      compiler-failure)
+        printf '%s\n' 'simulated learning-context compiler failure' >&2
+        exit 7
+        ;;
+      compiler-timeout)
+        sleep 5
+        ;;
+    esac
+    case "${LEARNING_CONTEXT_CASE:-no-hints}" in
+      advisory)
+        cat <<'JSON'
+{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":1,"token_count":5},"selected_hints":[{"id":"advisory-coverage","scope":"global","guidance":"Advisory: cover the public API boundary.","selection_reason":"global","token_count":5}],"excluded_hints":[]}
+JSON
+        ;;
+      required)
+        cat <<'JSON'
+{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":1,"token_count":6},"selected_hints":[{"id":"required-contract","scope":"exact","guidance":"Required: preserve the billing idempotency contract.","selection_reason":"exact","token_count":6}],"excluded_hints":[]}
+JSON
+        ;;
+      retired)
+        cat <<'JSON'
+{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":0,"token_count":0},"selected_hints":[],"excluded_hints":[{"id":"retired-danger","exclusion_reason":"retired"}]}
+JSON
+        ;;
+      prompt-budget)
+        cat <<'JSON'
+{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":2,"max_tokens":25},"usage":{"schema":"legion.learning-usage.v1","hint_count":2,"token_count":20},"selected_hints":[{"id":"a-first","scope":"global","guidance":"alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha","selection_reason":"global","token_count":10},{"id":"b-second","scope":"global","guidance":"bravo bravo bravo bravo bravo bravo bravo bravo bravo bravo","selection_reason":"global","token_count":10}],"excluded_hints":[{"id":"m-middle","exclusion_reason":"token_limit"},{"id":"z-last","exclusion_reason":"hint_limit"}]}
+JSON
+        ;;
+      *)
+        cat <<'JSON'
+{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":0,"token_count":0},"selected_hints":[],"excluded_hints":[]}
+JSON
+        ;;
+    esac
+    ;;
+  hints) printf '{"schema":"legion.self-learning.hints.v1","entities":{}}\n' ;;
+  record) printf '{"ok":true,"recorded":true}\n' ;;
+  run) printf '{"ok":true,"applied_memory":true}\n' ;;
+  *) printf '{"ok":true}\n' ;;
+esac
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-self-learn"
+}
+
+install_learning_boundary_consumers() {
+  cat > "$BATS_TEST_TMPDIR/bin/fieldops-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$LEGION_RUN_DIR/boundary-inputs"
+jq -cn --arg path "${LEGION_LEARNING_CONTEXT_PATH-unset}" --arg revision "${LEGION_LEARNING_CONTEXT_REVISION-unset}" \
+  '{path:$path,revision:$revision}' > "$LEGION_RUN_DIR/boundary-inputs/plan.json"
+printf '{"schema":"legion.plugin.plan.v1","task":"%s"}\n' "$LEGION_TASK" > "$LEGION_RUN_PLAN_FILE"
+printf '%s\n' '{"id":"one","archetype":"implement-feature","task":"Implement the first delegated slice."}' '{"id":"two","archetype":"write-tests","task":"Implement the second delegated slice."}' > "$LEGION_RUN_SLICES_FILE"
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/fieldops-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$LEGION_RUN_DIR/boundary-inputs"
+jq -cn --arg path "${LEGION_LEARNING_CONTEXT_PATH-unset}" --arg revision "${LEGION_LEARNING_CONTEXT_REVISION-unset}" \
+  '{path:$path,revision:$revision}' > "$LEGION_RUN_DIR/boundary-inputs/validate.json"
+printf '{"ok":true,"command":"fieldops-validate"}\n'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$LEGION_RUN_DIR/boundary-inputs"
+slices=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in --slices) slices="$2"; shift 2 ;; *) shift ;; esac
+done
+cp "$slices" "$LEGION_RUN_DIR/boundary-inputs/delegated-slices.jsonl"
+ledger="$LEGION_RUN_DIR/fanout-task-ledger.json"
+printf '{"schema":"legion.task-ledger.v1","status":"completed","tasks":[]}\n' > "$ledger"
+jq -cn --arg ledger "$ledger" '{ok:1,slices:2,failed:0,applied:2,results:[],task_ledger_path:$ledger}'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  final-review) printf '{"executor":"claude","model":"test-model-claude","reasoning_effort":"high","resolved":true}\n' ;;
+  *) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
+esac
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-claude" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$LEGION_RUN_DIR/boundary-inputs/final-review.args"
+printf '{"status":"ok","model":"test-model-claude","result":"{\\"verdict\\":\\"approve\\",\\"summary\\":\\"approved\\",\\"findings\\":[]}"}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/fieldops-plan" "$BATS_TEST_TMPDIR/bin/fieldops-validate" \
+    "$BATS_TEST_TMPDIR/bin/legion-fanout" "$BATS_TEST_TMPDIR/bin/legion-route" "$BATS_TEST_TMPDIR/bin/legion-claude"
+}
+
+run_learning_context_lifecycle() {
+  manifest="$(make_plugin)"
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Exercise learning context" --name learning-contract --json
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+}
+
+assert_learning_context_artifacts() {
+  [ -s "$run_dir/learning-context.json" ]
+  [ -s "$run_dir/learning-usage.json" ]
+  jq -e '.schema == "legion.learning-context.v1"' "$run_dir/learning-context.json"
+  jq -e '.schema == "legion.learning-usage.v1"' "$run_dir/learning-usage.json"
+}
+
+@test "legion-run: no-hint lifecycle still emits typed context and usage before planning" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  export LEARNING_CONTEXT_CASE=no-hints
+
+  run_learning_context_lifecycle
+  [ "$status" -eq 0 ]
+  assert_learning_context_artifacts
+  jq -e '.selected_hints == [] and .excluded_hints == []' "$run_dir/learning-context.json"
+  jq -e '.hint_count == 0 and .token_count == 0' "$run_dir/learning-usage.json"
+  jq -e 'index("compile-context") and index("--entity") and index("heavy-task:learning-contract") and index("--stage") and index("plan") and index("--json")' \
+    "$run_dir/boundary-inputs/compile-context.args.json"
+  jq -e --arg path "$run_dir/learning-context.json" \
+    '.path == $path and (.revision | length > 0)' "$run_dir/boundary-inputs/plan.json"
+}
+
+@test "legion-run: advisory trusted guidance reaches planning, every delegated slice, validation, and final review" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  export LEARNING_CONTEXT_CASE=advisory
+
+  run_learning_context_lifecycle
+  [ "$status" -eq 0 ]
+  assert_learning_context_artifacts
+  jq -e '.selected_hints | map(.id) == ["advisory-coverage"]' "$run_dir/learning-context.json"
+  jq -e --arg path "$run_dir/learning-context.json" \
+    '.learning_context.path == $path and (.learning_context.revision | length > 0) and .learning_context.dispositions[] | select(.id == "advisory-coverage" and .disposition == "advisory")' "$run_dir/plan.json"
+  jq -e -s 'length == 2 and all(.[]; .task | contains("Advisory: cover the public API boundary."))' \
+    "$run_dir/boundary-inputs/delegated-slices.jsonl"
+  jq -e --arg path "$run_dir/learning-context.json" \
+    '.path == $path and (.revision | length > 0)' "$run_dir/boundary-inputs/validate.json"
+  grep -Fq 'Advisory: cover the public API boundary.' "$run_dir/boundary-inputs/final-review.args"
+}
+
+@test "legion-run: required trusted guidance has a required disposition at every delegated boundary" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  export LEARNING_CONTEXT_CASE=required
+
+  run_learning_context_lifecycle
+  [ "$status" -eq 0 ]
+  assert_learning_context_artifacts
+  jq -e --arg path "$run_dir/learning-context.json" \
+    '.learning_context.path == $path and .learning_context.dispositions[] | select(.id == "required-contract" and .disposition == "required")' "$run_dir/plan.json"
+  jq -e -s 'all(.[]; .task | contains("Required: preserve the billing idempotency contract."))' \
+    "$run_dir/boundary-inputs/delegated-slices.jsonl"
+  grep -Fq 'Required: preserve the billing idempotency contract.' "$run_dir/boundary-inputs/final-review.args"
+}
+
+@test "legion-run: retired hints are recorded as excluded and never reach planner, slices, validator, or reviewer" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  export LEARNING_CONTEXT_CASE=retired
+
+  run_learning_context_lifecycle
+  [ "$status" -eq 0 ]
+  assert_learning_context_artifacts
+  jq -e '.selected_hints == [] and .excluded_hints[] | select(.id == "retired-danger" and .exclusion_reason == "retired")' "$run_dir/learning-context.json"
+  jq -e '.learning_context.dispositions[] | select(.id == "retired-danger" and .disposition == "retired")' "$run_dir/plan.json"
+  ! grep -R -F 'retired-danger' "$run_dir/boundary-inputs"
+}
+
+@test "legion-run: prompt-budgeted context keeps selected guidance and exposes exclusions in plan dispositions" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  export LEARNING_CONTEXT_CASE=prompt-budget
+
+  run_learning_context_lifecycle
+  [ "$status" -eq 0 ]
+  assert_learning_context_artifacts
+  jq -e '.hint_count == 2 and .token_count == 20' "$run_dir/learning-usage.json"
+  jq -e '.selected_hints | map(.id) == ["a-first", "b-second"]' "$run_dir/learning-context.json"
+  jq -e '.learning_context.dispositions[] | select(.id == "m-middle" and .disposition == "token_limit")' "$run_dir/plan.json"
+  jq -e '.learning_context.dispositions[] | select(.id == "z-last" and .disposition == "hint_limit")' "$run_dir/plan.json"
+  grep -Fq 'alpha alpha alpha' "$run_dir/boundary-inputs/final-review.args"
+  ! grep -R -F 'm-middle' "$run_dir/boundary-inputs"
+  ! grep -R -F 'z-last' "$run_dir/boundary-inputs"
+}
+
+@test "legion-run: compiler failure still writes empty typed artifacts and records the learning-context failure" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  export LEARNING_CONTEXT_CASE=compiler-failure
+
+  run_learning_context_lifecycle
+  [ "$status" -eq 1 ]
+  assert_learning_context_artifacts
+  echo "$json" | jq -e '.ok == false and .failed_stage == "learning-context"'
+  jq -e '.hint_count == 0 and .token_count == 0' "$run_dir/learning-usage.json"
+  jq -e '.stages[] | select(.stage == "learning-context" and .status == "failed")' "$run_dir/stage-status.json"
+}
+
+@test "legion-run: context compiler timeout leaves typed artifacts and a timed-out learning-context receipt" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  export LEARNING_CONTEXT_CASE=compiler-timeout
+
+  manifest="$(make_plugin)"
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Exercise learning context" --name learning-contract --stage-timeout-seconds 1 --json
+  [ "$status" -eq 124 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  assert_learning_context_artifacts
+  echo "$json" | jq -e '.ok == false and .failed_stage == "learning-context"'
+  jq -e '.stages[] | select(.stage == "learning-context" and .status == "failed" and .terminal_status == "timed_out")' "$run_dir/stage-status.json"
+}
+
 @test "legion-run: rejects a domain plugin that does not require legion-run" {
   manifest="$(make_plugin)"
   perl -0pi -e 's/entrypoint = "legion-run"/entrypoint = "custom-runner"/' "$manifest"

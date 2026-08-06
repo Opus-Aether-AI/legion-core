@@ -16,8 +16,37 @@
       "additionalProperties": false
     },
     "usage": {"$ref": "legion.learning-usage.v1.schema.json"},
-    "selected_hints": {"type": "array"},
-    "excluded_hints": {"type": "array"}
+    "selected_hints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "scope", "guidance", "selection_reason", "token_count"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "scope": {"type": "string", "minLength": 1},
+          "guidance": {"type": "string", "minLength": 1},
+          "selection_reason": {"type": "string", "minLength": 1},
+          "token_count": {"type": "integer", "minimum": 0},
+          "entity": {"type": "string", "minLength": 1},
+          "stage": {"type": "string", "minLength": 1},
+          "selector": {"type": "object"},
+          "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "excluded_hints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "exclusion_reason"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "exclusion_reason": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    }
   },
   "additionalProperties": false
 }

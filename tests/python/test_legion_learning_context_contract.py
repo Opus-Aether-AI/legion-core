@@ -173,6 +173,7 @@ def test_context_and_usage_schemas_are_public_versioned_documents():
     expected = {
         "legion.learning-hint.v1.schema.json": "legion.learning-hint.v1",
         "legion.learning-context.v1.schema.json": "legion.learning-context.v1",
+        "legion.learning-context-receipts.v1.schema.json": "legion.learning-context-receipts.v1",
         "legion.learning-usage.v1.schema.json": "legion.learning-usage.v1",
         "legion.learning-evidence.v1.schema.json": "legion.learning-evidence.v1",
         "legion.learning-state.v1.schema.json": "legion.learning-state.v1",

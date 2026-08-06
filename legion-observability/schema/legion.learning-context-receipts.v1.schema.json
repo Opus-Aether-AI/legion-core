@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.learning-context-receipts.v1.schema.json",
+  "title": "legion.learning-context-receipts.v1",
+  "type": "object",
+  "required": ["schema", "learning_context", "receipts"],
+  "properties": {
+    "schema": {"const": "legion.learning-context-receipts.v1"},
+    "learning_context": {
+      "type": "object",
+      "required": ["path", "revision", "mode", "dispositions"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "mode": {"enum": ["off", "observe", "advisory", "required"]},
+        "dispositions": {"type": "array"}
+      },
+      "additionalProperties": false
+    },
+    "receipts": {"type": "array"}
+  },
+  "additionalProperties": false
+}

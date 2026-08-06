@@ -260,3 +260,10 @@ legion-self-learn reconcile --repo . --legacy-state legacy-state.json --evidence
 
 These hints are failure evidence. They do not override the user, the repository's
 `AGENTS.md`, or normal validation gates.
+
+`legion-run` consumes this compiler at its planning boundary. It writes the
+schema-valid context and usage artifacts even when no hint is selected, hashes
+the immutable context as a revision, and carries only bounded trusted guidance
+to delegated slice and final-review inputs. Its `learning-receipts.json`
+records each delivery disposition and the deterministic-validation receipt;
+it never carries raw transcripts or evidence excerpts.

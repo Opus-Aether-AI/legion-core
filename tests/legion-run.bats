@@ -216,7 +216,7 @@ set -euo pipefail
 case "$1" in
   compile-context)
     mkdir -p "$LEGION_RUN_DIR/boundary-inputs"
-    jq -cn '$ARGS.positional' --args "$@" > "$LEGION_RUN_DIR/boundary-inputs/compile-context.args.json"
+    jq -cn '$ARGS.positional' --args -- "$@" > "$LEGION_RUN_DIR/boundary-inputs/compile-context.args.json"
     case "${LEARNING_CONTEXT_CASE:-no-hints}" in
       compiler-failure)
         printf '%s\n' 'simulated learning-context compiler failure' >&2
@@ -354,7 +354,7 @@ assert_learning_context_artifacts() {
   assert_learning_context_artifacts
   jq -e '.selected_hints | map(.id) == ["advisory-coverage"]' "$run_dir/learning-context.json"
   jq -e --arg path "$run_dir/learning-context.json" \
-    '.learning_context.path == $path and (.learning_context.revision | length > 0) and .learning_context.dispositions[] | select(.id == "advisory-coverage" and .disposition == "advisory")' "$run_dir/plan.json"
+    '.learning_context.path == $path and (.learning_context.revision | length > 0) and (.learning_context.dispositions[] | select(.id == "advisory-coverage" and .disposition == "advisory"))' "$run_dir/plan.json"
   jq -e -s 'length == 2 and all(.[]; .task | contains("Advisory: cover the public API boundary."))' \
     "$run_dir/boundary-inputs/delegated-slices.jsonl"
   jq -e --arg path "$run_dir/learning-context.json" \
@@ -372,7 +372,7 @@ assert_learning_context_artifacts() {
   [ "$status" -eq 0 ]
   assert_learning_context_artifacts
   jq -e --arg path "$run_dir/learning-context.json" \
-    '.learning_context.path == $path and .learning_context.dispositions[] | select(.id == "required-contract" and .disposition == "required")' "$run_dir/plan.json"
+    '.learning_context.path == $path and (.learning_context.dispositions[] | select(.id == "required-contract" and .disposition == "required"))' "$run_dir/plan.json"
   jq -e -s 'all(.[]; .task | contains("Required: preserve the billing idempotency contract."))' \
     "$run_dir/boundary-inputs/delegated-slices.jsonl"
   grep -Fq 'Required: preserve the billing idempotency contract.' "$run_dir/boundary-inputs/final-review.args"
@@ -387,7 +387,7 @@ assert_learning_context_artifacts() {
   run_learning_context_lifecycle
   [ "$status" -eq 0 ]
   assert_learning_context_artifacts
-  jq -e '.selected_hints == [] and .excluded_hints[] | select(.id == "retired-danger" and .exclusion_reason == "retired")' "$run_dir/learning-context.json"
+  jq -e '.selected_hints == [] and (.excluded_hints[] | select(.id == "retired-danger" and .exclusion_reason == "retired"))' "$run_dir/learning-context.json"
   jq -e '.learning_context.dispositions[] | select(.id == "retired-danger" and .disposition == "retired")' "$run_dir/plan.json"
   ! grep -R -F 'retired-danger' "$run_dir/boundary-inputs"
 }

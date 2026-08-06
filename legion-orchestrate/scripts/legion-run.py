@@ -56,6 +56,10 @@ PIPELINE_STAGES = [
 PIPELINE_REQUIRED_ARTIFACTS = [
     "doctor.json",
     "self-learn-hints.json",
+    "learning-context.json",
+    "learning-usage.json",
+    "learning-context-receipt.json",
+    "learning-receipts.json",
     "plan.json",
     "slices.jsonl",
     "routes.json",
@@ -77,6 +81,12 @@ PIPELINE_REQUIRED_ARTIFACTS = [
 PIPELINE_STAGE_ARTIFACTS = {
     "doctor": ["doctor.json"],
     "self-learn-hints": ["self-learn-hints.json"],
+    "learning-context": [
+        "learning-context.json",
+        "learning-usage.json",
+        "learning-context-receipt.json",
+        "learning-receipts.json",
+    ],
     "plan": ["plan.json", "slices.jsonl"],
     "route": ["routes.json"],
     "fanout-apply": ["fanout.json", "task-ledger.json"],
@@ -87,6 +97,19 @@ PIPELINE_STAGE_ARTIFACTS = {
     "share": ["share.json"],
     "self-learn": ["learning-feedback.json", "self-learn.json"],
     "heal-plan": ["heal-plan.json"],
+}
+
+LEARNING_CONTEXT_MODES = {"off", "observe", "advisory", "required"}
+_LEARNING_SAFE_HINT_FIELDS = {
+    "id",
+    "scope",
+    "guidance",
+    "selection_reason",
+    "token_count",
+    "entity",
+    "stage",
+    "selector",
+    "evidence_ids",
 }
 
 COMMAND_FALLBACKS = {
@@ -374,6 +397,156 @@ def contract_payload(runner: dict[str, Any], repo: Path, task: str) -> dict[str,
     }
 
 
+def _empty_learning_context(repository_identity: str, entity: str) -> dict[str, Any]:
+    usage = {"schema": "legion.learning-usage.v1", "hint_count": 0, "token_count": 0}
+    return {
+        "schema": "legion.learning-context.v1",
+        "repository_identity": repository_identity,
+        "entity": entity,
+        "stage": "plan",
+        "limits": {"max_hints": 20, "max_tokens": 1200},
+        "usage": usage,
+        "selected_hints": [],
+        "excluded_hints": [],
+    }
+
+
+def _learning_context_error(payload: Any) -> str:
+    """Return a compact validation error for the public typed context contract."""
+    if not isinstance(payload, dict):
+        return "expected an object"
+    required = {
+        "schema", "repository_identity", "entity", "stage", "limits", "usage",
+        "selected_hints", "excluded_hints",
+    }
+    if set(payload) != required:
+        return "unexpected or missing top-level fields"
+    if payload.get("schema") != "legion.learning-context.v1":
+        return "invalid schema"
+    if not all(isinstance(payload.get(key), str) and payload[key] for key in ("repository_identity", "entity", "stage")):
+        return "repository_identity, entity, and stage must be non-empty strings"
+    limits = payload.get("limits")
+    usage = payload.get("usage")
+    if not isinstance(limits, dict) or set(limits) != {"max_hints", "max_tokens"}:
+        return "invalid limits"
+    if not isinstance(usage, dict) or set(usage) != {"schema", "hint_count", "token_count"} or usage.get("schema") != "legion.learning-usage.v1":
+        return "invalid usage"
+    for value in [limits.get("max_hints"), limits.get("max_tokens"), usage.get("hint_count"), usage.get("token_count")]:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return "limits and usage counts must be non-negative integers"
+    selected = payload.get("selected_hints")
+    excluded = payload.get("excluded_hints")
+    if not isinstance(selected, list) or not isinstance(excluded, list):
+        return "selected_hints and excluded_hints must be arrays"
+    if len(selected) != usage["hint_count"] or len(selected) > limits["max_hints"]:
+        return "selected hint count exceeds or disagrees with limits"
+    selected_tokens = 0
+    for hint in selected:
+        if not isinstance(hint, dict) or set(hint) - _LEARNING_SAFE_HINT_FIELDS:
+            return "selected hint contains unsafe fields"
+        if not all(isinstance(hint.get(key), str) and hint[key] for key in ("id", "scope", "guidance", "selection_reason")):
+            return "selected hint is missing safe guidance fields"
+        tokens = hint.get("token_count")
+        if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0:
+            return "selected hint token_count must be a non-negative integer"
+        selected_tokens += tokens
+    if selected_tokens != usage["token_count"] or selected_tokens > limits["max_tokens"]:
+        return "selected token count exceeds or disagrees with limits"
+    for hint in excluded:
+        if not isinstance(hint, dict) or set(hint) != {"id", "exclusion_reason"}:
+            return "excluded hint contains unsafe fields"
+        if not all(isinstance(hint.get(key), str) and hint[key] for key in ("id", "exclusion_reason")):
+            return "excluded hint is missing an exclusion reason"
+    return ""
+
+
+def _safe_learning_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Copy only the typed executor-safe context fields into run artifacts."""
+    return {
+        "schema": payload["schema"],
+        "repository_identity": payload["repository_identity"],
+        "entity": payload["entity"],
+        "stage": payload["stage"],
+        "limits": {"max_hints": payload["limits"]["max_hints"], "max_tokens": payload["limits"]["max_tokens"]},
+        "usage": {
+            "schema": payload["usage"]["schema"],
+            "hint_count": payload["usage"]["hint_count"],
+            "token_count": payload["usage"]["token_count"],
+        },
+        "selected_hints": [
+            {key: hint[key] for key in sorted(hint) if key in _LEARNING_SAFE_HINT_FIELDS}
+            for hint in payload["selected_hints"]
+        ],
+        "excluded_hints": [
+            {"id": hint["id"], "exclusion_reason": hint["exclusion_reason"]}
+            for hint in payload["excluded_hints"]
+        ],
+    }
+
+
+def _learning_revision(context: dict[str, Any]) -> str:
+    encoded = json.dumps(context, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _required_guidance(hint: dict[str, Any], mode: str) -> bool:
+    return mode == "required" or str(hint.get("guidance") or "").lstrip().lower().startswith("required:")
+
+
+def _learning_dispositions(context: dict[str, Any], mode: str) -> list[dict[str, str]]:
+    dispositions: list[dict[str, str]] = []
+    for hint in context["selected_hints"]:
+        if mode == "off":
+            disposition = "off"
+        elif mode == "observe":
+            disposition = "observed"
+        elif _required_guidance(hint, mode):
+            disposition = "required"
+        else:
+            disposition = "advisory"
+        dispositions.append({"id": str(hint["id"]), "disposition": disposition})
+    for hint in context["excluded_hints"]:
+        dispositions.append({"id": str(hint["id"]), "disposition": str(hint["exclusion_reason"])})
+    return sorted(dispositions, key=lambda item: (item["id"], item["disposition"]))
+
+
+def _delivered_guidance(context: dict[str, Any], mode: str) -> list[str]:
+    if mode in {"off", "observe"}:
+        return []
+    return [str(hint["guidance"]) for hint in context["selected_hints"]]
+
+
+def _learning_context_descriptor(path: Path, revision: str, mode: str, dispositions: list[dict[str, str]]) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "revision": revision,
+        "mode": mode,
+        "dispositions": dispositions,
+    }
+
+
+def _append_guidance(task: str, guidance: list[str]) -> str:
+    if not guidance:
+        return task
+    return f"{task.rstrip()}\n\nTrusted learning guidance (bounded):\n" + "\n".join(f"- {item}" for item in guidance)
+
+
+def _write_learning_receipts(
+    path: Path,
+    *,
+    descriptor: dict[str, Any],
+    receipts: list[dict[str, Any]],
+) -> None:
+    _write_json(
+        path,
+        {
+            "schema": "legion.learning-context-receipts.v1",
+            "learning_context": descriptor,
+            "receipts": receipts,
+        },
+    )
+
+
 def run_process(
     argv: list[str],
     env: dict[str, str],
@@ -509,6 +682,7 @@ def create_review_snapshot(
     run_dir: Path,
     *,
     timeout_seconds: int,
+    learning_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write the current worktree to a detached commit without changing its index.
 
@@ -572,6 +746,8 @@ def create_review_snapshot(
         "dirty": tree_sha != base_tree,
         "created_at": _iso_utc(),
     }
+    if learning_context is not None:
+        payload["learning_context"] = learning_context
     _write_json(run_dir / "review-input.json", payload)
     return payload
 
@@ -1045,13 +1221,18 @@ def _artifact_preview(run_dir: Path, artifact: str) -> str:
 
 
 def _new_stage_records() -> list[dict[str, Any]]:
+    lifecycle_stages = [
+        *PIPELINE_STAGES[:2],
+        "learning-context",
+        *PIPELINE_STAGES[2:],
+    ]
     return [
         {
             "stage": stage,
             "status": "pending",
             "artifacts": PIPELINE_STAGE_ARTIFACTS.get(stage, []),
         }
-        for stage in PIPELINE_STAGES
+        for stage in lifecycle_stages
     ]
 
 
@@ -1625,6 +1806,7 @@ def execute(
     *,
     stage_timeout_seconds: int,
     allow_generated_slices: bool,
+    learning_context_mode: str,
 ) -> int:
     os.umask(0o077)
     require_clean_review_source(repo, timeout_seconds=stage_timeout_seconds)
@@ -1635,7 +1817,10 @@ def execute(
     current_stage = ""
 
     env = dict(os.environ)
-    trace_id = str(env.get("LEGION_TRACE_ID") or "").strip() or run_id
+    # The run report is scoped to this invocation, even when this runner is
+    # nested under an executor that has an inherited parent trace.
+    trace_id = run_id
+    inherited_trace_id = str(env.get("LEGION_TRACE_ID") or "").strip()
     env.update(
         {
             "LEGION_STATE_ROOT": state["state_root"],
@@ -1645,7 +1830,7 @@ def execute(
             "LEGION_BENCH_DIR": state["bench_dir"],
             "LEGION_REPORTS_DIR": state["reports_dir"],
             "LEGION_RUN_ID": run_id,
-            "LEGION_TRACE_ID": trace_id,
+            "LEGION_TRACE_ID": inherited_trace_id or trace_id,
             "LEGION_RUN_DIR": str(run_dir),
             "LEGION_RUN_PLAN_FILE": str(run_dir / "plan.json"),
             "LEGION_RUN_SLICES_FILE": str(run_dir / "slices.jsonl"),
@@ -1657,7 +1842,28 @@ def execute(
             "LEGION_PIPELINE_PROFILE": profile,
             "LEGION_TARGET_TYPE": runner.get("target_type", runner.get("mode", "plugin")),
             "LEGION_TARGET_NAME": runner["name"],
+            "LEGION_LEARNING_CONTEXT_MODE": learning_context_mode,
         }
+    )
+    learning_entity = str(
+        runner.get("learning_entity")
+        or f"{runner.get('target_type', 'runner')}:{runner['name']}"
+    )
+    context_path = run_dir / "learning-context.json"
+    usage_path = run_dir / "learning-usage.json"
+    context_receipt_path = run_dir / "learning-context-receipt.json"
+    receipts_path = run_dir / "learning-receipts.json"
+    learning_context = _empty_learning_context(str(state["repository_identity"]), learning_entity)
+    _write_json(context_path, learning_context)
+    _write_json(usage_path, learning_context["usage"])
+    learning_revision = _learning_revision(learning_context)
+    learning_dispositions = _learning_dispositions(learning_context, learning_context_mode)
+    learning_descriptor = _learning_context_descriptor(
+        context_path, learning_revision, learning_context_mode, learning_dispositions
+    )
+    learning_receipts: list[dict[str, Any]] = []
+    _write_learning_receipts(
+        receipts_path, descriptor=learning_descriptor, receipts=learning_receipts
     )
 
     def stage_run(
@@ -1667,6 +1873,7 @@ def execute(
         *,
         shell: bool = False,
         hermetic: bool = False,
+        stage_env: dict[str, str] | None = None,
     ) -> Any:
         nonlocal current_stage
         current_stage = stage
@@ -1674,7 +1881,7 @@ def execute(
         write_stage_status(run_dir, stages)
         payload = run_process(
             argv,
-            hermetic_stage_env(env) if hermetic else env,
+            hermetic_stage_env(stage_env or env) if hermetic else (stage_env or env),
             repo,
             artifact,
             shell=shell,
@@ -1684,6 +1891,143 @@ def execute(
         _set_stage_status(stages, stage, "passed")
         write_stage_status(run_dir, stages)
         return payload
+
+    def compile_learning_context() -> None:
+        """Compile one immutable, executor-safe context before the planner runs."""
+        nonlocal current_stage, learning_context, learning_revision
+        nonlocal learning_dispositions, learning_descriptor
+        current_stage = "learning-context"
+        _set_stage_status(stages, "learning-context", "running")
+        write_stage_status(run_dir, stages)
+        if learning_context_mode == "off":
+            _write_json(
+                context_receipt_path,
+                {
+                    "schema": "legion.learning-context-receipt.v1",
+                    "status": "off",
+                    "path": str(context_path),
+                    "revision": learning_revision,
+                },
+            )
+        else:
+            command_artifact = run_dir / ".learning-context-command.json"
+            try:
+                compiled = run_process(
+                    [
+                        _cmd("legion-self-learn"),
+                        "compile-context",
+                        "--entity", learning_entity,
+                        "--stage", "plan",
+                        "--json",
+                    ],
+                    env,
+                    repo,
+                    command_artifact,
+                    timeout_seconds=stage_timeout_seconds,
+                )
+            except LegionRunError as exc:
+                command_artifact.unlink(missing_ok=True)
+                _write_json(
+                    context_receipt_path,
+                    {
+                        "schema": "legion.learning-context-receipt.v1",
+                        "status": "failed",
+                        "path": str(context_path),
+                        "revision": learning_revision,
+                        "exit_code": exc.code,
+                    },
+                )
+                _write_learning_receipts(
+                    receipts_path, descriptor=learning_descriptor, receipts=learning_receipts
+                )
+                context_path.chmod(0o400)
+                usage_path.chmod(0o400)
+                raise
+            command_artifact.unlink(missing_ok=True)
+            if isinstance(compiled, dict):
+                compiled = dict(compiled)
+                compiled.pop("exit_code", None)
+                compiled.pop("stderr", None)
+            # Older self-learning binaries predate compile-context and return
+            # their generic successful payload.  Preserve those callers by
+            # recording an empty, typed context rather than treating that
+            # capability absence as malformed trusted guidance.
+            if compiled == {"ok": True}:
+                _write_json(
+                    context_receipt_path,
+                    {
+                        "schema": "legion.learning-context-receipt.v1",
+                        "status": "unavailable",
+                        "path": str(context_path),
+                        "revision": learning_revision,
+                    },
+                )
+                compiled = learning_context
+            error = _learning_context_error(compiled)
+            if error:
+                _write_json(
+                    context_receipt_path,
+                    {
+                        "schema": "legion.learning-context-receipt.v1",
+                        "status": "failed",
+                        "path": str(context_path),
+                        "revision": learning_revision,
+                        "error": error,
+                    },
+                )
+                context_path.chmod(0o400)
+                usage_path.chmod(0o400)
+                raise LegionRunError(
+                    f"stage semantic failure (learning-context-receipt.json): {error}", 1
+                )
+            learning_context = _safe_learning_context(compiled)
+            _write_json(context_path, learning_context)
+            _write_json(usage_path, learning_context["usage"])
+            learning_revision = _learning_revision(learning_context)
+            learning_dispositions = _learning_dispositions(
+                learning_context, learning_context_mode
+            )
+            learning_descriptor = _learning_context_descriptor(
+                context_path,
+                learning_revision,
+                learning_context_mode,
+                learning_dispositions,
+            )
+            _write_json(
+                context_receipt_path,
+                {
+                    "schema": "legion.learning-context-receipt.v1",
+                    "status": "compiled",
+                    "path": str(context_path),
+                    "revision": learning_revision,
+                    "usage": learning_context["usage"],
+                },
+            )
+        context_path.chmod(0o400)
+        usage_path.chmod(0o400)
+        env.update(
+            {
+                "LEGION_LEARNING_CONTEXT_PATH": str(context_path),
+                "LEGION_LEARNING_CONTEXT_REVISION": learning_revision,
+            }
+        )
+        _set_stage_status(stages, "learning-context", "passed")
+        write_stage_status(run_dir, stages)
+
+    def record_learning_receipt(boundary: str, kind: str, status: str) -> None:
+        learning_receipts.append(
+            {
+                "boundary": boundary,
+                "kind": kind,
+                "status": status,
+                "path": str(context_path),
+                "revision": learning_revision,
+                "dispositions": learning_dispositions,
+            }
+        )
+        _write_learning_receipts(
+            receipts_path, descriptor=learning_descriptor, receipts=learning_receipts
+        )
 
     def finalize_self_learning(
         *,
@@ -1759,6 +2103,17 @@ def execute(
 
     def finalize_failure(exc: LegionRunError) -> dict[str, Any]:
         failed_stage = current_stage or "unknown"
+        receipt_boundary = {
+            "plan": ("plan", "delivery"),
+            "fanout-apply": ("fanout-apply", "delivery"),
+            "validate": ("validate", "deterministic-verification"),
+            "review": ("final-review", "delivery"),
+        }.get(failed_stage)
+        if receipt_boundary and not any(
+            receipt.get("boundary") == receipt_boundary[0]
+            for receipt in learning_receipts
+        ):
+            record_learning_receipt(receipt_boundary[0], receipt_boundary[1], "failed")
         _set_stage_status(stages, failed_stage, "failed", str(exc))
         if exc.code == 124:
             for item in stages:
@@ -1820,7 +2175,8 @@ def execute(
 
     try:
         stage_run("doctor", [_cmd("legion-doctor"), "--repo", str(repo), "--strict-demo", "--json"], run_dir / "doctor.json")
-        stage_run("self-learn-hints", [_cmd("legion-self-learn"), "hints", "--entity", f"{runner.get('target_type', 'runner')}:{runner['name']}", "--json"], run_dir / "self-learn-hints.json")
+        stage_run("self-learn-hints", [_cmd("legion-self-learn"), "hints", "--entity", learning_entity, "--json"], run_dir / "self-learn-hints.json")
+        compile_learning_context()
 
         current_stage = "plan"
         _set_stage_status(stages, "plan", "running")
@@ -1839,6 +2195,14 @@ def execute(
                 timeout_seconds=stage_timeout_seconds,
             )
             normalize_plan_file(plan_path, runner, task)
+        plan_payload = _load_json_object(plan_path)
+        plan_payload["learning_context"] = learning_descriptor
+        _write_json(plan_path, plan_payload)
+        record_learning_receipt(
+            "plan",
+            "delivery",
+            "delivered" if _delivered_guidance(learning_context, learning_context_mode) else learning_context_mode,
+        )
         slices_path = run_dir / "slices.jsonl"
         if runner.get("slices_file"):
             copy_explicit_slices(str(runner["slices_file"]), slices_path, repo)
@@ -1850,6 +2214,16 @@ def execute(
             allow_generated_slices=allow_generated_slices,
         )
         slices = load_slices(slices_path)
+        guidance = _delivered_guidance(learning_context, learning_context_mode)
+        if guidance:
+            for item in slices:
+                item["task"] = _append_guidance(str(item.get("task") or ""), guidance)
+            _write_jsonl(slices_path, slices)
+        record_learning_receipt(
+            "fanout-apply",
+            "delivery",
+            "delivered" if guidance else learning_context_mode,
+        )
         _set_stage_status(stages, "plan", "passed")
         write_stage_status(run_dir, stages)
 
@@ -1902,6 +2276,14 @@ def execute(
         if fanout_error is not None:
             raise fanout_error
         validation_payload = stage_run("validate", [runner["commands"]["validate"]], run_dir / "validation.json", shell=True, hermetic=True)
+        if isinstance(validation_payload, dict):
+            validation_payload["learning_context"] = {
+                "path": str(context_path),
+                "revision": learning_revision,
+            }
+            validation_payload["learning_context_dispositions"] = learning_dispositions
+            _write_json(run_dir / "validation.json", validation_payload)
+        record_learning_receipt("validate", "deterministic-verification", "verified")
         current_stage = "review"
         _set_stage_status(stages, "review", "running")
         write_stage_status(run_dir, stages)
@@ -1909,6 +2291,7 @@ def execute(
             repo,
             run_dir,
             timeout_seconds=stage_timeout_seconds,
+            learning_context=learning_descriptor,
         )
         review_route = run_process(
             [_cmd("legion-route"), "final-review", "--task", "independent final review"],
@@ -1926,6 +2309,7 @@ def execute(
             "\"title\":string,\"detail\":string}]}. Focus on correctness, unnecessary complexity, "
             "and spec adherence."
         )
+        review_task = _append_guidance(review_task, guidance)
         if review_executor == "claude":
             stage_run("review", [_cmd("legion-claude"), "run", "--repo", str(repo), "--base", review_input["head_sha"], "--model", str(review_route.get("model") or ""), "--effort", str(review_route.get("reasoning_effort") or "high"), "--sandbox", "read-only", "--no-fallback", "--task", review_task], run_dir / "review.json")
         elif review_executor == "codex":
@@ -1938,8 +2322,15 @@ def execute(
             )
         else:
             stage_run("review", [_cmd("legion-delegate"), "run", "--executor", review_executor, "--model", str(review_route.get("model") or ""), "--sandbox", "read-only", "--repo", str(repo), "--base", review_input["head_sha"], "--task", review_task], run_dir / "review.json")
+        record_learning_receipt(
+            "final-review",
+            "delivery",
+            "delivered" if guidance else learning_context_mode,
+        )
         eval_payload = stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True, hermetic=True)
-        stage_run("report", [_cmd("legion-report"), "--trace", trace_id, "--json"], run_dir / "legion-report.json")
+        report_env = dict(env)
+        report_env["LEGION_TRACE_ID"] = trace_id
+        stage_run("report", [_cmd("legion-report"), "--trace", trace_id, "--json"], run_dir / "legion-report.json", stage_env=report_env)
         stage_run("share", [_cmd("legion-share"), "--window", "1d", "--json"], run_dir / "share.json")
         finalize_self_learning(
             summary_text=f"legion-run completed profile {profile}",
@@ -1990,11 +2381,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="enable legacy generic slices when the plan provider does not emit slices.jsonl",
     )
+    parser.add_argument(
+        "--learning-context-mode",
+        choices=sorted(LEARNING_CONTEXT_MODES),
+        default=os.environ.get("LEGION_LEARNING_CONTEXT_MODE", "advisory"),
+        help="trusted learning compatibility mode: off, observe, advisory, or required (default: advisory)",
+    )
     parser.add_argument("--repo", default=os.getcwd())
     parser.add_argument("--task", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.learning_context_mode not in LEARNING_CONTEXT_MODES:
+        parser.error("--learning-context-mode must be one of: off, observe, advisory, required")
 
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     previous_sigint = signal.getsignal(signal.SIGINT)
@@ -2009,6 +2408,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.plugin or args.plugin_manifest:
             manifest = find_manifest(repo, args.plugin, args.plugin_manifest)
             runner = load_plugin(manifest, args.plugin, args.profile)
+            if args.name:
+                # A plugin can be reused for many independently learned heavy
+                # tasks; an explicit run name scopes that context accordingly.
+                runner["learning_entity"] = f"heavy-task:{_slug(args.name)}"
         else:
             runner = build_direct_runner(args)
         if args.dry_run:
@@ -2029,6 +2432,7 @@ def main(argv: list[str] | None = None) -> int:
             args.json,
             stage_timeout_seconds=args.stage_timeout_seconds,
             allow_generated_slices=args.allow_generated_slices,
+            learning_context_mode=args.learning_context_mode,
         )
     except LegionRunError as exc:
         print(f"legion-run: {exc}", file=sys.stderr)

@@ -84,6 +84,8 @@ printf '%s\n' '{"type":"turn.started"}'
 if [[ $review -eq 1 ]]; then
   if [[ "${MOCK_CODEX_REVIEW_INVALID_VERDICT:-}" == "1" ]]; then
     msg='{"verdict":"approve","summary":"mock invalid review","findings":[{}]}'
+  elif [[ "${MOCK_CODEX_REVIEW_PROSE:-}" == "1" ]]; then
+    msg='No findings. The immutable review completed successfully.'
   else
     msg='{"verdict":"approve","summary":"mock review","findings":[]}'
   fi

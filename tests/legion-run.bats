@@ -228,28 +228,33 @@ case "$1" in
     esac
     case "${LEARNING_CONTEXT_CASE:-no-hints}" in
       advisory)
-        cat <<'JSON'
-{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":1,"token_count":5},"selected_hints":[{"id":"advisory-coverage","scope":"global","guidance":"Advisory: cover the public API boundary.","selection_reason":"global","token_count":5}],"excluded_hints":[]}
+        cat <<JSON
+{"schema":"legion.learning-context.v1","repository_identity":"$LEGION_REPOSITORY_IDENTITY","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":1,"token_count":5},"selected_hints":[{"id":"advisory-coverage","scope":"global","guidance":"Advisory: cover the public API boundary.","selection_reason":"global","token_count":5}],"excluded_hints":[]}
 JSON
         ;;
       required)
-        cat <<'JSON'
-{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":1,"token_count":6},"selected_hints":[{"id":"required-contract","scope":"exact","guidance":"Required: preserve the billing idempotency contract.","selection_reason":"exact","token_count":6}],"excluded_hints":[]}
+        cat <<JSON
+{"schema":"legion.learning-context.v1","repository_identity":"$LEGION_REPOSITORY_IDENTITY","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":1,"token_count":6},"selected_hints":[{"id":"required-contract","scope":"exact","guidance":"Required: preserve the billing idempotency contract.","selection_reason":"exact","token_count":6}],"excluded_hints":[]}
 JSON
         ;;
       retired)
-        cat <<'JSON'
-{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":0,"token_count":0},"selected_hints":[],"excluded_hints":[{"id":"retired-danger","exclusion_reason":"retired"}]}
+        cat <<JSON
+{"schema":"legion.learning-context.v1","repository_identity":"$LEGION_REPOSITORY_IDENTITY","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":0,"token_count":0},"selected_hints":[],"excluded_hints":[{"id":"retired-danger","exclusion_reason":"retired"}]}
 JSON
         ;;
       prompt-budget)
-        cat <<'JSON'
-{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":2,"max_tokens":25},"usage":{"schema":"legion.learning-usage.v1","hint_count":2,"token_count":20},"selected_hints":[{"id":"a-first","scope":"global","guidance":"alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha","selection_reason":"global","token_count":10},{"id":"b-second","scope":"global","guidance":"bravo bravo bravo bravo bravo bravo bravo bravo bravo bravo","selection_reason":"global","token_count":10}],"excluded_hints":[{"id":"m-middle","exclusion_reason":"token_limit"},{"id":"z-last","exclusion_reason":"hint_limit"}]}
+        cat <<JSON
+{"schema":"legion.learning-context.v1","repository_identity":"$LEGION_REPOSITORY_IDENTITY","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":2,"max_tokens":25},"usage":{"schema":"legion.learning-usage.v1","hint_count":2,"token_count":20},"selected_hints":[{"id":"a-first","scope":"global","guidance":"alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha","selection_reason":"global","token_count":10},{"id":"b-second","scope":"global","guidance":"bravo bravo bravo bravo bravo bravo bravo bravo bravo bravo","selection_reason":"global","token_count":10}],"excluded_hints":[{"id":"m-middle","exclusion_reason":"token_limit"},{"id":"z-last","exclusion_reason":"hint_limit"}]}
+JSON
+        ;;
+      wrong-boundary)
+        cat <<JSON
+{"schema":"legion.learning-context.v1","repository_identity":"$LEGION_REPOSITORY_IDENTITY","entity":"heavy-task:wrong","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":0,"token_count":0},"selected_hints":[],"excluded_hints":[]}
 JSON
         ;;
       *)
-        cat <<'JSON'
-{"schema":"legion.learning-context.v1","repository_identity":"test/repo","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":0,"token_count":0},"selected_hints":[],"excluded_hints":[]}
+        cat <<JSON
+{"schema":"legion.learning-context.v1","repository_identity":"$LEGION_REPOSITORY_IDENTITY","entity":"heavy-task:learning-contract","stage":"plan","limits":{"max_hints":20,"max_tokens":1200},"usage":{"schema":"legion.learning-usage.v1","hint_count":0,"token_count":0},"selected_hints":[],"excluded_hints":[]}
 JSON
         ;;
     esac
@@ -337,7 +342,10 @@ assert_learning_context_artifacts() {
   assert_learning_context_artifacts
   jq -e '.selected_hints == [] and .excluded_hints == []' "$run_dir/learning-context.json"
   jq -e '.hint_count == 0 and .token_count == 0' "$run_dir/learning-usage.json"
-  jq -e 'index("compile-context") and index("--entity") and index("heavy-task:learning-contract") and index("--stage") and index("plan") and index("--json")' \
+  repo_real="$(cd "$REPO" && pwd -P)"
+  jq -e --arg repo "$repo_real" '
+    . == ["compile-context", "--repo", $repo, "--entity", "heavy-task:learning-contract", "--stage", "plan", "--json"]
+  ' \
     "$run_dir/boundary-inputs/compile-context.args.json"
   jq -e --arg path "$run_dir/learning-context.json" \
     '.path == $path and (.revision | length > 0)' "$run_dir/boundary-inputs/plan.json"
@@ -376,6 +384,36 @@ assert_learning_context_artifacts() {
   jq -e -s 'all(.[]; .task | contains("Required: preserve the billing idempotency contract."))' \
     "$run_dir/boundary-inputs/delegated-slices.jsonl"
   grep -Fq 'Required: preserve the billing idempotency contract.' "$run_dir/boundary-inputs/final-review.args"
+}
+
+@test "legion-run: Codex final review receives selected guidance as bounded task input" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  cat > "$BATS_TEST_TMPDIR/bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  final-review) printf '{"executor":"codex","model":"test-model-beta","reasoning_effort":"xhigh","resolved":true}\n' ;;
+  *) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
+esac
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$LEGION_RUN_DIR/boundary-inputs/codex-final-review.args"
+printf '{"status":"ok","model":"test-model-beta","verdict":{"verdict":"approve","summary":"approved","findings":[]}}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-route" "$BATS_TEST_TMPDIR/bin/legion-delegate"
+  export LEARNING_CONTEXT_CASE=advisory
+
+  run_learning_context_lifecycle
+
+  [ "$status" -eq 0 ]
+  grep -Fq -- '--task Review the immutable repository diff' \
+    "$run_dir/boundary-inputs/codex-final-review.args"
+  grep -Fq 'Advisory: cover the public API boundary.' \
+    "$run_dir/boundary-inputs/codex-final-review.args"
 }
 
 @test "legion-run: retired hints are recorded as excluded and never reach planner, slices, validator, or reviewer" {
@@ -422,6 +460,20 @@ assert_learning_context_artifacts() {
   echo "$json" | jq -e '.ok == false and .failed_stage == "learning-context"'
   jq -e '.hint_count == 0 and .token_count == 0' "$run_dir/learning-usage.json"
   jq -e '.stages[] | select(.stage == "learning-context" and .status == "failed")' "$run_dir/stage-status.json"
+}
+
+@test "legion-run: rejects a compiled context for a different boundary" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  export LEARNING_CONTEXT_CASE=wrong-boundary
+
+  run_learning_context_lifecycle
+
+  [ "$status" -eq 1 ]
+  echo "$json" | jq -e '.ok == false and .failed_stage == "learning-context"'
+  jq -e '.error | contains("compiled entity does not match")' \
+    "$run_dir/learning-context-receipt.json"
 }
 
 @test "legion-run: context compiler timeout leaves typed artifacts and a timed-out learning-context receipt" {
@@ -714,9 +766,16 @@ set -euo pipefail
 printf '%s\n' "$*" > "$LEGION_RUN_DIR/review-args.txt"
 printf '{"status":"ok","model":"test-model-beta","verdict":{"verdict":"approve","summary":"immutable snapshot reviewed","findings":[]}}\n'
 SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-report" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$LEGION_RUN_DIR/report-args.txt"
+jq -cn --arg trace "${LEGION_TRACE_ID-unset}" '{ok:true,env_trace:$trace}'
+SH
   chmod +x "$BATS_TEST_TMPDIR/bin/legion-fanout" \
     "$BATS_TEST_TMPDIR/bin/fieldops-validate" \
-    "$BATS_TEST_TMPDIR/bin/legion-delegate"
+    "$BATS_TEST_TMPDIR/bin/legion-delegate" \
+    "$BATS_TEST_TMPDIR/bin/legion-report"
   manifest="$(make_plugin)"
 
   LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=3 \
@@ -740,6 +799,8 @@ SH
   [ "$base_sha" != "$head_sha" ]
   git -C "$REPO" cat-file -e "$head_sha:generated.txt"
   grep -Fq -- "--base $base_sha --head $head_sha" "$run_dir/review-args.txt"
+  grep -Fq -- "--trace outer-trace --json" "$run_dir/report-args.txt"
+  jq -e '.env_trace == "outer-trace"' "$run_dir/legion-report.json"
 }
 
 @test "legion-run: a successful fanout must return its task ledger" {

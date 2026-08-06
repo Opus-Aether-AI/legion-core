@@ -218,6 +218,59 @@ def test_build_report_scan_all_keeps_late_manual_outcomes(tmp_path, monkeypatch)
     assert report["outcomes"][0]["id"] == "late"
 
 
+def test_default_cli_state_honors_resolved_telemetry_directory(
+    tmp_path, monkeypatch, capsys
+):
+    repo = tmp_path / "repo"
+    state_root = tmp_path / "state"
+    telemetry = tmp_path / "custom-telemetry"
+    repo.mkdir()
+    telemetry.mkdir()
+    (telemetry / "2026-08-07.jsonl").write_text(
+        json.dumps(
+            {
+                "schema": "legion.span.v1",
+                "run_id": "telemetry-run",
+                "executor": "codex",
+                "model": "test-model",
+                "status": "ok",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        self_learn.legion_state,
+        "resolve_state",
+        lambda _repo: {
+            "state_root": str(state_root),
+            "telemetry_dir": str(telemetry),
+        },
+    )
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(
+        self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: []
+    )
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
+    monkeypatch.setattr(
+        self_learn,
+        "run_scorecard",
+        lambda _repo: self_learn.empty_scorecard(str(repo)),
+    )
+
+    result = self_learn.main(
+        ["run", "--repo", str(repo), "--day", "2026-08-07", "--json"]
+    )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads(
+        open(payload["report_path"], encoding="utf-8").read()
+    )
+    assert report["spans"] == 1
+
+
 def test_build_report_turns_promoted_learning_laws_into_proposals(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     logs = tmp_path / "logs"

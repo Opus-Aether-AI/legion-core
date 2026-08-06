@@ -46,9 +46,14 @@ legion-delegate apply --run <RUN_ID> --repo .
 # Delegate a scoped task to Cursor Agent headless
 legion-cursor run --task "try the same fix with Cursor Agent; minimal edit" --repo .
 
-# Structured Codex review of an immutable base/head pair
-legion-delegate review --archetype security-review --base main --head HEAD --repo .
+# Structured Codex review of an immutable base/head pair, with optional bounded instructions
+legion-delegate review --archetype security-review --base main --head HEAD --repo . \
+  --task "Verify the selected security and learning guardrails."
 ```
+
+Review output is schema-gated. The adapter accepts schema-valid JSON and
+narrowly normalizes Codex's built-in `[P0]`–`[P3]` or explicit `No findings`
+formats; any other prose remains an invalid, fail-closed verdict.
 
 Requires the CLI for each executor you use, plus `jq` and `git`. The proxy
 additionally needs `bun`.

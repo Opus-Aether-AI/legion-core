@@ -509,14 +509,16 @@ $run_error" ]
 @test "delegate review: returns a verdict + emits span" {
     local repo; repo="$(make_test_repo rev1)"
     local base_sha; base_sha="$(git -C "$repo" rev-parse HEAD)"
-    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" \
+      --task "Verify the learned idempotency guardrail." --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e --arg sha "$base_sha" '
       .reviewed_base_sha == $sha and .reviewed_head_sha == $sha
       and .attempts == 1 and .max_attempts == 2
     '
-    assert_mock_called codex "exec review --base $base_sha"
+    assert_mock_called codex "Review only the immutable diff $base_sha...$base_sha."
+    assert_mock_called codex "Verify the learned idempotency guardrail."
 }
 
 @test "delegate review: freezes base/head SHAs and writes a durable terminal receipt" {
@@ -591,6 +593,19 @@ $run_error" ]
     '
     local run_id; run_id="$(echo "$output" | jq -r .run_id)"
     [ ! -d "$repo/.legion/worktrees/$run_id" ]
+}
+
+@test "delegate review: normalizes an explicit no-findings Codex review" {
+    local repo; repo="$(make_test_repo review-prose)"
+    MOCK_CODEX_REVIEW_PROSE=1 run "$DELEGATE" review \
+      --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '
+      .status == "ok"
+      and .verdict.verdict == "approve"
+      and .verdict.findings == []
+    '
 }
 
 @test "delegate review: configurable retry bound stops after one transient attempt" {

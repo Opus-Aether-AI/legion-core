@@ -245,16 +245,22 @@ def _append_jsonl(path: str, payload: dict[str, Any]) -> None:
         handle.write("\n")
 
 
-def load_spans(log_root: str, day: str | None = None) -> list[dict[str, Any]]:
+def load_spans(
+    log_root: str,
+    day: str | None = None,
+    *,
+    telemetry_dir: str = "",
+) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
     # An explicit log root is a caller contract (and keeps report/test runs
     # isolated); only fall back to the process telemetry directory when no root
     # was supplied at all.
-    spans_dir = (
-        os.path.join(os.path.expanduser(log_root), "spans")
-        if log_root
-        else os.environ.get("LEGION_TELEMETRY_DIR") or "spans"
-    )
+    if telemetry_dir:
+        spans_dir = os.path.expanduser(telemetry_dir)
+    elif log_root:
+        spans_dir = os.path.join(os.path.expanduser(log_root), "spans")
+    else:
+        spans_dir = os.environ.get("LEGION_TELEMETRY_DIR") or "spans"
     spans_dir = os.path.expanduser(spans_dir)
     paths = (
         [os.path.join(spans_dir, f"{day}.jsonl")]
@@ -1130,11 +1136,12 @@ def build_report(
     *,
     scan_all: bool = False,
     include_processed: bool = False,
+    telemetry_dir: str = "",
 ) -> dict[str, Any]:
     day = day or _date_utc()
     catalog = build_catalog(repo)
     scan_day = None if scan_all else day
-    spans = load_spans(log_root, scan_day)
+    spans = load_spans(log_root, scan_day, telemetry_dir=telemetry_dir)
     outcomes = dedupe_outcomes(
         span_outcomes(spans, catalog)
         + trigger_eval_outcomes(repo, catalog)
@@ -2028,6 +2035,7 @@ def run_command(args: argparse.Namespace) -> int:
         day,
         scan_all=not bool(args.day),
         include_processed=args.include_processed,
+        telemetry_dir=getattr(args, "telemetry_dir", ""),
     )
     report_path = daily_report_path(args.logs, day)
 
@@ -2164,12 +2172,14 @@ def main(argv: list[str] | None = None) -> int:
     reconcile.add_argument("--json", action="store_true", help="reserved for CLI compatibility; output is JSON")
 
     args = parser.parse_args(argv)
+    if args.cmd is None:
+        args = parser.parse_args(["run", *(argv or [])])
     if hasattr(args, "logs") and not args.logs:
         repo_for_state = getattr(args, "repo", os.getcwd())
-        args.logs = legion_state.resolve_state(repo_for_state)["state_root"]
-    if args.cmd in (None, "run"):
-        if args.cmd is None:
-            args = parser.parse_args(["run", *(argv or [])])
+        resolved = legion_state.resolve_state(repo_for_state)
+        args.logs = resolved["state_root"]
+        args.telemetry_dir = resolved["telemetry_dir"]
+    if args.cmd == "run":
         return run_command(args)
     if args.cmd == "hints":
         payload = hints(args.logs, args.entity, args.limit)

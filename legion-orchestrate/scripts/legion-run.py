@@ -411,7 +411,13 @@ def _empty_learning_context(repository_identity: str, entity: str) -> dict[str, 
     }
 
 
-def _learning_context_error(payload: Any) -> str:
+def _learning_context_error(
+    payload: Any,
+    *,
+    repository_identity: str = "",
+    entity: str = "",
+    stage: str = "",
+) -> str:
     """Return a compact validation error for the public typed context contract."""
     if not isinstance(payload, dict):
         return "expected an object"
@@ -425,6 +431,13 @@ def _learning_context_error(payload: Any) -> str:
         return "invalid schema"
     if not all(isinstance(payload.get(key), str) and payload[key] for key in ("repository_identity", "entity", "stage")):
         return "repository_identity, entity, and stage must be non-empty strings"
+    for key, expected in (
+        ("repository_identity", repository_identity),
+        ("entity", entity),
+        ("stage", stage),
+    ):
+        if expected and payload.get(key) != expected:
+            return f"compiled {key} does not match the requested boundary"
     limits = payload.get("limits")
     usage = payload.get("usage")
     if not isinstance(limits, dict) or set(limits) != {"max_hints", "max_tokens"}:
@@ -1864,10 +1877,10 @@ def execute(
     current_stage = ""
 
     env = dict(os.environ)
-    # The run report is scoped to this invocation, even when this runner is
-    # nested under an executor that has an inherited parent trace.
-    trace_id = run_id
     inherited_trace_id = str(env.get("LEGION_TRACE_ID") or "").strip()
+    # Nested runs join their parent's trace; top-level runs own a fresh trace.
+    # The report must query the same identity downstream stages emit.
+    trace_id = inherited_trace_id or run_id
     env.update(
         {
             "LEGION_STATE_ROOT": state["state_root"],
@@ -1889,6 +1902,7 @@ def execute(
             "LEGION_PIPELINE_PROFILE": profile,
             "LEGION_TARGET_TYPE": runner.get("target_type", runner.get("mode", "plugin")),
             "LEGION_TARGET_NAME": runner["name"],
+            "LEGION_REPOSITORY_IDENTITY": state["repository_identity"],
             "LEGION_LEARNING_CONTEXT_MODE": learning_context_mode,
         }
     )
@@ -1963,6 +1977,7 @@ def execute(
                     [
                         _cmd("legion-self-learn"),
                         "compile-context",
+                        "--repo", str(repo),
                         "--entity", learning_entity,
                         "--stage", "plan",
                         "--json",
@@ -2010,7 +2025,12 @@ def execute(
                     },
                 )
                 compiled = learning_context
-            error = _learning_context_error(compiled)
+            error = _learning_context_error(
+                compiled,
+                repository_identity=str(state["repository_identity"]),
+                entity=learning_entity,
+                stage="plan",
+            )
             if error:
                 _write_json(
                     context_receipt_path,
@@ -2360,7 +2380,7 @@ def execute(
         if review_executor == "claude":
             stage_run("review", [_cmd("legion-claude"), "run", "--repo", str(repo), "--base", review_input["head_sha"], "--model", str(review_route.get("model") or ""), "--effort", str(review_route.get("reasoning_effort") or "high"), "--sandbox", "read-only", "--no-fallback", "--task", review_task], run_dir / "review.json")
         elif review_executor == "codex":
-            stage_run("review", [_cmd("legion-delegate"), "review", "--model", str(review_route.get("model") or ""), "--reasoning-effort", str(review_route.get("reasoning_effort") or "xhigh"), "--repo", str(repo), "--base", review_input["base_sha"], "--head", review_input["head_sha"]], run_dir / "review.json")
+            stage_run("review", [_cmd("legion-delegate"), "review", "--model", str(review_route.get("model") or ""), "--reasoning-effort", str(review_route.get("reasoning_effort") or "xhigh"), "--repo", str(repo), "--base", review_input["base_sha"], "--head", review_input["head_sha"], "--task", review_task], run_dir / "review.json")
         elif review_executor == "self":
             raise LegionRunError(
                 "final-review resolved to executor=self; an independent delegated "
@@ -2375,9 +2395,7 @@ def execute(
             "delivered" if guidance else learning_context_mode,
         )
         eval_payload = stage_run("evaluate", [runner["commands"]["evaluate"]], run_dir / "eval.json", shell=True, hermetic=True)
-        report_env = dict(env)
-        report_env["LEGION_TRACE_ID"] = trace_id
-        stage_run("report", [_cmd("legion-report"), "--trace", trace_id, "--json"], run_dir / "legion-report.json", stage_env=report_env)
+        stage_run("report", [_cmd("legion-report"), "--trace", trace_id, "--json"], run_dir / "legion-report.json", stage_env=env)
         stage_run("share", [_cmd("legion-share"), "--window", "1d", "--json"], run_dir / "share.json")
         finalize_self_learning(
             summary_text=f"legion-run completed profile {profile}",

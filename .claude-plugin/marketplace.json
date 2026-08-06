@@ -13,7 +13,7 @@
       "name": "legion-router",
       "source": "./legion-router",
       "description": "Legion's multi-model brain: delegate scoped tasks to configured Codex, Cursor, Claude, and opencode executors, then bring back a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
-      "version": "0.5.6",
+      "version": "0.5.7",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",
@@ -64,7 +64,7 @@
       "name": "legion-orchestrate",
       "source": "./legion-orchestrate",
       "description": "Legion's dynamic multi-model orchestrator: the active primary decomposes work, configured executor roles fan out scoped slices, independent roles cross-verify, and the primary synthesizes and gates. Ships `legion-fanout` plus the LEGION_ULTRACODE max-exhaustive workflow.",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "category": "agent-orchestration",
       "keywords": [
         "orchestration",

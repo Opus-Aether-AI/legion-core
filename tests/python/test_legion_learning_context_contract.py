@@ -145,15 +145,61 @@ def test_compile_context_has_stable_ordering_and_enforces_hint_token_limits(tmp_
     repo = _repo(tmp_path)
     env, _, _ = _environment(tmp_path, repo, "over-budget-hints.json")
 
-    _, payload = _compile(repo, env, "--max-hints", "2", "--max-tokens", "25")
+    _, payload = _compile(repo, env, "--max-hints", "2", "--max-tokens", "35")
 
     assert [hint["id"] for hint in payload["selected_hints"]] == ["a-first", "b-second"]
     assert payload["limits"]["max_hints"] == 2
-    assert payload["limits"]["max_tokens"] == 25
+    assert payload["limits"]["max_tokens"] == 35
     assert payload["usage"]["hint_count"] == 2
-    assert payload["usage"]["token_count"] <= 25
+    assert payload["usage"]["token_count"] <= 35
     assert {hint["id"] for hint in payload["excluded_hints"]} == {"m-middle", "z-last"}
     assert {hint["exclusion_reason"] for hint in payload["excluded_hints"]} == {"hint_limit", "token_limit"}
+
+
+def test_context_budget_rejects_unbroken_ascii_and_cjk_guidance(tmp_path):
+    repo = _repo(tmp_path)
+    env, project, _ = _environment(tmp_path, repo)
+    (project / "hints.json").write_text(
+        json.dumps(
+            {
+                "schema": "legion.learning-hints.v1",
+                "hints": [
+                    {
+                        "schema": "legion.learning-hint.v1",
+                        "id": "a-unbroken-ascii",
+                        "scope": "global",
+                        "status": "active",
+                        "trusted": True,
+                        "guidance": "x" * 200,
+                    },
+                    {
+                        "schema": "legion.learning-hint.v1",
+                        "id": "b-unbroken-cjk",
+                        "scope": "global",
+                        "status": "active",
+                        "trusted": True,
+                        "guidance": "界" * 50,
+                    },
+                    {
+                        "schema": "legion.learning-hint.v1",
+                        "id": "z-small",
+                        "scope": "global",
+                        "status": "active",
+                        "trusted": True,
+                        "guidance": "keep this",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, payload = _compile(repo, env, "--max-hints", "3", "--max-tokens", "10")
+
+    assert [hint["id"] for hint in payload["selected_hints"]] == ["z-small"]
+    excluded = {hint["id"]: hint["exclusion_reason"] for hint in payload["excluded_hints"]}
+    assert excluded["a-unbroken-ascii"] == "token_limit"
+    assert excluded["b-unbroken-cjk"] == "token_limit"
 
 
 def test_compile_context_delivers_trusted_guidance_only_and_never_echoes_untrusted_text(tmp_path):

@@ -40,7 +40,10 @@ def mapping(value: Any) -> dict[str, Any]:
 
 def token_count(value: str) -> int:
     """A stable, tokenizer-independent conservative budget estimate."""
-    return len(re.findall(r"\S+", value))
+    word_count = len(re.findall(r"\S+", value))
+    utf8_quads = (len(value.encode("utf-8")) + 3) // 4
+    non_ascii = sum(ord(character) > 127 for character in value)
+    return max(word_count, utf8_quads, non_ascii)
 
 
 def read_json(path: str) -> Any:

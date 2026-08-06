@@ -54,7 +54,7 @@ Cursor Agent uses the same sidecar pattern through `legion-cursor`: it runs Curs
 |---|---|---|
 | Bulk mechanical edit across many files | ✅ yes | `run --archetype bulk-mechanical-edit` |
 | Independent module/file you can spec fully | ✅ yes | `run` with a tight, stateless task description |
-| Codex review of a risky diff / PR | ✅ yes | `review --archetype security-review --base <ref> [--head <ref>]` |
+| Codex review of a risky diff / PR | ✅ yes | `review --archetype security-review --base <ref> [--head <ref>] [--task "bounded instructions"]` |
 | Different-lineage second opinion | ✅ yes | route `second-opinion-review`, then use that executor's read-only adapter |
 | Two designs both plausible (tie-break) | ✅ yes | `review` on each, compare verdicts |
 | Task needs your conversation context / judgement | ❌ no | do it inline |
@@ -94,7 +94,7 @@ printf '%s' "$LONG_TASK" | legion-delegate run \
   --model "$(legion-route --model-ref codex_workhorse)" --reasoning-effort high --repo .
 
 # Codex second pass → STRUCTURED verdict JSON you can reconcile:
-legion-delegate review --archetype security-review --base main --head HEAD --repo .
+legion-delegate review --archetype security-review --base main --head HEAD --repo . --task "Verify required guardrails."
 #   -> {verdict: approve|request_changes|comment, summary, findings:[{severity,title,file,line,detail}]}
 # Review refs are resolved once to immutable commits. Add `--head <ref>` when
 # reviewing a non-HEAD snapshot; `--max-attempts N` bounds transient retries

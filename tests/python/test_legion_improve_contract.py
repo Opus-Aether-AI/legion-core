@@ -160,6 +160,8 @@ def test_public_schema_rejects_untyped_or_ineligible_proposals_before_leasing(tm
     env = _env(tmp_path)
     for change in (
         {"schema": "untyped"},
+        {"revision": True},
+        {"limits": {"max_changed_lines": True}},
         {"maintainer_eligible": False},
         {"target": {"path": "../escape"}},
         {
@@ -190,6 +192,19 @@ def test_default_mode_is_off_and_has_no_side_effects(tmp_path):
     assert not payload.get("branch")
     assert not payload.get("draft_pr")
     assert _git("status", "--porcelain", cwd=repo).stdout == ""
+
+    queue_dir = tmp_path / "off-queue"
+    queue_dir.mkdir()
+    invalid = queue_dir / "invalid.json"
+    invalid.write_text("{not-json", encoding="utf-8")
+    queued, queue_payload = _queue(
+        repo, queue_dir, tmp_path / "off-state", env=_env(tmp_path / "off")
+    )
+    assert queued.returncode == 0
+    assert queue_payload["mode"] == "off"
+    assert queue_payload["attempted"] == 0
+    assert invalid.is_file()
+    assert not (queue_dir / "quarantine").exists()
 
 
 def test_public_allowlists_reject_unsafe_commands_paths_and_oversized_diffs(tmp_path):
@@ -257,7 +272,54 @@ def test_noisy_validation_is_bounded_and_corrupt_resume_state_fails_closed(tmp_p
     assert resumed.returncode != 0
     assert failed["state"] == "failed"
     assert failed["reason"] == "state_corrupt"
+
+    for field, bad_value in (("state", []), ("mode", {})):
+        typed_state = tmp_path / f"corrupt-{field}-state"
+        stopped, partial = _run(
+            repo,
+            proposal,
+            typed_state,
+            "--mode",
+            "draft",
+            "--stop-after",
+            "leased",
+            env=env,
+        )
+        assert stopped.returncode != 0
+        durable_path = typed_state / "runs" / (partial["fingerprint"] + ".json")
+        durable = json.loads(durable_path.read_text(encoding="utf-8"))
+        durable[field] = bad_value
+        durable_path.write_text(json.dumps(durable), encoding="utf-8")
+        resumed, failed = _run(
+            repo, proposal, typed_state, "--mode", "draft", env=env
+        )
+        assert resumed.returncode != 0
+        assert failed["state"] == "failed"
+        assert failed["reason"] == "state_corrupt"
     assert not os.path.exists(env["FIXTURE_GH_LOG"])
+
+    transitions_state = tmp_path / "corrupt-transitions-state"
+    stopped, partial = _run(
+        repo,
+        proposal,
+        transitions_state,
+        "--mode",
+        "draft",
+        "--stop-after",
+        "leased",
+        env=env,
+    )
+    assert stopped.returncode != 0
+    durable_path = transitions_state / "runs" / (partial["fingerprint"] + ".json")
+    durable = json.loads(durable_path.read_text(encoding="utf-8"))
+    durable["transitions"] = {"bad": "shape"}
+    durable_path.write_text(json.dumps(durable), encoding="utf-8")
+    resumed, failed = _run(
+        repo, proposal, transitions_state, "--mode", "draft", env=env
+    )
+    assert resumed.returncode != 0
+    assert failed["state"] == "failed"
+    assert failed["reason"] == "state_corrupt"
 
 
 def test_draft_lifecycle_is_durable_deterministic_isolated_and_review_only(tmp_path):
@@ -329,6 +391,34 @@ def test_replay_and_atomic_leases_produce_one_fingerprint_branch_and_draft(tmp_p
     assert {p["proposal_id"] for p in sequential + concurrent_results} == {"proposal-safe-doc"}
 
 
+def test_replay_identity_ignores_growing_evidence_for_the_same_candidate(tmp_path):
+    repo, _ = _repo(tmp_path)
+    state = tmp_path / "state"
+    env = _env(tmp_path)
+    provenance = {
+        "source": "learning-law",
+        "source_id": "stable-law",
+        "confidence": 0.93,
+        "support": {"episodes": 5, "projects": 3},
+        "evidence_ids": ["e1", "e2", "e3"],
+    }
+    proposal = _proposal(tmp_path, revision=5, provenance=provenance)
+    first, initial = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert first.returncode == 0
+
+    provenance = dict(provenance)
+    provenance["support"] = {"episodes": 8, "projects": 4}
+    provenance["evidence_ids"] = ["e1", "e2", "e3", "e4"]
+    proposal = _proposal(tmp_path, revision=8, provenance=provenance)
+    replay, evolved = _run(repo, proposal, state, "--mode", "draft", env=env)
+
+    assert replay.returncode == 0
+    assert evolved["state"] == "draft_created"
+    assert evolved["fingerprint"] == initial["fingerprint"]
+    assert evolved["branch"] == initial["branch"]
+    assert open(env["FIXTURE_GH_LOG"], encoding="utf-8").read().count("pr create") == 1
+
+
 def test_independent_review_is_an_external_fail_closed_boundary(tmp_path):
     repo, _ = _repo(tmp_path)
     proposal = _proposal(tmp_path)
@@ -377,10 +467,99 @@ def test_queue_is_bounded_and_replays_terminal_proposals_without_republishing(tm
     )
     assert second.returncode == 0, second.stderr
     assert second_payload["attempted"] == 0
-    assert second_payload["skipped_terminal"] == 1
+    assert second_payload["skipped_completed"] == 1
     assert second_payload["results"] == []
     assert not proposal.exists()
     assert open(env["FIXTURE_GH_LOG"], encoding="utf-8").read().count("pr create") == 1
+
+
+def test_queue_quarantines_invalid_entries_and_dry_run_advances_to_later_work(tmp_path):
+    repo, _ = _repo(tmp_path)
+    env = _env(tmp_path)
+
+    queue_dir = tmp_path / "quarantine-queue"
+    queue_dir.mkdir()
+    (queue_dir / "000-invalid.json").write_text("{not-json", encoding="utf-8")
+    valid = _proposal(queue_dir)
+    valid.rename(queue_dir / "zzz-valid.json")
+    result, payload = _queue(
+        repo,
+        queue_dir,
+        tmp_path / "quarantine-state",
+        "--mode",
+        "draft",
+        "--max",
+        "1",
+        env=env,
+    )
+    assert result.returncode != 0
+    assert payload["invalid_entries"] == 1
+    assert payload["quarantined"] == 1
+    assert payload["attempted"] == 1
+    assert payload["results"][0]["state"] == "draft_created"
+    assert (queue_dir / "quarantine" / "000-invalid.json.invalid").is_file()
+
+    dry_queue = tmp_path / "dry-queue"
+    dry_queue.mkdir()
+    first = _proposal(dry_queue, id="dry-first")
+    first.rename(dry_queue / "a-first.json")
+    second = _proposal(
+        dry_queue,
+        id="dry-second",
+        candidate={
+            "operation": "append_markdown_guardrail",
+            "content": "Run the second independent workflow check.",
+        },
+    )
+    second.rename(dry_queue / "b-second.json")
+    first_run, first_payload = _queue(
+        repo,
+        dry_queue,
+        tmp_path / "dry-state",
+        "--mode",
+        "dry-run",
+        "--max",
+        "1",
+        env=env,
+    )
+    second_run, second_payload = _queue(
+        repo,
+        dry_queue,
+        tmp_path / "dry-state",
+        "--mode",
+        "dry-run",
+        "--max",
+        "1",
+        env=env,
+    )
+    assert first_run.returncode == second_run.returncode == 0
+    assert first_payload["results"][0]["state"] == "reviewed"
+    assert second_payload["results"][0]["state"] == "reviewed"
+    assert not (dry_queue / "a-first.json").exists()
+    assert not (dry_queue / "b-second.json").exists()
+
+    unsafe_queue = tmp_path / "unsafe-quarantine-queue"
+    outside = tmp_path / "outside-quarantine"
+    unsafe_queue.mkdir()
+    outside.mkdir()
+    (unsafe_queue / "quarantine").symlink_to(outside, target_is_directory=True)
+    invalid = unsafe_queue / "oversized.json"
+    invalid.write_text("x" * 65_537, encoding="utf-8")
+    unsafe_run, unsafe_payload = _queue(
+        repo,
+        unsafe_queue,
+        tmp_path / "unsafe-quarantine-state",
+        "--mode",
+        "draft",
+        "--max",
+        "1",
+        env=env,
+    )
+    assert unsafe_run.returncode != 0
+    assert unsafe_payload["invalid_entries"] == 1
+    assert unsafe_payload["quarantined"] == 0
+    assert invalid.is_file()
+    assert list(outside.iterdir()) == []
 
 
 def test_draft_api_failure_retries_from_reviewed_state_without_rereview(tmp_path):

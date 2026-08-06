@@ -12,6 +12,7 @@
 #   run     --model M [--sandbox S] [--task T | stdin] [--repo DIR] [--base REF]
 #           [--budget-tokens N] [--scope PATHSPEC] [--detach] [--apply] [--quiet]
 #   review  --model M --base REF [--head REF] [--max-attempts N] [--repo DIR]
+#           [--task BOUNDED_REVIEW_INSTRUCTIONS]
 #   apply   --run RUN_ID [--repo DIR]          # apply a captured diff to the repo
 #   status  --run RUN_ID [--repo DIR]
 #   cleanup [--run RUN_ID | --all] [--repo DIR]
@@ -182,6 +183,7 @@ trap on_terminating_signal INT TERM HUP
 
 ROUTE_BIN="$_self_dir/legion-route.py"
 REVIEW_SCHEMA="$_self_dir/../schema/review-verdict.schema.json"
+REVIEW_NORMALIZER="$_self_dir/normalize-review-verdict.py"
 
 # resolve_archetype <name> -> "executor|model|sandbox|reasoning_effort|fallback_csv" ("||||" on failure)
 resolve_archetype() {
@@ -1089,7 +1091,7 @@ write_review_terminal_receipt() {
 
 cmd_review() {
   local RUN_KIND="review"
-  local model="" base="" head="" repo="$PWD" archetype="" effort=""
+  local model="" base="" head="" repo="$PWD" archetype="" effort="" task=""
   local max_attempts="${LEGION_REVIEW_MAX_ATTEMPTS:-2}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1100,6 +1102,7 @@ cmd_review() {
       --archetype) archetype="$2"; shift 2 ;;
       --reasoning-effort) effort="$2"; shift 2 ;;
       --max-attempts) max_attempts="$2"; shift 2 ;;
+      --task) task="$2"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
       *) die "review: unknown arg '$1'" ;;
     esac
@@ -1116,6 +1119,7 @@ cmd_review() {
   [[ -n "$effort" ]] || effort="xhigh"
   [[ -n "$base" ]] || die "review: --base REF required"
   [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || die "review: --max-attempts must be a positive integer"
+  [[ "${#task}" -le 16384 ]] || die "review: --task exceeds 16384 characters"
 
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
   local base_sha head_sha
@@ -1154,7 +1158,7 @@ cmd_review() {
   REVIEW_ART_PATH="$art"
   REVIEW_WT_PATH="$wt"
 
-  # `codex exec review` has no task stdin. Each attempt gets immutable inputs and
+  # Each attempt gets immutable inputs, optional bounded review guidance, and
   # separate raw artifacts; only the terminal attempt is copied to stable paths.
   local start_ms end_ms dur rc=0 attempt=0 status="failed" reason="review-failed"
   local attempt_stream attempt_err attempt_verdict
@@ -1167,18 +1171,21 @@ cmd_review() {
     attempt_verdict="$art/attempt-$attempt.verdict.json"
     rm -f "$attempt_verdict"
     note "→ codex review attempt $attempt/$max_attempts (base $base_sha, head $head_sha)"
-    set +e
-    if [[ -n "$effort" ]]; then
-      ( cd "$wt" && "$CODEX_BIN" exec review --base "$base_sha" -m "$model" --json \
-          -c "model_reasoning_effort=$effort" --output-schema "$REVIEW_SCHEMA" \
-          -o "$attempt_verdict" ) </dev/null >"$attempt_stream" 2>"$attempt_err" &
-      CODEX_CHILD_PID=$!
+    local -a codex_review_args=(exec review)
+    local review_prompt=""
+    if [[ -n "$task" ]]; then
+      review_prompt="Review only the immutable diff $base_sha...$head_sha. $task"
     else
-      ( cd "$wt" && "$CODEX_BIN" exec review --base "$base_sha" -m "$model" --json \
-          --output-schema "$REVIEW_SCHEMA" -o "$attempt_verdict" ) \
-          </dev/null >"$attempt_stream" 2>"$attempt_err" &
-      CODEX_CHILD_PID=$!
+      codex_review_args+=(--base "$base_sha")
     fi
+    codex_review_args+=(-m "$model" --json)
+    [[ -n "$effort" ]] && codex_review_args+=(-c "model_reasoning_effort=$effort")
+    codex_review_args+=(--output-schema "$REVIEW_SCHEMA" -o "$attempt_verdict")
+    [[ -n "$review_prompt" ]] && codex_review_args+=("$review_prompt")
+    set +e
+    ( cd "$wt" && "$CODEX_BIN" "${codex_review_args[@]}" ) \
+      </dev/null >"$attempt_stream" 2>"$attempt_err" &
+    CODEX_CHILD_PID=$!
     wait "$CODEX_CHILD_PID"; rc=$?
     CODEX_CHILD_PID=""
     set -e
@@ -1189,8 +1196,12 @@ cmd_review() {
         break
       fi
       if ! review_verdict_is_valid "$attempt_verdict"; then
-        reason="invalid-verdict"
-        break
+        python3 "$REVIEW_NORMALIZER" "$attempt_verdict" --repo "$wt" \
+          >/dev/null 2>&1 || true
+        if ! review_verdict_is_valid "$attempt_verdict"; then
+          reason="invalid-verdict"
+          break
+        fi
       fi
       status="ok"
       reason="completed"
@@ -1476,7 +1487,7 @@ default; any registered executor via --executor)
            [--base REF] [--budget-tokens N] [--scope PATHSPEC ...] [--detach] [--apply] [--keep]
            [--no-dirty-warn] [--untrusted]
   review   [--archetype A | --model M] --base REF [--head REF] [--max-attempts N]
-           [--repo DIR] [--reasoning-effort E]
+           [--repo DIR] [--reasoning-effort E] [--task T]
            -> immutable-SHA structured verdict + terminal receipt
   resume   --run RUN_ID [--task T|stdin] [--model M] [--repo DIR] [--reasoning-effort E]
            -> continue a kept codex session (original run needs --keep)

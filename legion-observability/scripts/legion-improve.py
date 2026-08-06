@@ -46,6 +46,7 @@ TERMINAL = {"rejected", "stale", "failed", "draft_created"}
 MAX_PROCESS_OUTPUT = 65_536
 MAX_GIT_OUTPUT = 2_097_152
 MAX_SOURCE_BYTES = 1_048_576
+MAX_PROPOSAL_BYTES = 65_536
 EMPTY_DIFF = hashlib.sha256(b"").hexdigest()
 REVIEW_RETRYABLE = {"independent_review_unavailable", "independent_review_failed"}
 DRAFT_RETRYABLE = {
@@ -72,6 +73,21 @@ def canonical(value: Any) -> bytes:
 def digest(value: Any) -> str:
     payload = value if isinstance(value, bytes) else canonical(value)
     return hashlib.sha256(payload).hexdigest()
+
+
+def proposal_fingerprint(proposal: dict[str, Any]) -> str:
+    """Identify the proposed change, excluding evidence that may keep growing."""
+    return digest(
+        {
+            "schema": proposal["schema"],
+            "id": proposal["id"],
+            "kind": proposal["kind"],
+            "target": proposal["target"],
+            "candidate": proposal["candidate"],
+            "validation": proposal["validation"],
+            "limits": proposal.get("limits") or {},
+        }
+    )
 
 
 def _bounded_process(
@@ -253,7 +269,11 @@ def validate(proposal: Any) -> str | None:
         r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", proposal_id
     ):
         return "invalid_schema"
-    if not isinstance(proposal.get("revision"), int) or proposal["revision"] < 1:
+    if (
+        not isinstance(proposal.get("revision"), int)
+        or isinstance(proposal.get("revision"), bool)
+        or proposal["revision"] < 1
+    ):
         return "invalid_schema"
     summary = proposal.get("summary")
     if not isinstance(summary, str) or not summary.strip() or len(summary) > 1000:
@@ -291,6 +311,7 @@ def validate(proposal: Any) -> str | None:
         not isinstance(limits, dict)
         or set(limits) - {"max_changed_lines"}
         or not isinstance(limits.get("max_changed_lines", 200), int)
+        or isinstance(limits.get("max_changed_lines", 200), bool)
         or not 0 <= limits.get("max_changed_lines", 200) <= 500
     ):
         return "invalid_schema"
@@ -386,13 +407,18 @@ def _valid_durable_record(
     }
     if set(record) - allowed:
         return False
+    mode = record.get("mode")
     state = record.get("state")
+    if not isinstance(mode, str) or not isinstance(state, str):
+        return False
     if (
         record.get("schema") != RUN_SCHEMA
         or record.get("fingerprint") != fingerprint
         or record.get("proposal_id") != proposal["id"]
-        or record.get("revision") != proposal["revision"]
-        or record.get("mode") not in {"off", "dry-run", "draft"}
+        or not isinstance(record.get("revision"), int)
+        or isinstance(record.get("revision"), bool)
+        or record["revision"] < 1
+        or mode not in {"off", "dry-run", "draft"}
         or state not in set(STEPS) | TERMINAL
     ):
         return False
@@ -400,6 +426,8 @@ def _valid_durable_record(
     if reason is not None and (not isinstance(reason, str) or len(reason) > 160):
         return False
     transitions = record.get("transitions", [])
+    if not isinstance(transitions, list):
+        return False
     active_transitions = (
         transitions[:-1]
         if state in {"rejected", "stale", "failed"}
@@ -408,8 +436,7 @@ def _valid_durable_record(
         else transitions
     )
     if (
-        not isinstance(transitions, list)
-        or not active_transitions
+        not active_transitions
         or active_transitions != list(STEPS[: len(active_transitions)])
     ):
         return False
@@ -1156,24 +1183,30 @@ def _initial_record(
 
 
 def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
-    try:
-        proposal = json.loads(Path(args.proposal).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        proposal = None
+    proposal = _read_proposal(Path(args.proposal))
     fingerprint = digest(proposal if proposal is not None else {"proposal": "unreadable"})
     reason = validate(proposal)
     if reason:
+        raw_id = proposal.get("id", "") if isinstance(proposal, dict) else ""
+        raw_revision = (
+            proposal.get("revision", 0) if isinstance(proposal, dict) else 0
+        )
         record = {
             "schema": RUN_SCHEMA,
             "mode": args.mode,
-            "proposal_id": proposal.get("id", "") if isinstance(proposal, dict) else "",
-            "revision": proposal.get("revision", 0) if isinstance(proposal, dict) else 0,
+            "proposal_id": raw_id if isinstance(raw_id, str) else "",
+            "revision": (
+                raw_revision
+                if isinstance(raw_revision, int) and not isinstance(raw_revision, bool)
+                else 0
+            ),
             "fingerprint": fingerprint,
             "state": "rejected",
             "reason": reason,
         }
         return 2, public(record)
     assert isinstance(proposal, dict)
+    fingerprint = proposal_fingerprint(proposal)
     if args.mode == "off":
         return 0, public(_initial_record(proposal, fingerprint, "off"))
 
@@ -1362,7 +1395,56 @@ def _bounded_queue_paths(queue_dir: Path, limit: int = 1000) -> list[Path]:
     return sorted(entries)
 
 
+def _quarantine_queue_entry(proposal_path: Path) -> bool:
+    """Move one invalid entry out of the active queue without discarding it."""
+    quarantine = proposal_path.parent / "quarantine"
+    try:
+        if quarantine.is_symlink() or (
+            quarantine.exists() and not quarantine.is_dir()
+        ):
+            return False
+        quarantine.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if (
+            quarantine.is_symlink()
+            or quarantine.resolve().parent != proposal_path.parent.resolve()
+        ):
+            return False
+        os.chmod(quarantine, 0o700)
+        destination = quarantine / f"{proposal_path.name}.invalid"
+        for suffix in range(1000):
+            candidate = destination if suffix == 0 else Path(f"{destination}.{suffix}")
+            if not candidate.exists() and not candidate.is_symlink():
+                os.replace(proposal_path, candidate)
+                break
+        else:
+            return False
+        return True
+    except OSError:
+        return False
+
+
+def _read_proposal(proposal_path: Path) -> dict[str, Any] | None:
+    try:
+        if proposal_path.stat().st_size > MAX_PROPOSAL_BYTES:
+            return None
+        value = json.loads(proposal_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+    if args.mode == "off":
+        return 0, {
+            "schema": "legion.improvement-queue-run.v1",
+            "mode": "off",
+            "attempted": 0,
+            "failed": 0,
+            "skipped_completed": 0,
+            "invalid_entries": 0,
+            "quarantined": 0,
+            "results": [],
+        }
     resolved = legion_state.resolve_state(args.repo)
     queue_dir = Path(
         args.queue_dir
@@ -1374,23 +1456,29 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     results: list[dict[str, Any]] = []
     attempted = 0
     failures = 0
-    skipped_terminal = 0
+    skipped_completed = 0
+    invalid_entries = 0
+    quarantined = 0
     for proposal_path in _bounded_queue_paths(queue_dir):
-        try:
-            proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            proposal = None
-        fingerprint = digest(
-            proposal if proposal is not None else {"proposal": "unreadable"}
-        )
+        proposal = _read_proposal(proposal_path)
+        if validate(proposal):
+            invalid_entries += 1
+            quarantined += int(_quarantine_queue_entry(proposal_path))
+            continue
+        assert isinstance(proposal, dict)
+        fingerprint = proposal_fingerprint(proposal)
         existing = read_json(state_path(state_dir, fingerprint))
+        valid_existing = bool(
+            existing and _valid_durable_record(existing, proposal, fingerprint)
+        )
         if (
-            isinstance(proposal, dict)
-            and existing
-            and existing.get("state") in TERMINAL
-            and _valid_durable_record(existing, proposal, fingerprint)
+            valid_existing
+            and (
+                existing.get("state") in TERMINAL
+                or (args.mode == "dry-run" and existing.get("state") == "reviewed")
+            )
         ):
-            skipped_terminal += 1
+            skipped_completed += 1
             proposal_path.unlink(missing_ok=True)
             continue
         if attempted >= args.max:
@@ -1407,6 +1495,8 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         )
         code, payload = execute(run_args)
         failures += int(code != 0)
+        if code == 0 and args.mode == "dry-run" and payload.get("state") == "reviewed":
+            proposal_path.unlink(missing_ok=True)
         if len(results) < 100:
             results.append(
                 {
@@ -1420,10 +1510,12 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "mode": args.mode,
         "attempted": attempted,
         "failed": failures,
-        "skipped_terminal": skipped_terminal,
+        "skipped_completed": skipped_completed,
+        "invalid_entries": invalid_entries,
+        "quarantined": quarantined,
         "results": results,
     }
-    return (1 if failures else 0), payload
+    return (1 if failures or invalid_entries else 0), payload
 
 
 def parser() -> argparse.ArgumentParser:

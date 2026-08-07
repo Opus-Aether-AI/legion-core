@@ -1571,3 +1571,42 @@ def test_resume_after_each_durable_transition_and_stale_remote_or_base_are_safe(
     assert result.returncode != 0
     assert payload["state"] == "stale"
     assert payload["reason"] == "remote_base_sha_changed"
+
+
+def test_reconciliation_wait_is_not_reported_as_a_queue_failure(tmp_path):
+    """A deliberate wait must not look like an error to the daily refresh.
+
+    refresh.sh escalates any nonzero exit from `legion-improve queue` into a
+    high-severity self-learn failure record, so counting the publish
+    reconciliation window as a failure would pollute the learning signal this
+    engine exists to protect -- possibly on consecutive days for one proposal.
+    """
+    import importlib.util
+
+    module_path = os.path.join(
+        ROOT, "legion-observability", "scripts", "legion-improve.py"
+    )
+    spec = importlib.util.spec_from_file_location("legion_improve", module_path)
+    improve = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(improve)
+
+    assert "draft_pr_reconcile_pending" in improve.QUEUE_WAITING_REASONS
+    # It must still be retryable, so a later run can find the pull request.
+    assert "draft_pr_reconcile_pending" in improve.DRAFT_RETRYABLE
+    # Genuine failures must stay failures.
+    for reason in ("gh_unavailable", "branch_push_failed", "draft_pr_create_failed"):
+        assert reason not in improve.QUEUE_WAITING_REASONS, reason
+
+    schema = json.loads(
+        open(
+            os.path.join(
+                ROOT,
+                "legion-observability",
+                "schema",
+                "legion.improvement-queue-run.v1.schema.json",
+            ),
+            encoding="utf-8",
+        ).read()
+    )
+    status = schema["properties"]["results"]["items"]["properties"]["status"]["enum"]
+    assert "waiting" in status, status

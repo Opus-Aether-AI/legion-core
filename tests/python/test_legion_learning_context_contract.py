@@ -216,6 +216,46 @@ def test_compile_context_reports_token_limit_when_tokens_are_the_binding_cap(tmp
     assert {hint["exclusion_reason"] for hint in payload["excluded_hints"]} == {"token_limit"}
 
 
+def test_exclusion_reason_is_recorded_when_the_hint_is_rejected(tmp_path):
+    """Each hint must report the constraint binding for *it*, at its own turn.
+
+    The discriminating case is interleaved exhaustion: a large hint is rejected
+    on tokens while the selection is nowhere near the count cap, and only later
+    do small hints fill the remaining slots. Any implementation that decides the
+    reason after the passes finish relabels that earlier hint as count-blocked,
+    sending an operator to raise max_hints when only max_tokens would help.
+    """
+    repo = _repo(tmp_path)
+    env, project, _ = _environment(tmp_path, repo)
+    sizes = [("a-big", 90), ("b-big", 90), ("c-small", 5), ("d-small", 1), ("e-small", 1)]
+    (project / "hints.json").write_text(
+        json.dumps({
+            "hints": [
+                {
+                    "schema": "legion.learning-hint.v1",
+                    "id": hint_id,
+                    "scope": "global",
+                    "status": "active",
+                    "trusted": True,
+                    # Distinct text so de-duplication is not what excludes them.
+                    "guidance": hint_id[0] * size,
+                }
+                for hint_id, size in sizes
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+    _, payload = _compile(repo, env, "--max-hints", "3", "--max-tokens", "100")
+
+    reasons = {h["id"]: h["exclusion_reason"] for h in payload["excluded_hints"]}
+    assert [h["id"] for h in payload["selected_hints"]] == ["a-big", "c-small", "d-small"]
+    # Rejected on tokens while only one hint was selected -- far from the cap.
+    assert reasons["b-big"] == "token_limit", reasons
+    # Rejected once the count cap really was full.
+    assert reasons["e-small"] == "hint_limit", reasons
+
+
 def test_repeated_identical_guidance_cannot_evict_a_cross_project_law(tmp_path):
     """Accumulated boilerplate must not starve genuinely learned guidance.
 

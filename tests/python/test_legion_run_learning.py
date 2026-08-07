@@ -290,3 +290,43 @@ def test_core_identifier_replaces_anything_that_is_not_an_identifier():
     assert legion_run._core_identifier("review") == "review"
     for hostile in (HOSTILE, "has spaces", "", None, "x" * 200, "semi;colon"):
         assert legion_run._core_identifier(hostile) == "unnamed"
+
+
+def test_doctor_findings_keep_entity_attribution_with_bounded_blast_radius():
+    """Entity attribution is the point, so it is preserved -- but bounded.
+
+    A repository can aim a doctor finding at an entity it does not own
+    (check_domain_plugin reports `plugin:<name>` from a repo-owned TOML). That
+    is accepted: the promoted guidance is core-composed from the check name
+    alone, so the worst case is budget noise on that entity, never injected
+    text. This pins both halves of that bargain.
+    """
+    legion_run = load_legion_run()
+    runner = {
+        "name": "billing-export",
+        "mode": "heavy-task",
+        "pipeline": {"profile": "delivery"},
+        "learning_entity": "heavy-task:billing-export",
+    }
+
+    outcomes = legion_run._doctor_learning_outcomes(
+        [{
+            "severity": "fail",
+            "check": "domain-plugin",
+            "entity": "plugin:legion-router",
+            "message": "domain plugin manifest is invalid",
+        }],
+        runner=runner,
+        run_id="r1",
+        artifact_path=Path("doctor.json"),
+    )
+
+    assert outcomes
+    outcome = outcomes[0]
+    # Attribution is honoured, as documented.
+    assert (outcome["target_type"], outcome["target_name"]) == ("plugin", "legion-router")
+    assert outcome["metadata"]["reported_entity"] == "plugin:legion-router"
+    # But the promotable sentence names only the check, so a forged scope can
+    # never carry chosen text into a prompt.
+    assert outcome["provenance_summary"] == "legion-doctor check domain-plugin failed."
+    assert "manifest is invalid" not in outcome["provenance_summary"]

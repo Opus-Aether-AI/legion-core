@@ -28,12 +28,12 @@
     "attempted": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 10
+      "maximum": 50
     },
     "failed": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 10
+      "maximum": 50
     },
     "skipped_completed": {
       "type": "integer",
@@ -52,7 +52,7 @@
     },
     "results": {
       "type": "array",
-      "maxItems": 10,
+      "maxItems": 100,
       "items": {
         "type": "object",
         "required": [
@@ -71,7 +71,8 @@
           "status": {
             "enum": [
               "processed",
-              "failed"
+              "failed",
+              "waiting"
             ]
           }
         },
@@ -80,7 +81,8 @@
     },
     "drafts_created": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 10
     }
   },
   "additionalProperties": false

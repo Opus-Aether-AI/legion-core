@@ -258,7 +258,7 @@
         },
         "head_sha": {
           "type": "string",
-          "pattern": "^[0-9a-f]{40}$"
+          "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
         },
         "reconcile_attempts": {
           "type": "integer",

@@ -647,9 +647,12 @@ def _append_guidance(task: str, guidance: list[str]) -> str:
 def _guidance_present(delivered: Any, guidance: list[str]) -> bool:
     """True when every guidance line survived into the text a stage received.
 
-    Receipts are the audit trail for whether learning actually reached a
-    decision boundary, so they are derived from the delivered payload rather
-    than from the intent to deliver.
+    Used for the plan-file branch, where core assembles the artifact itself
+    and delivery can therefore be checked directly. The other boundaries --
+    the plan-command branch, fanout-apply and final-review -- hand guidance to
+    an external process and record intent, because what that process does with
+    its input is not observable from here. Do not read a receipt as proof the
+    consumer used the guidance; it attests that Legion delivered it.
 
     Match the structure `_append_guidance` writes -- the header, then each line
     as its own bullet -- rather than testing for bare substrings. A guidance
@@ -1884,6 +1887,15 @@ def _doctor_learning_outcomes(
         severity = str(item.get("severity") or "").lower()
         if severity not in {"fail", "failed", "error", "critical"}:
             continue
+        # Entity-scoped attribution is the point of this producer: a failure in
+        # a skill or command becomes that entity's memory. Note the residual
+        # risk -- check_domain_plugin reports `plugin:<name>` from a
+        # `.legion/**/*.toml` the target repository owns, so a repository can
+        # aim a finding at an entity it does not own. The blast radius is
+        # bounded to budget noise on that entity: the promoted guidance is
+        # core-composed from the check name only, and identical guidance
+        # de-duplicates, so repeats cannot accumulate.
+        claimed_entity = _short(_as_text(item.get("entity") or item.get("target")), 240)
         target_type, target_name = _split_entity(
             item.get("entity") or item.get("target"),
             default_type=default_type,
@@ -1913,6 +1925,7 @@ def _doctor_learning_outcomes(
                     "stage": "doctor",
                     "artifact": artifact_path.name,
                     "doctor_check": item.get("check") or "",
+                    "reported_entity": claimed_entity,
                 },
                 first_party_summary=(
                     f"legion-doctor check {_core_identifier(item.get('check'))} failed."
@@ -2728,9 +2741,20 @@ def execute(
             # echoes that field back into plan.json is its own choice.
             plan_delivered = bool(plan_guidance)
         plan_payload = _load_json_object(plan_path)
-        if learning_context_mode == "required":
+        # An acknowledgement is how an *external* planner proves it consumed the
+        # guidance. On the plan-file branch there is no external planner: core
+        # assembles plan.json itself, and the ack carries a runtime revision
+        # hash that no static plan file could contain. Demanding one there made
+        # `required` mode permanently unsatisfiable for direct heavy-task runs
+        # the moment a hint existed -- and it demanded it of the one branch that
+        # can prove delivery directly, which is checked instead.
+        if learning_context_mode == "required" and not runner.get("plan_files"):
             _require_learning_context_ack(
                 plan_payload, plan_bundle, plan_guidance, "planner"
+            )
+        elif learning_context_mode == "required" and plan_guidance and not plan_delivered:
+            raise LegionRunError(
+                "required learning guidance was not delivered into the plan file", 1
             )
         plan_payload["learning_context"] = plan_bundle["descriptor"]
         _write_json(plan_path, plan_payload)

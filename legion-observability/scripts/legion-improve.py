@@ -61,6 +61,10 @@ RECONCILE_ATTEMPTS = 3
 # The child never reported them, so a request it already sent may still
 # have succeeded remotely: treat these as ambiguous, never as failure.
 _AMBIGUOUS_PROCESS_CODES = frozenset({124, 125})
+# Outcomes where the engine is deliberately waiting rather than failing.
+# The queue must not report these as failures: refresh.sh escalates any
+# nonzero queue exit into a high-severity self-learn failure record.
+QUEUE_WAITING_REASONS = frozenset({"draft_pr_reconcile_pending"})
 EMPTY_DIFF = hashlib.sha256(b"").hexdigest()
 REVIEW_RETRYABLE = {"independent_review_unavailable", "independent_review_failed"}
 DRAFT_RETRYABLE = {
@@ -2165,6 +2169,7 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             "schema": QUEUE_SCHEMA,
             "mode": "off",
             "attempted": 0,
+            "drafts_created": 0,
             "failed": 0,
             "skipped_completed": 0,
             "invalid_entries": 0,
@@ -2242,7 +2247,13 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             base_ref=args.base_ref,
         )
         code, payload = execute(run_args)
-        failures += int(code != 0)
+        # Waiting out the publish reconciliation window is the engine working
+        # as designed, not an error. Counting it as a failure made the queue
+        # exit nonzero, which refresh.sh records as a high-severity failure --
+        # so a deliberate wait polluted the learning signal it exists to
+        # protect, potentially on consecutive days for the same proposal.
+        waiting = payload.get("reason") in QUEUE_WAITING_REASONS
+        failures += int(code != 0 and not waiting)
         productive += int(code == 0)
         if payload.get("state") == "draft_created":
             drafts_created += 1
@@ -2253,7 +2264,9 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 {
                     "fingerprint": fingerprint,
                     "state": payload.get("state", "failed"),
-                    "status": "processed" if code == 0 else "failed",
+                    "status": (
+                        "processed" if code == 0 else "waiting" if waiting else "failed"
+                    ),
                 }
             )
     payload = {

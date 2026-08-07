@@ -329,6 +329,13 @@ within the hint and token caps. Guidance that is textually identical after
 normalization collapses to one entry, reported as `duplicate_guidance` in
 `excluded_hints`, so repeated boilerplate cannot crowd out a promoted law.
 
+One consequence follows from that ordering: an entity that accumulates more
+distinct entity-scoped hints than `max_hints` stops receiving cross-project
+laws, which are excluded as `hint_limit`. That is the intended precedence --
+specific guidance outranks general -- but it is worth watching in
+`excluded_hints` for a busy entity, and it is a reason to retire stale
+entity-scoped hints rather than to raise the cap.
+
 `legion-run` compiles a separate context immediately before each `plan`,
 `fanout`, `validate`, and `review` decision boundary. This prevents a plan-only
 hint from leaking into review and lets newly promoted stage scopes take effect

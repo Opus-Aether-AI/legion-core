@@ -1730,7 +1730,7 @@ def _learning_outcome(
         "run_id": run_id,
         "source_path": str(source_path),
         "provenance": "first-party" if first_party_summary else "extension",
-        "provenance_summary": first_party_summary,
+        "provenance_summary": _short(first_party_summary, 500),
         "metadata": metadata or {},
     }
 

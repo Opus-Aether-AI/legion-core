@@ -34,6 +34,7 @@
       "properties": {
         "source": {"type": "string", "maxLength": 80},
         "source_id": {"type": "string", "maxLength": 160},
+        "law_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "support": {
           "type": "object",
@@ -50,7 +51,7 @@
         {
           "if": {"properties": {"source": {"const": "learning-law"}}, "required": ["source"]},
           "then": {
-            "required": ["confidence", "support"],
+            "required": ["law_key", "confidence", "support"],
             "properties": {
               "confidence": {"minimum": 0.9},
               "support": {

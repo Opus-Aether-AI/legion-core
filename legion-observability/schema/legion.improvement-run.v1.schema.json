@@ -23,12 +23,19 @@
     "transitions": {"type": "array", "items": {"type": "string"}},
     "draft_pr": {
       "type": "object",
-      "required": ["id", "draft", "url", "body"],
+      "required": ["id", "draft", "url", "number", "body", "repository", "remote_identity", "base_branch", "base_sha", "head_branch", "head_sha"],
       "properties": {
         "id": {"type": "string"},
-        "draft": {"const": true},
+        "draft": {"type": "boolean"},
         "url": {"type": "string", "pattern": "^https://"},
-        "body": {"type": "string", "maxLength": 1000}
+        "number": {"type": "integer", "minimum": 1},
+        "body": {"type": "string", "maxLength": 1000},
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "remote_identity": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "base_branch": {"type": "string"},
+        "base_sha": {"type": "string"},
+        "head_branch": {"type": "string"},
+        "head_sha": {"type": "string"}
       },
       "additionalProperties": false
     },

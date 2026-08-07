@@ -1,5 +1,7 @@
 import datetime as dt
+import hashlib
 import importlib.util
+import json
 import os
 import re
 import stat
@@ -154,6 +156,9 @@ def test_named_run_feedback_uses_the_same_entity_as_context_retrieval(tmp_path):
                     {
                         "summary": "Preserve the export idempotency boundary.",
                         "severity": "high",
+                        "source": "manual",
+                        "target_type": "skill",
+                        "target_name": "attacker-selected",
                     }
                 ]
             }
@@ -167,3 +172,41 @@ def test_named_run_feedback_uses_the_same_entity_as_context_retrieval(tmp_path):
         (outcome["target_type"], outcome["target_name"])
         for outcome in outcomes
     } == {("heavy-task", "billing-export")}
+    assert {outcome["source"] for outcome in outcomes} == {
+        "legion-run:validate",
+        "legion-run:terminal",
+    }
+
+
+def test_learning_receipt_id_and_manifest_bind_canonical_artifact_bytes(tmp_path):
+    legion_run = load_legion_run()
+    descriptor = {
+        "path": str(tmp_path / "learning-context.json"),
+        "revision": "a" * 64,
+        "mode": "advisory",
+        "dispositions": [],
+    }
+    receipts_path = tmp_path / "learning-receipts.json"
+    legion_run._write_learning_receipts(
+        receipts_path,
+        descriptor=descriptor,
+        descriptors={"plan": descriptor},
+        receipts=[],
+    )
+    payload = json.loads(receipts_path.read_text(encoding="utf-8"))
+    receipt_id = payload.pop("receipt_id")
+    expected = hashlib.sha256(
+        json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+    ).hexdigest()
+    assert receipt_id == expected
+    payload["receipts"].append({"status": "forged"})
+    payload["receipt_id"] = receipt_id
+    assert legion_run._learning_receipts_valid(payload) is False
+
+    manifest = legion_run.write_artifact_manifest(tmp_path)
+    entry = next(
+        item for item in manifest["artifacts"] if item["path"] == "learning-receipts.json"
+    )
+    assert entry["sha256"] == hashlib.sha256(receipts_path.read_bytes()).hexdigest()

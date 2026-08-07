@@ -183,7 +183,7 @@ def test_collect_learning_outcomes_harvests_doctor_and_validator_feedback(tmp_pa
 
     identities = {(item["source"], item["target_type"], item["target_name"]) for item in outcomes}
     assert ("legion-run:doctor", "skill", "caveman") in identities
-    assert ("validation-feedback", "skill", "legion-run") in identities
+    assert ("legion-run:validate", "heavy-task", "billing-export") in identities
     assert ("legion-run:terminal", "heavy-task", "billing-export") in identities
 
 

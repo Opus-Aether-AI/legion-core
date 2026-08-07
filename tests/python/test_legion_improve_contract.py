@@ -18,6 +18,11 @@ TRANSITIONS = (
     "eligible", "leased", "prepared", "candidate_ready", "evaluated",
     "reviewed", "draft_created",
 )
+IMPROVEMENT_PR_BODY = (
+    "Review-only Legion improvement. The exact remote base and candidate "
+    "passed repeated paired gates plus an independent immutable review. "
+    "Human review is required; this automation cannot merge or deploy."
+)
 
 
 def _git(*args, cwd):
@@ -135,19 +140,37 @@ def _env(tmp_path):
         "        head=; previous=\n"
         "        for arg in \"$@\"; do [ \"$previous\" = --head ] && head=$arg; previous=$arg; done\n"
         "        oid=$(git rev-parse \"$head\"); base_oid=$(git rev-parse refs/remotes/origin/main)\n"
-        "        printf '[{\"number\":7,\"url\":\"https://example.invalid/pr/7\",\"isDraft\":true,\"baseRefName\":\"main\",\"baseRefOid\":\"%s\",\"headRefName\":\"%s\",\"headRefOid\":\"%s\"}]\\n' \"$base_oid\" \"$head\" \"$oid\" ;;\n"
+        "        printf '[{\"number\":7,\"url\":\"https://github.com/fixture/repo/pull/7\",\"state\":\"OPEN\",\"isDraft\":true,\"body\":\"%s\",\"baseRefName\":\"main\",\"baseRefOid\":\"%s\",\"headRefName\":\"%s\",\"headRefOid\":\"%s\"}]\\n' \"$FIXTURE_PR_BODY\" \"$base_oid\" \"$head\" \"$oid\" ;;\n"
+        "      existing-closed|existing-merged)\n"
+        "        head=; previous=\n"
+        "        for arg in \"$@\"; do [ \"$previous\" = --head ] && head=$arg; previous=$arg; done\n"
+        "        oid=$(git rev-parse \"$head\"); base_oid=$(git rev-parse refs/remotes/origin/main)\n"
+        "        state=CLOSED; draft=true\n"
+        "        [ \"$FIXTURE_GH_MODE\" = existing-merged ] && state=MERGED && draft=false\n"
+        "        printf '[{\"number\":7,\"url\":\"https://github.com/fixture/repo/pull/7\",\"state\":\"%s\",\"isDraft\":%s,\"body\":\"%s\",\"baseRefName\":\"main\",\"baseRefOid\":\"%s\",\"headRefName\":\"%s\",\"headRefOid\":\"%s\"}]\\n' \"$state\" \"$draft\" \"$FIXTURE_PR_BODY\" \"$base_oid\" \"$head\" \"$oid\" ;;\n"
+        "      existing-body-wrong)\n"
+        "        head=; previous=\n"
+        "        for arg in \"$@\"; do [ \"$previous\" = --head ] && head=$arg; previous=$arg; done\n"
+        "        oid=$(git rev-parse \"$head\"); base_oid=$(git rev-parse refs/remotes/origin/main)\n"
+        "        printf '[{\"number\":7,\"url\":\"https://github.com/fixture/repo/pull/7\",\"state\":\"OPEN\",\"isDraft\":true,\"body\":\"tampered\",\"baseRefName\":\"main\",\"baseRefOid\":\"%s\",\"headRefName\":\"%s\",\"headRefOid\":\"%s\"}]\\n' \"$base_oid\" \"$head\" \"$oid\" ;;\n"
         "      existing-wrong)\n"
-        "        printf '[{\"number\":8,\"url\":\"https://example.invalid/pr/8\",\"isDraft\":true,\"baseRefName\":\"wrong\",\"baseRefOid\":\"0000000000000000000000000000000000000000\",\"headRefName\":\"wrong\",\"headRefOid\":\"0000000000000000000000000000000000000000\"}]\\n' ;;\n"
+        "        printf '[{\"number\":8,\"url\":\"https://github.com/fixture/repo/pull/8\",\"state\":\"OPEN\",\"isDraft\":true,\"baseRefName\":\"wrong\",\"baseRefOid\":\"0000000000000000000000000000000000000000\",\"headRefName\":\"wrong\",\"headRefOid\":\"0000000000000000000000000000000000000000\"}]\\n' ;;\n"
         "      fail-list) exit 18 ;;\n"
         "      *) printf '[]\\n' ;;\n"
         "    esac ;;\n"
         "  *'pr create'*)\n"
         "    [ \"${FIXTURE_GH_MODE:-ok}\" = fail-create ] && exit 19\n"
-        "    printf 'https://example.invalid/pr/7\\n' ;;\n"
+        "    if [ \"${FIXTURE_GH_MODE:-ok}\" = race-base ]; then\n"
+        "      base=$(git rev-parse refs/remotes/origin/main); tree=$(git rev-parse \"$base^{tree}\")\n"
+        "      next=$(printf 'race base\\n' | git commit-tree \"$tree\" -p \"$base\")\n"
+        "      git push -q origin \"$next:refs/heads/main\"\n"
+        "    fi\n"
+        "    printf 'https://github.com/fixture/repo/pull/7\\n' ;;\n"
         "  *'pr view'*)\n"
+        "    [ \"${FIXTURE_GH_MODE:-ok}\" = fail-view ] && exit 20\n"
         "    head=$(git for-each-ref --format='%(refname:short)' 'refs/heads/legion-improve/*' | head -n 1)\n"
         "    oid=$(git rev-parse \"$head\"); base_oid=$(git rev-parse refs/remotes/origin/main)\n"
-        "    printf '{\"number\":7,\"url\":\"https://example.invalid/pr/7\",\"isDraft\":true,\"baseRefName\":\"main\",\"baseRefOid\":\"%s\",\"headRefName\":\"%s\",\"headRefOid\":\"%s\"}\\n' \"$base_oid\" \"$head\" \"$oid\" ;;\n"
+        "    printf '{\"number\":7,\"url\":\"https://github.com/fixture/repo/pull/7\",\"state\":\"OPEN\",\"isDraft\":true,\"body\":\"%s\",\"baseRefName\":\"main\",\"baseRefOid\":\"%s\",\"headRefName\":\"%s\",\"headRefOid\":\"%s\"}\\n' \"$FIXTURE_PR_BODY\" \"$base_oid\" \"$head\" \"$oid\" ;;\n"
         "esac\n",
         encoding="utf-8",
     )
@@ -158,8 +181,10 @@ def _env(tmp_path):
     env["FIXTURE_EVAL_COUNTER"] = str(tmp_path / "fixture-eval-count")
     env["FIXTURE_GH_LOG"] = str(tmp_path / "fixture-gh.log")
     env["FIXTURE_REVIEW_LOG"] = str(tmp_path / "fixture-review.log")
+    env["FIXTURE_PR_BODY"] = IMPROVEMENT_PR_BODY
     env["LEGION_IMPROVE_VALIDATOR_BIN"] = str(evaluator)
     env["LEGION_IMPROVE_REVIEW_BIN"] = str(reviewer)
+    env["LEGION_IMPROVE_GITHUB_REPOSITORY"] = "fixture/repo"
     return env
 
 
@@ -237,6 +262,56 @@ def test_public_allowlists_reject_unsafe_commands_paths_and_oversized_diffs(tmp_
         assert payload["state"] == "rejected"
         assert payload["reason"] == reason
         assert (repo / "outside.md").read_text(encoding="utf-8") == "do not touch\n"
+
+
+def test_plugin_guardrail_candidate_bumps_manifest_and_marketplace_together(tmp_path):
+    repo, _ = _repo(tmp_path)
+    plugin = repo / "demo-plugin"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (repo / ".claude-plugin").mkdir()
+    (plugin / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "demo-plugin", "version": "1.2.3"}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (repo / ".claude-plugin" / "marketplace.json").write_text(
+        json.dumps(
+            {
+                "plugins": [
+                    {"name": "demo-plugin", "source": "./demo-plugin", "version": "1.2.3"}
+                ]
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git("add", ".", cwd=repo)
+    _git("commit", "-qm", "add plugin fixture", cwd=repo)
+    _git("push", "-q", "origin", "HEAD:main", cwd=repo)
+    proposal = _proposal(tmp_path, target={"path": "demo-plugin/SKILL.md"})
+
+    result, payload = _run(
+        repo,
+        proposal,
+        tmp_path / "state",
+        "--mode",
+        "draft",
+        env=_env(tmp_path / "env"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    branch = payload["branch"]
+    changed = _git("diff-tree", "--no-commit-id", "--name-only", "-r", branch, cwd=repo).stdout.splitlines()
+    assert sorted(changed) == [
+        ".claude-plugin/marketplace.json",
+        "demo-plugin/.claude-plugin/plugin.json",
+        "demo-plugin/SKILL.md",
+    ]
+    manifest = json.loads(_git("show", f"{branch}:demo-plugin/.claude-plugin/plugin.json", cwd=repo).stdout)
+    marketplace = json.loads(_git("show", f"{branch}:.claude-plugin/marketplace.json", cwd=repo).stdout)
+    assert manifest["version"] == "1.2.4"
+    assert marketplace["plugins"][0]["version"] == "1.2.4"
 
 
 def test_unexpected_candidate_failure_is_a_durable_failed_terminal_state(tmp_path):
@@ -500,6 +575,7 @@ def test_replay_identity_ignores_growing_evidence_for_the_same_candidate(tmp_pat
     provenance = {
         "source": "learning-law",
         "source_id": "stable-law",
+        "law_key": "stable-law",
         "confidence": 0.93,
         "support": {"episodes": 5, "projects": 3},
         "evidence_ids": ["e1", "e2", "e3"],
@@ -709,6 +785,70 @@ def test_draft_api_failure_retries_from_reviewed_state_without_rereview(tmp_path
     assert len(open(env["FIXTURE_REVIEW_LOG"], encoding="utf-8").read().splitlines()) == 1
 
 
+def test_stale_retry_reclaims_only_its_owned_unpublished_branch(tmp_path):
+    repo, _ = _repo(tmp_path)
+    proposal = _proposal(tmp_path)
+    state = tmp_path / "state"
+    env = _env(tmp_path)
+    env["FIXTURE_GH_MODE"] = "fail-create"
+
+    failed, partial = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert failed.returncode != 0
+    old_head = partial["review_receipt"]["reviewed_head_sha"]
+    assert _git("ls-remote", "origin", f"refs/heads/{partial['branch']}", cwd=repo).stdout.startswith(old_head)
+
+    (repo / "base-repair.md").write_text("repaired\n", encoding="utf-8")
+    _git("add", "base-repair.md", cwd=repo)
+    _git("commit", "-qm", "advance base after draft failure", cwd=repo)
+    _git("push", "-q", "origin", "HEAD:main", cwd=repo)
+    env.pop("FIXTURE_GH_MODE")
+
+    stale, stale_payload = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert stale.returncode != 0
+    assert stale_payload["state"] == "stale"
+    retried, completed = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert retried.returncode == 0, retried.stderr
+    assert completed["state"] == "draft_created"
+    assert completed["base_sha"] != partial["base_sha"]
+    assert completed["review_receipt"]["reviewed_head_sha"] != old_head
+
+
+def test_created_draft_is_rolled_back_when_base_races_or_verification_fails(tmp_path):
+    for mode, expected in (("race-base", "existing_pr_identity_mismatch"), ("fail-view", "draft_pr_verify_failed")):
+        fixture = tmp_path / mode
+        fixture.mkdir()
+        repo, _ = _repo(fixture)
+        proposal = _proposal(fixture)
+        env = _env(fixture / "env")
+        env["FIXTURE_GH_MODE"] = mode
+
+        result, payload = _run(repo, proposal, fixture / "state", "--mode", "draft", env=env)
+
+        assert result.returncode != 0
+        assert payload["reason"] == expected
+        log = open(env["FIXTURE_GH_LOG"], encoding="utf-8").read()
+        assert "pr close https://github.com/fixture/repo/pull/7 --delete-branch" in log
+        assert _git("ls-remote", "origin", f"refs/heads/{payload['branch']}", cwd=repo).stdout == ""
+
+
+def test_closed_or_merged_publication_is_reused_without_duplicate_pr(tmp_path):
+    for mode, draft in (("existing-closed", True), ("existing-merged", False)):
+        fixture = tmp_path / mode
+        fixture.mkdir()
+        repo, _ = _repo(fixture)
+        env = _env(fixture / "env")
+        env["FIXTURE_GH_MODE"] = mode
+        result, payload = _run(
+            repo,
+            _proposal(fixture),
+            fixture / "state",
+            "--mode",
+            "draft",
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert payload["draft_pr"]["draft"] is draft
+        assert "pr create" not in open(env["FIXTURE_GH_LOG"], encoding="utf-8").read()
 def test_existing_draft_pr_must_match_reviewed_base_branch_and_head(tmp_path):
     repo, _ = _repo(tmp_path)
     proposal = _proposal(tmp_path)
@@ -739,8 +879,23 @@ def test_existing_draft_pr_must_match_reviewed_base_branch_and_head(tmp_path):
     )
     assert rejected.returncode != 0
     assert failed["state"] == "failed"
-    assert failed["reason"] == "existing_pr_identity_mismatch"
+    assert failed["reason"] == "existing_pr_already_published"
     assert "pr create" not in open(bad_env["FIXTURE_GH_LOG"], encoding="utf-8").read()
+
+    body_env = _env(tmp_path / "existing-body-wrong")
+    body_env["FIXTURE_GH_MODE"] = "existing-body-wrong"
+    body_rejected, body_failed = _run(
+        repo,
+        proposal,
+        tmp_path / "existing-body-wrong-state",
+        "--mode",
+        "draft",
+        env=body_env,
+    )
+    assert body_rejected.returncode != 0
+    assert body_failed["state"] == "failed"
+    assert body_failed["reason"] == "existing_pr_already_published"
+    assert "pr create" not in open(body_env["FIXTURE_GH_LOG"], encoding="utf-8").read()
 
 
 def test_inspect_rejects_traversal_and_corrupt_records_without_echoing_them(tmp_path):
@@ -797,6 +952,44 @@ def test_inspect_rejects_traversal_and_corrupt_records_without_echoing_them(tmp_
     assert secret not in corrupt.stdout
 
 
+def test_completed_draft_identity_fields_are_deterministic_and_tamper_evident(tmp_path):
+    repo, _ = _repo(tmp_path)
+    proposal = _proposal(tmp_path)
+    state = tmp_path / "state"
+    env = _env(tmp_path / "env")
+    result, payload = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert result.returncode == 0, result.stderr
+    durable_path = state / "runs" / f"{payload['fingerprint']}.json"
+    original = json.loads(durable_path.read_text(encoding="utf-8"))
+
+    for field, value in (
+        ("id", "0" * 24),
+        ("body", "type-correct but unreviewed body"),
+        ("url", "https://github.com/fixture/repo/pull/99"),
+    ):
+        tampered = json.loads(json.dumps(original))
+        tampered["draft_pr"][field] = value
+        durable_path.write_text(json.dumps(tampered), encoding="utf-8")
+        inspected = subprocess.run(
+            [
+                "bash", CLI, "inspect", "--state-dir", str(state),
+                "--fingerprint", payload["fingerprint"], "--json",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert inspected.returncode != 0
+        error = json.loads(inspected.stdout)
+        assert error == {
+            "schema": "legion.improvement-error.v1",
+            "command": "inspect",
+            "status": "error",
+            "reason": "state_corrupt",
+        }
+    durable_path.write_text(json.dumps(original), encoding="utf-8")
+
+
 def test_explicit_remote_base_does_not_move_a_release_detached_checkout(tmp_path):
     repo, _ = _repo(tmp_path)
     release_sha = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
@@ -842,6 +1035,23 @@ def test_paired_repeats_reject_flakes_and_regressions_and_never_create_a_draft(t
         assert payload["state"] == "rejected"
         assert payload["reason"] == expected
         assert "draft_pr" not in payload
+
+
+def test_regression_terminal_reopens_after_external_validator_repair(tmp_path):
+    repo, _ = _repo(tmp_path)
+    proposal = _proposal(tmp_path)
+    state = tmp_path / "regression-repair"
+    env = _env(tmp_path / "env")
+    env["FIXTURE_EVAL_MODE"] = "regression"
+
+    rejected, first = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert rejected.returncode != 0
+    assert first["reason"] == "regression"
+
+    env.pop("FIXTURE_EVAL_MODE")
+    retried, completed = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert retried.returncode == 0, retried.stderr
+    assert completed["state"] == "draft_created"
 
 
 def test_resume_after_each_durable_transition_and_stale_remote_or_base_are_safe(tmp_path):

@@ -648,14 +648,65 @@ def _write_learning_receipts(
     receipts: list[dict[str, Any]],
     descriptors: dict[str, dict[str, Any]] | None = None,
 ) -> None:
-    _write_json(
-        path,
-        {
-            "schema": "legion.learning-context-receipts.v1",
-            "learning_context": descriptor,
-            "learning_contexts": descriptors or {"plan": descriptor},
-            "receipts": receipts,
-        },
+    payload = {
+        "schema": "legion.learning-context-receipts.v1",
+        "learning_context": descriptor,
+        "learning_contexts": descriptors or {"plan": descriptor},
+        "receipts": receipts,
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    payload["receipt_id"] = hashlib.sha256(canonical).hexdigest()
+    _write_json(path, payload)
+    try:
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise LegionRunError("learning receipt persistence failed", 1) from exc
+    if not _learning_receipts_valid(persisted):
+        raise LegionRunError("learning receipt integrity failure", 1)
+
+
+def _learning_receipts_valid(payload: Any) -> bool:
+    if not isinstance(payload, dict) or not isinstance(payload.get("receipt_id"), str):
+        return False
+    unsigned = dict(payload)
+    receipt_id = unsigned.pop("receipt_id")
+    canonical = json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return bool(
+        re.fullmatch(r"[0-9a-f]{64}", receipt_id)
+        and hashlib.sha256(canonical).hexdigest() == receipt_id
+    )
+
+
+def _learning_context_acknowledged(
+    payload: Any, bundle: dict[str, Any]
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    ack = payload.get("learning_context_ack")
+    return bool(
+        isinstance(ack, dict)
+        and ack.get("boundary") == bundle["boundary"]
+        and ack.get("revision") == bundle["revision"]
+    )
+
+
+def _require_learning_context_ack(
+    payload: Any,
+    bundle: dict[str, Any],
+    guidance: list[str],
+    consumer: str,
+) -> None:
+    if not guidance or _learning_context_acknowledged(payload, bundle):
+        return
+    raise LegionRunError(
+        f"required learning guidance was not acknowledged by {consumer}: "
+        f"expected learning_context_ack for {bundle['boundary']} "
+        f"revision {bundle['revision']}",
+        1,
     )
 
 
@@ -1431,13 +1482,15 @@ def write_artifact_manifest(run_dir: Path) -> dict[str, Any]:
     artifacts = []
     for name in sorted(names):
         path = run_dir / name
-        artifacts.append(
-            {
-                "path": name,
-                "exists": path.exists(),
-                "size_bytes": path.stat().st_size if path.exists() else 0,
-            }
-        )
+        exists = path.exists()
+        entry = {
+            "path": name,
+            "exists": exists,
+            "size_bytes": path.stat().st_size if exists else 0,
+        }
+        if exists and name != "artifact-manifest.json":
+            entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        artifacts.append(entry)
     payload = {"schema": "legion.artifact-manifest.v1", "artifacts": artifacts}
     _write_json(run_dir / "artifact-manifest.json", payload)
     return payload
@@ -1613,10 +1666,11 @@ def _feedback_outcome(
     summary = _short(item.get("summary") or item.get("lesson") or item.get("message"), 500)
     if not summary:
         return None
-    default_type, default_name = _runner_learning_target(runner)
-    target_type = _short(item.get("target_type") or default_type, 80)
-    target_name = _short(item.get("target_name") or default_name, 160)
-    source = _short(item.get("source") or f"legion-run:{stage}", 120)
+    # Stage payloads are untrusted extension output. Core owns trust provenance
+    # and scope, so a validator cannot label arbitrary prose as manual feedback
+    # or redirect it to another entity that would receive trusted prompts.
+    target_type, target_name = _runner_learning_target(runner)
+    source = f"legion-run:{stage}"
     severity = _short(item.get("severity") or "medium", 40)
     if severity not in {"info", "low", "medium", "high", "critical"}:
         severity = "medium"
@@ -1748,7 +1802,13 @@ def _doctor_learning_outcomes(
     return outcomes
 
 
-def _fanout_learning_outcomes(payload: Any, *, run_id: str, artifact_path: Path) -> list[dict[str, Any]]:
+def _fanout_learning_outcomes(
+    payload: Any,
+    *,
+    runner: dict[str, Any],
+    run_id: str,
+    artifact_path: Path,
+) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
     failed = _int_value(payload.get("failed") or payload.get("failures"))
@@ -1770,11 +1830,12 @@ def _fanout_learning_outcomes(payload: Any, *, run_id: str, artifact_path: Path)
     summary = f"legion-fanout reported {failed} failed slice(s) and {conflicts} apply conflict(s)."
     if details:
         summary = f"{summary} {details}"
+    target_type, target_name = _runner_learning_target(runner)
     return [
         _learning_outcome(
             source="legion-run:fanout-apply",
-            target_type="command",
-            target_name="legion-fanout",
+            target_type=target_type,
+            target_name=target_name,
             severity="high",
             summary=summary,
             evidence=json.dumps(payload, sort_keys=True),
@@ -1790,7 +1851,13 @@ def _fanout_learning_outcomes(payload: Any, *, run_id: str, artifact_path: Path)
     ]
 
 
-def _review_learning_outcomes(payload: Any, *, run_id: str, artifact_path: Path) -> list[dict[str, Any]]:
+def _review_learning_outcomes(
+    payload: Any,
+    *,
+    runner: dict[str, Any],
+    run_id: str,
+    artifact_path: Path,
+) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
     reason = _review_failure_reason(payload)
@@ -1811,11 +1878,12 @@ def _review_learning_outcomes(payload: Any, *, run_id: str, artifact_path: Path)
     summary = f"legion review gate failed: {reason}."
     if detail:
         summary = f"{summary} {detail}"
+    target_type, target_name = _runner_learning_target(runner)
     return [
         _learning_outcome(
             source="legion-run:review",
-            target_type="command",
-            target_name="legion-delegate",
+            target_type=target_type,
+            target_name=target_name,
             severity="high",
             summary=summary,
             evidence=json.dumps(payload, sort_keys=True),
@@ -1910,6 +1978,7 @@ def collect_learning_outcomes(
         outcomes.extend(
             _fanout_learning_outcomes(
                 fanout_payload,
+                runner=runner,
                 run_id=run_id,
                 artifact_path=run_dir / "fanout.json",
             )
@@ -1920,6 +1989,7 @@ def collect_learning_outcomes(
         outcomes.extend(
             _review_learning_outcomes(
                 review_payload,
+                runner=runner,
                 run_id=run_id,
                 artifact_path=run_dir / "review.json",
             )
@@ -2258,6 +2328,12 @@ def execute(
                 "LEGION_LEARNING_CONTEXT_PATH": str(bundle["path"]),
                 "LEGION_LEARNING_CONTEXT_REVISION": bundle["revision"],
                 "LEGION_LEARNING_CONTEXT_BOUNDARY": bundle["boundary"],
+                "LEGION_LEARNING_CONTEXT_REQUIRED_ACK": (
+                    "1"
+                    if learning_context_mode == "required"
+                    and bundle["context"]["selected_hints"]
+                    else "0"
+                ),
             }
         )
         return _delivered_guidance(verified, learning_context_mode)
@@ -2350,6 +2426,12 @@ def execute(
         return payload
 
     def finalize_success() -> dict[str, Any]:
+        try:
+            persisted_receipts = json.loads(receipts_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise LegionRunError("learning receipt integrity failure", 1) from exc
+        if not _learning_receipts_valid(persisted_receipts):
+            raise LegionRunError("learning receipt integrity failure", 1)
         summary = contract_payload(runner, repo, task)
         summary.update({"ok": True, "run_id": run_id, "run_dir": str(run_dir), "stage_status": stages})
         _write_json(run_dir / "summary.json", summary)
@@ -2449,6 +2531,9 @@ def execute(
         stage_run("self-learn-hints", [_cmd("legion-self-learn"), "hints", "--entity", learning_entity, "--json"], run_dir / "self-learn-hints.json")
         plan_bundle = compile_learning_context("plan")
         plan_guidance = activate_learning_context(plan_bundle)
+        # LEGION_TASK is the planner's task contract. Put bounded guidance in
+        # the actual planner input, not merely in an artifact written later.
+        env["LEGION_TASK"] = _append_guidance(task, plan_guidance)
 
         current_stage = "plan"
         _set_stage_status(stages, "plan", "running")
@@ -2468,13 +2553,22 @@ def execute(
             )
             normalize_plan_file(plan_path, runner, task)
         plan_payload = _load_json_object(plan_path)
+        if learning_context_mode == "required":
+            _require_learning_context_ack(
+                plan_payload, plan_bundle, plan_guidance, "planner"
+            )
         plan_payload["learning_context"] = plan_bundle["descriptor"]
         _write_json(plan_path, plan_payload)
+        env["LEGION_TASK"] = task
         record_learning_receipt(
             plan_bundle,
             "plan",
             "delivery",
-            "delivered" if plan_guidance else learning_context_mode,
+            (
+                "acknowledged"
+                if plan_guidance and learning_context_mode == "required"
+                else "delivered" if plan_guidance else learning_context_mode
+            ),
         )
         fanout_bundle = compile_learning_context("fanout")
         fanout_guidance = activate_learning_context(fanout_bundle)
@@ -2559,6 +2653,13 @@ def execute(
         validation_bundle = compile_learning_context("validate")
         validation_guidance = activate_learning_context(validation_bundle)
         validation_payload = stage_run("validate", [runner["commands"]["validate"]], run_dir / "validation.json", shell=True, hermetic=True)
+        if learning_context_mode == "required":
+            _require_learning_context_ack(
+                validation_payload,
+                validation_bundle,
+                validation_guidance,
+                "validator",
+            )
         if isinstance(validation_payload, dict):
             validation_payload["learning_context"] = validation_bundle["descriptor"]
             validation_payload["learning_context_dispositions"] = validation_bundle[
@@ -2569,7 +2670,11 @@ def execute(
             validation_bundle,
             "validate",
             "deterministic-verification",
-            "verified" if validation_guidance else learning_context_mode,
+            (
+                "acknowledged"
+                if validation_guidance and learning_context_mode == "required"
+                else "verified" if validation_guidance else learning_context_mode
+            ),
         )
         current_stage = "review"
         _set_stage_status(stages, "review", "running")

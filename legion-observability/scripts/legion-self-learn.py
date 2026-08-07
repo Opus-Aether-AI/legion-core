@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+import fcntl
 import glob
 import hashlib
 import importlib.util
@@ -53,6 +54,12 @@ SAFE_SOURCE_TYPES = {"skill", "command", "agent", "plugin"}
 SUCCESS_STATUSES = {"ok"}
 DEFAULT_MIN_SCORE_DELTA = 0.001
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+GLOBAL_HINT_RESERVE = 100
+PROJECT_HINT_CAP = (
+    legion_learning_context.MAX_HINTS
+    + legion_learning_context.MAX_EXCLUDED_HINTS
+    - GLOBAL_HINT_RESERVE
+)
 STOPWORDS = {
     "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with", "is",
     "are", "be", "this", "that", "it", "as", "at", "by", "from", "into", "via",
@@ -650,6 +657,27 @@ def learning_law_outcomes(repo: str) -> list[dict[str, Any]]:
     return outcomes
 
 
+def learning_law_lifecycle(repo: str) -> dict[str, str]:
+    """Return the complete bounded law lifecycle, including retired laws."""
+    state = legion_state.resolve_state(repo)
+    global_dir = _text(state.get("global_learning_dir"))
+    if not global_dir:
+        return {}
+    payload = _json_file(os.path.join(global_dir, "laws.json"))
+    result: dict[str, str] = {}
+    for law in _list(_dict(payload).get("laws"))[
+        : legion_learning_context.MAX_HINTS
+        + legion_learning_context.MAX_EXCLUDED_HINTS
+    ]:
+        if not isinstance(law, dict):
+            continue
+        key = _short(_text(law.get("key")), 160)
+        status = _short(_text(law.get("status")), 40)
+        if key and status:
+            result[key] = status
+    return result
+
+
 def _proc_result(name: str, argv: list[str], repo: str, timeout: int = 60) -> dict[str, Any]:
     started = time.monotonic()
     try:
@@ -1071,6 +1099,7 @@ def typed_improvement_proposal(
         "provenance": {
             "source": "learning-law",
             "source_id": _stable_id(["learning-law", law_key]),
+            "law_key": law_key,
             "confidence": confidence,
             "support": {"episodes": episodes, "projects": projects},
             "evidence_ids": evidence_ids,
@@ -1079,18 +1108,43 @@ def typed_improvement_proposal(
 
 
 def write_improvement_queue(report: dict[str, Any], log_root: str) -> list[str]:
-    written: list[str] = []
-    for proposal in _list(report.get("improvement_proposals")):
-        if not isinstance(proposal, dict):
-            continue
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                proposal, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-            ).encode("utf-8")
-        ).hexdigest()
-        path = os.path.join(improvement_queue_dir(log_root), f"{fingerprint}.json")
-        _write_json(path, proposal)
-        written.append(path)
+    queue_dir = improvement_queue_dir(log_root)
+    _ensure_dir(queue_dir)
+    lock_path = os.path.join(queue_dir, ".queue.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        lifecycle = _dict(report.get("learning_laws"))
+        if "learning_laws" in report:
+            active_laws = {
+                key for key, status in lifecycle.items() if _text(status) == "active"
+            }
+            # Reconcile only Legion-generated law proposals. Maintainer-authored
+            # queue entries are never removed by the learning loop.
+            for entry in list(os.scandir(queue_dir))[:10_000]:
+                if not entry.is_file(follow_symlinks=False) or not entry.name.endswith(".json"):
+                    continue
+                queued = _json_file(entry.path)
+                provenance = _dict(_dict(queued).get("provenance"))
+                if provenance.get("source") != "learning-law":
+                    continue
+                law_key = _text(provenance.get("law_key"))
+                if law_key and law_key not in active_laws:
+                    try:
+                        os.unlink(entry.path)
+                    except FileNotFoundError:
+                        pass
+        written: list[str] = []
+        for proposal in _list(report.get("improvement_proposals")):
+            if not isinstance(proposal, dict):
+                continue
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    proposal, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+                ).encode("utf-8")
+            ).hexdigest()
+            path = os.path.join(queue_dir, f"{fingerprint}.json")
+            _write_json(path, proposal)
+            written.append(path)
     return written
 
 
@@ -1174,6 +1228,7 @@ def build_report(
         "outcomes": outcomes,
         "proposals": proposals,
         "improvement_proposals": improvement_proposals,
+        "learning_laws": learning_law_lifecycle(repo),
         "by_entity": dict(sorted(by_entity.items())),
         "scorecard": run_scorecard(repo),
         "trace_contrast": contrast,
@@ -1229,14 +1284,14 @@ def _typed_hint_from_proposal(
         guidance = suggested
     if not guidance:
         return None
+    scope = "global" if source == "learning-law" else "exact"
     hint: dict[str, Any] = {
         "schema": legion_learning_context.HINT_SCHEMA,
         "id": f"memory:{_stable_id([proposal_id])}",
-        "scope": "exact",
+        "scope": scope,
         "status": "active",
         "trusted": True,
         "guidance": guidance,
-        "entity": f"{target_type}:{target_name}",
         "evidence_ids": [
             value
             for value in (
@@ -1247,6 +1302,11 @@ def _typed_hint_from_proposal(
         ],
         "origin": "self-learn-memory",
     }
+    if scope == "exact":
+        hint["entity"] = f"{target_type}:{target_name}"
+    law_key = _short(_text(_dict(outcome.get("metadata")).get("law_key")), 160)
+    if law_key:
+        hint["law_key"] = law_key
     stage = _text(_dict(outcome.get("metadata")).get("stage"))
     stage = {
         "fanout-apply": "fanout",
@@ -1262,42 +1322,102 @@ def sync_typed_hints(
 ) -> dict[str, Any]:
     """Merge promoted memory hints without overwriting maintainer-owned hints."""
     path = os.path.join(project_learning_dir, "hints.json")
-    existing = legion_learning_context.read_bounded_json(
-        path, legion_learning_context.MAX_HINT_DOCUMENT_BYTES
-    )
-    by_id: dict[str, dict[str, Any]] = {}
-    for hint in _list(_dict(existing).get("hints"))[
-        : legion_learning_context.MAX_HINTS
-        + legion_learning_context.MAX_EXCLUDED_HINTS
-    ]:
-        if not isinstance(hint, dict):
-            continue
-        hint_id = _text(hint.get("id"))
-        if hint_id:
-            by_id.setdefault(hint_id, hint)
-    outcomes = {
-        _text(item.get("id")): item
-        for item in _list(report.get("outcomes"))
-        if isinstance(item, dict) and _text(item.get("id"))
-    }
-    promoted = 0
-    for proposal in _list(report.get("proposals")):
-        if not isinstance(proposal, dict):
-            continue
-        outcome = outcomes.get(_text(proposal.get("outcome_id")), {})
-        hint = _typed_hint_from_proposal(proposal, outcome)
-        if hint is not None:
-            by_id[hint["id"]] = hint
-            promoted += 1
-    payload = {
-        "schema": "legion.learning-hints.v1",
-        "hints": [by_id[key] for key in sorted(by_id)][
+    _ensure_dir(project_learning_dir)
+    lock_path = os.path.join(project_learning_dir, ".hints.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        existing = legion_learning_context.read_bounded_json(
+            path, legion_learning_context.MAX_HINT_DOCUMENT_BYTES
+        )
+        maintainers: dict[str, dict[str, Any]] = {}
+        generated: dict[str, dict[str, Any]] = {}
+        for hint in _list(_dict(existing).get("hints"))[
             : legion_learning_context.MAX_HINTS
             + legion_learning_context.MAX_EXCLUDED_HINTS
-        ],
+        ]:
+            if not isinstance(hint, dict):
+                continue
+            hint_id = _text(hint.get("id"))
+            if not hint_id:
+                continue
+            bucket = generated if hint.get("origin") == "self-learn-memory" else maintainers
+            bucket.setdefault(hint_id, hint)
+
+        lifecycle = _dict(report.get("learning_laws"))
+        if "learning_laws" in report:
+            for hint_id, hint in list(generated.items()):
+                law_key = _text(hint.get("law_key"))
+                if law_key and lifecycle.get(law_key) != "active":
+                    retired = dict(hint)
+                    if _text(retired.get("status")) == "active":
+                        retired["status"] = "retired"
+                        retired["lifecycle_owner"] = "learning-law"
+                    generated[hint_id] = retired
+
+        outcomes = {
+            _text(item.get("id")): item
+            for item in _list(report.get("outcomes"))
+            if isinstance(item, dict) and _text(item.get("id"))
+        }
+        incoming: dict[str, dict[str, Any]] = {}
+        for proposal in _list(report.get("proposals")):
+            if not isinstance(proposal, dict):
+                continue
+            outcome = outcomes.get(_text(proposal.get("outcome_id")), {})
+            hint = _typed_hint_from_proposal(proposal, outcome)
+            if hint is None:
+                continue
+            prior = generated.get(hint["id"])
+            # A maintainer may explicitly retire or supersede a generated ID.
+            # Never reactivate that terminal decision during the next scan.
+            if (
+                prior
+                and _text(prior.get("status")) in {"retired", "superseded"}
+                and prior.get("lifecycle_owner") != "learning-law"
+            ):
+                incoming[hint["id"]] = prior
+            else:
+                incoming[hint["id"]] = hint
+        generated.update(incoming)
+
+        status_rank = {"active": 0, "superseded": 1, "retired": 2}
+        scope_rank = {"exact": 0, "selector": 1, "global": 2}
+        ordered_maintainers = list(maintainers.values())
+        ordered_generated = sorted(
+            generated.values(),
+            key=lambda hint: (
+                status_rank.get(_text(hint.get("status")), 3),
+                scope_rank.get(_text(hint.get("scope")), 3),
+                _text(hint.get("id")),
+            ),
+        )
+        available = max(0, PROJECT_HINT_CAP - len(ordered_maintainers))
+        kept_generated = ordered_generated[:available]
+        kept_ids = {_text(hint.get("id")) for hint in kept_generated}
+        rejected_ids = sorted(
+            hint_id
+            for hint_id, hint in incoming.items()
+            if hint_id not in kept_ids or _text(hint.get("status")) != "active"
+        )
+        payload = {
+            "schema": "legion.learning-hints.v1",
+            "hints": ordered_maintainers + kept_generated,
+        }
+        _write_json(path, payload)
+        promoted = sum(
+            1
+            for hint_id, hint in incoming.items()
+            if hint_id in kept_ids and _text(hint.get("status")) == "active"
+        )
+    return {
+        "path": path,
+        "promoted": promoted,
+        "rejected": len(rejected_ids),
+        "rejected_ids": rejected_ids,
+        "total": len(payload["hints"]),
+        "project_cap": PROJECT_HINT_CAP,
+        "global_reserve": GLOBAL_HINT_RESERVE,
     }
-    _write_json(path, payload)
-    return {"path": path, "promoted": promoted, "total": len(payload["hints"])}
 
 
 def apply_memory(

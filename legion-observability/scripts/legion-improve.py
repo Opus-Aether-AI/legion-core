@@ -32,7 +32,14 @@ import legion_state  # noqa: E402
 
 PROPOSAL_SCHEMA = "legion.improvement-proposal.v1"
 RUN_SCHEMA = "legion.improvement-run.v1"
+ERROR_SCHEMA = "legion.improvement-error.v1"
 REVIEW_SCHEMA = "legion.improvement-review-receipt.v1"
+QUEUE_SCHEMA = "legion.improvement-queue-run.v1"
+IMPROVEMENT_PR_BODY = (
+    "Review-only Legion improvement. The exact remote base and candidate "
+    "passed repeated paired gates plus an independent immutable review. "
+    "Human review is required; this automation cannot merge or deploy."
+)
 STEPS = (
     "eligible",
     "leased",
@@ -56,6 +63,7 @@ DRAFT_RETRYABLE = {
     "draft_pr_create_failed",
     "draft_pr_response_invalid",
     "draft_pr_verify_failed",
+    "draft_base_changed",
 }
 TERMINAL_RETRYABLE_WITHOUT_INPUT_CHANGE = {
     "repository_unavailable",
@@ -73,6 +81,9 @@ TERMINAL_RETRYABLE_WITHOUT_INPUT_CHANGE = {
     "baseline_failed",
     "baseline_variance",
     "candidate_variance",
+    "baseline_mutated",
+    "candidate_mutated",
+    "regression",
     "review_snapshot_failed",
     "review_snapshot_mismatch",
     "independent_review_invalid",
@@ -184,7 +195,27 @@ def _bounded_process(
         if timed_out:
             return subprocess.CompletedProcess(argv, 124, "", "process timed out")
         return subprocess.CompletedProcess(argv, 125, "", "process output exceeded limit")
-    process.wait()
+    try:
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    if timed_out:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        for stream in streams:
+            assert stream is not None
+            stream.close()
+        return subprocess.CompletedProcess(argv, 124, "", "process timed out")
     stdout = bytes(streams[process.stdout])
     stderr = bytes(streams[process.stderr])
     for stream in streams:
@@ -342,6 +373,7 @@ def validate(proposal: Any) -> str | None:
         if not isinstance(provenance, dict) or set(provenance) - {
             "source",
             "source_id",
+            "law_key",
             "confidence",
             "support",
             "evidence_ids",
@@ -349,12 +381,18 @@ def validate(proposal: Any) -> str | None:
             return "invalid_schema"
         source = provenance.get("source", "")
         source_id = provenance.get("source_id")
+        law_key = provenance.get("law_key")
         confidence = provenance.get("confidence")
         support = provenance.get("support")
         if not isinstance(source, str) or len(source) > 80:
             return "invalid_schema"
         if source_id is not None and (
             not isinstance(source_id, str) or len(source_id) > 160
+        ):
+            return "invalid_schema"
+        if law_key is not None and (
+            not isinstance(law_key, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", law_key)
         ):
             return "invalid_schema"
         if confidence is not None and (
@@ -382,6 +420,9 @@ def validate(proposal: Any) -> str | None:
             return "invalid_schema"
         if source == "learning-law":
             if (
+                not isinstance(law_key, str)
+                or not law_key
+                or
                 not isinstance(confidence, (int, float))
                 or isinstance(confidence, bool)
                 or not math.isfinite(float(confidence))
@@ -426,6 +467,7 @@ def _valid_durable_record(
         "transitions", "reason", "remote_identity", "base_sha",
         "remote_base_sha", "base_branch", "base_source", "branch", "lease_id",
         "diff_digest", "changed_lines", "evaluation", "review_receipt", "draft_pr",
+        "reclaim_remote_head",
     }
     if set(record) - allowed:
         return False
@@ -465,6 +507,10 @@ def _valid_durable_record(
     if state in STEPS and transitions[-1] != state:
         return False
     if state in {"rejected", "stale", "failed"} and transitions[-1] != state:
+        return False
+    if "reclaim_remote_head" in record and not _valid_sha(
+        record.get("reclaim_remote_head")
+    ):
         return False
     if state == "eligible":
         return len(transitions) == 1
@@ -556,12 +602,37 @@ def _valid_durable_record(
         if (
             transitions != list(STEPS)
             or not isinstance(draft_pr, dict)
-            or draft_pr.get("draft") is not True
-            or not _safe_pr_url(str(draft_pr.get("url") or ""))
-            or not isinstance(draft_pr.get("id"), str)
-            or not isinstance(draft_pr.get("body"), str)
-            or len(draft_pr["body"]) > 1000
+            or set(draft_pr)
+            != {
+                "id", "draft", "url", "number", "body", "repository",
+                "remote_identity", "base_branch", "base_sha", "head_branch",
+                "head_sha",
+            }
+            or not isinstance(draft_pr.get("draft"), bool)
+            or draft_pr.get("body") != IMPROVEMENT_PR_BODY
+            or draft_pr.get("remote_identity") != record.get("remote_identity")
+            or draft_pr.get("base_branch") != record.get("base_branch")
+            or draft_pr.get("base_sha") != record.get("base_sha")
+            or draft_pr.get("head_branch") != record.get("branch")
+            or draft_pr.get("head_sha")
+            != record["review_receipt"].get("reviewed_head_sha")
+            or not isinstance(draft_pr.get("repository"), str)
+            or not re.fullmatch(
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+                draft_pr.get("repository", ""),
+            )
+            or not isinstance(draft_pr.get("number"), int)
+            or isinstance(draft_pr.get("number"), bool)
+            or draft_pr.get("number", 0) < 1
+            or not re.fullmatch(
+                rf"https://github\.com/{re.escape(draft_pr.get('repository', ''))}/pull/{draft_pr.get('number')}",
+                _safe_pr_url(str(draft_pr.get("url") or "")),
+            )
         ):
+            return False
+        draft_body = dict(draft_pr)
+        draft_id = draft_body.pop("id", None)
+        if draft_id != digest(draft_body)[:24]:
             return False
     return True
 
@@ -770,6 +841,73 @@ def _target_file(worktree: Path, relative: str) -> Path:
     return target
 
 
+def _plugin_policy_paths(worktree: Path, relative: str) -> list[str]:
+    """Derive policy-mandated version files from a Markdown target."""
+    target = worktree / relative
+    for parent in (target.parent, *target.parents):
+        if parent == worktree or worktree not in parent.parents:
+            break
+        manifest = parent / ".claude-plugin" / "plugin.json"
+        if not manifest.is_file():
+            continue
+        marketplace = worktree / ".claude-plugin" / "marketplace.json"
+        if not marketplace.is_file():
+            raise ImproveError("rejected", "plugin_version_policy_unavailable")
+        return sorted(
+            {
+                relative,
+                manifest.relative_to(worktree).as_posix(),
+                marketplace.relative_to(worktree).as_posix(),
+            }
+        )
+    return [relative]
+
+
+def _write_pretty_json(path: Path, value: dict[str, Any]) -> None:
+    fd, pending = tempfile.mkstemp(prefix=".legion-improve-json-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(pending, path.stat().st_mode)
+        os.replace(pending, path)
+    finally:
+        try:
+            os.unlink(pending)
+        except FileNotFoundError:
+            pass
+
+
+def _sync_plugin_policy_versions(worktree: Path, relative: str) -> None:
+    policy_paths = _plugin_policy_paths(worktree, relative)
+    if len(policy_paths) == 1:
+        return
+    manifest_rel = next(path for path in policy_paths if path.endswith("/.claude-plugin/plugin.json"))
+    marketplace_rel = ".claude-plugin/marketplace.json"
+    manifest_path = worktree / manifest_rel
+    marketplace_path = worktree / marketplace_rel
+    manifest = read_json(manifest_path)
+    marketplace = read_json(marketplace_path)
+    if not isinstance(manifest, dict) or not isinstance(marketplace, dict):
+        raise ImproveError("rejected", "plugin_version_policy_unavailable")
+    version = manifest.get("version")
+    match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", str(version or ""))
+    name = manifest.get("name")
+    plugins = marketplace.get("plugins")
+    if not match or not isinstance(name, str) or not isinstance(plugins, list):
+        raise ImproveError("rejected", "plugin_version_policy_unavailable")
+    next_version = f"{match.group(1)}.{match.group(2)}.{int(match.group(3)) + 1}"
+    matches = [item for item in plugins if isinstance(item, dict) and item.get("name") == name]
+    if len(matches) != 1 or matches[0].get("version") != version:
+        raise ImproveError("rejected", "plugin_version_policy_unavailable")
+    manifest["version"] = next_version
+    matches[0]["version"] = next_version
+    _write_pretty_json(manifest_path, manifest)
+    _write_pretty_json(marketplace_path, marketplace)
+
+
 def apply_candidate(
     record: dict[str, Any], proposal: dict[str, Any], root: Path
 ) -> None:
@@ -805,6 +943,7 @@ def apply_candidate(
             os.fsync(handle.fileno())
         os.chmod(pending, target.stat().st_mode)
         os.replace(pending, target)
+        _sync_plugin_policy_versions(worktree, relative)
     finally:
         try:
             os.unlink(pending)
@@ -927,7 +1066,13 @@ def create_candidate_snapshot(
     )
     try:
         git(candidate, "read-tree", record["base_sha"], env=env)
-        git(candidate, "add", "--", proposal["target"]["path"], env=env)
+        git(
+            candidate,
+            "add",
+            "--",
+            *_plugin_policy_paths(candidate, proposal["target"]["path"]),
+            env=env,
+        )
         tree_sha = git(candidate, "write-tree", env=env).stdout.strip()
         created = _bounded_process(
             [
@@ -1059,7 +1204,8 @@ def _reviewed_head_matches(
     paths = git(
         worktree, "diff", "--name-only", base, head, "--", check=False
     )
-    if paths.returncode != 0 or paths.stdout.splitlines() != [proposal["target"]["path"]]:
+    expected_paths = _plugin_policy_paths(worktree, proposal["target"]["path"])
+    if paths.returncode != 0 or sorted(paths.stdout.splitlines()) != expected_paths:
         return False
     patch = git(
         worktree, "diff", "--binary", base, head, "--", check=False
@@ -1074,13 +1220,69 @@ def _safe_pr_url(value: str) -> str:
     return value if re.fullmatch(r"https://[^\s]+", value) else ""
 
 
+def _github_repository(worktree: Path) -> str:
+    configured = os.environ.get("LEGION_IMPROVE_GITHUB_REPOSITORY", "").strip()
+    if configured:
+        return (
+            configured
+            if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", configured)
+            else ""
+        )
+    remote = git(worktree, "remote", "get-url", "origin", check=False)
+    value = remote.stdout.strip()
+    match = re.fullmatch(
+        r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?",
+        value,
+    )
+    return match.group(1) if match else ""
+
+
+def _draft_pr_payload(
+    row: dict[str, Any], record: dict[str, Any], repository: str
+) -> dict[str, Any] | None:
+    number = row.get("number")
+    url = _safe_pr_url(str(row.get("url") or ""))
+    if (
+        not repository
+        or not isinstance(number, int)
+        or isinstance(number, bool)
+        or number < 1
+        or row.get("body") != IMPROVEMENT_PR_BODY
+        or not re.fullmatch(
+            rf"https://github\.com/{re.escape(repository)}/pull/{number}", url
+        )
+    ):
+        return None
+    payload = {
+        "draft": row.get("isDraft") is True,
+        "url": url,
+        "number": number,
+        "body": row["body"],
+        "repository": repository,
+        "remote_identity": record["remote_identity"],
+        "base_branch": record["base_branch"],
+        "base_sha": record["base_sha"],
+        "head_branch": record["branch"],
+        "head_sha": record["review_receipt"]["reviewed_head_sha"],
+    }
+    payload["id"] = digest(payload)[:24]
+    return payload
+
+
 def _pr_identity_error(
-    row: Any, record: dict[str, Any], branch: str, head_sha: str
+    row: Any,
+    record: dict[str, Any],
+    branch: str,
+    head_sha: str,
+    *,
+    require_draft: bool = True,
 ) -> str | None:
     if not isinstance(row, dict):
         return "existing_pr_identity_mismatch"
-    if row.get("isDraft") is not True:
+    if require_draft and row.get("isDraft") is not True:
         return "existing_pr_not_draft"
+    if row.get("body") != IMPROVEMENT_PR_BODY:
+        return "existing_pr_body_mismatch"
     if (
         row.get("baseRefName") != record["base_branch"]
         or row.get("baseRefOid") != record["base_sha"]
@@ -1093,35 +1295,58 @@ def _pr_identity_error(
     return None
 
 
+def _delete_owned_remote_branch(
+    worktree: Path, branch: str, expected_head: str
+) -> bool:
+    current = _remote_branch_sha(worktree, branch)
+    if not current:
+        return True
+    if current != expected_head:
+        return False
+    deleted = git(
+        worktree,
+        "push",
+        "--quiet",
+        f"--force-with-lease=refs/heads/{branch}:{expected_head}",
+        "origin",
+        f":refs/heads/{branch}",
+        check=False,
+    )
+    return deleted.returncode == 0 or not _remote_branch_sha(worktree, branch)
+
+
+def _rollback_created_pr(
+    gh: str, worktree: Path, pr_url: str, branch: str, head_sha: str
+) -> bool:
+    closed = _bounded_process(
+        [gh, "pr", "close", pr_url, "--delete-branch"],
+        cwd=worktree,
+        timeout=120,
+    )
+    branch_removed = _delete_owned_remote_branch(worktree, branch, head_sha)
+    return closed.returncode == 0 and branch_removed
+
+
 def draft(
-    record: dict[str, Any], proposal: dict[str, Any], root: Path
+    record: dict[str, Any],
+    proposal: dict[str, Any],
+    root: Path,
+    source_repo: str | Path,
 ) -> str | None:
     worktree = actual_worktree(root, record["fingerprint"])
     if not _reviewed_head_matches(record, proposal, root):
         return "review_snapshot_mismatch"
     head_sha = record["review_receipt"]["reviewed_head_sha"]
     branch = record["branch"]
-    existing = _remote_branch_sha(worktree, branch)
-    if existing and existing != head_sha:
-        return "branch_collision"
-    if not existing:
-        pushed = git(
-            worktree,
-            "push",
-            "--quiet",
-            "origin",
-            f"{head_sha}:refs/heads/{branch}",
-            check=False,
-        )
-        if pushed.returncode != 0:
-            existing = _remote_branch_sha(worktree, branch)
-            if existing != head_sha:
-                return "branch_push_failed"
+    # A local deterministic ref is safe and lets identity probes resolve the
+    # reviewed head without publishing or moving any remote state.
     git(worktree, "branch", "--force", branch, head_sha, check=False)
-
     gh_configured = os.environ.get("GH_BIN", "gh")
     gh = shutil.which(gh_configured) if not os.path.isabs(gh_configured) else gh_configured
     if not gh or not os.access(gh, os.X_OK):
+        return "gh_unavailable"
+    repository = _github_repository(worktree)
+    if not repository:
         return "gh_unavailable"
     listed = _bounded_process(
         [
@@ -1131,9 +1356,9 @@ def draft(
             "--head",
             branch,
             "--state",
-            "open",
+            "all",
             "--json",
-            "number,url,isDraft,baseRefName,baseRefOid,headRefName,headRefOid",
+            "number,url,state,isDraft,body,baseRefName,baseRefOid,headRefName,headRefOid",
         ],
         cwd=worktree,
         timeout=120,
@@ -1149,18 +1374,58 @@ def draft(
         return "draft_pr_list_failed"
     if rows:
         if len(rows) != 1:
-            return "existing_pr_identity_mismatch"
+            return "existing_pr_already_published"
         existing_pr = rows[0]
-        identity_error = _pr_identity_error(existing_pr, record, branch, head_sha)
+        identity_error = _pr_identity_error(
+            existing_pr,
+            record,
+            branch,
+            head_sha,
+            require_draft=False,
+        )
         if identity_error:
-            return identity_error
+            return "existing_pr_already_published"
         pr_url = _safe_pr_url(str(existing_pr.get("url") or ""))
-    body = (
-        "Review-only Legion improvement. The exact remote base and candidate "
-        "passed repeated paired gates plus an independent immutable review. "
-        "Human review is required; this automation cannot merge or deploy."
-    )
+        draft_pr = _draft_pr_payload(existing_pr, record, repository)
+        if draft_pr is None:
+            return "existing_pr_identity_mismatch"
+        record["draft_pr"] = draft_pr
+        record.pop("reclaim_remote_head", None)
+        return None
+
+    existing = _remote_branch_sha(worktree, branch)
+    if existing and existing != head_sha:
+        reclaim = record.get("reclaim_remote_head")
+        if not _valid_sha(reclaim) or existing != reclaim:
+            return "branch_collision"
+        pushed = git(
+            worktree,
+            "push",
+            "--quiet",
+            f"--force-with-lease=refs/heads/{branch}:{reclaim}",
+            "origin",
+            f"{head_sha}:refs/heads/{branch}",
+            check=False,
+        )
+        if pushed.returncode != 0 and _remote_branch_sha(worktree, branch) != head_sha:
+            return "branch_push_failed"
+    elif not existing:
+        pushed = git(
+            worktree,
+            "push",
+            "--quiet",
+            "origin",
+            f"{head_sha}:refs/heads/{branch}",
+            check=False,
+        )
+        if pushed.returncode != 0 and _remote_branch_sha(worktree, branch) != head_sha:
+            return "branch_push_failed"
+    record.pop("reclaim_remote_head", None)
     if not pr_url:
+        if _stale_reason(record, source_repo) is not None:
+            if not _delete_owned_remote_branch(worktree, branch, head_sha):
+                return "draft_pr_rollback_failed"
+            return "draft_base_changed"
         created = _bounded_process(
             [
                 gh,
@@ -1174,7 +1439,7 @@ def draft(
                 "--title",
                 f"docs: review improvement {record['fingerprint'][:12]}",
                 "--body",
-                body,
+                IMPROVEMENT_PR_BODY,
             ],
             cwd=worktree,
             timeout=120,
@@ -1192,30 +1457,36 @@ def draft(
                 "view",
                 pr_url,
                 "--json",
-                "number,url,isDraft,baseRefName,baseRefOid,headRefName,headRefOid",
+                "number,url,state,isDraft,body,baseRefName,baseRefOid,headRefName,headRefOid",
             ],
             cwd=worktree,
             timeout=120,
         )
         if verified.returncode != 0:
-            return "draft_pr_verify_failed"
+            return (
+                "draft_pr_verify_failed"
+                if _rollback_created_pr(gh, worktree, pr_url, branch, head_sha)
+                else "draft_pr_rollback_failed"
+            )
         try:
             created_pr = json.loads(verified.stdout)
         except ValueError:
-            return "draft_pr_verify_failed"
+            return (
+                "draft_pr_verify_failed"
+                if _rollback_created_pr(gh, worktree, pr_url, branch, head_sha)
+                else "draft_pr_rollback_failed"
+            )
         identity_error = _pr_identity_error(
             created_pr, record, branch, head_sha
         )
-        if identity_error:
-            return identity_error
-    record["draft_pr"] = {
-        "id": digest({"branch": branch, "fingerprint": record["fingerprint"]})[
-            :24
-        ],
-        "draft": True,
-        "url": pr_url,
-        "body": body,
-    }
+        created_payload = _draft_pr_payload(created_pr, record, repository)
+        if identity_error or created_payload is None or _stale_reason(record, source_repo) is not None:
+            return (
+                identity_error or "draft_base_changed"
+                if _rollback_created_pr(gh, worktree, pr_url, branch, head_sha)
+                else "draft_pr_rollback_failed"
+            )
+        record["draft_pr"] = created_payload
     return None
 
 
@@ -1252,6 +1523,15 @@ def public(record: dict[str, Any]) -> dict[str, Any]:
     ):
         value["worktree"] = public_worktree(record["fingerprint"])
     return value
+
+
+def error_payload(command: str, reason: str) -> dict[str, Any]:
+    return {
+        "schema": ERROR_SCHEMA,
+        "command": command,
+        "status": "error",
+        "reason": reason,
+    }
 
 
 def maybe_stop(record: dict[str, Any], stop_after: str | None) -> None:
@@ -1323,8 +1603,18 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         if record.get("state") in TERMINAL:
             if not _retryable_terminal(record, proposal, args.repo):
                 return (0 if record["state"] == "draft_created" else 2), public(record)
+            prior_receipt = record.get("review_receipt")
+            reclaim_remote_head = (
+                prior_receipt.get("reviewed_head_sha")
+                if isinstance(prior_receipt, dict)
+                and record.get("branch") == "legion-improve/" + fingerprint
+                and _valid_sha(prior_receipt.get("reviewed_head_sha"))
+                else ""
+            )
             cleanup_worktrees(args.repo, root, fingerprint)
             record = _initial_record(proposal, fingerprint, args.mode)
+            if reclaim_remote_head:
+                record["reclaim_remote_head"] = reclaim_remote_head
             atomic_write(path, record)
         record["mode"] = args.mode
         if record["state"] != "eligible":
@@ -1378,8 +1668,9 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 candidate = actual_worktree(root, fingerprint)
                 paths, lines, patch = changed_paths(candidate)
                 target = proposal["target"]["path"]
+                expected_paths = _plugin_policy_paths(candidate, target)
                 limit = proposal.get("limits", {}).get("max_changed_lines", 200)
-                if paths != [target]:
+                if paths != expected_paths:
                     terminal(record, "rejected", "path_not_allowlisted")
                 elif lines > limit:
                     terminal(record, "rejected", "diff_too_large")
@@ -1426,7 +1717,7 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                     atomic_write(path, record)
                     cleanup_worktrees(args.repo, root, fingerprint)
                     return 2, public(record)
-                failed = draft(record, proposal, root)
+                failed = draft(record, proposal, root, args.repo)
                 if failed:
                     if failed in DRAFT_RETRYABLE:
                         record["reason"] = failed
@@ -1463,25 +1754,13 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
 
 def inspect(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     if not re.fullmatch(r"[0-9a-f]{64}", args.fingerprint):
-        return 2, {
-            "schema": RUN_SCHEMA,
-            "state": "failed",
-            "reason": "invalid_fingerprint",
-        }
+        return 2, error_payload("inspect", "invalid_fingerprint")
     record = read_json(state_path(Path(args.state_dir).resolve(), args.fingerprint))
     if not record:
-        return 2, {
-            "schema": RUN_SCHEMA,
-            "state": "missing",
-            "reason": "unknown_fingerprint",
-        }
+        return 2, error_payload("inspect", "unknown_fingerprint")
     proposal_identity = {"id": record.get("proposal_id")}
     if not _valid_durable_record(record, proposal_identity, args.fingerprint):
-        return 2, {
-            "schema": RUN_SCHEMA,
-            "state": "failed",
-            "reason": "state_corrupt",
-        }
+        return 2, error_payload("inspect", "state_corrupt")
     return 0, public(record)
 
 
@@ -1544,7 +1823,7 @@ def _read_proposal(proposal_path: Path) -> dict[str, Any] | None:
 def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     if args.mode == "off":
         return 0, {
-            "schema": "legion.improvement-queue-run.v1",
+            "schema": QUEUE_SCHEMA,
             "mode": "off",
             "attempted": 0,
             "failed": 0,
@@ -1617,7 +1896,7 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 }
             )
     payload = {
-        "schema": "legion.improvement-queue-run.v1",
+        "schema": QUEUE_SCHEMA,
         "mode": args.mode,
         "attempted": attempted,
         "failed": failures,
@@ -1674,32 +1953,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.command == "run":
         if args.evaluation_repeats < 2 or args.evaluation_repeats > 10:
-            print(
-                json.dumps(
-                    {
-                        "schema": RUN_SCHEMA,
-                        "state": "rejected",
-                        "reason": "evaluation_repeats_out_of_range",
-                    },
-                    sort_keys=True,
-                )
-            )
+            print(json.dumps(error_payload("run", "evaluation_repeats_out_of_range"), sort_keys=True))
             return 2
         code, payload = execute(args)
     elif args.command == "inspect":
         code, payload = inspect(args)
     elif args.command == "queue":
         if not 1 <= args.max <= 10 or not 2 <= args.evaluation_repeats <= 10:
-            print(
-                json.dumps(
-                    {
-                        "schema": "legion.improvement-queue-run.v1",
-                        "state": "rejected",
-                        "reason": "queue_bounds_out_of_range",
-                    },
-                    sort_keys=True,
-                )
-            )
+            print(json.dumps(error_payload("queue", "queue_bounds_out_of_range"), sort_keys=True))
             return 2
         code, payload = process_queue(args)
     else:

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.improvement-error.v1.schema.json",
+  "title": "legion.improvement-error.v1",
+  "type": "object",
+  "required": ["schema", "command", "status", "reason"],
+  "properties": {
+    "schema": {"const": "legion.improvement-error.v1"},
+    "command": {"enum": ["run", "inspect", "queue"]},
+    "status": {"const": "error"},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 160}
+  },
+  "additionalProperties": false
+}

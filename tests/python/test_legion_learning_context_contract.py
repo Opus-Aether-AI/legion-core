@@ -141,6 +141,50 @@ def test_compile_context_resolves_exact_selector_and_global_with_reasons(tmp_pat
     assert excluded["old-release-rule"] == "superseded"
 
 
+def test_saturated_project_store_reserves_raw_candidate_capacity_for_global_laws(tmp_path):
+    repo = _repo(tmp_path)
+    env, project, global_learning = _environment(tmp_path, repo)
+    project_hints = [
+        {
+            "schema": "legion.learning-hint.v1",
+            "id": f"project-{index:03d}",
+            "scope": "exact",
+            "entity": "skill:other",
+            "status": "active",
+            "trusted": True,
+            "guidance": f"Project-only guidance {index}.",
+        }
+        for index in range(300)
+    ]
+    (project / "hints.json").write_text(
+        json.dumps({"schema": "legion.learning-hints.v1", "hints": project_hints}),
+        encoding="utf-8",
+    )
+    (global_learning / "hints.json").write_text(
+        json.dumps(
+            {
+                "schema": "legion.learning-hints.v1",
+                "hints": [
+                    {
+                        "schema": "legion.learning-hint.v1",
+                        "id": "global-law",
+                        "scope": "global",
+                        "status": "active",
+                        "trusted": True,
+                        "guidance": "Always run the representative workflow.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, payload = _compile(repo, env)
+
+    assert [hint["id"] for hint in payload["selected_hints"]] == ["global-law"]
+    assert len(payload["excluded_hints"]) == 200
+
+
 def test_compile_context_has_stable_ordering_and_enforces_hint_token_limits(tmp_path):
     repo = _repo(tmp_path)
     env, _, _ = _environment(tmp_path, repo, "over-budget-hints.json")

@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 
 HERE = os.path.dirname(__file__)
@@ -382,6 +383,132 @@ def test_supported_learning_law_emits_bounded_typed_improvement_queue(tmp_path):
     queued = json.loads(open(paths[0], encoding="utf-8").read())
     assert queued == typed
     assert str(repo) not in json.dumps(queued, sort_keys=True)
+
+
+def _memory_report(identifier, *, source="manual", law_key=""):
+    outcome = {
+        "id": f"outcome-{identifier}",
+        "source": source,
+        "target_type": "skill",
+        "target_name": "release",
+        "severity": "high",
+        "summary": f"Guardrail {identifier}.",
+        "evidence": f"evidence-{identifier}",
+        "metadata": {"law_key": law_key} if law_key else {},
+    }
+    proposal = {
+        "id": f"proposal-{identifier}",
+        "target_type": "skill",
+        "target_name": "release",
+        "severity": "high",
+        "summary": outcome["summary"],
+        "suggested_change": f"Apply safe behavior {identifier}.",
+        "outcome_id": outcome["id"],
+    }
+    return {"outcomes": [outcome], "proposals": [proposal]}
+
+
+def test_learning_law_memory_is_global_and_retirement_cannot_be_reactivated(tmp_path):
+    learning = str(tmp_path / "learning")
+    report = _memory_report("global", source="learning-law", law_key="global-law")
+    report["learning_laws"] = {"global-law": "active"}
+    first = self_learn.sync_typed_hints(report, learning)
+    hint_path = first["path"]
+    active = json.loads(open(hint_path, encoding="utf-8").read())["hints"][0]
+    assert active["scope"] == "global"
+    assert "entity" not in active
+
+    retired_report = {"outcomes": [], "proposals": [], "learning_laws": {"global-law": "retired"}}
+    self_learn.sync_typed_hints(retired_report, learning)
+    retired = json.loads(open(hint_path, encoding="utf-8").read())["hints"][0]
+    assert retired["status"] == "retired"
+
+    # A maintainer-authored terminal status has no lifecycle-owner marker and
+    # remains terminal even when the generated law appears again.
+    retired.pop("lifecycle_owner", None)
+    self_learn._write_json(hint_path, {"schema": "legion.learning-hints.v1", "hints": [retired]})
+    self_learn.sync_typed_hints(report, learning)
+    preserved = json.loads(open(hint_path, encoding="utf-8").read())["hints"][0]
+    assert preserved["status"] == "retired"
+
+
+def test_typed_hint_promotion_serializes_concurrent_read_merge_write(tmp_path):
+    learning = str(tmp_path / "learning")
+    reports = [_memory_report("one"), _memory_report("two")]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda report: self_learn.sync_typed_hints(report, learning), reports))
+
+    hints = json.loads(
+        open(os.path.join(learning, "hints.json"), encoding="utf-8").read()
+    )["hints"]
+    assert {hint["guidance"] for hint in hints} == {
+        "Guardrail one. Suggested: Apply safe behavior one.",
+        "Guardrail two. Suggested: Apply safe behavior two.",
+    }
+
+
+def test_hint_capacity_preserves_maintainers_and_reports_rejected_promotions(tmp_path):
+    learning = tmp_path / "learning"
+    learning.mkdir()
+    maintainers = [
+        {
+            "schema": "legion.learning-hint.v1",
+            "id": f"maintainer-{index:03d}",
+            "scope": "global",
+            "status": "active",
+            "trusted": True,
+            "guidance": f"Maintainer guidance {index}.",
+        }
+        for index in range(self_learn.PROJECT_HINT_CAP)
+    ]
+    self_learn._write_json(
+        str(learning / "hints.json"),
+        {"schema": "legion.learning-hints.v1", "hints": maintainers},
+    )
+
+    result = self_learn.sync_typed_hints(_memory_report("overflow"), str(learning))
+
+    stored = json.loads((learning / "hints.json").read_text(encoding="utf-8"))["hints"]
+    assert len(stored) == self_learn.PROJECT_HINT_CAP
+    assert result["promoted"] == 0
+    assert result["rejected"] == 1
+    assert result["global_reserve"] == 100
+
+
+def test_retired_learning_law_is_removed_from_generated_improvement_queue(tmp_path):
+    logs = str(tmp_path / "logs")
+    proposal = {
+        "schema": "legion.improvement-proposal.v1",
+        "id": "learning-law:one",
+        "revision": 5,
+        "maintainer_eligible": True,
+        "kind": "documentation_guardrail",
+        "summary": "Law one.",
+        "target": {"path": "SKILL.md"},
+        "candidate": {"operation": "append_markdown_guardrail", "content": "Do one."},
+        "validation": {"profile": "documentation"},
+        "limits": {"max_changed_lines": 40},
+        "provenance": {
+            "source": "learning-law",
+            "source_id": "one",
+            "law_key": "one",
+            "confidence": 0.95,
+            "support": {"episodes": 5, "projects": 3},
+            "evidence_ids": [],
+        },
+    }
+    paths = self_learn.write_improvement_queue(
+        {"improvement_proposals": [proposal], "learning_laws": {"one": "active"}},
+        logs,
+    )
+    assert len(paths) == 1 and os.path.exists(paths[0])
+
+    self_learn.write_improvement_queue(
+        {"improvement_proposals": [], "learning_laws": {"one": "retired"}},
+        logs,
+    )
+    assert not os.path.exists(paths[0])
 
 
 def test_weak_or_single_project_learning_never_enters_improvement_queue(tmp_path):

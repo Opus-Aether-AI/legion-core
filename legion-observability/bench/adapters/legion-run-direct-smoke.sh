@@ -717,7 +717,7 @@ checks = {
     ),
     "validation_feedback_recorded": (
         learning_feedback.get("recorded") == 1
-        and learning_feedback.get("outcomes", [{}])[0].get("source") == "validation-feedback"
+        and learning_feedback.get("outcomes", [{}])[0].get("source") == "legion-run:validate"
         and learning_feedback.get("outcomes", [{}])[0].get("target_name") == "direct-plan-validate"
     ),
     "self_learning_memory_updated_by_validation_feedback": (

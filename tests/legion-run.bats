@@ -317,7 +317,11 @@ jq -cn --arg path "${LEGION_LEARNING_CONTEXT_PATH-unset}" --arg revision "${LEGI
   --slurpfile context "$LEGION_LEARNING_CONTEXT_PATH" \
   '{path:$path,revision:$revision,stage:$context[0].stage,hint_ids:[$context[0].selected_hints[].id]}' \
   > "$LEGION_RUN_DIR/boundary-inputs/plan.json"
-printf '{"schema":"legion.plugin.plan.v1","task":"%s"}\n' "$LEGION_TASK" > "$LEGION_RUN_PLAN_FILE"
+jq -cn --arg task "$LEGION_TASK" \
+  --arg boundary "$LEGION_LEARNING_CONTEXT_BOUNDARY" \
+  --arg revision "$LEGION_LEARNING_CONTEXT_REVISION" \
+  '{schema:"legion.plugin.plan.v1",task:$task,learning_context_ack:{boundary:$boundary,revision:$revision}}' \
+  > "$LEGION_RUN_PLAN_FILE"
 printf '%s\n' '{"id":"one","archetype":"implement-feature","task":"Implement the first delegated slice."}' '{"id":"two","archetype":"write-tests","task":"Implement the second delegated slice."}' > "$LEGION_RUN_SLICES_FILE"
 SH
   cat > "$BATS_TEST_TMPDIR/bin/fieldops-validate" <<'SH'
@@ -328,7 +332,9 @@ jq -cn --arg path "${LEGION_LEARNING_CONTEXT_PATH-unset}" --arg revision "${LEGI
   --slurpfile context "$LEGION_LEARNING_CONTEXT_PATH" \
   '{path:$path,revision:$revision,stage:$context[0].stage,hint_ids:[$context[0].selected_hints[].id]}' \
   > "$LEGION_RUN_DIR/boundary-inputs/validate.json"
-printf '{"ok":true,"command":"fieldops-validate"}\n'
+jq -cn --arg boundary "$LEGION_LEARNING_CONTEXT_BOUNDARY" \
+  --arg revision "$LEGION_LEARNING_CONTEXT_REVISION" \
+  '{ok:true,command:"fieldops-validate",learning_context_ack:{boundary:$boundary,revision:$revision}}'
 SH
   cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
 #!/usr/bin/env bash
@@ -363,7 +369,7 @@ SH
 
 run_learning_context_lifecycle() {
   manifest="$(make_plugin)"
-  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Exercise learning context" --name learning-contract --json
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Exercise learning context" --name learning-contract --json "$@"
   json="$(printf '%s' "$output" | json_from_output)"
   run_dir="$(echo "$json" | jq -r '.run_dir')"
 }
@@ -424,7 +430,7 @@ assert_learning_context_artifacts() {
   install_learning_boundary_consumers
   export LEARNING_CONTEXT_CASE=stage-scoped
 
-  run_learning_context_lifecycle
+  run_learning_context_lifecycle --learning-context-mode required
 
   [ "$status" -eq 0 ]
   jq -e '.stage == "plan" and .hint_ids == ["plan-only"]' \
@@ -453,7 +459,7 @@ assert_learning_context_artifacts() {
   install_learning_boundary_consumers
   export LEARNING_CONTEXT_CASE=required
 
-  run_learning_context_lifecycle
+  run_learning_context_lifecycle --learning-context-mode required
   [ "$status" -eq 0 ]
   assert_learning_context_artifacts
   jq -e --arg path "$run_dir/learning-context.json" \
@@ -461,6 +467,38 @@ assert_learning_context_artifacts() {
   jq -e -s 'all(.[]; .task | contains("Required: preserve the billing idempotency contract."))' \
     "$run_dir/boundary-inputs/delegated-slices.jsonl"
   grep -Fq 'Required: preserve the billing idempotency contract.' "$run_dir/boundary-inputs/final-review.args"
+}
+
+@test "legion-run: required mode rejects planner or validator without boundary revision acknowledgement" {
+  install_fake_pipeline_bins
+  install_learning_context_boundary_fake
+  install_learning_boundary_consumers
+  export LEARNING_CONTEXT_CASE=required
+  cat > "$BATS_TEST_TMPDIR/bin/fieldops-plan" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"schema":"legion.plugin.plan.v1","task":"unacknowledged"}\n' > "$LEGION_RUN_PLAN_FILE"
+printf '%s\n' '{"id":"one","archetype":"implement-feature","task":"slice"}' > "$LEGION_RUN_SLICES_FILE"
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/fieldops-plan"
+
+  run_learning_context_lifecycle --learning-context-mode required
+
+  [ "$status" -eq 1 ]
+  echo "$json" | jq -e '.failed_stage == "plan" and (.error | contains("not acknowledged by planner"))'
+
+  install_learning_boundary_consumers
+  cat > "$BATS_TEST_TMPDIR/bin/fieldops-validate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"ok":true,"command":"fieldops-validate"}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/fieldops-validate"
+
+  run_learning_context_lifecycle --learning-context-mode required
+
+  [ "$status" -eq 1 ]
+  echo "$json" | jq -e '.failed_stage == "validate" and (.error | contains("not acknowledged by validator"))'
 }
 
 @test "legion-run: Codex final review receives selected guidance as bounded task input" {
@@ -1370,7 +1408,7 @@ SH
   echo "$json" | jq -e '.ok == false and .failed_stage == "fanout-apply"'
   jq -e '.failed == 1 and .exit_code == 0' "$run_dir/fanout.json"
   jq -e '.failed_stage == "fanout-apply" and (.message | contains("semantic failure"))' "$run_dir/failure.json"
-  jq -e '.outcomes[] | select(.source == "legion-run:fanout-apply" and .target_type == "command" and .target_name == "legion-fanout" and (.summary | contains("1 failed")))' "$run_dir/learning-feedback.json"
+  jq -e '.outcomes[] | select(.source == "legion-run:fanout-apply" and .target_type == "heavy-task" and .target_name == "billing-export" and (.summary | contains("1 failed")))' "$run_dir/learning-feedback.json"
   jq -e '.run.applied_memory == true' "$run_dir/self-learn.json"
 }
 
@@ -1413,7 +1451,7 @@ SH
   echo "$json" | jq -e '.ok == false and .failed_stage == "validate"'
   jq -e '.ok == false and .exit_code == 1' "$run_dir/validation.json"
   jq -e '.recorded >= 1' "$run_dir/learning-feedback.json"
-  jq -e '.outcomes[] | select(.source == "validation-feedback" and .target_type == "skill" and .target_name == "legion-run" and (.summary | contains("idempotency")))' "$run_dir/learning-feedback.json"
+  jq -e '.outcomes[] | select(.source == "legion-run:validate" and .target_type == "heavy-task" and .target_name == "billing-export" and (.summary | contains("idempotency")))' "$run_dir/learning-feedback.json"
   jq -e '.run.applied_memory == true' "$run_dir/self-learn.json"
   [ -s "$run_dir/self-learn-run.json" ]
 }
@@ -1460,7 +1498,7 @@ SH
   run_dir="$(echo "$json" | jq -r '.run_dir')"
   echo "$json" | jq -e '.ok == false and .failed_stage == "review"'
   jq -e '.verdict.verdict == "request_changes"' "$run_dir/review.json"
-  jq -e '.outcomes[] | select(.source == "legion-run:review" and .target_type == "command" and .target_name == "legion-delegate" and (.summary | contains("request_changes")))' "$run_dir/learning-feedback.json"
+  jq -e '.outcomes[] | select(.source == "legion-run:review" and .target_type == "heavy-task" and .target_name == "billing-export" and (.summary | contains("request_changes")))' "$run_dir/learning-feedback.json"
   jq -e '.run.applied_memory == true' "$run_dir/self-learn.json"
   jq -e '.stages[] | select(.stage == "review" and .status == "failed")' "$run_dir/stage-status.json"
   jq -e '.stages[] | select(.stage == "self-learn" and .status == "passed")' "$run_dir/stage-status.json"

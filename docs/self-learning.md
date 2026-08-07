@@ -143,8 +143,12 @@ Memory mode is intentionally safe: it does not rewrite source or vendored skills
 session decisions, and promoted learning laws may contribute bounded guidance;
 model-authored review text is not copied into trusted executor instructions.
 Instead, review evidence promotes only Legion's fixed, typed guardrail for that
-finding class. Every promoted hint remains entity-scoped and may also be scoped
-to `plan`, `fanout`, `validate`, or `review`.
+finding class. Local feedback remains entity-scoped; an active, supported
+cross-project learning law is promoted with `global` scope so it can reach
+ordinary plugin and heavy-task runs. Hints may also be scoped to `plan`,
+`fanout`, `validate`, or `review`. Promotion holds a project lock across the
+read/merge/write transaction, preserves maintainer retirement decisions, and
+reports capacity rejection while reserving compiler space for global hints.
 The default cron run scans all available spans and manual records so bugs recorded
 after yesterday's cron are still ingested. Passing `--day YYYY-MM-DD` keeps an
 exact UTC-day report window for reproducible audits and tests. Durable memory
@@ -189,9 +193,12 @@ legion-improve run --repo . --proposal proposal.json --state-dir .legion/improve
 `legion-improve` defaults to `off`; `dry-run` never creates a PR; and `draft`
 is the only publishing mode. It freezes the remote identity and base SHA,
 creates an isolated worktree, allows only a native Markdown-guardrail mutation,
-checks a bounded single-file diff, and runs immutable baseline and candidate
+checks a bounded allowlisted diff, and runs immutable baseline and candidate
 gates repeatedly. Any baseline/candidate variance or candidate regression is
-rejected. The proposal cannot supply a command. A bounded receipt from the
+rejected and may be retried after the external validator is repaired. A plugin
+guardrail also derives the required patch-version changes for its plugin
+manifest and marketplace entry; proposals still cannot supply those paths or a
+command. A bounded receipt from the
 external `legion-delegate review` boundary over exact base/head SHAs is required
 before an idempotent draft PR is created through `gh`. It never merges, deploys,
 or writes to the operator checkout.
@@ -199,8 +206,12 @@ or writes to the operator checkout.
 Recoverable terminal attempts are not dead letters. A repaired validator,
 cleaned operator checkout, newer proposal revision, or advanced remote base can
 reopen the same deterministic fingerprint from `eligible`; completed draft
-records never reopen. Reuse or creation of a draft is verified against its base
-and head branches plus both object IDs from the independently reviewed snapshot.
+records never reopen. Before publishing, the engine searches open, closed, and
+merged PRs for the deterministic head. It reclaims only its own unpublished
+branch with force-with-lease, rechecks the base around creation, and closes the
+new draft plus removes its owned branch if post-create identity verification
+fails. Durable PR state binds a deterministic ID and fixed body to the GitHub
+repository, PR number, base/head branches, and both reviewed object IDs.
 
 Only active cross-project laws with confidence at least `0.9`, five supporting
 episodes, three projects, a bounded guidance string, and a safe non-vendored
@@ -293,6 +304,11 @@ where intended. It writes schema-valid context and usage artifacts even when no
 hint is selected, hashes each safe context as a revision, and re-authenticates
 the bytes both before and after delivery so same-user file replacement fails
 closed. Hint counts, UTF-8-byte token budgets, selector values, evidence replay,
-and excluded metadata all have absolute caps. `learning-receipts.json` binds
-every delivery to its boundary, path, and revision; raw transcripts, selectors,
-and evidence excerpts never cross into executor context.
+and excluded metadata all have absolute caps. In `required` mode, planners and
+validators must echo `learning_context_ack` with the exact boundary and revision;
+plan guidance is also placed in the actual `LEGION_TASK` input, while fanout and
+review guidance is injected directly into their bounded task inputs.
+`learning-receipts.json` binds every delivery to its boundary, path, and revision
+with a canonical receipt ID, and the artifact manifest records its SHA-256.
+Raw transcripts, selectors, and evidence excerpts never cross into executor
+context.

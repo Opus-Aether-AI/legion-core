@@ -79,8 +79,9 @@ observe -> analyze -> propose -> baseline -> isolate -> mutate -> score -> keep/
 - **Propose:** self-learning writes evidence and typed proposals; it never applies a source candidate to the operator checkout.
 - **Promote:** explicit `--apply-memory` syncs bounded entity/stage hints into the
   project `learning/hints.json`, which official runs compile at each decision
-  boundary. Raw model review prose never becomes trusted guidance.
-- **Improve:** `legion-improve` is off by default. In `draft` mode it freezes the remote/base identity, confines an eligible documentation proposal to an isolated worktree and allowlists, rejects flake/regression gates, records an independent receipt, then opens a draft PR only. It never merges or deploys.
+  boundary. Supported cross-project laws retain global scope; promotion is
+  locked, lifecycle-aware, capacity-bounded, and never trusts raw model prose.
+- **Improve:** `legion-improve` is off by default. In `draft` mode it freezes the remote/base identity, confines an eligible documentation proposal to an isolated worktree and derived plugin-version allowlists, rejects flake/regression gates, records an independent receipt, then opens a draft PR only. Publication is all-state/idempotent, force-with-lease guarded, and rolled back if the base or verified identity races. It never merges or deploys.
 
 The source-changing queue is deliberately narrower than memory. Only promoted
 laws with confidence ≥0.9, at least five episodes across three projects, and a

@@ -29,9 +29,10 @@
       "additionalProperties": false
     }
   },
-  "required": ["schema", "learning_context", "learning_contexts", "receipts"],
+  "required": ["schema", "receipt_id", "learning_context", "learning_contexts", "receipts"],
   "properties": {
     "schema": {"const": "legion.learning-context-receipts.v1"},
+    "receipt_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "learning_context": {"$ref": "#/$defs/descriptor"},
     "learning_contexts": {
       "type": "object",

@@ -197,18 +197,27 @@ def load_hints(directories: list[str]) -> list[dict[str, Any]]:
     global storage, and later duplicate entries in one file are ignored.
     """
     by_id: dict[str, dict[str, Any]] = {}
-    for directory in directories:
+    total_cap = MAX_HINTS + MAX_EXCLUDED_HINTS
+    for index, directory in enumerate(directories):
+        # The final directory is the global store. A saturated project file
+        # must not consume the entire raw-candidate budget before global laws
+        # are even considered.
+        directory_cap = total_cap
+        if len(directories) > 1 and index < len(directories) - 1:
+            directory_cap = total_cap - MAX_HINTS
+        added = 0
         document = read_bounded_json(
             os.path.join(directory, "hints.json"), MAX_HINT_DOCUMENT_BYTES
         )
         for hint in values(mapping(document).get("hints")):
-            if len(by_id) >= MAX_HINTS + MAX_EXCLUDED_HINTS:
+            if len(by_id) >= total_cap or added >= directory_cap:
                 break
             if not isinstance(hint, dict):
                 continue
             hint_id = text(hint.get("id"))
             if _valid_hint_id(hint_id) and hint_id not in by_id:
                 by_id[hint_id] = hint
+                added += 1
     return [by_id[hint_id] for hint_id in sorted(by_id)]
 
 

@@ -34,6 +34,11 @@ MAX_SELECTOR_VALUES = 20
 MAX_EVIDENCE_FILE_BYTES = 8_388_608
 MAX_EVIDENCE_LINE_BYTES = 65_536
 MAX_EVIDENCE_RECORDS = 10_000
+# A legacy state document legitimately holds up to MAX_EVIDENCE_RECORDS ids of
+# MAX_IDENTIFIER_CHARS each, which exceeds the hint-document bound. Sizing its
+# read gate from the hint constant silently refused migrations the post-read
+# bounds were designed to accept.
+MAX_LEGACY_STATE_BYTES = 4_194_304
 
 
 def text(value: Any) -> str:
@@ -306,15 +311,19 @@ def compile_context(
             seen_guidance.add(key)
         deduped.append(entry)
 
-    # Reserve a slice of the budget for cross-project laws. Exact-scope hints
-    # legitimately outrank them, but a long tail of entity-specific guidance
-    # should not be able to starve every promoted law.
+    # Reserve a slice of the budget for cross-project laws so a long tail of
+    # entity-specific guidance cannot starve every promoted law. The reserve is
+    # deliberately a proportion with no floor: exact-scope hints outrank global
+    # ones, and rounding a tiny budget up to one reserved slot would invert that
+    # precedence outright -- at max_hints=1 it would hand the only slot to a
+    # global hint while excluding an exactly-matching one.
     reserve_slots = 0
     if max_hints:
         available_globals = sum(1 for entry in deduped if entry[3] == "global")
-        reserve_slots = min(available_globals, max(1, max_hints // 4))
+        reserve_slots = min(available_globals, max_hints // 4)
 
     chosen: dict[str, int] = {}
+    rejected: dict[str, str] = {}
     used_tokens = 0
 
     def _take(entry: tuple[int, str, dict[str, Any], str]) -> str | None:
@@ -339,19 +348,22 @@ def compile_context(
     for entry in deduped:
         if entry[1] in chosen:
             continue
-        _take(entry)
+        # Record the constraint that was binding for THIS hint at the moment it
+        # was rejected. Recomputing it after the passes finish would relabel a
+        # genuinely token-blocked hint as count-blocked as soon as later, smaller
+        # hints happened to fill the remaining slots -- sending an operator to
+        # raise max_hints when only max_tokens would have helped.
+        reason = _take(entry)
+        if reason:
+            rejected.setdefault(entry[1], reason)
 
     selected: list[dict[str, Any]] = []
     for _rank, hint_id, hint, reason in deduped:
         if hint_id in chosen:
             selected.append(_safe_selected_hint(hint, reason, chosen[hint_id]))
         else:
-            # Report the constraint that is actually binding. The count cap
-            # wins when it is exhausted, so a full selection never reports a
-            # token limit it did not reach.
-            over_count = len(chosen) >= max_hints
             excluded.append(
-                _safe_excluded_hint(hint, "hint_limit" if over_count else "token_limit")
+                _safe_excluded_hint(hint, rejected.get(hint_id, "hint_limit"))
             )
 
     excluded.sort(key=lambda item: (item["id"], item["exclusion_reason"]))
@@ -483,7 +495,7 @@ def reconcile_state(
     # arbitrary number of arbitrarily long evidence ids straight past
     # MAX_EVIDENCE_RECORDS and MAX_IDENTIFIER_CHARS into durable state.
     legacy = (
-        mapping(read_bounded_json(legacy_state_path, MAX_HINT_DOCUMENT_BYTES))
+        mapping(read_bounded_json(legacy_state_path, MAX_LEGACY_STATE_BYTES))
         if legacy_state_path
         else {}
     )

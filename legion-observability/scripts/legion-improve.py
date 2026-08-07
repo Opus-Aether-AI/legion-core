@@ -54,6 +54,9 @@ MAX_PROCESS_OUTPUT = 65_536
 MAX_GIT_OUTPUT = 2_097_152
 MAX_SOURCE_BYTES = 1_048_576
 MAX_PROPOSAL_BYTES = 65_536
+# Consecutive empty pull-request listings tolerated against a recorded
+# publish intent before concluding nothing was ever published.
+RECONCILE_ATTEMPTS = 3
 EMPTY_DIFF = hashlib.sha256(b"").hexdigest()
 REVIEW_RETRYABLE = {"independent_review_unavailable", "independent_review_failed"}
 DRAFT_RETRYABLE = {
@@ -592,7 +595,13 @@ def _valid_durable_record(
     if publish_attempt is not None:
         if (
             not isinstance(publish_attempt, dict)
-            or set(publish_attempt) != {"repository", "head_branch", "head_sha"}
+            or set(publish_attempt) - {
+                "repository",
+                "head_branch",
+                "head_sha",
+                "reconcile_attempts",
+            }
+            or not {"repository", "head_branch", "head_sha"} <= set(publish_attempt)
             or not isinstance(publish_attempt.get("repository"), str)
             or not re.fullmatch(
                 r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
@@ -1611,7 +1620,14 @@ def draft(
     # attempt recorded a publish intent for this exact head, GitHub's list
     # consistency window can hide a pull request that really exists, and
     # creating another here is precisely the duplicate the intent record exists
-    # to prevent. Wait for the listing to settle instead.
+    # to prevent.
+    #
+    # The wait is bounded. A crash before `gh pr create` ever ran, or a create
+    # that genuinely failed, leaves an intent that no listing will ever
+    # corroborate; blocking on it forever would wedge this fingerprint with no
+    # way out but hand-editing state. After RECONCILE_ATTEMPTS consecutive
+    # empty listings -- far longer than any list-consistency window, since runs
+    # are daily -- conclude nothing was published and allow the retry.
     attempt = record.get("publish_attempt")
     if (
         isinstance(attempt, dict)
@@ -1619,7 +1635,16 @@ def draft(
         and attempt.get("head_branch") == branch
         and attempt.get("head_sha") == head_sha
     ):
-        return "draft_pr_reconcile_pending"
+        seen = attempt.get("reconcile_attempts")
+        seen = seen + 1 if isinstance(seen, int) and not isinstance(seen, bool) else 1
+        if seen < RECONCILE_ATTEMPTS:
+            attempt = dict(attempt)
+            attempt["reconcile_attempts"] = seen
+            record["publish_attempt"] = attempt
+            _persist_draft_state(root, record)
+            return "draft_pr_reconcile_pending"
+        record.pop("publish_attempt", None)
+        _persist_draft_state(root, record)
 
     existing = _remote_branch_sha(worktree, branch)
     if existing and existing != head_sha:
@@ -2145,9 +2170,11 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     skipped_completed = 0
     invalid_entries = 0
     quarantined = 0
-    # Enough headroom to reach a healthy proposal sitting behind a few stuck
-    # ones, while still bounding the work one refresh can do.
-    max_attempts = min(50, max(int(args.max), 10))
+    # Headroom to step past a few stuck entries, proportionate to the bound
+    # the operator actually asked for. A flat floor here would silently let
+    # `--max 1` run ten full evaluate+review pipelines and overrun the cron
+    # window it was set to fit.
+    max_attempts = min(50, int(args.max) + 3)
     for proposal_path in _bounded_queue_paths(queue_dir):
         proposal = _read_proposal(proposal_path)
         if validate(proposal):

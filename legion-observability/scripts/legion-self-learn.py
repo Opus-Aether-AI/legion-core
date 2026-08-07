@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -1329,18 +1330,35 @@ def _guidance_text(value: Any, limit: int = 360) -> str:
     text = _text(value)
     if not text:
         return ""
+    # Drop C0/C1 controls and every Unicode format character. The format class
+    # (Cf) covers bidirectional overrides and zero-width joiners, which are
+    # printable to this filter and invisible to `\s`, yet let a bullet render
+    # differently from its bytes to anyone auditing hints.json or reading the
+    # prompt. Surrogates are dropped for the same reason.
     text = "".join(
-        char for char in text if char >= " " or char in "\t\n\r"
+        char
+        for char in text
+        # Tab, newline and carriage return are kept here so the collapse below
+        # turns them into a single separating space; dropping them outright
+        # would run adjacent words together.
+        if char in "\t\n\r"
+        or unicodedata.category(char) not in {"Cc", "Cf", "Cs"}
     )
     return _short(_GUIDANCE_WHITESPACE.sub(" ", text).strip(), limit)
 
 
 def _first_party_outcome(outcome: dict[str, Any]) -> bool:
-    """True only when core itself composed the summary from deterministic tooling.
+    """True only when core composed the summary from deterministic tooling.
 
     Records written before this marker existed carry no ``provenance`` field and
     are treated as untrusted, so an upgrade can never retroactively promote old
     extension prose into trusted executor guidance.
+
+    The marker is set by ``_learning_outcome`` and is not re-derivable once a
+    record has round-tripped through outcomes.jsonl, so it is a provenance
+    label, not an authentication token: any process that can write that file
+    can assert it -- as it could already assert ``source: "manual"``. Treat the
+    outcomes log as trusted local state.
     """
     return _text(outcome.get("provenance")) == "first-party"
 

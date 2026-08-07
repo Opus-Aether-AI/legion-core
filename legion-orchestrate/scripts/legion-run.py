@@ -635,10 +635,13 @@ def _learning_context_descriptor(path: Path, revision: str, mode: str, dispositi
     }
 
 
+GUIDANCE_HEADER = "Trusted learning guidance (bounded):"
+
+
 def _append_guidance(task: str, guidance: list[str]) -> str:
     if not guidance:
         return task
-    return f"{task.rstrip()}\n\nTrusted learning guidance (bounded):\n" + "\n".join(f"- {item}" for item in guidance)
+    return f"{task.rstrip()}\n\n{GUIDANCE_HEADER}\n" + "\n".join(f"- {item}" for item in guidance)
 
 
 def _guidance_present(delivered: Any, guidance: list[str]) -> bool:
@@ -647,13 +650,19 @@ def _guidance_present(delivered: Any, guidance: list[str]) -> bool:
     Receipts are the audit trail for whether learning actually reached a
     decision boundary, so they are derived from the delivered payload rather
     than from the intent to deliver.
+
+    Match the structure `_append_guidance` writes -- the header, then each line
+    as its own bullet -- rather than testing for bare substrings. A guidance
+    line is often an ordinary phrase ("tests", "review") that already occurs in
+    the task text, so a substring test would attest delivery for a stage whose
+    plan artifact never received the guidance at all.
     """
     if not guidance:
         return False
     text = delivered if isinstance(delivered, str) else ""
-    if not text:
+    if GUIDANCE_HEADER not in text:
         return False
-    return all(item in text for item in guidance)
+    return all(f"- {item}" in text for item in guidance)
 
 
 def _write_learning_receipts(
@@ -1408,8 +1417,13 @@ def write_plan_from_files(
     payload.setdefault("task", task)
     # Append to whatever task the plan source settled on, so an explicit task
     # inside a JSON plan file is preserved and still carries the guidance.
-    if guidance:
-        payload["task"] = _append_guidance(_as_text(payload.get("task"), task), guidance)
+    # Only a string task is appended to: coercing an authored list or object
+    # through str() would silently replace a plan author's structured field
+    # with its repr, and only when guidance happened to be active. When the
+    # task is not a string the guidance is not delivered here, and the delivery
+    # receipt records that truthfully.
+    if guidance and isinstance(payload.get("task"), str):
+        payload["task"] = _append_guidance(payload["task"], guidance)
     payload["runner"] = runner["name"]
     payload["profile"] = runner["pipeline"]["profile"]
     _write_json(plan_path, payload)
@@ -1907,9 +1921,12 @@ def _fanout_learning_outcomes(
                 " ".join(str(bit) for bit in [item.get("id"), item.get("status"), item.get("error")] if bit)
             )
     details = "; ".join(result_summaries[:4])
+    # Counters are composed by core. Slice ids, statuses and error strings come
+    # from the planner and the executors, so they are model-controlled text and
+    # must not reach the summary: this outcome is marked first-party, and a
+    # first-party summary is merged verbatim into trusted executor guidance.
+    # The detail stays in `evidence`, which is never promoted.
     summary = f"legion-fanout reported {failed} failed slice(s) and {conflicts} apply conflict(s)."
-    if details:
-        summary = f"{summary} {details}"
     target_type, target_name = _runner_learning_target(runner)
     return [
         _learning_outcome(

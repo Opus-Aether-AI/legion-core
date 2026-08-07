@@ -147,8 +147,11 @@ finding class. Local feedback remains entity-scoped; an active, supported
 cross-project learning law is promoted with `global` scope so it can reach
 ordinary plugin and heavy-task runs. Hints may also be scoped to `plan`,
 `fanout`, `validate`, or `review`. Promotion holds a project lock across the
-read/merge/write transaction, preserves maintainer retirement decisions, and
-reports capacity rejection while reserving compiler space for global hints.
+read/merge/write transaction; durable memory uses the same serialization.
+Maintainer retirement/supersession decisions remain protected tombstones even
+under capacity pressure, and rejected promotions are reported while compiler
+space stays reserved for global hints. The improvement queue retains only the
+current revision of each active generated law and removes retired revisions.
 The default cron run scans all available spans and manual records so bugs recorded
 after yesterday's cron are still ingested. Passing `--day YYYY-MM-DD` keeps an
 exact UTC-day report window for reproducible audits and tests. Durable memory
@@ -210,8 +213,12 @@ records never reopen. Before publishing, the engine searches open, closed, and
 merged PRs for the deterministic head. It reclaims only its own unpublished
 branch with force-with-lease, rechecks the base around creation, and closes the
 new draft plus removes its owned branch if post-create identity verification
-fails. Durable PR state binds a deterministic ID and fixed body to the GitHub
-repository, PR number, base/head branches, and both reviewed object IDs.
+fails. Durable state records the commit actually published—not merely the latest
+reviewed commit—so repeated stale generations can reclaim only their own branch.
+A pending-rollback receipt is persisted before verification; failed cleanup is
+retried before any later publication, including an already-closed PR response.
+Draft state binds a deterministic ID and fixed body to the GitHub repository,
+PR number, base/head branches, and both reviewed object IDs.
 
 Only active cross-project laws with confidence at least `0.9`, five supporting
 episodes, three projects, a bounded guidance string, and a safe non-vendored

@@ -127,21 +127,24 @@ def test_validate_stage_payload_requires_schema_valid_terminal_review(
     assert "invalid terminal verdict" in str(exc.value)
 
 
-def test_validate_stage_payload_preserves_schema_valid_codex_comment(tmp_path):
+def test_validate_stage_payload_rejects_nonapproving_codex_comment(tmp_path):
     legion_run = load_legion_run()
 
-    legion_run.validate_stage_payload(
-        "review",
-        {
-            "status": "ok",
-            "verdict": {
-                "verdict": "comment",
-                "summary": "Only a low-severity observation remains.",
-                "findings": [{"severity": "low", "title": "Optional cleanup"}],
+    with pytest.raises(legion_run.LegionRunError) as exc:
+        legion_run.validate_stage_payload(
+            "review",
+            {
+                "status": "ok",
+                "verdict": {
+                    "verdict": "comment",
+                    "summary": "Only a low-severity observation remains.",
+                    "findings": [{"severity": "low", "title": "Optional cleanup"}],
+                },
             },
-        },
-        tmp_path / "review.json",
-    )
+            tmp_path / "review.json",
+        )
+
+    assert "review verdict comment" in str(exc.value)
 
 
 def test_collect_learning_outcomes_harvests_doctor_and_validator_feedback(tmp_path):

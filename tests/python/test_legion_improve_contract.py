@@ -160,12 +160,18 @@ def _env(tmp_path):
         "    esac ;;\n"
         "  *'pr create'*)\n"
         "    [ \"${FIXTURE_GH_MODE:-ok}\" = fail-create ] && exit 19\n"
-        "    if [ \"${FIXTURE_GH_MODE:-ok}\" = race-base ]; then\n"
+        "    if [ \"${FIXTURE_GH_MODE:-ok}\" = race-base ] || [ \"${FIXTURE_GH_MODE:-ok}\" = race-base-close-once ]; then\n"
         "      base=$(git rev-parse refs/remotes/origin/main); tree=$(git rev-parse \"$base^{tree}\")\n"
         "      next=$(printf 'race base\\n' | git commit-tree \"$tree\" -p \"$base\")\n"
         "      git push -q origin \"$next:refs/heads/main\"\n"
         "    fi\n"
         "    printf 'https://github.com/fixture/repo/pull/7\\n' ;;\n"
+        "  *'pr close'*)\n"
+        "    if [ \"${FIXTURE_GH_MODE:-ok}\" = race-base-close-once ]; then\n"
+        "      count=0; [ -f \"$FIXTURE_GH_CLOSE_COUNTER\" ] && count=$(cat \"$FIXTURE_GH_CLOSE_COUNTER\")\n"
+        "      count=$((count + 1)); printf '%s' \"$count\" > \"$FIXTURE_GH_CLOSE_COUNTER\"\n"
+        "      [ \"$count\" -eq 1 ] && exit 21\n"
+        "    fi; true ;;\n"
         "  *'pr view'*)\n"
         "    [ \"${FIXTURE_GH_MODE:-ok}\" = fail-view ] && exit 20\n"
         "    head=$(git for-each-ref --format='%(refname:short)' 'refs/heads/legion-improve/*' | head -n 1)\n"
@@ -180,6 +186,7 @@ def _env(tmp_path):
     env["HOME"] = str(tmp_path / "home")
     env["FIXTURE_EVAL_COUNTER"] = str(tmp_path / "fixture-eval-count")
     env["FIXTURE_GH_LOG"] = str(tmp_path / "fixture-gh.log")
+    env["FIXTURE_GH_CLOSE_COUNTER"] = str(tmp_path / "fixture-gh-close-count")
     env["FIXTURE_REVIEW_LOG"] = str(tmp_path / "fixture-review.log")
     env["FIXTURE_PR_BODY"] = IMPROVEMENT_PR_BODY
     env["LEGION_IMPROVE_VALIDATOR_BIN"] = str(evaluator)
@@ -795,17 +802,49 @@ def test_stale_retry_reclaims_only_its_owned_unpublished_branch(tmp_path):
     failed, partial = _run(repo, proposal, state, "--mode", "draft", env=env)
     assert failed.returncode != 0
     old_head = partial["review_receipt"]["reviewed_head_sha"]
+    assert partial["published_remote_head"] == old_head
     assert _git("ls-remote", "origin", f"refs/heads/{partial['branch']}", cwd=repo).stdout.startswith(old_head)
 
     (repo / "base-repair.md").write_text("repaired\n", encoding="utf-8")
     _git("add", "base-repair.md", cwd=repo)
     _git("commit", "-qm", "advance base after draft failure", cwd=repo)
     _git("push", "-q", "origin", "HEAD:main", cwd=repo)
-    env.pop("FIXTURE_GH_MODE")
+
+    # Resume from a valid durable stale state, then stop the next generation
+    # after review. The remote still contains the first generation's actually
+    # published head while the newest review receipt now names a second head.
+    durable_path = state / "runs" / f"{partial['fingerprint']}.json"
+    durable = json.loads(durable_path.read_text(encoding="utf-8"))
+    durable["state"] = "stale"
+    durable["reason"] = "base_sha_changed"
+    durable["transitions"].append("stale")
+    durable_path.write_text(json.dumps(durable), encoding="utf-8")
+    stopped, second_generation = _run(
+        repo,
+        proposal,
+        state,
+        "--mode",
+        "draft",
+        "--stop-after",
+        "reviewed",
+        env=env,
+    )
+    assert stopped.returncode != 0
+    assert second_generation["state"] == "reviewed"
+    assert second_generation["published_remote_head"] == old_head
+    second_head = second_generation["review_receipt"]["reviewed_head_sha"]
+    assert second_head != old_head
+
+    (repo / "second-base-repair.md").write_text("repaired again\n", encoding="utf-8")
+    _git("add", "second-base-repair.md", cwd=repo)
+    _git("commit", "-qm", "advance base after second review", cwd=repo)
+    _git("push", "-q", "origin", "HEAD:main", cwd=repo)
 
     stale, stale_payload = _run(repo, proposal, state, "--mode", "draft", env=env)
     assert stale.returncode != 0
     assert stale_payload["state"] == "stale"
+    assert stale_payload["reason"] != "branch_collision"
+    env.pop("FIXTURE_GH_MODE")
     retried, completed = _run(repo, proposal, state, "--mode", "draft", env=env)
     assert retried.returncode == 0, retried.stderr
     assert completed["state"] == "draft_created"
@@ -829,6 +868,37 @@ def test_created_draft_is_rolled_back_when_base_races_or_verification_fails(tmp_
         log = open(env["FIXTURE_GH_LOG"], encoding="utf-8").read()
         assert "pr close https://github.com/fixture/repo/pull/7 --delete-branch" in log
         assert _git("ls-remote", "origin", f"refs/heads/{payload['branch']}", cwd=repo).stdout == ""
+
+
+def test_failed_pr_rollback_is_durable_and_retried_before_more_publication(tmp_path):
+    repo, _ = _repo(tmp_path)
+    proposal = _proposal(tmp_path)
+    state = tmp_path / "rollback-retry-state"
+    env = _env(tmp_path / "rollback-retry-env")
+    env["FIXTURE_GH_MODE"] = "race-base-close-once"
+
+    failed, pending = _run(repo, proposal, state, "--mode", "draft", env=env)
+
+    assert failed.returncode != 0
+    assert pending["state"] == "reviewed"
+    assert pending["reason"] == "draft_pr_rollback_failed"
+    assert pending["pending_rollback"]["url"] == "https://github.com/fixture/repo/pull/7"
+    assert pending["published_remote_head"] == pending["pending_rollback"]["head_sha"]
+
+    cleaned, stale = _run(repo, proposal, state, "--mode", "draft", env=env)
+
+    assert cleaned.returncode != 0
+    assert stale["state"] == "stale"
+    assert "pending_rollback" not in stale
+    log = open(env["FIXTURE_GH_LOG"], encoding="utf-8").read()
+    assert log.count("pr close https://github.com/fixture/repo/pull/7 --delete-branch") == 2
+    assert log.count("pr create") == 1
+
+    env.pop("FIXTURE_GH_MODE")
+    _git("merge", "--ff-only", "origin/main", cwd=repo)
+    resumed, completed = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert resumed.returncode == 0, resumed.stderr
+    assert completed["state"] == "draft_created"
 
 
 def test_closed_or_merged_publication_is_reused_without_duplicate_pr(tmp_path):

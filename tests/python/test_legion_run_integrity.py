@@ -178,6 +178,50 @@ def test_named_run_feedback_uses_the_same_entity_as_context_retrieval(tmp_path):
     }
 
 
+def test_validator_feedback_metadata_is_allowlisted_and_bounded(tmp_path):
+    legion_run = load_legion_run()
+    metadata = {
+        "stage": "forged",
+        "artifact": "forged.json",
+        "feedback_id": "forged-id",
+        "a_nested": {"bounded": [1, 2, 3]},
+        "oversized": "x" * 2_000,
+        "bad key": "ignored",
+        **{f"key-{index:02d}": index for index in range(40)},
+    }
+
+    outcomes = legion_run.collect_learning_outcomes(
+        runner={
+            "name": "fieldops",
+            "target_type": "plugin",
+            "learning_entity": "heavy-task:billing-export",
+        },
+        run_id="run-bounded-metadata",
+        run_dir=tmp_path,
+        stage_payloads={
+            "validate": {
+                "learning_feedback": [
+                    {
+                        "id": "validator-feedback",
+                        "summary": "Keep validator metadata bounded.",
+                        "metadata": metadata,
+                    }
+                ]
+            }
+        },
+    )
+
+    stored = outcomes[0]["metadata"]
+    assert stored["stage"] == "validate"
+    assert stored["artifact"] == "validation.json"
+    assert stored["feedback_id"] == "validator-feedback"
+    assert stored["a_nested"] == {"bounded": [1, 2, 3]}
+    assert "oversized" not in stored
+    assert "bad key" not in stored
+    assert len(stored) <= 35
+    assert len(json.dumps(stored, sort_keys=True).encode("utf-8")) < 4_500
+
+
 def test_learning_receipt_id_and_manifest_bind_canonical_artifact_bytes(tmp_path):
     legion_run = load_legion_run()
     descriptor = {

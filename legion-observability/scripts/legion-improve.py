@@ -64,6 +64,8 @@ DRAFT_RETRYABLE = {
     "draft_pr_response_invalid",
     "draft_pr_verify_failed",
     "draft_base_changed",
+    "draft_pr_rollback_failed",
+    "draft_pr_rolled_back",
 }
 TERMINAL_RETRYABLE_WITHOUT_INPUT_CHANGE = {
     "repository_unavailable",
@@ -467,7 +469,7 @@ def _valid_durable_record(
         "transitions", "reason", "remote_identity", "base_sha",
         "remote_base_sha", "base_branch", "base_source", "branch", "lease_id",
         "diff_digest", "changed_lines", "evaluation", "review_receipt", "draft_pr",
-        "reclaim_remote_head",
+        "published_remote_head", "pending_rollback",
     }
     if set(record) - allowed:
         return False
@@ -508,10 +510,35 @@ def _valid_durable_record(
         return False
     if state in {"rejected", "stale", "failed"} and transitions[-1] != state:
         return False
-    if "reclaim_remote_head" in record and not _valid_sha(
-        record.get("reclaim_remote_head")
+    if "published_remote_head" in record and not _valid_sha(
+        record.get("published_remote_head")
     ):
         return False
+    pending_rollback = record.get("pending_rollback")
+    if pending_rollback is not None:
+        if (
+            not isinstance(pending_rollback, dict)
+            or set(pending_rollback)
+            != {"id", "url", "repository", "head_branch", "head_sha"}
+            or not isinstance(pending_rollback.get("repository"), str)
+            or not re.fullmatch(
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+                pending_rollback.get("repository", ""),
+            )
+            or pending_rollback.get("head_branch") != record.get("branch")
+            or not _valid_sha(pending_rollback.get("head_sha"))
+            or pending_rollback.get("head_sha")
+            != record.get("published_remote_head")
+            or not re.fullmatch(
+                rf"https://github\.com/{re.escape(pending_rollback.get('repository', ''))}/pull/[1-9][0-9]*",
+                _safe_pr_url(str(pending_rollback.get("url") or "")),
+            )
+        ):
+            return False
+        pending_body = dict(pending_rollback)
+        pending_id = pending_body.pop("id", None)
+        if pending_id != digest(pending_body)[:24]:
+            return False
     if state == "eligible":
         return len(transitions) == 1
 
@@ -1323,8 +1350,85 @@ def _rollback_created_pr(
         cwd=worktree,
         timeout=120,
     )
+    closed_or_already_closed = closed.returncode == 0
+    if not closed_or_already_closed:
+        viewed = _bounded_process(
+            [gh, "pr", "view", pr_url, "--json", "state"],
+            cwd=worktree,
+            timeout=120,
+        )
+        try:
+            state = json.loads(viewed.stdout).get("state")
+        except (AttributeError, ValueError):
+            state = ""
+        closed_or_already_closed = viewed.returncode == 0 and state == "CLOSED"
     branch_removed = _delete_owned_remote_branch(worktree, branch, head_sha)
-    return closed.returncode == 0 and branch_removed
+    return closed_or_already_closed and branch_removed
+
+
+def _pending_rollback_payload(
+    pr_url: str, repository: str, branch: str, head_sha: str
+) -> dict[str, str] | None:
+    url = _safe_pr_url(pr_url)
+    if not re.fullmatch(
+        rf"https://github\.com/{re.escape(repository)}/pull/[1-9][0-9]*", url
+    ):
+        return None
+    payload = {
+        "url": url,
+        "repository": repository,
+        "head_branch": branch,
+        "head_sha": head_sha,
+    }
+    return {"id": digest(payload)[:24], **payload}
+
+
+def _owned_open_draft(
+    row: Any, repository: str, branch: str, head_sha: str
+) -> dict[str, str] | None:
+    number = row.get("number") if isinstance(row, dict) else None
+    url = _safe_pr_url(str(row.get("url") or "")) if isinstance(row, dict) else ""
+    if (
+        not isinstance(row, dict)
+        or not isinstance(number, int)
+        or isinstance(number, bool)
+        or number < 1
+        or not re.fullmatch(
+            rf"https://github\.com/{re.escape(repository)}/pull/{number}", url
+        )
+        or row.get("state") != "OPEN"
+        or row.get("isDraft") is not True
+        or row.get("body") != IMPROVEMENT_PR_BODY
+        or row.get("headRefName") != branch
+        or row.get("headRefOid") != head_sha
+    ):
+        return None
+    return _pending_rollback_payload(url, repository, branch, head_sha)
+
+
+def _persist_draft_state(root: Path, record: dict[str, Any]) -> None:
+    atomic_write(state_path(root, record["fingerprint"]), record)
+
+
+def _finish_pending_rollback(
+    record: dict[str, Any], root: Path, gh: str, worktree: Path
+) -> bool:
+    pending = record.get("pending_rollback")
+    if not isinstance(pending, dict):
+        return True
+    rolled_back = _rollback_created_pr(
+        gh,
+        worktree,
+        pending["url"],
+        pending["head_branch"],
+        pending["head_sha"],
+    )
+    if rolled_back:
+        record.pop("pending_rollback", None)
+        if record.get("published_remote_head") == pending["head_sha"]:
+            record.pop("published_remote_head", None)
+        _persist_draft_state(root, record)
+    return rolled_back
 
 
 def draft(
@@ -1334,13 +1438,6 @@ def draft(
     source_repo: str | Path,
 ) -> str | None:
     worktree = actual_worktree(root, record["fingerprint"])
-    if not _reviewed_head_matches(record, proposal, root):
-        return "review_snapshot_mismatch"
-    head_sha = record["review_receipt"]["reviewed_head_sha"]
-    branch = record["branch"]
-    # A local deterministic ref is safe and lets identity probes resolve the
-    # reviewed head without publishing or moving any remote state.
-    git(worktree, "branch", "--force", branch, head_sha, check=False)
     gh_configured = os.environ.get("GH_BIN", "gh")
     gh = shutil.which(gh_configured) if not os.path.isabs(gh_configured) else gh_configured
     if not gh or not os.access(gh, os.X_OK):
@@ -1348,6 +1445,24 @@ def draft(
     repository = _github_repository(worktree)
     if not repository:
         return "gh_unavailable"
+    pending = record.get("pending_rollback")
+    if pending:
+        if pending.get("repository") != repository:
+            return "draft_pr_rollback_failed"
+        if not _finish_pending_rollback(record, root, gh, worktree):
+            return "draft_pr_rollback_failed"
+        return (
+            "draft_base_changed"
+            if _stale_reason(record, source_repo) is not None
+            else "draft_pr_rolled_back"
+        )
+    if not _reviewed_head_matches(record, proposal, root):
+        return "review_snapshot_mismatch"
+    head_sha = record["review_receipt"]["reviewed_head_sha"]
+    branch = record["branch"]
+    # A local deterministic ref is safe and lets identity probes resolve the
+    # reviewed head without publishing or moving any remote state.
+    git(worktree, "branch", "--force", branch, head_sha, check=False)
     listed = _bounded_process(
         [
             gh,
@@ -1384,25 +1499,36 @@ def draft(
             require_draft=False,
         )
         if identity_error:
+            owned = _owned_open_draft(existing_pr, repository, branch, head_sha)
+            if owned:
+                record["published_remote_head"] = head_sha
+                record["pending_rollback"] = owned
+                _persist_draft_state(root, record)
+                return (
+                    identity_error
+                    if _finish_pending_rollback(record, root, gh, worktree)
+                    else "draft_pr_rollback_failed"
+                )
             return "existing_pr_already_published"
         pr_url = _safe_pr_url(str(existing_pr.get("url") or ""))
         draft_pr = _draft_pr_payload(existing_pr, record, repository)
         if draft_pr is None:
             return "existing_pr_identity_mismatch"
         record["draft_pr"] = draft_pr
-        record.pop("reclaim_remote_head", None)
+        record["published_remote_head"] = head_sha
+        _persist_draft_state(root, record)
         return None
 
     existing = _remote_branch_sha(worktree, branch)
     if existing and existing != head_sha:
-        reclaim = record.get("reclaim_remote_head")
-        if not _valid_sha(reclaim) or existing != reclaim:
+        published = record.get("published_remote_head")
+        if not _valid_sha(published) or existing != published:
             return "branch_collision"
         pushed = git(
             worktree,
             "push",
             "--quiet",
-            f"--force-with-lease=refs/heads/{branch}:{reclaim}",
+            f"--force-with-lease=refs/heads/{branch}:{published}",
             "origin",
             f"{head_sha}:refs/heads/{branch}",
             check=False,
@@ -1420,11 +1546,14 @@ def draft(
         )
         if pushed.returncode != 0 and _remote_branch_sha(worktree, branch) != head_sha:
             return "branch_push_failed"
-    record.pop("reclaim_remote_head", None)
+    record["published_remote_head"] = head_sha
+    _persist_draft_state(root, record)
     if not pr_url:
         if _stale_reason(record, source_repo) is not None:
             if not _delete_owned_remote_branch(worktree, branch, head_sha):
                 return "draft_pr_rollback_failed"
+            record.pop("published_remote_head", None)
+            _persist_draft_state(root, record)
             return "draft_base_changed"
         created = _bounded_process(
             [
@@ -1450,6 +1579,11 @@ def draft(
         pr_url = _safe_pr_url(lines[-1] if lines else "")
         if not pr_url:
             return "draft_pr_response_invalid"
+        pending = _pending_rollback_payload(pr_url, repository, branch, head_sha)
+        if pending is None:
+            return "draft_pr_response_invalid"
+        record["pending_rollback"] = pending
+        _persist_draft_state(root, record)
         verified = _bounded_process(
             [
                 gh,
@@ -1465,7 +1599,7 @@ def draft(
         if verified.returncode != 0:
             return (
                 "draft_pr_verify_failed"
-                if _rollback_created_pr(gh, worktree, pr_url, branch, head_sha)
+                if _finish_pending_rollback(record, root, gh, worktree)
                 else "draft_pr_rollback_failed"
             )
         try:
@@ -1473,7 +1607,7 @@ def draft(
         except ValueError:
             return (
                 "draft_pr_verify_failed"
-                if _rollback_created_pr(gh, worktree, pr_url, branch, head_sha)
+                if _finish_pending_rollback(record, root, gh, worktree)
                 else "draft_pr_rollback_failed"
             )
         identity_error = _pr_identity_error(
@@ -1481,12 +1615,15 @@ def draft(
         )
         created_payload = _draft_pr_payload(created_pr, record, repository)
         if identity_error or created_payload is None or _stale_reason(record, source_repo) is not None:
+            failure = identity_error or "draft_base_changed"
             return (
-                identity_error or "draft_base_changed"
-                if _rollback_created_pr(gh, worktree, pr_url, branch, head_sha)
+                failure
+                if _finish_pending_rollback(record, root, gh, worktree)
                 else "draft_pr_rollback_failed"
             )
         record["draft_pr"] = created_payload
+        record.pop("pending_rollback", None)
+        _persist_draft_state(root, record)
     return None
 
 
@@ -1505,6 +1642,8 @@ def public(record: dict[str, Any]) -> dict[str, Any]:
         "base_source",
         "branch",
         "lease_id",
+        "published_remote_head",
+        "pending_rollback",
         "review_receipt",
         "draft_pr",
     )
@@ -1603,23 +1742,22 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         if record.get("state") in TERMINAL:
             if not _retryable_terminal(record, proposal, args.repo):
                 return (0 if record["state"] == "draft_created" else 2), public(record)
-            prior_receipt = record.get("review_receipt")
-            reclaim_remote_head = (
-                prior_receipt.get("reviewed_head_sha")
-                if isinstance(prior_receipt, dict)
-                and record.get("branch") == "legion-improve/" + fingerprint
-                and _valid_sha(prior_receipt.get("reviewed_head_sha"))
-                else ""
-            )
+            published_remote_head = record.get("published_remote_head")
             cleanup_worktrees(args.repo, root, fingerprint)
             record = _initial_record(proposal, fingerprint, args.mode)
-            if reclaim_remote_head:
-                record["reclaim_remote_head"] = reclaim_remote_head
+            if _valid_sha(published_remote_head):
+                record["published_remote_head"] = published_remote_head
             atomic_write(path, record)
         record["mode"] = args.mode
         if record["state"] != "eligible":
             stale = _stale_reason(record, args.repo)
-            if stale:
+            if stale and not (
+                record.get("state") == "reviewed"
+                and (
+                    record.get("pending_rollback")
+                    or record.get("published_remote_head")
+                )
+            ):
                 terminal(record, "stale", stale)
                 atomic_write(path, record)
                 cleanup_worktrees(args.repo, root, fingerprint)
@@ -1712,13 +1850,25 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 if args.mode == "dry-run":
                     return 0, public(record)
                 stale = _stale_reason(record, args.repo)
-                if stale:
+                if stale and not (
+                    record.get("pending_rollback")
+                    or record.get("published_remote_head")
+                ):
                     terminal(record, "stale", stale)
                     atomic_write(path, record)
                     cleanup_worktrees(args.repo, root, fingerprint)
                     return 2, public(record)
                 failed = draft(record, proposal, root, args.repo)
                 if failed:
+                    if failed == "draft_base_changed":
+                        terminal(
+                            record,
+                            "stale",
+                            _stale_reason(record, args.repo) or failed,
+                        )
+                        atomic_write(path, record)
+                        cleanup_worktrees(args.repo, root, fingerprint)
+                        return 2, public(record)
                     if failed in DRAFT_RETRYABLE:
                         record["reason"] = failed
                         atomic_write(path, record)

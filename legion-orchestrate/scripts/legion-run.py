@@ -1127,7 +1127,7 @@ def _review_failure_reason(payload: dict[str, Any]) -> str:
     if schema_error:
         return f"invalid terminal verdict: {schema_error}"
     decision = str(verdict["verdict"]).strip().lower()
-    if _is_bad_status(decision):
+    if decision != "approve":
         return f"review verdict {decision}"
     blocking = _blocking_review_findings(verdict)
     if blocking:
@@ -1679,12 +1679,46 @@ def _feedback_outcome(
         evidence = json.dumps(evidence_raw, sort_keys=True)
     else:
         evidence = str(evidence_raw or artifact_path)
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    metadata: dict[str, Any] = {}
+    raw_metadata = item.get("metadata")
+    if isinstance(raw_metadata, dict):
+        for key in sorted(
+            value
+            for value in raw_metadata
+            if isinstance(value, str)
+            and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", value)
+            and value not in {"stage", "artifact", "feedback_id"}
+        )[:32]:
+            value = raw_metadata[key]
+            try:
+                encoded = json.dumps(
+                    value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError):
+                continue
+            if len(encoded.encode("utf-8")) > 1024:
+                continue
+            candidate = {**metadata, key: value}
+            if len(
+                json.dumps(
+                    candidate,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ) > 4096:
+                break
+            metadata = candidate
     metadata = {
         **metadata,
         "stage": stage,
-        "artifact": artifact_path.name,
-        "feedback_id": item.get("id") or "",
+        "artifact": _short(artifact_path.name, 160),
+        "feedback_id": _short(item.get("id") or "", 160),
     }
     return _learning_outcome(
         source=source,

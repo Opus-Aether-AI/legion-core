@@ -19,6 +19,19 @@
     "base_source": {"enum": ["operator", "remote"]},
     "branch": {"type": "string", "pattern": "^legion-improve/[a-f0-9]{64}$"},
     "lease_id": {"type": "string"},
+    "published_remote_head": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+    "pending_rollback": {
+      "type": "object",
+      "required": ["id", "url", "repository", "head_branch", "head_sha"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-f0-9]{24}$"},
+        "url": {"type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$"},
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "head_branch": {"type": "string", "pattern": "^legion-improve/[a-f0-9]{64}$"},
+        "head_sha": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"}
+      },
+      "additionalProperties": false
+    },
     "worktree": {"type": "string", "pattern": "^/isolated-worktree/[a-f0-9]{64}$"},
     "transitions": {"type": "array", "items": {"type": "string"}},
     "draft_pr": {

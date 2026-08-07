@@ -64,6 +64,11 @@ def _valid(payload: Any) -> bool:
             return False
         if "detail" in finding and not isinstance(finding["detail"], str):
             return False
+    if payload["verdict"] in {"approve", "comment"} and any(
+        finding.get("severity") in {"critical", "high", "medium"}
+        for finding in payload["findings"]
+    ):
+        return False
     return True
 
 

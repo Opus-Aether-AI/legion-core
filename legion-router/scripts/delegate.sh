@@ -1048,6 +1048,9 @@ review_verdict_is_valid() {
         and ((has("line") | not) or (.line | type == "number" and floor == .))
         and ((has("detail") | not) or (.detail | type == "string"))
       )
+      and ((.verdict == "request_changes") or all(.findings[];
+        .severity == "low"
+      ))
     ' "$verdict_file" >/dev/null 2>&1
 }
 
@@ -1120,6 +1123,7 @@ cmd_review() {
   [[ -n "$base" ]] || die "review: --base REF required"
   [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || die "review: --max-attempts must be a positive integer"
   [[ "${#task}" -le 16384 ]] || die "review: --task exceeds 16384 characters"
+  [[ -z "$task" ]] || scan_task_text "$task"
 
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
   local base_sha head_sha
@@ -1171,7 +1175,7 @@ cmd_review() {
     attempt_verdict="$art/attempt-$attempt.verdict.json"
     rm -f "$attempt_verdict"
     note "→ codex review attempt $attempt/$max_attempts (base $base_sha, head $head_sha)"
-    local -a codex_review_args=(exec review --base "$base_sha")
+    local -a codex_review_args=(exec -s "$sandbox" review --base "$base_sha")
     local review_prompt=""
     if [[ -n "$task" ]]; then
       review_prompt="Review only the immutable diff $base_sha...$head_sha. $task"

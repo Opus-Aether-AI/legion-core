@@ -1110,16 +1110,50 @@ def typed_improvement_proposal(
 def write_improvement_queue(report: dict[str, Any], log_root: str) -> list[str]:
     queue_dir = improvement_queue_dir(log_root)
     _ensure_dir(queue_dir)
+    lifecycle = _dict(report.get("learning_laws"))
+    has_lifecycle = "learning_laws" in report
+    proposals = [
+        proposal
+        for proposal in _list(report.get("improvement_proposals"))
+        if isinstance(proposal, dict)
+        and (
+            not has_lifecycle
+            or _dict(proposal.get("provenance")).get("source") != "learning-law"
+            or lifecycle.get(
+                _text(_dict(proposal.get("provenance")).get("law_key"))
+            )
+            == "active"
+        )
+    ]
+    proposal_entries = [
+        (
+            proposal,
+            hashlib.sha256(
+                json.dumps(
+                    proposal,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+        for proposal in proposals
+    ]
+    current_law_files = {
+        _text(_dict(proposal.get("provenance")).get("law_key")): (
+            f"{fingerprint}.json"
+        )
+        for proposal, fingerprint in proposal_entries
+        if _dict(proposal.get("provenance")).get("source") == "learning-law"
+        and _text(_dict(proposal.get("provenance")).get("law_key"))
+    }
     lock_path = os.path.join(queue_dir, ".queue.lock")
     with open(lock_path, "a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        lifecycle = _dict(report.get("learning_laws"))
-        if "learning_laws" in report:
-            active_laws = {
-                key for key, status in lifecycle.items() if _text(status) == "active"
-            }
+        if has_lifecycle:
             # Reconcile only Legion-generated law proposals. Maintainer-authored
-            # queue entries are never removed by the learning loop.
+            # queue entries are never removed by the learning loop. Exactly one
+            # current revision is retained for each emitted active law.
             for entry in list(os.scandir(queue_dir))[:10_000]:
                 if not entry.is_file(follow_symlinks=False) or not entry.name.endswith(".json"):
                     continue
@@ -1128,20 +1162,19 @@ def write_improvement_queue(report: dict[str, Any], log_root: str) -> list[str]:
                 if provenance.get("source") != "learning-law":
                     continue
                 law_key = _text(provenance.get("law_key"))
-                if law_key and law_key not in active_laws:
+                if (
+                    law_key
+                    and (
+                        lifecycle.get(law_key) != "active"
+                        or current_law_files.get(law_key) != entry.name
+                    )
+                ):
                     try:
                         os.unlink(entry.path)
                     except FileNotFoundError:
                         pass
         written: list[str] = []
-        for proposal in _list(report.get("improvement_proposals")):
-            if not isinstance(proposal, dict):
-                continue
-            fingerprint = hashlib.sha256(
-                json.dumps(
-                    proposal, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-                ).encode("utf-8")
-            ).hexdigest()
+        for proposal, fingerprint in proposal_entries:
             path = os.path.join(queue_dir, f"{fingerprint}.json")
             _write_json(path, proposal)
             written.append(path)
@@ -1380,20 +1413,50 @@ def sync_typed_hints(
                 incoming[hint["id"]] = hint
         generated.update(incoming)
 
+        protected_decisions = {
+            hint_id: hint
+            for hint_id, hint in generated.items()
+            if _text(hint.get("status")) in {"retired", "superseded"}
+            and hint.get("lifecycle_owner") != "learning-law"
+        }
+        evictable_generated = {
+            hint_id: hint
+            for hint_id, hint in generated.items()
+            if hint_id not in protected_decisions
+        }
         status_rank = {"active": 0, "superseded": 1, "retired": 2}
         scope_rank = {"exact": 0, "selector": 1, "global": 2}
         ordered_maintainers = list(maintainers.values())
         ordered_generated = sorted(
-            generated.values(),
+            evictable_generated.values(),
             key=lambda hint: (
                 status_rank.get(_text(hint.get("status")), 3),
                 scope_rank.get(_text(hint.get("scope")), 3),
                 _text(hint.get("id")),
             ),
         )
-        available = max(0, PROJECT_HINT_CAP - len(ordered_maintainers))
+        ordered_decisions = [
+            protected_decisions[hint_id] for hint_id in sorted(protected_decisions)
+        ]
+        storage_cap = (
+            legion_learning_context.MAX_HINTS
+            + legion_learning_context.MAX_EXCLUDED_HINTS
+        )
+        # Maintainer terminal decisions are durable tombstones. Keep them
+        # outside the active/evictable slice, append them after compiler-visible
+        # entries, and reduce active capacity rather than ever dropping one.
+        available = min(
+            max(0, PROJECT_HINT_CAP - len(ordered_maintainers)),
+            max(
+                0,
+                storage_cap - len(ordered_maintainers) - len(ordered_decisions),
+            ),
+        )
         kept_generated = ordered_generated[:available]
-        kept_ids = {_text(hint.get("id")) for hint in kept_generated}
+        kept_ids = {
+            _text(hint.get("id"))
+            for hint in kept_generated + ordered_decisions
+        }
         rejected_ids = sorted(
             hint_id
             for hint_id, hint in incoming.items()
@@ -1401,7 +1464,7 @@ def sync_typed_hints(
         )
         payload = {
             "schema": "legion.learning-hints.v1",
-            "hints": ordered_maintainers + kept_generated,
+            "hints": ordered_maintainers + kept_generated + ordered_decisions,
         }
         _write_json(path, payload)
         promoted = sum(
@@ -1417,10 +1480,28 @@ def sync_typed_hints(
         "total": len(payload["hints"]),
         "project_cap": PROJECT_HINT_CAP,
         "global_reserve": GLOBAL_HINT_RESERVE,
+        "protected_decisions": len(ordered_decisions),
     }
 
 
 def apply_memory(
+    report: dict[str, Any],
+    log_root: str,
+    *,
+    project_learning_dir: str = "",
+) -> dict[str, Any]:
+    _ensure_dir(self_learn_dir(log_root))
+    lock_path = memory_path(log_root) + ".lock"
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _apply_memory_locked(
+            report,
+            log_root,
+            project_learning_dir=project_learning_dir,
+        )
+
+
+def _apply_memory_locked(
     report: dict[str, Any],
     log_root: str,
     *,
@@ -2296,6 +2377,7 @@ def run_command(args: argparse.Namespace) -> int:
         "hints_path": _text(
             _dict(_dict(memory or {}).get("typed_hints")).get("path")
         ),
+        "typed_hints": _dict(_dict(memory or {}).get("typed_hints")),
         "applied_memory": memory is not None,
         "changed_source": changed,
         "experiments": experiments,
@@ -2322,6 +2404,11 @@ def run_command(args: argparse.Namespace) -> int:
         print(f"report: {payload['report_path']}")
         if payload["applied_memory"]:
             print(f"memory: {payload['memory_path']}")
+            print(
+                "typed hints: "
+                f"promoted={payload['typed_hints'].get('promoted', 0)} "
+                f"rejected={payload['typed_hints'].get('rejected', 0)}"
+            )
         if changed:
             print("changed source:")
             for path in changed:

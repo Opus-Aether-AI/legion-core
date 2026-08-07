@@ -476,6 +476,50 @@ def test_hint_capacity_preserves_maintainers_and_reports_rejected_promotions(tmp
     assert result["global_reserve"] == 100
 
 
+def test_hint_capacity_never_evicts_a_maintainer_terminal_decision(tmp_path):
+    learning = tmp_path / "learning"
+    learning.mkdir()
+    report = _memory_report("retired-at-cap")
+    retired_id = "memory:" + self_learn._stable_id(["proposal-retired-at-cap"])
+    active = [
+        {
+            "schema": "legion.learning-hint.v1",
+            "id": f"generated-{index:03d}",
+            "scope": "exact",
+            "entity": "skill:release",
+            "status": "active",
+            "trusted": True,
+            "guidance": f"Generated guidance {index}.",
+            "origin": "self-learn-memory",
+        }
+        for index in range(self_learn.PROJECT_HINT_CAP)
+    ]
+    retired = {
+        "schema": "legion.learning-hint.v1",
+        "id": retired_id,
+        "scope": "exact",
+        "entity": "skill:release",
+        "status": "retired",
+        "trusted": True,
+        "guidance": "Do not reactivate this generated hint.",
+        "origin": "self-learn-memory",
+    }
+    self_learn._write_json(
+        str(learning / "hints.json"),
+        {"schema": "legion.learning-hints.v1", "hints": active + [retired]},
+    )
+
+    first = self_learn.sync_typed_hints(report, str(learning))
+    second = self_learn.sync_typed_hints(report, str(learning))
+
+    stored = json.loads((learning / "hints.json").read_text(encoding="utf-8"))["hints"]
+    protected = next(item for item in stored if item["id"] == retired_id)
+    assert protected["status"] == "retired"
+    assert first["protected_decisions"] == second["protected_decisions"] == 1
+    assert first["promoted"] == second["promoted"] == 0
+    assert retired_id in first["rejected_ids"]
+
+
 def test_retired_learning_law_is_removed_from_generated_improvement_queue(tmp_path):
     logs = str(tmp_path / "logs")
     proposal = {
@@ -509,6 +553,54 @@ def test_retired_learning_law_is_removed_from_generated_improvement_queue(tmp_pa
         logs,
     )
     assert not os.path.exists(paths[0])
+
+
+def test_learning_law_queue_keeps_only_the_current_revision(tmp_path):
+    logs = str(tmp_path / "logs")
+    base = {
+        "schema": "legion.improvement-proposal.v1",
+        "id": "learning-law:revised",
+        "revision": 5,
+        "maintainer_eligible": True,
+        "kind": "documentation_guardrail",
+        "summary": "Current law revision.",
+        "target": {"path": "SKILL.md"},
+        "candidate": {
+            "operation": "append_markdown_guardrail",
+            "content": "Use the current evidence revision.",
+        },
+        "validation": {"profile": "documentation"},
+        "limits": {"max_changed_lines": 40},
+        "provenance": {
+            "source": "learning-law",
+            "source_id": "revised",
+            "law_key": "revised",
+            "confidence": 0.95,
+            "support": {"episodes": 5, "projects": 3},
+            "evidence_ids": [],
+        },
+    }
+    first = self_learn.write_improvement_queue(
+        {"improvement_proposals": [base], "learning_laws": {"revised": "active"}},
+        logs,
+    )[0]
+    revised = json.loads(json.dumps(base))
+    revised["revision"] = 6
+    revised["provenance"]["support"]["episodes"] = 6
+
+    second = self_learn.write_improvement_queue(
+        {
+            "improvement_proposals": [revised],
+            "learning_laws": {"revised": "active"},
+        },
+        logs,
+    )[0]
+
+    queue = self_learn.improvement_queue_dir(logs)
+    entries = sorted(name for name in os.listdir(queue) if name.endswith(".json"))
+    assert first != second
+    assert not os.path.exists(first)
+    assert entries == [os.path.basename(second)]
 
 
 def test_weak_or_single_project_learning_never_enters_improvement_queue(tmp_path):
@@ -713,6 +805,41 @@ def test_apply_memory_preserves_existing_entity_hints(tmp_path):
     assert "command:review-gate" in memory["entities"]
     assert memory["entities"]["command:review-gate"]["hints"] == ["Existing guardrail"]
     assert "skill:workflow-orchestrator" in memory["entities"]
+
+
+def test_apply_memory_serializes_concurrent_read_merge_write(tmp_path):
+    logs = str(tmp_path / "logs")
+    learning = str(tmp_path / "learning")
+    reports = []
+    for index in range(2):
+        report = _memory_report(f"concurrent-{index}")
+        report["generated_at"] = f"2026-08-07T00:00:0{index}Z"
+        report["day"] = f"2026-08-0{index + 7}"
+        reports.append(report)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(
+            pool.map(
+                lambda report: self_learn.apply_memory(
+                    report, logs, project_learning_dir=learning
+                ),
+                reports,
+            )
+        )
+
+    memory = self_learn.load_memory(logs)
+    entry = memory["entities"]["skill:release"]
+    assert set(entry["proposal_ids"]) == {
+        "proposal-concurrent-0",
+        "proposal-concurrent-1",
+    }
+    hints = json.loads(
+        open(memory["typed_hints"]["path"], encoding="utf-8").read()
+    )["hints"]
+    assert {item["id"] for item in hints} == {
+        "memory:" + self_learn._stable_id(["proposal-concurrent-0"]),
+        "memory:" + self_learn._stable_id(["proposal-concurrent-1"]),
+    }
 
 
 def test_apply_memory_replaces_legacy_law_hint_and_renders_revision_first(tmp_path):

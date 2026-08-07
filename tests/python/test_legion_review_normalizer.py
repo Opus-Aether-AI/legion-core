@@ -68,3 +68,16 @@ def test_normalizer_preserves_schema_valid_json(tmp_path):
     }
 
     assert normalizer.normalize(json.dumps(expected), tmp_path) == expected
+
+
+def test_normalizer_rejects_nonblocking_decisions_with_blocking_findings(tmp_path):
+    for decision in ("approve", "comment"):
+        payload = {
+            "verdict": decision,
+            "summary": "The decision contradicts the finding.",
+            "findings": [
+                {"severity": "medium", "title": "A blocking issue remains"}
+            ],
+        }
+
+        assert normalizer.normalize(json.dumps(payload), tmp_path) is None

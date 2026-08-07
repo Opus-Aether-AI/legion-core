@@ -98,7 +98,8 @@ legion-delegate review --archetype security-review --base main --head HEAD --rep
 #   -> {verdict: approve|request_changes|comment, summary, findings:[{severity,title,file,line,detail}]}
 # Review refs are resolved once to immutable commits. Add `--head <ref>` when
 # reviewing a non-HEAD snapshot; `--max-attempts N` bounds transient retries
-# (default 2). Every launched review writes a durable `terminal_receipt`.
+# (default 2). Every launched review is explicitly read-only and writes a
+# durable `terminal_receipt`; approve/comment cannot hide blocking findings.
 
 # Iterate on a kept session (same codex thread) instead of starting fresh:
 legion-delegate run    --archetype parallel-codegen --task "..." --repo . --keep   # note the run_id
@@ -137,7 +138,7 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
 
 - `run` defaults to `workspace-write` (edits the worktree); `review` is `read-only`.
 - `danger-full-access` is **hard-blocked** unless `LEGION_ALLOW_DANGER=1`.
-- Task text is scanned for dangerous/injection patterns before any write run (override: `LEGION_ALLOW_UNSAFE=1`).
+- Task text is scanned for dangerous/injection patterns before runs and reviews (override: `LEGION_ALLOW_UNSAFE=1`).
 - `executor=self` is returned to the primary for inline work. A process carrying
   `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`, or positive `LEGION_DEPTH` must
   implement its assigned slice directly; Legion refuses nested delegation.

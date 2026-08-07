@@ -895,6 +895,17 @@ def test_failed_pr_rollback_is_durable_and_retried_before_more_publication(tmp_p
     durable["transitions"].append("failed")
     durable_path.write_text(json.dumps(durable), encoding="utf-8")
 
+    inspected, still_pending = _run(
+        repo, proposal, state, "--mode", "dry-run", env=env
+    )
+    assert inspected.returncode != 0
+    assert still_pending["state"] == "reviewed"
+    assert still_pending["pending_rollback"] == pending["pending_rollback"]
+
+    candidate = state / "worktrees" / pending["fingerprint"] / "candidate"
+    _git("worktree", "remove", "--force", str(candidate), cwd=repo)
+    assert not candidate.exists()
+
     cleaned, stale = _run(repo, proposal, state, "--mode", "draft", env=env)
 
     assert cleaned.returncode != 0

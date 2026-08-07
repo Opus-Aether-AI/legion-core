@@ -1437,25 +1437,33 @@ def draft(
     root: Path,
     source_repo: str | Path,
 ) -> str | None:
-    worktree = actual_worktree(root, record["fingerprint"])
+    pending = record.get("pending_rollback")
+    # A pre-fix run may have removed its candidate worktree after persisting a
+    # rollback receipt. Roll back from the operator repository so recovery does
+    # not depend on recreating the reviewed candidate checkout.
+    operation_repo = (
+        Path(source_repo).resolve()
+        if pending
+        else actual_worktree(root, record["fingerprint"])
+    )
     gh_configured = os.environ.get("GH_BIN", "gh")
     gh = shutil.which(gh_configured) if not os.path.isabs(gh_configured) else gh_configured
     if not gh or not os.access(gh, os.X_OK):
         return "gh_unavailable"
-    repository = _github_repository(worktree)
+    repository = _github_repository(operation_repo)
     if not repository:
         return "gh_unavailable"
-    pending = record.get("pending_rollback")
     if pending:
         if pending.get("repository") != repository:
             return "draft_pr_rollback_failed"
-        if not _finish_pending_rollback(record, root, gh, worktree):
+        if not _finish_pending_rollback(record, root, gh, operation_repo):
             return "draft_pr_rollback_failed"
         return (
             "draft_base_changed"
             if _stale_reason(record, source_repo) is not None
             else "draft_pr_rolled_back"
         )
+    worktree = operation_repo
     if not _reviewed_head_matches(record, proposal, root):
         return "review_snapshot_mismatch"
     head_sha = record["review_receipt"]["reviewed_head_sha"]
@@ -1861,7 +1869,10 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 maybe_stop(record, args.stop_after)
             if record["state"] == "reviewed":
                 if args.mode == "dry-run":
-                    return 0, public(record)
+                    return (
+                        2 if record.get("pending_rollback") else 0,
+                        public(record),
+                    )
                 stale = _stale_reason(record, args.repo)
                 if stale and not (
                     record.get("pending_rollback")

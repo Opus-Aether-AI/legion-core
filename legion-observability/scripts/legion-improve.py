@@ -66,6 +66,7 @@ DRAFT_RETRYABLE = {
     "draft_base_changed",
     "draft_pr_rollback_failed",
     "draft_pr_rolled_back",
+    "draft_pr_reconcile_pending",
 }
 TERMINAL_RETRYABLE_WITHOUT_INPUT_CHANGE = {
     "repository_unavailable",
@@ -78,6 +79,7 @@ TERMINAL_RETRYABLE_WITHOUT_INPUT_CHANGE = {
     "internal_operation_failed",
     "worktree_prepare_failed",
     "candidate_reset_failed",
+    "changed_paths_unavailable",
     "candidate_target_unavailable",
     "candidate_target_invalid_utf8",
     "baseline_failed",
@@ -97,6 +99,30 @@ class ImproveError(Exception):
         self.state = state
         self.reason = reason
         super().__init__(reason)
+
+
+ROOT = Path(__file__).resolve().parents[2]
+# The daily refresh runs from cron, whose PATH is a bare /usr/bin:/bin, and
+# refresh.sh deliberately invokes every sibling Legion binary by absolute path
+# for exactly that reason. Resolving these off PATH alone made the review and
+# publish hops fail with independent_review_unavailable / gh_unavailable on
+# every cron run, silently, forever.
+COMMAND_FALLBACKS = {
+    "legion-delegate": ROOT / "legion-router" / "bin" / "legion-delegate",
+}
+
+
+def _resolve_command(configured: str) -> str:
+    """Resolve an external command, falling back to the in-repo copy."""
+    if os.path.isabs(configured):
+        return configured
+    found = shutil.which(configured)
+    if found:
+        return found
+    fallback = COMMAND_FALLBACKS.get(configured)
+    if fallback and os.access(fallback, os.X_OK):
+        return str(fallback)
+    return ""
 
 
 def canonical(value: Any) -> bytes:
@@ -274,9 +300,21 @@ def atomic_write(path: Path, value: dict[str, Any]) -> None:
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
+    """Read one JSON object, failing closed on anything unreadable.
+
+    This is the entry point for resume state that may have been truncated,
+    replaced, or hand-edited, so it must not raise. A very large file can raise
+    MemoryError and a deeply nested document can raise RecursionError; neither
+    derives from OSError or ValueError, so both used to escape and abort the
+    process with a traceback before the corrupt-state handling could run.
+    """
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError, MemoryError):
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, RecursionError, MemoryError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -371,74 +409,85 @@ def validate(proposal: Any) -> str | None:
     ):
         return "invalid_schema"
     provenance = proposal.get("provenance")
-    if provenance is not None:
-        if not isinstance(provenance, dict) or set(provenance) - {
-            "source",
-            "source_id",
-            "law_key",
-            "confidence",
-            "support",
-            "evidence_ids",
-        }:
-            return "invalid_schema"
-        source = provenance.get("source", "")
-        source_id = provenance.get("source_id")
-        law_key = provenance.get("law_key")
-        confidence = provenance.get("confidence")
-        support = provenance.get("support")
-        if not isinstance(source, str) or len(source) > 80:
-            return "invalid_schema"
-        if source_id is not None and (
-            not isinstance(source_id, str) or len(source_id) > 160
-        ):
-            return "invalid_schema"
-        if law_key is not None and (
-            not isinstance(law_key, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", law_key)
-        ):
-            return "invalid_schema"
-        if confidence is not None and (
-            not isinstance(confidence, (int, float))
-            or isinstance(confidence, bool)
-            or not math.isfinite(float(confidence))
-            or not 0 <= confidence <= 1
-        ):
-            return "invalid_schema"
-        if support is not None and (
-            not isinstance(support, dict)
-            or set(support) - {"episodes", "projects"}
-            or any(
-                not isinstance(value, int) or isinstance(value, bool) or value < 0
-                for value in support.values()
-            )
-        ):
-            return "invalid_schema"
-        evidence_ids = provenance.get("evidence_ids", [])
-        if (
-            not isinstance(evidence_ids, list)
-            or len(evidence_ids) > 20
-            or not all(isinstance(item, str) and len(item) <= 160 for item in evidence_ids)
-        ):
-            return "invalid_schema"
-        if source == "learning-law":
-            if (
-                not isinstance(law_key, str)
-                or not law_key
-                or
-                not isinstance(confidence, (int, float))
-                or isinstance(confidence, bool)
-                or not math.isfinite(float(confidence))
-                or confidence < 0.9
-                or not isinstance(support, dict)
-                or set(support) != {"episodes", "projects"}
-                or not isinstance(support.get("episodes"), int)
-                or isinstance(support.get("episodes"), bool)
-                or support["episodes"] < 5
-                or not isinstance(support.get("projects"), int)
-                or isinstance(support.get("projects"), bool)
-                or support["projects"] < 3
-            ):
-                return "not_maintainer_eligible"
+    # Evidence provenance is mandatory. This block used to be guarded by
+    # `if provenance is not None`, so a proposal that simply omitted the key
+    # skipped the documented eligibility bar entirely and was still schema
+    # valid -- leaving the bar enforced only by whoever wrote the proposal and
+    # never by the engine that acts on it. An engine that can open a pull
+    # request must verify eligibility itself.
+    if provenance is None:
+        return "not_maintainer_eligible"
+    if not isinstance(provenance, dict) or set(provenance) - {
+        "source",
+        "source_id",
+        "law_key",
+        "confidence",
+        "support",
+        "evidence_ids",
+    }:
+        return "invalid_schema"
+    source = provenance.get("source", "")
+    source_id = provenance.get("source_id")
+    law_key = provenance.get("law_key")
+    confidence = provenance.get("confidence")
+    support = provenance.get("support")
+    if not isinstance(source, str) or len(source) > 80:
+        return "invalid_schema"
+    if source_id is not None and (
+        not isinstance(source_id, str) or len(source_id) > 160
+    ):
+        return "invalid_schema"
+    if law_key is not None and (
+        not isinstance(law_key, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", law_key)
+    ):
+        return "invalid_schema"
+    if confidence is not None and (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not math.isfinite(float(confidence))
+        or not 0 <= confidence <= 1
+    ):
+        return "invalid_schema"
+    if support is not None and (
+        not isinstance(support, dict)
+        or set(support) - {"episodes", "projects"}
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in support.values()
+        )
+    ):
+        return "invalid_schema"
+    evidence_ids = provenance.get("evidence_ids", [])
+    if (
+        not isinstance(evidence_ids, list)
+        or len(evidence_ids) > 20
+        or not all(isinstance(item, str) and len(item) <= 160 for item in evidence_ids)
+    ):
+        return "invalid_schema"
+    # An active cross-project learning law is the only evidence class that may
+    # reach this engine. Anything else is rejected rather than skipping the bar
+    # below, which is what an unrecognized or absent source used to do.
+    if source != "learning-law":
+        return "not_maintainer_eligible"
+    if (
+        not isinstance(law_key, str)
+        or not law_key
+        or
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not math.isfinite(float(confidence))
+        or confidence < 0.9
+        or not isinstance(support, dict)
+        or set(support) != {"episodes", "projects"}
+        or not isinstance(support.get("episodes"), int)
+        or isinstance(support.get("episodes"), bool)
+        or support["episodes"] < 5
+        or not isinstance(support.get("projects"), int)
+        or isinstance(support.get("projects"), bool)
+        or support["projects"] < 3
+    ):
+        return "not_maintainer_eligible"
     return None
 
 
@@ -469,7 +518,7 @@ def _valid_durable_record(
         "transitions", "reason", "remote_identity", "base_sha",
         "remote_base_sha", "base_branch", "base_source", "branch", "lease_id",
         "diff_digest", "changed_lines", "evaluation", "review_receipt", "draft_pr",
-        "published_remote_head", "pending_rollback",
+        "published_remote_head", "pending_rollback", "publish_attempt",
     }
     if set(record) - allowed:
         return False
@@ -538,6 +587,20 @@ def _valid_durable_record(
         pending_body = dict(pending_rollback)
         pending_id = pending_body.pop("id", None)
         if pending_id != digest(pending_body)[:24]:
+            return False
+    publish_attempt = record.get("publish_attempt")
+    if publish_attempt is not None:
+        if (
+            not isinstance(publish_attempt, dict)
+            or set(publish_attempt) != {"repository", "head_branch", "head_sha"}
+            or not isinstance(publish_attempt.get("repository"), str)
+            or not re.fullmatch(
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+                publish_attempt.get("repository", ""),
+            )
+            or publish_attempt.get("head_branch") != record.get("branch")
+            or not _valid_sha(publish_attempt.get("head_sha"))
+        ):
             return False
     if state == "eligible":
         return len(transitions) == 1
@@ -944,6 +1007,14 @@ def apply_candidate(
     reset = git(worktree, "reset", "--hard", record["base_sha"], check=False)
     if reset.returncode != 0:
         raise ImproveError("failed", "candidate_reset_failed")
+    # reset --hard restores tracked content but leaves untracked files behind.
+    # A temp file orphaned by a crash mid-write is later picked up by
+    # `ls-files --others` and rejects the proposal as path_not_allowlisted --
+    # a terminal state that does not reopen without an input change. Clean the
+    # tree the same way ensure_worktree does.
+    cleaned = git(worktree, "clean", "-ffdx", check=False)
+    if cleaned.returncode != 0:
+        raise ImproveError("failed", "candidate_reset_failed")
     relative = proposal["target"]["path"]
     target = _target_file(worktree, relative)
     try:
@@ -979,29 +1050,32 @@ def apply_candidate(
 
 
 def changed_paths(worktree: Path) -> tuple[list[str], int, str]:
-    names = git(
-        worktree, "diff", "--name-only", "HEAD", "--", check=False
-    ).stdout.splitlines()
-    names.extend(
-        git(
-            worktree,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            check=False,
-        ).stdout.splitlines()
+    """Summarize the working-tree change as (paths, changed lines, diff digest).
+
+    Every git call here is checked, because _bounded_process returns an *empty*
+    stdout when a command exceeds its output cap. An empty diff hashes to
+    EMPTY_DIFF, which is the sentinel meaning "nothing changed" -- so an
+    unchecked failure would report a large real mutation as no mutation and
+    defeat the baseline tamper check that consumes this digest.
+    """
+    listed = git(worktree, "diff", "--name-only", "HEAD", "--", check=False)
+    others = git(
+        worktree, "ls-files", "--others", "--exclude-standard", check=False
     )
-    stats = git(
-        worktree, "diff", "--numstat", "HEAD", "--", check=False
-    ).stdout.splitlines()
+    stats = git(worktree, "diff", "--numstat", "HEAD", "--", check=False)
+    diffed = git(worktree, "diff", "--binary", "HEAD", "--", check=False)
+    if any(
+        result.returncode != 0 for result in (listed, others, stats, diffed)
+    ):
+        raise ImproveError("failed", "changed_paths_unavailable")
+    names = listed.stdout.splitlines()
+    names.extend(others.stdout.splitlines())
     changed_lines = 0
-    for row in stats:
+    for row in stats.stdout.splitlines():
         columns = row.split("\t")
         if len(columns) >= 2 and columns[0].isdigit() and columns[1].isdigit():
             changed_lines += int(columns[0]) + int(columns[1])
-    patch = git(
-        worktree, "diff", "--binary", "HEAD", "--", check=False
-    ).stdout.encode("utf-8")
+    patch = diffed.stdout.encode("utf-8")
     return sorted(set(names)), changed_lines, hashlib.sha256(patch).hexdigest()
 
 
@@ -1139,7 +1213,7 @@ def independent_review(
 ) -> None:
     head_sha = create_candidate_snapshot(record, proposal, root)
     configured = os.environ.get("LEGION_IMPROVE_REVIEW_BIN", "legion-delegate")
-    reviewer = shutil.which(configured) if not os.path.isabs(configured) else configured
+    reviewer = _resolve_command(configured)
     if not reviewer or not os.access(reviewer, os.X_OK):
         raise ImproveError("failed", "independent_review_unavailable")
     result = _bounded_process(
@@ -1306,6 +1380,11 @@ def _pr_identity_error(
 ) -> str | None:
     if not isinstance(row, dict):
         return "existing_pr_identity_mismatch"
+    # Deliberately state-blind. Reusing an already closed or merged pull request
+    # for the deterministic head is the documented behavior: the alternative is
+    # opening a duplicate of the very change a maintainer already decided on.
+    # See docs/self-learning.md and
+    # test_closed_or_merged_publication_is_reused_without_duplicate_pr.
     if require_draft and row.get("isDraft") is not True:
         return "existing_pr_not_draft"
     if row.get("body") != IMPROVEMENT_PR_BODY:
@@ -1524,8 +1603,23 @@ def draft(
             return "existing_pr_identity_mismatch"
         record["draft_pr"] = draft_pr
         record["published_remote_head"] = head_sha
+        record.pop("publish_attempt", None)
         _persist_draft_state(root, record)
         return None
+
+    # An empty listing is not proof that nothing was published. If an earlier
+    # attempt recorded a publish intent for this exact head, GitHub's list
+    # consistency window can hide a pull request that really exists, and
+    # creating another here is precisely the duplicate the intent record exists
+    # to prevent. Wait for the listing to settle instead.
+    attempt = record.get("publish_attempt")
+    if (
+        isinstance(attempt, dict)
+        and attempt.get("repository") == repository
+        and attempt.get("head_branch") == branch
+        and attempt.get("head_sha") == head_sha
+    ):
+        return "draft_pr_reconcile_pending"
 
     existing = _remote_branch_sha(worktree, branch)
     if existing and existing != head_sha:
@@ -1563,6 +1657,18 @@ def draft(
             record.pop("published_remote_head", None)
             _persist_draft_state(root, record)
             return "draft_base_changed"
+        # Record the intent to publish before the one irreversible call in this
+        # engine. If `gh pr create` succeeds but this process dies before the
+        # rollback receipt is persisted -- or prints a banner line where the URL
+        # was expected -- the durable record would otherwise hold no trace of a
+        # real pull request, and a later run could open a second one for the
+        # same fingerprint.
+        record["publish_attempt"] = {
+            "repository": repository,
+            "head_branch": branch,
+            "head_sha": head_sha,
+        }
+        _persist_draft_state(root, record)
         created = _bounded_process(
             [
                 gh,
@@ -1582,6 +1688,13 @@ def draft(
             timeout=120,
         )
         if created.returncode != 0:
+            # A non-zero exit means the API call itself did not succeed, so no
+            # pull request exists and a straight retry is safe. Only ambiguous
+            # outcomes -- a success whose URL could not be parsed, or a process
+            # that died before persisting the receipt -- keep the intent record
+            # and force reconciliation.
+            record.pop("publish_attempt", None)
+            _persist_draft_state(root, record)
             return "draft_pr_create_failed"
         lines = created.stdout.strip().splitlines()
         pr_url = _safe_pr_url(lines[-1] if lines else "")
@@ -1631,6 +1744,7 @@ def draft(
             )
         record["draft_pr"] = created_payload
         record.pop("pending_rollback", None)
+        record.pop("publish_attempt", None)
         _persist_draft_state(root, record)
     return None
 
@@ -2025,10 +2139,15 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     ).resolve()
     results: list[dict[str, Any]] = []
     attempted = 0
+    productive = 0
+    drafts_created = 0
     failures = 0
     skipped_completed = 0
     invalid_entries = 0
     quarantined = 0
+    # Enough headroom to reach a healthy proposal sitting behind a few stuck
+    # ones, while still bounding the work one refresh can do.
+    max_attempts = min(50, max(int(args.max), 10))
     for proposal_path in _bounded_queue_paths(queue_dir):
         proposal = _read_proposal(proposal_path)
         if validate(proposal):
@@ -2054,7 +2173,19 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             skipped_completed += 1
             proposal_path.unlink(missing_ok=True)
             continue
-        if attempted >= args.max:
+        # "At most --max draft pull requests per refresh" is an invariant of
+        # this engine, not a side effect of how many entries happen to be
+        # attempted. Count publications, and stop creating once the cap is hit.
+        if drafts_created >= args.max:
+            continue
+        # --max bounds the productive work one refresh performs. A fingerprint
+        # that fails every run sorts first every run, and counting its failures
+        # against that budget let one permanently stuck entry starve every
+        # later proposal indefinitely. Failed attempts therefore do not consume
+        # the budget, and a separate attempt ceiling still bounds total work.
+        if productive >= args.max:
+            continue
+        if attempted >= max_attempts:
             continue
         attempted += 1
         run_args = argparse.Namespace(
@@ -2068,6 +2199,9 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         )
         code, payload = execute(run_args)
         failures += int(code != 0)
+        productive += int(code == 0)
+        if payload.get("state") == "draft_created":
+            drafts_created += 1
         if code == 0 and args.mode == "dry-run" and payload.get("state") == "reviewed":
             proposal_path.unlink(missing_ok=True)
         if len(results) < 100:
@@ -2082,6 +2216,7 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "schema": QUEUE_SCHEMA,
         "mode": args.mode,
         "attempted": attempted,
+        "drafts_created": drafts_created,
         "failed": failures,
         "skipped_completed": skipped_completed,
         "invalid_entries": invalid_entries,

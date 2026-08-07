@@ -209,6 +209,13 @@ case "$IMPROVE_MODE" in
     off) ;;
     dry-run|draft)
         if [ -x "$IMPROVE" ]; then
+            # cron runs with a bare PATH (/usr/bin:/bin), so `gh` is not
+            # resolvable even when it is installed. Legion binaries are already
+            # invoked by absolute path; extend the search for the third-party
+            # tools the publish hop needs so a draft run does not fail with
+            # gh_unavailable on every scheduled refresh.
+            PATH="$PATH:$HOME/.agents/bin:/opt/homebrew/bin:/usr/local/bin"
+            export PATH
             if ! "$IMPROVE" queue --repo "$SOURCE_CLONE" \
                 --base-ref "${LEGION_IMPROVE_BASE_REF:-main}" \
                 --mode "$IMPROVE_MODE" \

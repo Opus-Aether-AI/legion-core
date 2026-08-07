@@ -657,13 +657,23 @@ def learning_law_outcomes(repo: str) -> list[dict[str, Any]]:
     return outcomes
 
 
-def learning_law_lifecycle(repo: str) -> dict[str, str]:
-    """Return the complete bounded law lifecycle, including retired laws."""
+def learning_law_lifecycle(repo: str) -> dict[str, str] | None:
+    """Return the complete bounded law lifecycle, including retired laws.
+
+    Returns ``None`` when the law store could not be read at all -- no global
+    directory, a missing or unreadable ``laws.json``, or a malformed document.
+    That is deliberately distinct from an empty mapping, which means "read
+    successfully, and no laws exist". Callers use the difference to avoid
+    treating an unreadable store as proof that every law was retired, which
+    would delete queued proposals and retire live hints on a transient fault.
+    """
     state = legion_state.resolve_state(repo)
     global_dir = _text(state.get("global_learning_dir"))
     if not global_dir:
-        return {}
+        return None
     payload = _json_file(os.path.join(global_dir, "laws.json"))
+    if not isinstance(payload, dict):
+        return None
     result: dict[str, str] = {}
     for law in _list(_dict(payload).get("laws"))[
         : legion_learning_context.MAX_HINTS
@@ -984,6 +994,14 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
             "clearer artifact, or route to a stronger validator before returning."
         )
         validation = "Run legion-doctor, legion-eval, and a targeted delegated smoke run."
+    elif source.startswith("legion-run:"):
+        kind = "run_stage_guardrail"
+        stage = _short(source.split(":", 1)[1], 40) or "stage"
+        suggested = (
+            f"Prevent this {stage} failure recurring: address the recorded cause in the "
+            "target entity before the next run reaches that stage."
+        )
+        validation = f"Re-run the failing legion-run {stage} stage and require it to pass."
     else:
         kind = "memory_guardrail"
         suggested = (
@@ -1252,7 +1270,7 @@ def build_report(
     for outcome in outcomes:
         by_entity[f"{outcome['target_type']}:{outcome['target_name']}"] += 1
     contrast = trace_contrast(spans, catalog)
-    return {
+    report = {
         "schema": "legion.self-learning.report.v1",
         "generated_at": _iso_utc(),
         "day": day,
@@ -1264,11 +1282,18 @@ def build_report(
         "outcomes": outcomes,
         "proposals": proposals,
         "improvement_proposals": improvement_proposals,
-        "learning_laws": learning_law_lifecycle(repo),
         "by_entity": dict(sorted(by_entity.items())),
         "scorecard": run_scorecard(repo),
         "trace_contrast": contrast,
     }
+    # Only publish a lifecycle the loop actually read. Consumers treat the
+    # absence of this key as "lifecycle unknown" and skip every reconciliation
+    # that would otherwise retire hints or delete queued proposals, so a
+    # transient read failure degrades to a no-op instead of a purge.
+    lifecycle = learning_law_lifecycle(repo)
+    if lifecycle is not None:
+        report["learning_laws"] = lifecycle
+    return report
 
 
 def _empty_memory() -> dict[str, Any]:
@@ -1290,11 +1315,40 @@ def load_memory(log_root: str) -> dict[str, Any]:
     return _empty_memory()
 
 
-def _hint_from_proposal(proposal: dict[str, Any]) -> str:
-    return _short(
-        f"{proposal.get('summary')} Suggested: {proposal.get('suggested_change')}",
-        360,
+_GUIDANCE_WHITESPACE = re.compile(r"\s+")
+
+
+def _guidance_text(value: Any, limit: int = 360) -> str:
+    """Flatten one guidance string for prompt delivery.
+
+    Guidance is rendered as a single bullet line inside an executor prompt, so
+    embedded newlines and control characters would let a summary break out of
+    the surrounding list structure. Collapse them before the length bound
+    rather than after, so the bound applies to what is actually delivered.
+    """
+    text = _text(value)
+    if not text:
+        return ""
+    text = "".join(
+        char for char in text if char >= " " or char in "\t\n\r"
     )
+    return _short(_GUIDANCE_WHITESPACE.sub(" ", text).strip(), limit)
+
+
+def _first_party_outcome(outcome: dict[str, Any]) -> bool:
+    """True only when core itself composed the summary from deterministic tooling.
+
+    Records written before this marker existed carry no ``provenance`` field and
+    are treated as untrusted, so an upgrade can never retroactively promote old
+    extension prose into trusted executor guidance.
+    """
+    return _text(outcome.get("provenance")) == "first-party"
+
+
+def _hint_from_proposal(proposal: dict[str, Any]) -> str:
+    summary = _guidance_text(proposal.get("summary"))
+    suggested = _guidance_text(proposal.get("suggested_change"))
+    return _short(" ".join(part for part in [summary, f"Suggested: {suggested}" if suggested else ""] if part), 360)
 
 
 def _typed_hint_from_proposal(
@@ -1313,8 +1367,15 @@ def _typed_hint_from_proposal(
     source = _text(outcome.get("source"))
     if not target_type or not target_name or not proposal_id:
         return None
-    suggested = _short(_text(proposal.get("suggested_change")), 360)
-    if source in {"manual", "session-learn", "learning-law"}:
+    suggested = _guidance_text(proposal.get("suggested_change"))
+    # Deterministic source classes may carry their bounded summary. That is the
+    # class of record whose text core composed itself: operator-entered notes,
+    # the fixed session-learn rule set, promoted cross-project laws, and
+    # first-party run outcomes (legion-doctor checks, legion-fanout counters,
+    # core stage errors). Extension feedback payloads and model-authored review
+    # prose stay reduced to Legion's own fixed guardrail, because a validator
+    # plugin or a reviewer model must not be able to write executor guidance.
+    if source in {"manual", "session-learn", "learning-law"} or _first_party_outcome(outcome):
         guidance = _hint_from_proposal(proposal)
     else:
         guidance = suggested
@@ -1365,6 +1426,24 @@ def sync_typed_hints(
         existing = legion_learning_context.read_bounded_json(
             path, legion_learning_context.MAX_HINT_DOCUMENT_BYTES
         )
+        # An unreadable store is not an empty one. read_bounded_json returns
+        # None for a document that is oversized, truncated, or not an object --
+        # exactly the states in which the maintainer-owned hints it holds are
+        # most worth preserving. Treating that as "no hints yet" and writing
+        # this run's promotions over the top silently destroys them, so refuse
+        # to write and surface the condition instead.
+        if existing is None and os.path.exists(path):
+            return {
+                "path": path,
+                "promoted": 0,
+                "rejected": 0,
+                "rejected_ids": [],
+                "total": 0,
+                "project_cap": PROJECT_HINT_CAP,
+                "global_reserve": GLOBAL_HINT_RESERVE,
+                "protected_decisions": 0,
+                "skipped": "unreadable_hint_store",
+            }
         maintainers: dict[str, dict[str, Any]] = {}
         generated: dict[str, dict[str, Any]] = {}
         for hint in _list(_dict(existing).get("hints"))[

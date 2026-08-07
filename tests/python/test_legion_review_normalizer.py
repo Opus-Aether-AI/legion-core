@@ -81,3 +81,39 @@ def test_normalizer_rejects_nonblocking_decisions_with_blocking_findings(tmp_pat
         }
 
         assert normalizer.normalize(json.dumps(payload), tmp_path) is None
+
+
+def test_normalizer_accepts_only_explicit_no_findings_statements(tmp_path):
+    """A clean prose review must still normalize to an approval."""
+    for text in (
+        "No findings.",
+        "no issues",
+        "No issues found.",
+        "nothing to flag",
+        "Review Summary: No findings.",
+    ):
+        verdict = normalizer.normalize(text, tmp_path)
+
+        assert verdict is not None, text
+        assert verdict["verdict"] == "approve"
+        assert verdict["findings"] == []
+
+
+def test_normalizer_never_approves_on_a_conversational_pleasantry(tmp_path):
+    """Approval must assert a review outcome, not merely sound positive.
+
+    This gate authorizes publishing a self-authored patch. A reviewer that
+    degrades to a stock phrase, or one steered by content inside the diff it is
+    reviewing, must not be able to satisfy it.
+    """
+    for text in (
+        "looks good",
+        "Looks good!",
+        "LGTM",
+        "Overall it looks good.",
+        "approved",
+        "The patch is approved.",
+        "",
+        "   ",
+    ):
+        assert normalizer.normalize(text, tmp_path) is None, text

@@ -60,6 +60,14 @@ def _proposal(tmp_path, **overrides):
             "content": "Validate the real workflow before declaring success.",
         },
         "validation": {"profile": "documentation"},
+        "provenance": {
+            "source": "learning-law",
+            "source_id": "law-source-id",
+            "law_key": "verify-before-declaring-done",
+            "confidence": 0.95,
+            "support": {"episodes": 6, "projects": 4},
+            "evidence_ids": ["evidence-1"],
+        },
     }
     proposal.update(overrides)
     path = tmp_path / "proposal.json"
@@ -126,7 +134,14 @@ def _env(tmp_path):
         "if [ \"${FIXTURE_REVIEW_MODE:-approve}\" = fail ]; then exit 23; fi\n"
         "verdict=approve\n"
         "[ \"${FIXTURE_REVIEW_MODE:-approve}\" = reject ] && verdict=request_changes\n"
-        "printf '{\"status\":\"ok\",\"model\":\"independent-test-reviewer\",\"reviewed_base_sha\":\"%s\",\"reviewed_head_sha\":\"%s\",\"attempts\":1,\"verdict\":{\"verdict\":\"%s\",\"summary\":\"bounded\",\"findings\":[]}}\\n' \"$base\" \"$head\" \"$verdict\"\n",
+        # Findings are independent of the verdict on purpose: a reviewer that
+        # says "approve" while reporting a blocking finding is the shape the
+        # publish gate has to catch.
+        "findings='[]'\n"
+        "if [ -n \"${FIXTURE_REVIEW_FINDING_SEVERITY:-}\" ]; then\n"
+        "  findings=$(printf '[{\"severity\":\"%s\",\"title\":\"fixture finding\",\"detail\":\"bounded\"}]' \"$FIXTURE_REVIEW_FINDING_SEVERITY\")\n"
+        "fi\n"
+        "printf '{\"status\":\"ok\",\"model\":\"independent-test-reviewer\",\"reviewed_base_sha\":\"%s\",\"reviewed_head_sha\":\"%s\",\"attempts\":1,\"verdict\":{\"verdict\":\"%s\",\"summary\":\"bounded\",\"findings\":%s}}\\n' \"$base\" \"$head\" \"$verdict\" \"$findings\"\n",
         encoding="utf-8",
     )
     reviewer.chmod(0o755)
@@ -195,6 +210,30 @@ def _env(tmp_path):
     return env
 
 
+def _reviewed_state(repo, proposal, state, env):
+    """Drive one proposal to the durable reviewed state and return its record."""
+    stopped, payload = _run(
+        repo, proposal, state, "--mode", "draft", "--stop-after", "reviewed", env=env
+    )
+    assert stopped.returncode != 0
+    assert payload["state"] == "reviewed"
+    path = state / "runs" / (payload["fingerprint"] + ".json")
+    return payload, path, json.loads(path.read_text(encoding="utf-8"))
+
+
+def _reseal_review_receipt(receipt):
+    """Recompute the engine's tamper-evident receipt id after editing a record.
+
+    Durable records are rejected outright when the id no longer matches, so a
+    test that wants the *publish-time* recheck to be the failing gate has to
+    hand the engine a record that is otherwise perfectly well formed.
+    """
+    body = {key: value for key, value in receipt.items() if key != "id"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    receipt["id"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+    return receipt
+
+
 def _assert_private_and_bounded(value, repo):
     encoded = json.dumps(value, sort_keys=True)
     assert str(repo) not in encoded
@@ -227,6 +266,88 @@ def test_public_schema_rejects_untyped_or_ineligible_proposals_before_leasing(tm
         assert payload["state"] == "rejected"
         assert payload["reason"] in {"invalid_schema", "not_maintainer_eligible", "path_not_allowlisted"}
         assert not payload.get("lease_id")
+
+
+def test_eligibility_bar_cannot_be_skipped_by_omitting_provenance(tmp_path):
+    """The engine, not the proposal author, enforces the evidence bar.
+
+    The documented bar is an active cross-project law with confidence >= 0.9,
+    >= 5 supporting episodes across >= 3 projects. It used to sit behind an
+    `if provenance is not None` guard, so a proposal that simply left the key
+    out skipped the check entirely while remaining schema valid.
+    """
+    repo, _ = _repo(tmp_path)
+    state = tmp_path / "state"
+    env = _env(tmp_path)
+    ineligible = (
+        # No provenance at all: previously accepted.
+        {"provenance": None},
+        # Provenance from an unrecognized evidence class.
+        {
+            "provenance": {
+                "source": "manual",
+                "source_id": "hand-written",
+                "law_key": "hand-written-law",
+                "confidence": 1.0,
+                "support": {"episodes": 99, "projects": 99},
+                "evidence_ids": ["e1"],
+            }
+        },
+        # A real law that has not cleared the confidence bar.
+        {
+            "provenance": {
+                "source": "learning-law",
+                "source_id": "weak-confidence",
+                "law_key": "weak-law",
+                "confidence": 0.5,
+                "support": {"episodes": 9, "projects": 9},
+                "evidence_ids": ["e1"],
+            }
+        },
+    )
+    for change in ineligible:
+        proposal = _proposal(tmp_path, **change)
+        if change["provenance"] is None:
+            payload_text = json.loads(proposal.read_text(encoding="utf-8"))
+            payload_text.pop("provenance", None)
+            proposal.write_text(json.dumps(payload_text), encoding="utf-8")
+
+        result, payload = _run(repo, proposal, state, "--mode", "dry-run", env=env)
+
+        assert result.returncode != 0, change
+        assert payload["state"] == "rejected", change
+        assert payload["reason"] in {"invalid_schema", "not_maintainer_eligible"}, change
+        assert not payload.get("lease_id"), change
+
+
+def test_corrupt_resume_state_fails_closed_instead_of_crashing(tmp_path):
+    """Unreadable durable state must not abort the process with a traceback.
+
+    read_json is the entry point for state that may have been truncated or
+    hand-edited. A deeply nested document raises RecursionError, which is not
+    an OSError or ValueError, so it used to escape and kill the run before the
+    corrupt-state path could report a structured result.
+    """
+    import importlib.util
+
+    module_path = os.path.join(
+        ROOT, "legion-observability", "scripts", "legion-improve.py"
+    )
+    spec = importlib.util.spec_from_file_location("legion_improve", module_path)
+    improve = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(improve)
+
+    deep = tmp_path / "deep.json"
+    deep.write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+    assert improve.read_json(deep) is None
+
+    truncated = tmp_path / "truncated.json"
+    truncated.write_text('{"state": "reviewed"', encoding="utf-8")
+    assert improve.read_json(truncated) is None
+
+    not_an_object = tmp_path / "list.json"
+    not_an_object.write_text("[1, 2, 3]", encoding="utf-8")
+    assert improve.read_json(not_an_object) is None
 
 
 def test_default_mode_is_off_and_has_no_side_effects(tmp_path):
@@ -269,6 +390,42 @@ def test_public_allowlists_reject_unsafe_commands_paths_and_oversized_diffs(tmp_
         assert payload["state"] == "rejected"
         assert payload["reason"] == reason
         assert (repo / "outside.md").read_text(encoding="utf-8") == "do not touch\n"
+
+
+def test_written_candidate_paths_are_reallowlisted_after_the_mutation(tmp_path):
+    """Schema validation is a filter, not the allowlist.
+
+    ``path_not_allowlisted`` is checked twice: once against the declared target
+    before anything is built, and again against what Git actually reports the
+    candidate changed. The other tests only ever reach the first check, which
+    leaves the second -- the one that observes the real mutation rather than
+    the claim about it -- unexercised. A declared path that is schema valid but
+    is not the path Git names must be rejected after the write, not published.
+    """
+    repo, _ = _repo(tmp_path)
+    state = tmp_path / "post-apply-state"
+    env = _env(tmp_path)
+    # "./allowed.md" clears safe_path (relative, no traversal) and addresses a
+    # real allowlisted file, but Git reports the mutation as "allowed.md".
+    proposal = _proposal(tmp_path, target={"path": "./allowed.md"})
+
+    result, payload = _run(repo, proposal, state, "--mode", "draft", env=env)
+
+    assert result.returncode != 0
+    assert payload["state"] == "rejected"
+    assert payload["reason"] == "path_not_allowlisted"
+    # Static validation rejects before leasing, so a lease and an isolated
+    # worktree are what distinguish this from the pre-build rejection.
+    assert payload["lease_id"]
+    assert payload["worktree"]
+    durable = json.loads(
+        (state / "runs" / (payload["fingerprint"] + ".json")).read_text(encoding="utf-8")
+    )
+    assert durable["transitions"] == ["eligible", "leased", "prepared", "rejected"]
+    assert "draft_pr" not in payload
+    assert not os.path.exists(env["FIXTURE_GH_LOG"])
+    assert (repo / "allowed.md").read_text(encoding="utf-8") == "before\n"
+    assert _git("status", "--porcelain", cwd=repo).stdout == ""
 
 
 def test_plugin_guardrail_candidate_bumps_manifest_and_marketplace_together(tmp_path):
@@ -633,6 +790,88 @@ def test_independent_review_is_an_external_fail_closed_boundary(tmp_path):
     assert done["state"] == "draft_created"
 
 
+def test_approving_verdict_with_a_blocking_finding_never_publishes(tmp_path):
+    """The verdict word is not the gate; the findings it carries are.
+
+    A reviewer that answers "approve" while reporting a critical, high, or
+    medium finding has not cleared the change, and publishing it would open a
+    pull request the reviewer itself argued against. Severity is the only thing
+    that differs between the rejected cases and the published control below, so
+    a regression that trusts the verdict alone cannot pass both halves.
+    """
+    repo, _ = _repo(tmp_path)
+    proposal = _proposal(tmp_path)
+    # "HIGH" is included because the engine compares case-folded severities.
+    for severity in ("critical", "HIGH", "medium"):
+        env = _env(tmp_path / severity)
+        env["FIXTURE_REVIEW_FINDING_SEVERITY"] = severity
+
+        result, payload = _run(
+            repo, proposal, tmp_path / (severity + "-state"), "--mode", "draft", env=env
+        )
+
+        assert result.returncode != 0, severity
+        assert payload["state"] == "rejected", severity
+        assert payload["reason"] == "review_requested_changes", severity
+        assert "draft_pr" not in payload, severity
+        assert "published_remote_head" not in payload, severity
+        # gh is never invoked at all, so the log file is never created.
+        assert not os.path.exists(env["FIXTURE_GH_LOG"]), severity
+
+    low_env = _env(tmp_path / "low")
+    low_env["FIXTURE_REVIEW_FINDING_SEVERITY"] = "low"
+    accepted, published = _run(
+        repo, proposal, tmp_path / "low-state", "--mode", "draft", env=low_env
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert published["state"] == "draft_created"
+    assert "pr create" in open(low_env["FIXTURE_GH_LOG"], encoding="utf-8").read()
+
+
+def test_missing_reviewer_binary_fails_closed_before_any_publication(tmp_path):
+    """No reachable reviewer means no review, and no review means no draft.
+
+    The independent review is the engine's only external judgement, so an
+    unresolvable reviewer command must stop the run at the immutable evaluated
+    state rather than degrade into publishing an unreviewed candidate.
+    """
+    unavailable = {
+        # An absolute path that does not exist.
+        "absolute": "/nonexistent/legion-improve/legion-delegate",
+        # A bare name that is on no PATH entry and has no in-repo fallback.
+        "unresolvable": "legion-improve-reviewer-that-is-not-installed",
+    }
+    for name, configured in unavailable.items():
+        fixture = tmp_path / name
+        fixture.mkdir()
+        repo, _ = _repo(fixture)
+        proposal = _proposal(fixture)
+        env = _env(fixture / "env")
+        reachable = env["LEGION_IMPROVE_REVIEW_BIN"]
+        env["LEGION_IMPROVE_REVIEW_BIN"] = configured
+        state = fixture / "state"
+
+        result, payload = _run(repo, proposal, state, "--mode", "draft", env=env)
+
+        assert result.returncode != 0, name
+        assert payload["state"] == "evaluated", name
+        assert payload["reason"] == "independent_review_unavailable", name
+        assert "review_receipt" not in payload, name
+        assert "draft_pr" not in payload, name
+        assert not os.path.exists(env["FIXTURE_GH_LOG"]), name
+        assert (
+            _git("ls-remote", "origin", "refs/heads/" + payload["branch"], cwd=repo).stdout
+            == ""
+        ), name
+
+        # Fail-closed, not a dead end: the evaluated state is immutable and the
+        # run completes once a reviewer is reachable again.
+        env["LEGION_IMPROVE_REVIEW_BIN"] = reachable
+        resumed, done = _run(repo, proposal, state, "--mode", "draft", env=env)
+        assert resumed.returncode == 0, resumed.stderr
+        assert done["state"] == "draft_created", name
+
+
 def test_queue_is_bounded_and_replays_terminal_proposals_without_republishing(tmp_path):
     repo, _ = _repo(tmp_path)
     queue_dir = tmp_path / "queue"
@@ -790,6 +1029,89 @@ def test_draft_api_failure_retries_from_reviewed_state_without_rereview(tmp_path
     assert resumed.returncode == 0, resumed.stderr
     assert done["state"] == "draft_created"
     assert len(open(env["FIXTURE_REVIEW_LOG"], encoding="utf-8").read().splitlines()) == 1
+
+
+def test_reviewed_head_is_reverified_against_the_candidate_before_publishing(tmp_path):
+    """The review receipt is a claim; the reviewed commit is the evidence.
+
+    Between review and publication the engine re-derives the reviewed commit's
+    parents, its changed paths, and its patch digest from the candidate
+    worktree. Trusting the receipt alone would let anything that moved in that
+    window -- a candidate that no longer produces the reviewed diff, or a
+    target whose allowlisted path set has changed -- reach a pull request under
+    an approval that was never given for it.
+    """
+    digest_fixture = tmp_path / "digest-mismatch"
+    digest_fixture.mkdir()
+    repo, _ = _repo(digest_fixture)
+    proposal = _proposal(digest_fixture)
+    state = digest_fixture / "state"
+    env = _env(digest_fixture / "env")
+    payload, durable_path, durable = _reviewed_state(repo, proposal, state, env)
+    # Restate the reviewed diff as a different, still well-formed digest. The
+    # record stays internally consistent, so only the publish-time recheck can
+    # notice that the candidate no longer produces the patch that was reviewed.
+    replacement = hashlib.sha256(b"a diff that was never reviewed").hexdigest()
+    durable["diff_digest"] = replacement
+    durable["review_receipt"]["diff_digest"] = replacement
+    _reseal_review_receipt(durable["review_receipt"])
+    durable_path.write_text(json.dumps(durable), encoding="utf-8")
+
+    blocked, failed = _run(repo, proposal, state, "--mode", "draft", env=env)
+
+    assert blocked.returncode != 0
+    assert failed["state"] == "failed"
+    assert failed["reason"] == "review_snapshot_mismatch"
+    assert "draft_pr" not in failed
+    assert not os.path.exists(env["FIXTURE_GH_LOG"])
+    assert (
+        _git("ls-remote", "origin", "refs/heads/" + payload["branch"], cwd=repo).stdout
+        == ""
+    )
+
+    # The same gate covers the allowlisted path set, which is derived from the
+    # candidate worktree rather than from the record. Planting a plugin
+    # manifest above the reviewed target after review widens the policy-mandated
+    # path set, so the reviewed commit no longer changes everything it must.
+    paths_fixture = tmp_path / "paths-mismatch"
+    paths_fixture.mkdir()
+    repo, _ = _repo(paths_fixture)
+    (repo / "demo-plugin").mkdir()
+    (repo / "demo-plugin" / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-qm", "add plugin-free skill fixture", cwd=repo)
+    _git("push", "-q", "origin", "HEAD:main", cwd=repo)
+    proposal = _proposal(paths_fixture, target={"path": "demo-plugin/SKILL.md"})
+    state = paths_fixture / "state"
+    env = _env(paths_fixture / "env")
+    payload, _, _ = _reviewed_state(repo, proposal, state, env)
+    candidate = state / "worktrees" / payload["fingerprint"] / "candidate"
+    (candidate / "demo-plugin" / ".claude-plugin").mkdir(parents=True)
+    (candidate / ".claude-plugin").mkdir()
+    (candidate / "demo-plugin" / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "demo-plugin", "version": "1.2.3"}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (candidate / ".claude-plugin" / "marketplace.json").write_text(
+        json.dumps(
+            {"plugins": [{"name": "demo-plugin", "source": "./demo-plugin", "version": "1.2.3"}]},
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    blocked, failed = _run(repo, proposal, state, "--mode", "draft", env=env)
+
+    assert blocked.returncode != 0
+    assert failed["state"] == "failed"
+    assert failed["reason"] == "review_snapshot_mismatch"
+    assert "draft_pr" not in failed
+    assert not os.path.exists(env["FIXTURE_GH_LOG"])
+    assert (
+        _git("ls-remote", "origin", "refs/heads/" + payload["branch"], cwd=repo).stdout
+        == ""
+    )
 
 
 def test_stale_retry_reclaims_only_its_owned_unpublished_branch(tmp_path):
@@ -1079,6 +1401,50 @@ def test_completed_draft_identity_fields_are_deterministic_and_tamper_evident(tm
             "reason": "state_corrupt",
         }
     durable_path.write_text(json.dumps(original), encoding="utf-8")
+
+
+def test_github_repository_is_derived_from_the_origin_remote_when_unpinned(
+    tmp_path, monkeypatch
+):
+    """The repository a draft is opened against comes from the origin remote.
+
+    This is the one branch the black-box tests cannot reach: they all pin
+    LEGION_IMPROVE_GITHUB_REPOSITORY, and a run whose origin really is a GitHub
+    URL cannot complete against a local fixture remote. Every other test would
+    therefore stay green while the derivation that decides *where* a pull
+    request is published silently stopped recognising a supported remote form
+    -- or started accepting one that is not a GitHub repository at all.
+    """
+    import importlib.util
+
+    module_path = os.path.join(
+        ROOT, "legion-observability", "scripts", "legion-improve.py"
+    )
+    spec = importlib.util.spec_from_file_location("legion_improve", module_path)
+    improve = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(improve)
+    monkeypatch.delenv("LEGION_IMPROVE_GITHUB_REPOSITORY", raising=False)
+
+    repo = tmp_path / "remote-forms"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    # No origin at all: nothing to derive, and nothing may be invented.
+    assert improve._github_repository(repo) == ""
+
+    _git("remote", "add", "origin", "https://github.com/org/repo.git", cwd=repo)
+    for url, expected in (
+        ("https://github.com/org/repo.git", "org/repo"),
+        ("git@github.com:org/repo.git", "org/repo"),
+        ("ssh://git@github.com/org/repo", "org/repo"),
+        ("https://github.com/org/repo/", "org/repo"),
+        # Not a GitHub repository URL: the publish hop must stop with
+        # gh_unavailable rather than aim at a host or path nobody configured.
+        ("https://gitlab.com/org/repo.git", ""),
+        ("https://github.com/org/repo/extra", ""),
+        ("https://github.com/org", ""),
+    ):
+        _git("remote", "set-url", "origin", url, cwd=repo)
+        assert improve._github_repository(repo) == expected, url
 
 
 def test_explicit_remote_base_does_not_move_a_release_detached_checkout(tmp_path):

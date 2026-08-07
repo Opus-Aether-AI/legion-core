@@ -197,7 +197,76 @@ def test_compile_context_has_stable_ordering_and_enforces_hint_token_limits(tmp_
     assert payload["usage"]["hint_count"] == 2
     assert payload["usage"]["token_count"] <= 130
     assert {hint["id"] for hint in payload["excluded_hints"]} == {"m-middle", "z-last"}
-    assert {hint["exclusion_reason"] for hint in payload["excluded_hints"]} == {"hint_limit", "token_limit"}
+    # Both are excluded because the hint-count cap is full, so both must say so.
+    # Reporting the second as "token_limit" -- which the earlier implementation
+    # did once a count exclusion had already been recorded -- misdirects an
+    # operator into raising max_tokens when max_hints is the binding constraint.
+    assert {hint["exclusion_reason"] for hint in payload["excluded_hints"]} == {"hint_limit"}
+
+
+def test_compile_context_reports_token_limit_when_tokens_are_the_binding_cap(tmp_path):
+    repo = _repo(tmp_path)
+    env, _, _ = _environment(tmp_path, repo, "over-budget-hints.json")
+
+    # Generous count cap, tight token cap: the token limit is genuinely binding.
+    _, payload = _compile(repo, env, "--max-hints", "20", "--max-tokens", "60")
+
+    assert payload["usage"]["token_count"] <= 60
+    assert payload["excluded_hints"]
+    assert {hint["exclusion_reason"] for hint in payload["excluded_hints"]} == {"token_limit"}
+
+
+def test_repeated_identical_guidance_cannot_evict_a_cross_project_law(tmp_path):
+    """Accumulated boilerplate must not starve genuinely learned guidance.
+
+    Every failure on one entity mints a new hint id carrying the same advice.
+    Those copies sort ahead of global laws, so without content de-duplication
+    a busy entity permanently crowds every promoted law out of the budget.
+    """
+    repo = _repo(tmp_path)
+    env, project, _ = _environment(tmp_path, repo)
+    boilerplate = (
+        "Record the issue as a reusable harness memory and turn it into a "
+        "source patch when it repeats or blocks work."
+    )
+    law = "Always regenerate the OpenAPI client after changing a route contract."
+    hints = [
+        {
+            "schema": "legion.learning-hint.v1",
+            "id": f"memory:duplicate-{index:02d}",
+            "scope": "exact",
+            "entity": "skill:release",
+            "status": "active",
+            "trusted": True,
+            "guidance": boilerplate,
+        }
+        for index in range(30)
+    ]
+    hints.append(
+        {
+            "schema": "legion.learning-hint.v1",
+            "id": "law:openapi-client",
+            "scope": "global",
+            "status": "active",
+            "trusted": True,
+            "guidance": law,
+        }
+    )
+    (project / "hints.json").write_text(
+        json.dumps({"hints": hints}), encoding="utf-8"
+    )
+
+    _, payload = _compile(
+        repo, env, "--entity", "skill:release", "--stage", "plan",
+        "--max-hints", "20", "--max-tokens", "1200",
+    )
+
+    guidance = [hint["guidance"] for hint in payload["selected_hints"]]
+    assert law in guidance, "the cross-project law must survive the budget"
+    assert guidance.count(boilerplate) == 1, "duplicates must collapse to one slot"
+    excluded = {hint["exclusion_reason"] for hint in payload["excluded_hints"]}
+    assert excluded == {"duplicate_guidance"}
+    assert payload["usage"]["hint_count"] == 2
 
 
 def test_context_budget_rejects_unbroken_ascii_and_cjk_guidance(tmp_path):

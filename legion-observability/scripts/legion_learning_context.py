@@ -237,6 +237,19 @@ def _safe_selected_hint(hint: dict[str, Any], reason: str, tokens: int) -> dict[
     return result
 
 
+_GUIDANCE_KEY_WHITESPACE = re.compile(r"\s+")
+
+
+def _guidance_key(value: Any) -> str:
+    """Normalize guidance for duplicate detection.
+
+    Two hints carrying the same advice differ only by id and evidence, so
+    compare the delivered text with whitespace collapsed and case folded.
+    """
+    collapsed = _GUIDANCE_KEY_WHITESPACE.sub(" ", text(value)).strip()
+    return collapsed.casefold()
+
+
 def _safe_excluded_hint(hint: dict[str, Any], reason: str) -> dict[str, str]:
     hint_id = text(hint.get("id"))
     return {
@@ -273,26 +286,73 @@ def compile_context(
         else:
             excluded.append(_safe_excluded_hint(hint, reason))
 
-    selected: list[dict[str, Any]] = []
+    ordered = sorted(candidates, key=lambda item: (item[0], item[1]))
+
+    # Repeated failures on one entity mint a new hint id per occurrence while
+    # reusing a single guidance string. Without content de-duplication those
+    # copies each consume a slot and a token share, and they sort ahead of
+    # broader scopes, so accumulated duplicates can crowd genuinely distinct
+    # guidance -- in particular cross-project laws -- out of the budget
+    # entirely. De-duplicate before the budget is spent, keeping the
+    # highest-ranked instance of each distinct guidance string.
+    deduped: list[tuple[int, str, dict[str, Any], str]] = []
+    seen_guidance: set[str] = set()
+    for entry in ordered:
+        key = _guidance_key(entry[2].get("guidance"))
+        if key and key in seen_guidance:
+            excluded.append(_safe_excluded_hint(entry[2], "duplicate_guidance"))
+            continue
+        if key:
+            seen_guidance.add(key)
+        deduped.append(entry)
+
+    # Reserve a slice of the budget for cross-project laws. Exact-scope hints
+    # legitimately outrank them, but a long tail of entity-specific guidance
+    # should not be able to starve every promoted law.
+    reserve_slots = 0
+    if max_hints:
+        available_globals = sum(1 for entry in deduped if entry[3] == "global")
+        reserve_slots = min(available_globals, max(1, max_hints // 4))
+
+    chosen: dict[str, int] = {}
     used_tokens = 0
-    count_limit_reported = False
-    for _rank, _hint_id, hint, reason in sorted(candidates, key=lambda item: (item[0], item[1])):
+
+    def _take(entry: tuple[int, str, dict[str, Any], str]) -> str | None:
+        """Try to fit one hint. Returns the binding constraint, or None on success."""
+        nonlocal used_tokens
+        _rank, hint_id, hint, _reason = entry
         guidance_tokens = token_count(text(hint.get("guidance")))
-        # When both limits are exhausted, report each deterministically.  This
-        # makes a compiled document explain all active constraints instead of
-        # hiding the count cap behind the token cap.
-        over_count = len(selected) >= max_hints
-        over_tokens = used_tokens + guidance_tokens > max_tokens
-        if over_count and not count_limit_reported:
-            excluded.append(_safe_excluded_hint(hint, "hint_limit"))
-            count_limit_reported = True
-        elif over_tokens:
-            excluded.append(_safe_excluded_hint(hint, "token_limit"))
-        elif over_count:
-            excluded.append(_safe_excluded_hint(hint, "hint_limit"))
+        if len(chosen) >= max_hints:
+            return "hint_limit"
+        if used_tokens + guidance_tokens > max_tokens:
+            return "token_limit"
+        chosen[hint_id] = guidance_tokens
+        used_tokens += guidance_tokens
+        return None
+
+    for entry in deduped:
+        if len(chosen) >= reserve_slots:
+            break
+        if entry[3] == "global":
+            _take(entry)
+
+    for entry in deduped:
+        if entry[1] in chosen:
+            continue
+        _take(entry)
+
+    selected: list[dict[str, Any]] = []
+    for _rank, hint_id, hint, reason in deduped:
+        if hint_id in chosen:
+            selected.append(_safe_selected_hint(hint, reason, chosen[hint_id]))
         else:
-            selected.append(_safe_selected_hint(hint, reason, guidance_tokens))
-            used_tokens += guidance_tokens
+            # Report the constraint that is actually binding. The count cap
+            # wins when it is exhausted, so a full selection never reports a
+            # token limit it did not reach.
+            over_count = len(chosen) >= max_hints
+            excluded.append(
+                _safe_excluded_hint(hint, "hint_limit" if over_count else "token_limit")
+            )
 
     excluded.sort(key=lambda item: (item["id"], item["exclusion_reason"]))
     excluded = excluded[:MAX_EXCLUDED_HINTS]
@@ -314,7 +374,16 @@ def compile_context(
 
 
 def safe_legacy_identity(legacy_identity: str, repository_identity: str) -> bool:
-    """Accept a legacy path identity only when its basename anchors the repo."""
+    """Accept a legacy path identity only when its basename anchors the repo.
+
+    The legacy identity is a local checkout path and the canonical identity is
+    a remote one, so the repository name is the only segment the two reliably
+    share -- a clone lives at ``~/src/release-tools``, not ``~/acme/…``.
+    Comparing the owner as well would make the documented migration impossible
+    for ordinary layouts. This is a sanity guard on a path the operator passes
+    explicitly via ``--legacy-state``, not an authorization boundary; the
+    bounds applied to the merged content are what keep a wrong file cheap.
+    """
     legacy_identity = text(legacy_identity)
     if not legacy_identity or not os.path.isabs(legacy_identity):
         return False
@@ -409,15 +478,35 @@ def reconcile_state(
     if not isinstance(state.get("evidence"), list):
         state["evidence"] = []
     reconciled: list[str] = []
-    legacy = mapping(read_json(legacy_state_path)) if legacy_state_path else {}
+    # Read the legacy document through the same size bound as every other
+    # untrusted store. The unbounded reader let a crafted legacy file carry an
+    # arbitrary number of arbitrarily long evidence ids straight past
+    # MAX_EVIDENCE_RECORDS and MAX_IDENTIFIER_CHARS into durable state.
+    legacy = (
+        mapping(read_bounded_json(legacy_state_path, MAX_HINT_DOCUMENT_BYTES))
+        if legacy_state_path
+        else {}
+    )
     legacy_identity = text(legacy.get("repository") or legacy.get("repository_identity"))
     if legacy and safe_legacy_identity(legacy_identity, repository_identity):
         reconciled.append(legacy_identity)
-        for entity, entry in sorted(mapping(legacy.get("entities")).items()):
+        for entity, entry in sorted(mapping(legacy.get("entities")).items())[
+            :MAX_EVIDENCE_RECORDS
+        ]:
             if not isinstance(entry, dict) or not text(entity):
                 continue
             target = mapping(state["entities"].setdefault(entity, {}))
-            ids = sorted({text(item) for item in values(target.get("evidence_ids")) + values(entry.get("evidence_ids")) if text(item)})
+            # Apply the same per-id length bound and per-entity record cap the
+            # evidence replay path uses, so the legacy lane cannot be the one
+            # unbounded way into this file.
+            ids = sorted(
+                {
+                    text(item)[:MAX_IDENTIFIER_CHARS]
+                    for item in values(target.get("evidence_ids"))
+                    + values(entry.get("evidence_ids"))
+                    if text(item)
+                }
+            )[:MAX_EVIDENCE_RECORDS]
             if ids:
                 target["evidence_ids"] = ids
             state["entities"][entity] = target

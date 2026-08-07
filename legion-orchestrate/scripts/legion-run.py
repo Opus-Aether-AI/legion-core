@@ -641,6 +641,21 @@ def _append_guidance(task: str, guidance: list[str]) -> str:
     return f"{task.rstrip()}\n\nTrusted learning guidance (bounded):\n" + "\n".join(f"- {item}" for item in guidance)
 
 
+def _guidance_present(delivered: Any, guidance: list[str]) -> bool:
+    """True when every guidance line survived into the text a stage received.
+
+    Receipts are the audit trail for whether learning actually reached a
+    decision boundary, so they are derived from the delivered payload rather
+    than from the intent to deliver.
+    """
+    if not guidance:
+        return False
+    text = delivered if isinstance(delivered, str) else ""
+    if not text:
+        return False
+    return all(item in text for item in guidance)
+
+
 def _write_learning_receipts(
     path: Path,
     *,
@@ -1320,7 +1335,14 @@ def _extend_unique(items: list[str], value: Any) -> None:
             items.append(item)
 
 
-def write_plan_from_files(plan_files: list[str], plan_path: Path, runner: dict[str, Any], task: str, base_dir: Path) -> dict[str, Any]:
+def write_plan_from_files(
+    plan_files: list[str],
+    plan_path: Path,
+    runner: dict[str, Any],
+    task: str,
+    base_dir: Path,
+    guidance: list[str] | None = None,
+) -> dict[str, Any]:
     sources = [_resolve_plan_source(plan_file, base_dir) for plan_file in plan_files]
     if not sources:
         raise LegionRunError("direct heavy-task mode requires --plan-command or --plan-file")
@@ -1384,6 +1406,10 @@ def write_plan_from_files(plan_files: list[str], plan_path: Path, runner: dict[s
     payload.setdefault("schema", "legion.heavy-task.plan.v1")
     payload.setdefault("mode", "legion-generate-slices")
     payload.setdefault("task", task)
+    # Append to whatever task the plan source settled on, so an explicit task
+    # inside a JSON plan file is preserved and still carries the guidance.
+    if guidance:
+        payload["task"] = _append_guidance(_as_text(payload.get("task"), task), guidance)
     payload["runner"] = runner["name"]
     payload["profile"] = runner["pipeline"]["profile"]
     _write_json(plan_path, payload)
@@ -1478,7 +1504,13 @@ def write_stage_status(run_dir: Path, stages: list[dict[str, Any]]) -> None:
 
 def write_artifact_manifest(run_dir: Path) -> dict[str, Any]:
     names = set(PIPELINE_REQUIRED_ARTIFACTS)
-    names.update(path.name for path in run_dir.iterdir() if path.is_file())
+    # Walk the tree, not just the top level. The fanout, validate and review
+    # learning bundles live under learning-contexts/, and a manifest that skips
+    # them cannot detect a post-run edit to what a stage was told it received.
+    for path in sorted(run_dir.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        names.add(path.relative_to(run_dir).as_posix())
     artifacts = []
     for name in sorted(names):
         path = run_dir / name
@@ -1635,7 +1667,19 @@ def _learning_outcome(
     run_id: str,
     source_path: Path,
     metadata: dict[str, Any] | None = None,
+    first_party: bool = False,
 ) -> dict[str, Any]:
+    """Build one durable outcome record.
+
+    ``first_party`` marks a summary that core itself composed from deterministic
+    tooling (legion-doctor checks, legion-fanout counters, core stage errors).
+    Only those summaries may later be merged verbatim into trusted executor
+    guidance. Everything else -- extension feedback payloads and model-authored
+    review prose -- defaults to untrusted and is reduced to Legion's own fixed
+    guardrail at the promotion boundary. The marker is a top-level field set
+    only here, never copied from caller-supplied ``metadata``, because
+    ``_feedback_outcome`` forwards arbitrary extension metadata keys.
+    """
     normalized_severity = _short(severity or "medium", 40)
     if normalized_severity not in {"info", "low", "medium", "high", "critical"}:
         normalized_severity = "medium"
@@ -1651,6 +1695,7 @@ def _learning_outcome(
         "evidence": _short(evidence, 1200),
         "run_id": run_id,
         "source_path": str(source_path),
+        "provenance": "first-party" if first_party else "extension",
         "metadata": metadata or {},
     }
 
@@ -1831,6 +1876,7 @@ def _doctor_learning_outcomes(
                     "artifact": artifact_path.name,
                     "doctor_check": item.get("check") or "",
                 },
+                first_party=True,
             )
         )
     return outcomes
@@ -1881,6 +1927,7 @@ def _fanout_learning_outcomes(
                 "failed": failed,
                 "apply_conflicts": conflicts,
             },
+            first_party=True,
         )
     ]
 
@@ -1951,6 +1998,7 @@ def _terminal_failure_outcome(
         run_id=run_id,
         source_path=run_dir / "failure.json",
         metadata={"stage": failed_stage, "artifact": "failure.json"},
+        first_party=True,
     )
 
 
@@ -2137,6 +2185,21 @@ def execute(
     _write_json(context_path, learning_context)
     _write_json(usage_path, learning_context["usage"])
     learning_revision = _learning_revision(learning_context)
+    # learning-context-receipt.json is a hard-required pipeline artifact, but it
+    # was only written once compile_learning_context("plan") ran. A doctor or
+    # self-learn-hints failure aborts before that, leaving a run directory that
+    # is missing a mandatory artifact. Seed it here so every terminal state,
+    # including the earliest failures, has a well-formed receipt.
+    _write_json(
+        context_receipt_path,
+        {
+            "schema": "legion.learning-context-receipt.v1",
+            "status": "pending",
+            "path": str(context_path),
+            "revision": learning_revision,
+            "usage": learning_context["usage"],
+        },
+    )
     learning_dispositions = _learning_dispositions(learning_context, learning_context_mode)
     learning_descriptor = _learning_context_descriptor(
         context_path, learning_revision, learning_context_mode, learning_dispositions
@@ -2257,6 +2320,11 @@ def execute(
                 compiled.pop("exit_code", None)
                 compiled.pop("stderr", None)
             if compiled == {"ok": True}:
+                # An *absent* compiler degrades to no guidance; advisory mode
+                # continues, required mode fails. A compiler that crashed,
+                # timed out, or returned a context failing its own contract is
+                # a different class entirely and always fails the run, so a
+                # forged budget or a boundary mismatch cannot pass unnoticed.
                 compiled = _empty_learning_context(
                     str(state["repository_identity"]), learning_entity, boundary
                 )
@@ -2288,6 +2356,11 @@ def execute(
             )
             bundle_context_path.chmod(0o400)
             bundle_usage_path.chmod(0o400)
+            # A context that fails its own contract -- forged budgets, token
+            # accounting that does not add up, a boundary that does not match
+            # the one requested -- indicates tampering or a broken toolchain,
+            # not an absent compiler. It fails the run in every mode so the
+            # operator sees it, rather than silently continuing unguided.
             raise LegionRunError(
                 f"stage semantic failure ({bundle_receipt_path.name}): {error}", 1
             )
@@ -2574,7 +2647,18 @@ def execute(
         write_stage_status(run_dir, stages)
         plan_path = run_dir / "plan.json"
         if runner.get("plan_files"):
-            write_plan_from_files(list(runner["plan_files"]), plan_path, runner, task, repo)
+            # The plan-file branch assembles plan.json in-process and never
+            # reads the environment, so guidance has to be threaded in
+            # explicitly. Passing only `task` here silently dropped it while
+            # the receipt below still attested delivery.
+            write_plan_from_files(
+                list(runner["plan_files"]),
+                plan_path,
+                runner,
+                task,
+                repo,
+                guidance=plan_guidance,
+            )
             _write_json(run_dir / "plan-command.json", {"ok": True, "source": "plan-file", "paths": runner["plan_files"]})
         else:
             run_process(
@@ -2594,14 +2678,22 @@ def execute(
         plan_payload["learning_context"] = plan_bundle["descriptor"]
         _write_json(plan_path, plan_payload)
         env["LEGION_TASK"] = task
+        # Attest what the planner actually received. A receipt that reports
+        # "delivered" for a branch that dropped the guidance is worse than no
+        # receipt, because it makes the gap invisible to an audit.
+        plan_delivered = bool(plan_guidance) and _guidance_present(
+            plan_payload.get("task"), plan_guidance
+        )
         record_learning_receipt(
             plan_bundle,
             "plan",
             "delivery",
             (
                 "acknowledged"
-                if plan_guidance and learning_context_mode == "required"
-                else "delivered" if plan_guidance else learning_context_mode
+                if plan_delivered and learning_context_mode == "required"
+                else "delivered" if plan_delivered
+                else "not_delivered" if plan_guidance
+                else learning_context_mode
             ),
         )
         fanout_bundle = compile_learning_context("fanout")

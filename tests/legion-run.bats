@@ -682,6 +682,84 @@ SH
   jq -e '.stages[] | select(.stage == "learning-context" and .status == "failed" and .terminal_status == "timed_out")' "$run_dir/stage-status.json"
 }
 
+# Every other learning-context test shadows legion-self-learn with a stub that
+# prints curated fixture text, so the compiler, the runner's validation of what
+# it returns, and the seam that splices guidance into a prompt are all asserted
+# against a fake.  A regression anywhere on the real path -- a hint that no
+# longer loads, a document the runner now rejects, guidance that reaches a
+# receipt but not the prompt -- stays invisible to them.  This test writes a
+# real hints file, runs the real compiler, and asserts on the delivered prompt
+# text rather than on any receipt or descriptor.
+@test "legion-run: real compiled guidance from a project hints file reaches the planner prompt and every delegated slice" {
+  install_fake_pipeline_bins
+  install_learning_boundary_consumers
+  # install_fake_pipeline_bins stubs legion-self-learn; drop the stub so PATH
+  # resolves the real command from legion-observability/bin.
+  rm -f "$BATS_TEST_TMPDIR/bin/legion-self-learn"
+  # The real compiler reads the project store and the global store. Pin the
+  # global one at an empty directory so a developer's own promoted laws cannot
+  # add guidance this test would then attribute to the fixture.
+  export LEGION_GLOBAL_LEARNING_DIR="$BATS_TEST_TMPDIR/global-learning"
+  mkdir -p "$LEGION_GLOBAL_LEARNING_DIR" "$LEGION_STATE_ROOT/learning"
+  guidance="Reconcile the persisted ledger before reporting success."
+  cat > "$LEGION_STATE_ROOT/learning/hints.json" <<'JSON'
+{
+  "schema": "legion.learning-hints.v1",
+  "hints": [
+    {
+      "schema": "legion.learning-hint.v1",
+      "id": "promoted-ledger-law",
+      "scope": "global",
+      "status": "active",
+      "trusted": true,
+      "guidance": "Reconcile the persisted ledger before reporting success.",
+      "evidence_ids": ["ev-promoted-ledger-law"]
+    },
+    {
+      "schema": "legion.learning-hint.v1",
+      "id": "retired-ledger-law",
+      "scope": "global",
+      "status": "retired",
+      "trusted": true,
+      "guidance": "Never deliver this retired ledger guidance.",
+      "evidence_ids": ["ev-retired-ledger-law"]
+    }
+  ]
+}
+JSON
+
+  run_learning_context_lifecycle
+
+  [ "$status" -eq 0 ]
+  assert_learning_context_artifacts
+  # The compiled document must come from the fixture hints, not from an empty
+  # or defaulted context that would make every assertion below vacuous.
+  jq -e --arg guidance "$guidance" '
+    (.selected_hints | map(.id)) == ["promoted-ledger-law"] and
+    .selected_hints[0].guidance == $guidance and
+    .usage.hint_count == 1
+  ' "$run_dir/learning-context.json"
+
+  # The delivered prompt is the invariant: the planner's task contract and each
+  # delegated slice must carry the marker and the real guidance text.
+  jq -e --arg guidance "$guidance" '
+    (.task | contains("Trusted learning guidance (bounded):")) and
+    (.task | contains($guidance))
+  ' "$run_dir/plan.json"
+  jq -e -s --arg guidance "$guidance" '
+    length == 2 and
+    all(.[]; .task | contains("Trusted learning guidance (bounded):")) and
+    all(.[]; .task | contains($guidance))
+  ' "$run_dir/slices.jsonl"
+  # slices.jsonl is the runner's copy; assert on what legion-fanout was handed.
+  jq -e -s --arg guidance "$guidance" \
+    'length == 2 and all(.[]; .task | contains($guidance))' \
+    "$run_dir/boundary-inputs/delegated-slices.jsonl"
+  grep -Fq 'Trusted learning guidance (bounded):' "$run_dir/boundary-inputs/final-review.args"
+  grep -Fq "$guidance" "$run_dir/boundary-inputs/final-review.args"
+  ! grep -R -F 'retired ledger guidance' "$run_dir/boundary-inputs"
+}
+
 @test "legion-run: rejects a domain plugin that does not require legion-run" {
   manifest="$(make_plugin)"
   perl -0pi -e 's/entrypoint = "legion-run"/entrypoint = "custom-runner"/' "$manifest"

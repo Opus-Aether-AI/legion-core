@@ -21,9 +21,16 @@ from typing import Any
 FINDING = re.compile(
     r"^- \[P([0-3])\] (.+?) — (.+?):(\d+)(?:-\d+)?\s*$"
 )
+# An approval may only be inferred from an explicit statement that the review
+# produced no findings, and only when that statement is the entire message.
+# "looks good" is deliberately absent: it is a phrase a model emits
+# conversationally, so accepting it let a reviewer that never really reviewed --
+# or one steered by content inside the diff under review -- satisfy the gate
+# that authorizes publishing a self-authored patch. The remaining phrases are
+# assertions about the review outcome, not pleasantries.
 APPROVAL = re.compile(
     r"^\s*(?:review summary:\s*)?"
-    r"(?:no findings|no issues|nothing to flag|looks good)"
+    r"(?:no findings|no issues found|no issues|nothing to flag)"
     r"[.!]?\s*$",
     re.IGNORECASE,
 )

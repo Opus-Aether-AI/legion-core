@@ -1670,6 +1670,22 @@ def _runner_learning_target(runner: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+_CORE_IDENTIFIER = re.compile(r"[A-Za-z0-9._:-]{1,80}")
+
+
+def _core_identifier(value: Any) -> str:
+    """Return a short identifier safe to interpolate into a first-party summary.
+
+    A first-party summary is merged verbatim into trusted executor guidance, so
+    only values core itself controls -- stage names, doctor check names -- may
+    appear in one. Anything that does not look like a plain identifier is
+    replaced rather than passed through, so a hostile value can never become a
+    sentence in a prompt.
+    """
+    text = _as_text(value)
+    return text if _CORE_IDENTIFIER.fullmatch(text) else "unnamed"
+
+
 def _learning_outcome(
     *,
     source: str,
@@ -1681,18 +1697,22 @@ def _learning_outcome(
     run_id: str,
     source_path: Path,
     metadata: dict[str, Any] | None = None,
-    first_party: bool = False,
+    first_party_summary: str = "",
 ) -> dict[str, Any]:
     """Build one durable outcome record.
 
-    ``first_party`` marks a summary that core itself composed from deterministic
-    tooling (legion-doctor checks, legion-fanout counters, core stage errors).
-    Only those summaries may later be merged verbatim into trusted executor
-    guidance. Everything else -- extension feedback payloads and model-authored
-    review prose -- defaults to untrusted and is reduced to Legion's own fixed
-    guardrail at the promotion boundary. The marker is a top-level field set
-    only here, never copied from caller-supplied ``metadata``, because
-    ``_feedback_outcome`` forwards arbitrary extension metadata keys.
+    ``summary`` is the human-facing text and may quote third-party detail: a
+    doctor message, a slice error, a reviewer finding. It is what reports show.
+
+    ``first_party_summary`` is the separate, core-composed sentence that may be
+    merged verbatim into trusted executor guidance. Trust attaches to that
+    text, not to the producer, because every producer interpolates something it
+    does not control. Leave it empty and the outcome is untrusted, and the
+    promotion boundary reduces it to Legion's own fixed guardrail.
+
+    Both markers are top-level fields set only here, never copied from
+    caller-supplied ``metadata``, which ``_feedback_outcome`` populates from
+    arbitrary extension keys.
     """
     normalized_severity = _short(severity or "medium", 40)
     if normalized_severity not in {"info", "low", "medium", "high", "critical"}:
@@ -1709,7 +1729,8 @@ def _learning_outcome(
         "evidence": _short(evidence, 1200),
         "run_id": run_id,
         "source_path": str(source_path),
-        "provenance": "first-party" if first_party else "extension",
+        "provenance": "first-party" if first_party_summary else "extension",
+        "provenance_summary": first_party_summary,
         "metadata": metadata or {},
     }
 
@@ -1868,6 +1889,9 @@ def _doctor_learning_outcomes(
             default_type=default_type,
             default_name=default_name,
         )
+        # The message interpolates third-party text -- check_mcp folds in a
+        # plugin's self-declared name, check_bridges echoes bridge output -- so
+        # it stays in the human-facing summary and never becomes guidance.
         summary = _short(
             item.get("message")
             or item.get("summary")
@@ -1890,7 +1914,9 @@ def _doctor_learning_outcomes(
                     "artifact": artifact_path.name,
                     "doctor_check": item.get("check") or "",
                 },
-                first_party=True,
+                first_party_summary=(
+                    f"legion-doctor check {_core_identifier(item.get('check'))} failed."
+                ),
             )
         )
     return outcomes
@@ -1921,12 +1947,11 @@ def _fanout_learning_outcomes(
                 " ".join(str(bit) for bit in [item.get("id"), item.get("status"), item.get("error")] if bit)
             )
     details = "; ".join(result_summaries[:4])
-    # Counters are composed by core. Slice ids, statuses and error strings come
-    # from the planner and the executors, so they are model-controlled text and
-    # must not reach the summary: this outcome is marked first-party, and a
-    # first-party summary is merged verbatim into trusted executor guidance.
-    # The detail stays in `evidence`, which is never promoted.
-    summary = f"legion-fanout reported {failed} failed slice(s) and {conflicts} apply conflict(s)."
+    # Slice ids, statuses and error strings are planner- and executor-authored,
+    # so they belong in the human-facing summary only. The counters below are
+    # core's own and are the sentence allowed to become guidance.
+    counters = f"legion-fanout reported {failed} failed slice(s) and {conflicts} apply conflict(s)."
+    summary = f"{counters} {details}".strip() if details else counters
     target_type, target_name = _runner_learning_target(runner)
     return [
         _learning_outcome(
@@ -1944,7 +1969,7 @@ def _fanout_learning_outcomes(
                 "failed": failed,
                 "apply_conflicts": conflicts,
             },
-            first_party=True,
+            first_party_summary=counters,
         )
     ]
 
@@ -2010,12 +2035,15 @@ def _terminal_failure_outcome(
         target_type=target_type,
         target_name=target_name,
         severity="medium",
+        # The message is a LegionRunError string; for a review-stage failure it
+        # embeds reviewer-model finding titles, so only the stage name is
+        # allowed to become guidance.
         summary=f"legion-run failed at {failed_stage}: {message}",
         evidence=str(run_dir),
         run_id=run_id,
         source_path=run_dir / "failure.json",
         metadata={"stage": failed_stage, "artifact": "failure.json"},
-        first_party=True,
+        first_party_summary=f"legion-run failed at {_core_identifier(failed_stage)}.",
     )
 
 
@@ -2663,12 +2691,18 @@ def execute(
         _set_stage_status(stages, "plan", "running")
         write_stage_status(run_dir, stages)
         plan_path = run_dir / "plan.json"
+        # Track what this process delivered, not what the planner chose to echo
+        # back. The plan-command branch hands guidance to the planner through
+        # LEGION_TASK; a conforming hook may legitimately emit a refined task or
+        # omit the field entirely, so inspecting plan.json would report a
+        # delivery failure that did not happen.
+        plan_delivered = False
         if runner.get("plan_files"):
             # The plan-file branch assembles plan.json in-process and never
             # reads the environment, so guidance has to be threaded in
             # explicitly. Passing only `task` here silently dropped it while
             # the receipt below still attested delivery.
-            write_plan_from_files(
+            written = write_plan_from_files(
                 list(runner["plan_files"]),
                 plan_path,
                 runner,
@@ -2676,6 +2710,9 @@ def execute(
                 repo,
                 guidance=plan_guidance,
             )
+            # This branch assembles plan.json itself, so the artifact is the
+            # delivery and can be checked directly.
+            plan_delivered = _guidance_present(written.get("task"), plan_guidance)
             _write_json(run_dir / "plan-command.json", {"ok": True, "source": "plan-file", "paths": runner["plan_files"]})
         else:
             run_process(
@@ -2687,6 +2724,9 @@ def execute(
                 timeout_seconds=stage_timeout_seconds,
             )
             normalize_plan_file(plan_path, runner, task)
+            # The planner received the guidance through LEGION_TASK. Whether it
+            # echoes that field back into plan.json is its own choice.
+            plan_delivered = bool(plan_guidance)
         plan_payload = _load_json_object(plan_path)
         if learning_context_mode == "required":
             _require_learning_context_ack(
@@ -2695,12 +2735,6 @@ def execute(
         plan_payload["learning_context"] = plan_bundle["descriptor"]
         _write_json(plan_path, plan_payload)
         env["LEGION_TASK"] = task
-        # Attest what the planner actually received. A receipt that reports
-        # "delivered" for a branch that dropped the guidance is worse than no
-        # receipt, because it makes the gap invisible to an audit.
-        plan_delivered = bool(plan_guidance) and _guidance_present(
-            plan_payload.get("task"), plan_guidance
-        )
         record_learning_receipt(
             plan_bundle,
             "plan",

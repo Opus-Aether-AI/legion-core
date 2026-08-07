@@ -57,6 +57,10 @@ MAX_PROPOSAL_BYTES = 65_536
 # Consecutive empty pull-request listings tolerated against a recorded
 # publish intent before concluding nothing was ever published.
 RECONCILE_ATTEMPTS = 3
+# Exit codes _bounded_process synthesizes after killing a child locally.
+# The child never reported them, so a request it already sent may still
+# have succeeded remotely: treat these as ambiguous, never as failure.
+_AMBIGUOUS_PROCESS_CODES = frozenset({124, 125})
 EMPTY_DIFF = hashlib.sha256(b"").hexdigest()
 REVIEW_RETRYABLE = {"independent_review_unavailable", "independent_review_failed"}
 DRAFT_RETRYABLE = {
@@ -107,9 +111,9 @@ class ImproveError(Exception):
 ROOT = Path(__file__).resolve().parents[2]
 # The daily refresh runs from cron, whose PATH is a bare /usr/bin:/bin, and
 # refresh.sh deliberately invokes every sibling Legion binary by absolute path
-# for exactly that reason. Resolving these off PATH alone made the review and
-# publish hops fail with independent_review_unavailable / gh_unavailable on
-# every cron run, silently, forever.
+# for exactly that reason. Legion binaries ship in this repository so they can
+# be resolved directly; `gh` cannot, and is handled by the PATH extension in
+# scripts/refresh.sh instead.
 COMMAND_FALLBACKS = {
     "legion-delegate": ROOT / "legion-router" / "bin" / "legion-delegate",
 }
@@ -609,6 +613,16 @@ def _valid_durable_record(
             )
             or publish_attempt.get("head_branch") != record.get("branch")
             or not _valid_sha(publish_attempt.get("head_sha"))
+        ):
+            return False
+        seen = publish_attempt.get("reconcile_attempts")
+        # Bounded like every other durable counter. An unbounded value
+        # would let hand-edited state skip the reconciliation wait in one
+        # step and go straight to publishing.
+        if seen is not None and (
+            not isinstance(seen, int)
+            or isinstance(seen, bool)
+            or not 0 <= seen <= RECONCILE_ATTEMPTS
         ):
             return False
     if state == "eligible":
@@ -1713,13 +1727,15 @@ def draft(
             timeout=120,
         )
         if created.returncode != 0:
-            # A non-zero exit means the API call itself did not succeed, so no
-            # pull request exists and a straight retry is safe. Only ambiguous
-            # outcomes -- a success whose URL could not be parsed, or a process
-            # that died before persisting the receipt -- keep the intent record
-            # and force reconciliation.
-            record.pop("publish_attempt", None)
-            _persist_draft_state(root, record)
+            # A rejection by gh means no pull request exists and a straight
+            # retry is safe. A local timeout or an output-cap kill does NOT
+            # mean that: _bounded_process synthesizes those codes after killing
+            # the child, while the request it already sent can still land at
+            # GitHub. Those keep the intent so the next run reconciles instead
+            # of opening a duplicate.
+            if created.returncode not in _AMBIGUOUS_PROCESS_CODES:
+                record.pop("publish_attempt", None)
+                _persist_draft_state(root, record)
             return "draft_pr_create_failed"
         lines = created.stdout.strip().splitlines()
         pr_url = _safe_pr_url(lines[-1] if lines else "")
@@ -1791,6 +1807,7 @@ def public(record: dict[str, Any]) -> dict[str, Any]:
         "lease_id",
         "published_remote_head",
         "pending_rollback",
+        "publish_attempt",
         "review_receipt",
         "draft_pr",
     )

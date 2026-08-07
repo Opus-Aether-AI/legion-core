@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 import tempfile
 from datetime import datetime, timezone
 from typing import Any
@@ -251,8 +252,17 @@ def _guidance_key(value: Any) -> str:
     Two hints carrying the same advice differ only by id and evidence, so
     compare the delivered text with whitespace collapsed and case folded.
     """
-    collapsed = _GUIDANCE_KEY_WHITESPACE.sub(" ", text(value)).strip()
-    return collapsed.casefold()
+    # Normalize the same classes legion-self-learn strips when it composes
+    # guidance. Without this, two visually identical bullets differing only by
+    # a zero-width joiner or a bidi override produce different keys, both
+    # survive de-duplication, and both consume a slot -- which is precisely the
+    # crowding this key exists to prevent.
+    stripped = "".join(
+        char
+        for char in text(value)
+        if char in "\t\n\r" or unicodedata.category(char) not in {"Cc", "Cf", "Cs"}
+    )
+    return _GUIDANCE_KEY_WHITESPACE.sub(" ", stripped).strip().casefold()
 
 
 def _safe_excluded_hint(hint: dict[str, Any], reason: str) -> dict[str, str]:
@@ -311,17 +321,13 @@ def compile_context(
             seen_guidance.add(key)
         deduped.append(entry)
 
-    # Reserve a slice of the budget for cross-project laws so a long tail of
-    # entity-specific guidance cannot starve every promoted law. The reserve is
-    # deliberately a proportion with no floor: exact-scope hints outrank global
-    # ones, and rounding a tiny budget up to one reserved slot would invert that
-    # precedence outright -- at max_hints=1 it would hand the only slot to a
-    # global hint while excluding an exactly-matching one.
-    reserve_slots = 0
-    if max_hints:
-        available_globals = sum(1 for entry in deduped if entry[3] == "global")
-        reserve_slots = min(available_globals, max_hints // 4)
-
+    # Selection is strictly in rank order: exact, then selector, then global,
+    # as documented. An earlier revision reserved a slice of the budget for
+    # global laws, but a reserve inverts that precedence whenever the reserved
+    # hint is admitted ahead of a higher-ranked one -- by count when the budget
+    # is small, and by tokens whenever the reserved hint is large. Content
+    # de-duplication above is what actually stops repeated boilerplate from
+    # crowding laws out, and it does so without reordering anything.
     chosen: dict[str, int] = {}
     rejected: dict[str, str] = {}
     used_tokens = 0
@@ -340,14 +346,6 @@ def compile_context(
         return None
 
     for entry in deduped:
-        if len(chosen) >= reserve_slots:
-            break
-        if entry[3] == "global":
-            _take(entry)
-
-    for entry in deduped:
-        if entry[1] in chosen:
-            continue
         # Record the constraint that was binding for THIS hint at the moment it
         # was rejected. Recomputing it after the passes finish would relabel a
         # genuinely token-blocked hint as count-blocked as soon as later, smaller

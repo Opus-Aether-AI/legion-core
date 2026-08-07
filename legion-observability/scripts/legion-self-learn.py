@@ -1386,15 +1386,23 @@ def _typed_hint_from_proposal(
     if not target_type or not target_name or not proposal_id:
         return None
     suggested = _guidance_text(proposal.get("suggested_change"))
-    # Deterministic source classes may carry their bounded summary. That is the
-    # class of record whose text core composed itself: operator-entered notes,
-    # the fixed session-learn rule set, promoted cross-project laws, and
-    # first-party run outcomes (legion-doctor checks, legion-fanout counters,
-    # core stage errors). Extension feedback payloads and model-authored review
-    # prose stay reduced to Legion's own fixed guardrail, because a validator
-    # plugin or a reviewer model must not be able to write executor guidance.
-    if source in {"manual", "session-learn", "learning-law"} or _first_party_outcome(outcome):
+    # Deterministic source classes may carry their bounded summary: operator
+    # entered notes, the fixed session-learn rule set, and promoted
+    # cross-project laws all originate as text Legion composed or curated.
+    #
+    # A run outcome is different. Its human-facing summary quotes third-party
+    # detail -- a doctor message naming a plugin, a slice error, a reviewer
+    # finding -- so it is never promoted. What may be promoted is the separate
+    # core-composed sentence the producer supplied alongside it, which contains
+    # only identifiers core controls.
+    first_party = _guidance_text(outcome.get("provenance_summary"))
+    if source in {"manual", "session-learn", "learning-law"}:
         guidance = _hint_from_proposal(proposal)
+    elif _first_party_outcome(outcome) and first_party:
+        guidance = _short(
+            " ".join(part for part in [first_party, f"Suggested: {suggested}" if suggested else ""] if part),
+            360,
+        )
     else:
         guidance = suggested
     if not guidance:

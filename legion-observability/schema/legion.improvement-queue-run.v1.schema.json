@@ -11,7 +11,8 @@
     "skipped_completed",
     "invalid_entries",
     "quarantined",
-    "results"
+    "results",
+    "drafts_created"
   ],
   "properties": {
     "schema": {

@@ -161,7 +161,7 @@ legion-observability/
 - `LEGION_SESSION_LEARN=0` — disable refresh-time session mining.
 - `LEGION_EVIDENCE_LEARN=0` — disable refresh-time evidence-linked learning.
 - `LEGION_IMPROVE_MODE=off|dry-run|draft` — bounded refresh-time typed
-  improvement processing (default: `off`). `LEGION_IMPROVE_MAX` defaults to 1.
+  improvement processing (default: `off`). `LEGION_IMPROVE_MAX` defaults to 1 and bounds completed proposals and created draft PRs; up to three additional failing entries may be attempted so one stuck proposal cannot starve the queue.
 - `LEGION_IMPROVE_REVIEW_BIN` — independent review boundary (default:
   `legion-delegate`). `LEGION_IMPROVE_VALIDATOR_BIN` optionally adds one
   operator-configured paired validator; proposals cannot set either command.

@@ -142,6 +142,12 @@ Memory mode is intentionally safe: it does not rewrite source or vendored skills
 `--apply-memory` is the explicit promotion boundary. Manual corrections,
 session decisions, and promoted learning laws may contribute bounded guidance;
 model-authored review text is not copied into trusted executor instructions.
+A run outcome contributes only the short sentence core composed for it -- the
+failing doctor check, the failing stage, the fan-out counters -- recorded as
+`provenance_summary` alongside a `provenance` marker. Its human-facing summary
+quotes third-party detail (a doctor message naming a plugin, a slice error, a
+reviewer finding) and is never promoted. Outcome records written before that
+marker existed carry no provenance and are treated as untrusted.
 Instead, review evidence promotes only Legion's fixed, typed guardrail for that
 finding class. Local feedback remains entity-scoped; an active, supported
 cross-project learning law is promoted with `global` scope so it can reach
@@ -232,8 +238,21 @@ review-only automation explicitly:
 ```bash
 export LEGION_IMPROVE_MODE=dry-run  # evaluate + independent review, no PR
 export LEGION_IMPROVE_MODE=draft    # additionally create a draft PR
-export LEGION_IMPROVE_MAX=1         # bounded proposals per refresh
+export LEGION_IMPROVE_MAX=1         # bounded successful proposals per refresh
 ```
+
+`LEGION_IMPROVE_MAX` bounds the proposals a refresh *completes*, and it is a
+hard cap on draft PRs created. Attempts that fail do not consume that budget --
+otherwise one permanently failing fingerprint, which sorts first every run,
+would starve every later proposal forever -- so a refresh may attempt up to
+`LEGION_IMPROVE_MAX + 3` entries before stopping. Size the cron window for that
+worst case, not for the success count.
+
+A publish intent is persisted before the pull request is created. If that call
+is ambiguous -- a local timeout, or a success whose URL could not be parsed --
+the intent survives and the next refresh reports `draft_pr_reconcile_pending`
+rather than risking a duplicate, for up to three refreshes before concluding
+nothing was published.
 
 The refresh bases candidates on the exact remote `main` tip even when the
 installed source clone is detached at a stable release tag. Auto-update remains
@@ -304,6 +323,11 @@ legion-self-learn reconcile --repo . --legacy-state legacy-state.json --evidence
 
 These hints are failure evidence. They do not override the user, the repository's
 `AGENTS.md`, or normal validation gates.
+
+Selection is strictly by scope rank -- exact, then selector, then global --
+within the hint and token caps. Guidance that is textually identical after
+normalization collapses to one entry, reported as `duplicate_guidance` in
+`excluded_hints`, so repeated boilerplate cannot crowd out a promoted law.
 
 `legion-run` compiles a separate context immediately before each `plan`,
 `fanout`, `validate`, and `review` decision boundary. This prevents a plan-only

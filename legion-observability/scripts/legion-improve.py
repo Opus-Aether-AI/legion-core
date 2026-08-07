@@ -2095,10 +2095,12 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="legion-improve",
         description=(
-            "Review-only typed proposal engine: eligible -> leased -> prepared -> "
-            "candidate_ready -> evaluated -> reviewed -> draft_created. Modes: off, "
-            "dry-run, draft."
+            "Review-only typed proposal engine.\n"
+            "States: eligible -> leased -> prepared -> candidate_ready -> evaluated "
+            "-> reviewed -> draft_created.\n"
+            "Modes: off, dry-run, draft."
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = result.add_subparsers(dest="command")
     run = sub.add_parser("run", help="process one typed proposal")

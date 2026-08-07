@@ -11,7 +11,7 @@ setup() {
 
 @test "legion-improve publishes modes and the durable state-machine contract" {
   [ -x "$IMPROVE" ]
-  run bash "$IMPROVE" --help
+  run env COLUMNS=40 bash "$IMPROVE" --help
   [ "$status" -eq 0 ]
   [[ "$output" == *"off"* ]]
   [[ "$output" == *"dry-run"* ]]

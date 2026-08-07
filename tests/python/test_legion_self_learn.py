@@ -584,6 +584,12 @@ def test_learning_law_queue_keeps_only_the_current_revision(tmp_path):
         {"improvement_proposals": [base], "learning_laws": {"revised": "active"}},
         logs,
     )[0]
+    self_learn.write_improvement_queue(
+        {"improvement_proposals": [], "learning_laws": {"revised": "active"}},
+        logs,
+    )
+    assert os.path.exists(first)
+
     revised = json.loads(json.dumps(base))
     revised["revision"] = 6
     revised["provenance"]["support"]["episodes"] = 6

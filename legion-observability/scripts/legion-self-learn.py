@@ -1166,7 +1166,10 @@ def write_improvement_queue(report: dict[str, Any], log_root: str) -> list[str]:
                     law_key
                     and (
                         lifecycle.get(law_key) != "active"
-                        or current_law_files.get(law_key) != entry.name
+                        or (
+                            law_key in current_law_files
+                            and current_law_files[law_key] != entry.name
+                        )
                     )
                 ):
                     try:

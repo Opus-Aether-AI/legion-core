@@ -885,6 +885,16 @@ def test_failed_pr_rollback_is_durable_and_retried_before_more_publication(tmp_p
     assert pending["pending_rollback"]["url"] == "https://github.com/fixture/repo/pull/7"
     assert pending["published_remote_head"] == pending["pending_rollback"]["head_sha"]
 
+    # Even if an outer process error terminalized the run after the rollback
+    # receipt was persisted, the next invocation must recover that receipt
+    # before publishing or resetting any state.
+    durable_path = state / "runs" / f"{pending['fingerprint']}.json"
+    durable = json.loads(durable_path.read_text(encoding="utf-8"))
+    durable["state"] = "failed"
+    durable["reason"] = "internal_operation_failed"
+    durable["transitions"].append("failed")
+    durable_path.write_text(json.dumps(durable), encoding="utf-8")
+
     cleaned, stale = _run(repo, proposal, state, "--mode", "draft", env=env)
 
     assert cleaned.returncode != 0

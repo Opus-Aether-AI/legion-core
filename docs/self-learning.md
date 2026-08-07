@@ -150,8 +150,9 @@ ordinary plugin and heavy-task runs. Hints may also be scoped to `plan`,
 read/merge/write transaction; durable memory uses the same serialization.
 Maintainer retirement/supersession decisions remain protected tombstones even
 under capacity pressure, and rejected promotions are reported while compiler
-space stays reserved for global hints. The improvement queue retains only the
-current revision of each active generated law and removes retired revisions.
+space stays reserved for global hints. The improvement queue retains an active
+generated law when a later report does not re-emit it, replaces it only when a
+new current revision is emitted, and removes it when the law is retired.
 The default cron run scans all available spans and manual records so bugs recorded
 after yesterday's cron are still ingested. Passing `--day YYYY-MM-DD` keeps an
 exact UTC-day report window for reproducible audits and tests. Durable memory

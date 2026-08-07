@@ -1739,6 +1739,19 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 return 2, public(corrupt)
         else:
             record = _initial_record(proposal, fingerprint, args.mode)
+        if (
+            record.get("state") in {"rejected", "stale", "failed"}
+            and record.get("pending_rollback")
+            and record.get("transitions", [])[-2:]
+            == ["reviewed", record.get("state")]
+        ):
+            # A process-level failure after draft creation must not discard the
+            # durable rollback receipt. Re-enter the reviewed cleanup boundary
+            # before ordinary terminal retry handling can reset the record.
+            record["state"] = "reviewed"
+            record["transitions"].pop()
+            record["reason"] = "draft_pr_rollback_failed"
+            atomic_write(path, record)
         if record.get("state") in TERMINAL:
             if not _retryable_terminal(record, proposal, args.repo):
                 return (0 if record["state"] == "draft_created" else 2), public(record)
@@ -1895,6 +1908,15 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             cleanup_worktrees(args.repo, root, fingerprint)
             return 2, public(record)
         except (OSError, subprocess.CalledProcessError):
+            if record.get("pending_rollback"):
+                # Keep rollback ownership durable and retryable. Terminalizing
+                # here would let the generic reset path forget the created PR.
+                record["state"] = "reviewed"
+                record["transitions"] = list(STEPS[:6])
+                record["reason"] = "draft_pr_rollback_failed"
+                record.pop("repo_runtime", None)
+                atomic_write(path, record)
+                return 2, public(record)
             terminal(record, "failed", "internal_operation_failed")
             record.pop("repo_runtime", None)
             atomic_write(path, record)

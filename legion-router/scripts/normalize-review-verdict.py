@@ -24,8 +24,8 @@ FINDING = re.compile(
 APPROVAL = re.compile(
     r"^\s*(?:review summary:\s*)?"
     r"(?:no findings|no issues|nothing to flag|looks good)"
-    r"(?:[.!:]|$)",
-    re.IGNORECASE | re.MULTILINE,
+    r"[.!]?\s*$",
+    re.IGNORECASE,
 )
 SEVERITY = {"0": "critical", "1": "high", "2": "medium", "3": "low"}
 MAX_INPUT_BYTES = 1_048_576

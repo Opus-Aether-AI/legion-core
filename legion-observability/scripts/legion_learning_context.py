@@ -24,6 +24,16 @@ EVIDENCE_SCHEMA = "legion.learning-evidence.v1"
 STATE_SCHEMA = "legion.learning-state.v1"
 ACTIVE_STATUS = "active"
 _SCOPE_RANK = {"exact": 0, "selector": 1, "global": 2}
+MAX_HINT_DOCUMENT_BYTES = 1_048_576
+MAX_HINTS = 100
+MAX_TOKENS = 10_000
+MAX_EXCLUDED_HINTS = 200
+MAX_IDENTIFIER_CHARS = 160
+MAX_BOUNDARY_CHARS = 256
+MAX_SELECTOR_VALUES = 20
+MAX_EVIDENCE_FILE_BYTES = 8_388_608
+MAX_EVIDENCE_LINE_BYTES = 65_536
+MAX_EVIDENCE_RECORDS = 10_000
 
 
 def text(value: Any) -> str:
@@ -40,14 +50,26 @@ def mapping(value: Any) -> dict[str, Any]:
 
 def token_count(value: str) -> int:
     """A stable, tokenizer-independent conservative budget estimate."""
-    word_count = len(re.findall(r"\S+", value))
-    utf8_quads = (len(value.encode("utf-8")) + 3) // 4
-    non_ascii = sum(ord(character) > 127 for character in value)
-    return max(word_count, utf8_quads, non_ascii)
+    # One UTF-8 byte per token is intentionally pessimistic. Unlike a bytes/4
+    # average, it remains an upper safety budget for punctuation-heavy text,
+    # high-entropy identifiers, and multi-codepoint emoji sequences without
+    # coupling this shared boundary to one provider tokenizer.
+    return len(value.encode("utf-8"))
 
 
 def read_json(path: str) -> Any:
     try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def read_bounded_json(path: str, max_bytes: int) -> Any:
+    """Read one small JSON document without materializing oversized input."""
+    try:
+        if os.stat(path).st_size > max_bytes:
+            return None
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, TypeError, ValueError):
@@ -97,20 +119,35 @@ def _expired(hint: dict[str, Any], now: datetime) -> bool:
     return parsed <= now
 
 
-def _selector_value_matches(actual: Any, expected: Any) -> bool:
-    if isinstance(expected, list):
-        return any(_selector_value_matches(actual, item) for item in expected)
-    if isinstance(actual, list):
-        return any(_selector_value_matches(item, expected) for item in actual)
-    return actual == expected
+def _bounded_text(value: Any, limit: int) -> str:
+    value = text(value)
+    return value if 0 < len(value) <= limit else ""
+
+
+def _valid_hint_id(value: Any) -> bool:
+    value = text(value)
+    return bool(
+        value
+        and len(value) <= MAX_IDENTIFIER_CHARS
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", value)
+    )
+
+
+def _selector_values(value: Any) -> list[str] | None:
+    raw = value if isinstance(value, list) else [value]
+    if not raw or len(raw) > MAX_SELECTOR_VALUES:
+        return None
+    result = [_bounded_text(item, MAX_BOUNDARY_CHARS) for item in raw]
+    return result if all(result) else None
 
 
 def _matches_selector(selector: dict[str, Any], request: dict[str, str]) -> bool:
-    if not selector:
+    if not selector or set(selector) - {"repository_identity", "entity", "stage"}:
         return False
     for key, expected in selector.items():
         actual = request.get(key, "")
-        if not actual or not _selector_value_matches(actual, expected):
+        expected_values = _selector_values(expected)
+        if not actual or expected_values is None or actual not in expected_values:
             return False
     return True
 
@@ -119,7 +156,7 @@ def _match_reason(hint: dict[str, Any], request: dict[str, str], now: datetime) 
     """Return a selection or exclusion reason without returning hint content."""
     if hint.get("schema") not in {None, "", HINT_SCHEMA}:
         return "invalid"
-    if not text(hint.get("id")):
+    if not _valid_hint_id(hint.get("id")):
         return "invalid"
     status = text(hint.get("status")).lower()
     if status == "retired":
@@ -161,12 +198,16 @@ def load_hints(directories: list[str]) -> list[dict[str, Any]]:
     """
     by_id: dict[str, dict[str, Any]] = {}
     for directory in directories:
-        document = read_json(os.path.join(directory, "hints.json"))
+        document = read_bounded_json(
+            os.path.join(directory, "hints.json"), MAX_HINT_DOCUMENT_BYTES
+        )
         for hint in values(mapping(document).get("hints")):
+            if len(by_id) >= MAX_HINTS + MAX_EXCLUDED_HINTS:
+                break
             if not isinstance(hint, dict):
                 continue
             hint_id = text(hint.get("id"))
-            if hint_id and hint_id not in by_id:
+            if _valid_hint_id(hint_id) and hint_id not in by_id:
                 by_id[hint_id] = hint
     return [by_id[hint_id] for hint_id in sorted(by_id)]
 
@@ -181,20 +222,18 @@ def _safe_selected_hint(hint: dict[str, Any], reason: str, tokens: int) -> dict[
         "token_count": tokens,
     }
     for key in ("entity", "stage"):
-        value = text(hint.get(key))
+        value = _bounded_text(hint.get(key), MAX_BOUNDARY_CHARS)
         if value:
             result[key] = value
-    selector = mapping(hint.get("selector"))
-    if selector:
-        result["selector"] = selector
-    evidence_ids = sorted({text(item) for item in values(hint.get("evidence_ids")) if text(item)})
-    if evidence_ids:
-        result["evidence_ids"] = evidence_ids
     return result
 
 
 def _safe_excluded_hint(hint: dict[str, Any], reason: str) -> dict[str, str]:
-    return {"id": text(hint.get("id")) or "<invalid>", "exclusion_reason": reason}
+    hint_id = text(hint.get("id"))
+    return {
+        "id": hint_id if _valid_hint_id(hint_id) else "invalid",
+        "exclusion_reason": reason,
+    }
 
 
 def compile_context(
@@ -208,8 +247,8 @@ def compile_context(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Compile the single typed context document delivered to an executor."""
-    max_hints = max(0, int(max_hints))
-    max_tokens = max(0, int(max_tokens))
+    max_hints = min(MAX_HINTS, max(0, int(max_hints)))
+    max_tokens = min(MAX_TOKENS, max(0, int(max_tokens)))
     request = {
         "repository_identity": repository_identity,
         "entity": entity,
@@ -247,6 +286,7 @@ def compile_context(
             used_tokens += guidance_tokens
 
     excluded.sort(key=lambda item: (item["id"], item["exclusion_reason"]))
+    excluded = excluded[:MAX_EXCLUDED_HINTS]
     usage = {
         "schema": USAGE_SCHEMA,
         "hint_count": len(selected),
@@ -274,41 +314,64 @@ def safe_legacy_identity(legacy_identity: str, repository_identity: str) -> bool
     return bool(legacy_name and repository_name and legacy_name == repository_name)
 
 
-def read_evidence(path: str, repository_identity: str) -> tuple[list[dict[str, str]], int, int]:
+def read_evidence(
+    path: str, repository_identity: str
+) -> tuple[list[dict[str, str]], int, int, int]:
     """Replay only canonical, same-repository evidence and deduplicate by ID."""
     replayed = 0
+    limited = 0
     by_id: dict[str, dict[str, str]] = {}
     try:
-        with open(path, encoding="utf-8") as handle:
-            lines = list(handle)
+        handle = open(path, "rb")
     except OSError:
-        lines = []
-    for line in lines:
-        try:
-            evidence = json.loads(line)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(evidence, dict) or evidence.get("schema") != EVIDENCE_SCHEMA:
-            continue
-        if text(evidence.get("repository_identity")) != repository_identity:
-            continue
-        evidence_id = text(evidence.get("id"))
-        if not evidence_id:
-            continue
-        replayed += 1
-        # Do not retain arbitrary evidence payload fields; in particular no
-        # transcripts, excerpts, prompts, or command output cross into state.
-        by_id.setdefault(
-            evidence_id,
-            {
-                "id": evidence_id,
-                "entity": text(evidence.get("entity")),
-                "outcome": text(evidence.get("outcome")),
-                "digest": text(evidence.get("digest")),
-            },
-        )
+        return [], 0, 0, 0
+    total_bytes = 0
+    records_seen = 0
+    with handle:
+        while total_bytes < MAX_EVIDENCE_FILE_BYTES and records_seen < MAX_EVIDENCE_RECORDS:
+            line = handle.readline(MAX_EVIDENCE_LINE_BYTES + 1)
+            if not line:
+                break
+            total_bytes += len(line)
+            records_seen += 1
+            if len(line) > MAX_EVIDENCE_LINE_BYTES and not line.endswith(b"\n"):
+                limited += 1
+                while line and not line.endswith(b"\n"):
+                    line = handle.readline(MAX_EVIDENCE_LINE_BYTES + 1)
+                    total_bytes += len(line)
+                    if total_bytes >= MAX_EVIDENCE_FILE_BYTES:
+                        break
+                continue
+            try:
+                evidence = json.loads(line.decode("utf-8"))
+            except (TypeError, UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(evidence, dict) or evidence.get("schema") != EVIDENCE_SCHEMA:
+                continue
+            if text(evidence.get("repository_identity")) != repository_identity:
+                continue
+            evidence_id = _bounded_text(evidence.get("id"), MAX_IDENTIFIER_CHARS)
+            entity = _bounded_text(evidence.get("entity"), MAX_BOUNDARY_CHARS)
+            outcome = _bounded_text(evidence.get("outcome"), MAX_BOUNDARY_CHARS)
+            evidence_digest = _bounded_text(evidence.get("digest"), MAX_IDENTIFIER_CHARS)
+            if not evidence_id:
+                continue
+            replayed += 1
+            # Do not retain arbitrary evidence payload fields; in particular no
+            # transcripts, excerpts, prompts, or command output cross into state.
+            by_id.setdefault(
+                evidence_id,
+                {
+                    "id": evidence_id,
+                    "entity": entity,
+                    "outcome": outcome,
+                    "digest": evidence_digest,
+                },
+            )
+        if handle.read(1):
+            limited += 1
     records = [by_id[evidence_id] for evidence_id in sorted(by_id)]
-    return records, replayed, replayed - len(records)
+    return records, replayed, replayed - len(records), limited
 
 
 def reconcile_state(
@@ -350,20 +413,34 @@ def reconcile_state(
                 target["evidence_ids"] = ids
             state["entities"][entity] = target
 
-    records, replayed, deduplicated = read_evidence(evidence_path, repository_identity) if evidence_path else ([], 0, 0)
-    record_ids = {text(item.get("id")) for item in values(state.get("evidence")) if isinstance(item, dict)}
+    records, replayed, deduplicated, limited = (
+        read_evidence(evidence_path, repository_identity)
+        if evidence_path
+        else ([], 0, 0, 0)
+    )
     safe_existing = [
         {key: text(item.get(key)) for key in ("id", "entity", "outcome", "digest")}
-        for item in values(state.get("evidence"))
-        if isinstance(item, dict) and text(item.get("id"))
+        for item in values(state.get("evidence"))[:MAX_EVIDENCE_RECORDS]
+        if isinstance(item, dict)
+        and _bounded_text(item.get("id"), MAX_IDENTIFIER_CHARS)
     ]
+    record_ids = {item["id"] for item in safe_existing}
     for record in records:
-        if record["id"] not in record_ids:
+        if (
+            len(safe_existing) < MAX_EVIDENCE_RECORDS
+            and record["id"] not in record_ids
+        ):
             safe_existing.append(record)
             record_ids.add(record["id"])
         if record["entity"]:
             entity = mapping(state["entities"].setdefault(record["entity"], {}))
-            entity["evidence_ids"] = sorted({text(item) for item in values(entity.get("evidence_ids")) + [record["id"]] if text(item)})
+            entity["evidence_ids"] = sorted(
+                {
+                    bounded
+                    for item in values(entity.get("evidence_ids")) + [record["id"]]
+                    if (bounded := _bounded_text(item, MAX_IDENTIFIER_CHARS))
+                }
+            )[:MAX_EVIDENCE_RECORDS]
             state["entities"][record["entity"]] = entity
     state["evidence"] = sorted(safe_existing, key=lambda item: item["id"])
     atomic_write_json(state_path, state)
@@ -374,5 +451,6 @@ def reconcile_state(
         "evidence_ids": [record["id"] for record in records],
         "evidence_replayed": replayed,
         "evidence_deduplicated": deduplicated,
+        "evidence_limited": limited,
         "state_path": state_path,
     }

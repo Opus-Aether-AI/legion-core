@@ -517,6 +517,8 @@ $run_error" ]
       .reviewed_base_sha == $sha and .reviewed_head_sha == $sha
       and .attempts == 1 and .max_attempts == 2
     '
+    assert_mock_called codex "exec review --base $base_sha"
+    assert_mock_called codex "-c developer_instructions=\"Review only the immutable diff $base_sha...$base_sha. Verify the learned idempotency guardrail.\""
     assert_mock_called codex "Review only the immutable diff $base_sha...$base_sha."
     assert_mock_called codex "Verify the learned idempotency guardrail."
 }

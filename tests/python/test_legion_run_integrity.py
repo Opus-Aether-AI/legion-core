@@ -98,3 +98,72 @@ def test_hermetic_stage_environment_drops_runner_state_overrides():
     assert "LEGION_PROJECT_LEARNING_DIR" not in clean
     assert "LEGION_GLOBAL_LEARNING_DIR" not in clean
     assert "LEGION_PROJECT_ID" not in clean
+
+
+def test_learning_context_rejects_forged_budget_and_token_accounting():
+    legion_run = load_legion_run()
+    guidance = "x" * 20_000
+    payload = {
+        "schema": "legion.learning-context.v1",
+        "repository_identity": "repo-id",
+        "entity": "heavy-task:billing",
+        "stage": "plan",
+        "limits": {"max_hints": 1_000_000, "max_tokens": 1_000_000},
+        "usage": {
+            "schema": "legion.learning-usage.v1",
+            "hint_count": 1,
+            "token_count": 0,
+        },
+        "selected_hints": [
+            {
+                "id": "forged",
+                "scope": "global",
+                "guidance": guidance,
+                "selection_reason": "global",
+                "token_count": 0,
+            }
+        ],
+        "excluded_hints": [],
+    }
+
+    error = legion_run._learning_context_error(
+        payload,
+        repository_identity="repo-id",
+        entity="heavy-task:billing",
+        stage="plan",
+    )
+
+    assert "absolute caps" in error
+
+
+def test_named_run_feedback_uses_the_same_entity_as_context_retrieval(tmp_path):
+    legion_run = load_legion_run()
+    runner = {
+        "name": "fieldops",
+        "target_type": "plugin",
+        "learning_entity": "heavy-task:billing-export",
+    }
+
+    outcomes = legion_run.collect_learning_outcomes(
+        runner=runner,
+        run_id="run-1",
+        run_dir=tmp_path,
+        stage_payloads={
+            "validate": {
+                "learning_feedback": [
+                    {
+                        "summary": "Preserve the export idempotency boundary.",
+                        "severity": "high",
+                    }
+                ]
+            }
+        },
+        failed_stage="validate",
+        failure_message="validator failed",
+    )
+
+    assert outcomes
+    assert {
+        (outcome["target_type"], outcome["target_name"])
+        for outcome in outcomes
+    } == {("heavy-task", "billing-export")}

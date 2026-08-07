@@ -6,8 +6,8 @@
   "required": ["schema", "hint_count", "token_count"],
   "properties": {
     "schema": {"const": "legion.learning-usage.v1"},
-    "hint_count": {"type": "integer", "minimum": 0},
-    "token_count": {"type": "integer", "minimum": 0}
+    "hint_count": {"type": "integer", "minimum": 0, "maximum": 100},
+    "token_count": {"type": "integer", "minimum": 0, "maximum": 10000}
   },
   "additionalProperties": false
 }

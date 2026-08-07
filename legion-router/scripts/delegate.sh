@@ -1171,17 +1171,19 @@ cmd_review() {
     attempt_verdict="$art/attempt-$attempt.verdict.json"
     rm -f "$attempt_verdict"
     note "→ codex review attempt $attempt/$max_attempts (base $base_sha, head $head_sha)"
-    local -a codex_review_args=(exec review)
+    local -a codex_review_args=(exec review --base "$base_sha")
     local review_prompt=""
     if [[ -n "$task" ]]; then
       review_prompt="Review only the immutable diff $base_sha...$head_sha. $task"
-    else
-      codex_review_args+=(--base "$base_sha")
     fi
     codex_review_args+=(-m "$model" --json)
     [[ -n "$effort" ]] && codex_review_args+=(-c "model_reasoning_effort=$effort")
+    if [[ -n "$review_prompt" ]]; then
+      local encoded_review_prompt
+      encoded_review_prompt="$(jq -Rn --arg value "$review_prompt" '$value')"
+      codex_review_args+=(-c "developer_instructions=$encoded_review_prompt")
+    fi
     codex_review_args+=(--output-schema "$REVIEW_SCHEMA" -o "$attempt_verdict")
-    [[ -n "$review_prompt" ]] && codex_review_args+=("$review_prompt")
     set +e
     ( cd "$wt" && "$CODEX_BIN" "${codex_review_args[@]}" ) \
       </dev/null >"$attempt_stream" 2>"$attempt_err" &

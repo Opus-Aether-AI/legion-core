@@ -145,13 +145,13 @@ def test_compile_context_has_stable_ordering_and_enforces_hint_token_limits(tmp_
     repo = _repo(tmp_path)
     env, _, _ = _environment(tmp_path, repo, "over-budget-hints.json")
 
-    _, payload = _compile(repo, env, "--max-hints", "2", "--max-tokens", "35")
+    _, payload = _compile(repo, env, "--max-hints", "2", "--max-tokens", "130")
 
     assert [hint["id"] for hint in payload["selected_hints"]] == ["a-first", "b-second"]
     assert payload["limits"]["max_hints"] == 2
-    assert payload["limits"]["max_tokens"] == 35
+    assert payload["limits"]["max_tokens"] == 130
     assert payload["usage"]["hint_count"] == 2
-    assert payload["usage"]["token_count"] <= 35
+    assert payload["usage"]["token_count"] <= 130
     assert {hint["id"] for hint in payload["excluded_hints"]} == {"m-middle", "z-last"}
     assert {hint["exclusion_reason"] for hint in payload["excluded_hints"]} == {"hint_limit", "token_limit"}
 
@@ -200,6 +200,67 @@ def test_context_budget_rejects_unbroken_ascii_and_cjk_guidance(tmp_path):
     excluded = {hint["id"]: hint["exclusion_reason"] for hint in payload["excluded_hints"]}
     assert excluded["a-unbroken-ascii"] == "token_limit"
     assert excluded["b-unbroken-cjk"] == "token_limit"
+
+
+def test_compiler_drops_unbounded_selector_and_evidence_metadata(tmp_path):
+    repo = _repo(tmp_path)
+    env, project, _ = _environment(tmp_path, repo)
+    secret = "UNRELATED_SECRET_METADATA" * 4000
+    (project / "hints.json").write_text(
+        json.dumps(
+            {
+                "schema": "legion.learning-hints.v1",
+                "hints": [
+                    {
+                        "schema": "legion.learning-hint.v1",
+                        "id": "bounded-selector",
+                        "scope": "selector",
+                        "selector": {"entity": ["skill:release", secret]},
+                        "status": "active",
+                        "trusted": True,
+                        "guidance": "Check the release gate.",
+                        "evidence_ids": [secret],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, payload = _compile(repo, env, "--max-tokens", "100")
+    encoded = json.dumps(payload, sort_keys=True)
+
+    assert payload["selected_hints"] == []
+    assert len(encoded) < 32_768
+    assert "UNRELATED_SECRET_METADATA" not in encoded
+
+
+def test_oversized_hint_document_is_ignored_as_one_fail_closed_source(tmp_path):
+    repo = _repo(tmp_path)
+    env, project, _ = _environment(tmp_path, repo)
+    (project / "hints.json").write_text(
+        json.dumps(
+            {
+                "schema": "legion.learning-hints.v1",
+                "hints": [
+                    {
+                        "schema": "legion.learning-hint.v1",
+                        "id": "oversized",
+                        "scope": "global",
+                        "status": "active",
+                        "trusted": True,
+                        "guidance": "x" * 1_100_000,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, payload = _compile(repo, env)
+
+    assert payload["selected_hints"] == []
+    assert payload["usage"]["token_count"] == 0
 
 
 def test_compile_context_delivers_trusted_guidance_only_and_never_echoes_untrusted_text(tmp_path):
@@ -259,3 +320,49 @@ def test_reconcile_deduplicates_replayed_evidence_and_rehomes_legacy_path_state(
     assert payload["evidence_replayed"] == 3
     assert payload["evidence_deduplicated"] == 1
     assert (project / "state.json").exists()
+
+
+def test_reconcile_streams_evidence_and_skips_oversized_lines(tmp_path):
+    repo = _repo(tmp_path)
+    env, project, _ = _environment(tmp_path, repo)
+    evidence = project / "bounded-evidence.jsonl"
+    evidence.write_text(
+        json.dumps(
+            {
+                "schema": "legion.learning-evidence.v1",
+                "id": "oversized",
+                "repository_identity": "github.com/acme/release-tools",
+                "entity": "skill:release",
+                "outcome": "failed",
+                "digest": "x" * 70_000,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "schema": "legion.learning-evidence.v1",
+                "id": "bounded-evidence",
+                "repository_identity": "github.com/acme/release-tools",
+                "entity": "skill:release",
+                "outcome": "failed",
+                "digest": "abc123",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _command(
+        "reconcile",
+        "--repo",
+        str(repo),
+        "--evidence",
+        str(evidence),
+        "--json",
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["evidence_ids"] == ["bounded-evidence"]
+    assert payload["evidence_limited"] == 1

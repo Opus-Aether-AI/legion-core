@@ -37,12 +37,12 @@ def test_normalizes_builtin_review_findings_and_repo_relative_paths(tmp_path):
 
 def test_normalizer_accepts_explicit_no_findings_and_rejects_ambiguous_prose(tmp_path):
     approved = normalizer.normalize(
-        "No findings. The immutable diff passes the requested checks.", tmp_path
+        "No findings.", tmp_path
     )
 
     assert approved == {
         "verdict": "approve",
-        "summary": "No findings. The immutable diff passes the requested checks.",
+        "summary": "No findings.",
         "findings": [],
     }
     assert normalizer.normalize("Review completed.", tmp_path) is None
@@ -51,6 +51,12 @@ def test_normalizer_accepts_explicit_no_findings_and_rejects_ambiguous_prose(tmp
     ) is None
     assert normalizer.normalize(
         "No findings.\n- [P1] unfamiliar finding syntax", tmp_path
+    ) is None
+    assert normalizer.normalize(
+        "Looks good. However, the security boundary is bypassable.", tmp_path
+    ) is None
+    assert normalizer.normalize(
+        "Review summary: no issues. A race remains.", tmp_path
     ) is None
 
 

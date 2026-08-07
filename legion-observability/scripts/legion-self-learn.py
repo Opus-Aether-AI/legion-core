@@ -1206,7 +1206,106 @@ def _hint_from_proposal(proposal: dict[str, Any]) -> str:
     )
 
 
-def apply_memory(report: dict[str, Any], log_root: str) -> dict[str, Any]:
+def _typed_hint_from_proposal(
+    proposal: dict[str, Any], outcome: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Promote safe memory into the typed runtime store.
+
+    ``--apply-memory`` is the explicit promotion boundary. Deterministic source
+    classes may include their bounded summary; model-authored review prose is
+    reduced to Legion's fixed suggested guardrail before becoming trusted
+    executor guidance.
+    """
+    target_type = _short(_text(proposal.get("target_type")), 80)
+    target_name = _short(_text(proposal.get("target_name")), 160)
+    proposal_id = _short(_text(proposal.get("id")), 120)
+    source = _text(outcome.get("source"))
+    if not target_type or not target_name or not proposal_id:
+        return None
+    suggested = _short(_text(proposal.get("suggested_change")), 360)
+    if source in {"manual", "session-learn", "learning-law"}:
+        guidance = _hint_from_proposal(proposal)
+    else:
+        guidance = suggested
+    if not guidance:
+        return None
+    hint: dict[str, Any] = {
+        "schema": legion_learning_context.HINT_SCHEMA,
+        "id": f"memory:{_stable_id([proposal_id])}",
+        "scope": "exact",
+        "status": "active",
+        "trusted": True,
+        "guidance": guidance,
+        "entity": f"{target_type}:{target_name}",
+        "evidence_ids": [
+            value
+            for value in (
+                _short(_text(outcome.get("id")), 160),
+                _short(proposal_id, 160),
+            )
+            if value
+        ],
+        "origin": "self-learn-memory",
+    }
+    stage = _text(_dict(outcome.get("metadata")).get("stage"))
+    stage = {
+        "fanout-apply": "fanout",
+        "final-review": "review",
+    }.get(stage, stage)
+    if stage in {"plan", "fanout", "validate", "review"}:
+        hint["stage"] = stage
+    return hint
+
+
+def sync_typed_hints(
+    report: dict[str, Any], project_learning_dir: str
+) -> dict[str, Any]:
+    """Merge promoted memory hints without overwriting maintainer-owned hints."""
+    path = os.path.join(project_learning_dir, "hints.json")
+    existing = legion_learning_context.read_bounded_json(
+        path, legion_learning_context.MAX_HINT_DOCUMENT_BYTES
+    )
+    by_id: dict[str, dict[str, Any]] = {}
+    for hint in _list(_dict(existing).get("hints"))[
+        : legion_learning_context.MAX_HINTS
+        + legion_learning_context.MAX_EXCLUDED_HINTS
+    ]:
+        if not isinstance(hint, dict):
+            continue
+        hint_id = _text(hint.get("id"))
+        if hint_id:
+            by_id.setdefault(hint_id, hint)
+    outcomes = {
+        _text(item.get("id")): item
+        for item in _list(report.get("outcomes"))
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    promoted = 0
+    for proposal in _list(report.get("proposals")):
+        if not isinstance(proposal, dict):
+            continue
+        outcome = outcomes.get(_text(proposal.get("outcome_id")), {})
+        hint = _typed_hint_from_proposal(proposal, outcome)
+        if hint is not None:
+            by_id[hint["id"]] = hint
+            promoted += 1
+    payload = {
+        "schema": "legion.learning-hints.v1",
+        "hints": [by_id[key] for key in sorted(by_id)][
+            : legion_learning_context.MAX_HINTS
+            + legion_learning_context.MAX_EXCLUDED_HINTS
+        ],
+    }
+    _write_json(path, payload)
+    return {"path": path, "promoted": promoted, "total": len(payload["hints"])}
+
+
+def apply_memory(
+    report: dict[str, Any],
+    log_root: str,
+    *,
+    project_learning_dir: str = "",
+) -> dict[str, Any]:
     memory = load_memory(log_root)
     if not isinstance(memory.get("entities"), dict):
         memory["entities"] = {}
@@ -1274,6 +1373,12 @@ def apply_memory(report: dict[str, Any], log_root: str) -> dict[str, Any]:
     if report_ref not in reports:
         reports.append(report_ref)
     memory["updated_at"] = report.get("generated_at")
+    typed_hints = sync_typed_hints(
+        report,
+        project_learning_dir
+        or os.path.join(os.path.expanduser(log_root), "learning"),
+    )
+    memory["typed_hints"] = typed_hints
     _write_json(memory_path(log_root), memory)
     append_experiment_log(report, log_root)
     return memory
@@ -2058,11 +2163,19 @@ def run_command(args: argparse.Namespace) -> int:
 
     memory = None
     if args.apply_memory or args.apply_source:
-        memory = apply_memory(report, args.logs)
+        state = legion_state.resolve_state(args.repo)
+        memory = apply_memory(
+            report,
+            args.logs,
+            project_learning_dir=state["project_learning_dir"],
+        )
 
     payload = {
         "report_path": report_path,
         "memory_path": memory_path(args.logs),
+        "hints_path": _text(
+            _dict(_dict(memory or {}).get("typed_hints")).get("path")
+        ),
         "applied_memory": memory is not None,
         "changed_source": changed,
         "experiments": experiments,

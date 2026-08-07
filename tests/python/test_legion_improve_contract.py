@@ -129,9 +129,25 @@ def _env(tmp_path):
     gh.write_text(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FIXTURE_GH_LOG\"\n"
         "case \"$*\" in\n"
+        "  *'pr list'*)\n"
+        "    case \"${FIXTURE_GH_MODE:-ok}\" in\n"
+        "      existing-good)\n"
+        "        head=; previous=\n"
+        "        for arg in \"$@\"; do [ \"$previous\" = --head ] && head=$arg; previous=$arg; done\n"
+        "        oid=$(git rev-parse \"$head\"); base_oid=$(git rev-parse refs/remotes/origin/main)\n"
+        "        printf '[{\"number\":7,\"url\":\"https://example.invalid/pr/7\",\"isDraft\":true,\"baseRefName\":\"main\",\"baseRefOid\":\"%s\",\"headRefName\":\"%s\",\"headRefOid\":\"%s\"}]\\n' \"$base_oid\" \"$head\" \"$oid\" ;;\n"
+        "      existing-wrong)\n"
+        "        printf '[{\"number\":8,\"url\":\"https://example.invalid/pr/8\",\"isDraft\":true,\"baseRefName\":\"wrong\",\"baseRefOid\":\"0000000000000000000000000000000000000000\",\"headRefName\":\"wrong\",\"headRefOid\":\"0000000000000000000000000000000000000000\"}]\\n' ;;\n"
+        "      fail-list) exit 18 ;;\n"
+        "      *) printf '[]\\n' ;;\n"
+        "    esac ;;\n"
         "  *'pr create'*)\n"
         "    [ \"${FIXTURE_GH_MODE:-ok}\" = fail-create ] && exit 19\n"
         "    printf 'https://example.invalid/pr/7\\n' ;;\n"
+        "  *'pr view'*)\n"
+        "    head=$(git for-each-ref --format='%(refname:short)' 'refs/heads/legion-improve/*' | head -n 1)\n"
+        "    oid=$(git rev-parse \"$head\"); base_oid=$(git rev-parse refs/remotes/origin/main)\n"
+        "    printf '{\"number\":7,\"url\":\"https://example.invalid/pr/7\",\"isDraft\":true,\"baseRefName\":\"main\",\"baseRefOid\":\"%s\",\"headRefName\":\"%s\",\"headRefOid\":\"%s\"}\\n' \"$base_oid\" \"$head\" \"$oid\" ;;\n"
         "esac\n",
         encoding="utf-8",
     )
@@ -231,6 +247,28 @@ def test_unexpected_candidate_failure_is_a_durable_failed_terminal_state(tmp_pat
     assert payload["state"] == "failed"
     assert payload["reason"] == "candidate_target_unavailable"
     assert "draft_pr" not in payload
+
+
+def test_invalid_utf8_candidate_is_a_typed_terminal_failure(tmp_path):
+    repo, _ = _repo(tmp_path)
+    (repo / "allowed.md").write_bytes(b"before\xffafter\n")
+    _git("add", "allowed.md", cwd=repo)
+    _git("commit", "-qm", "add invalid utf8 fixture", cwd=repo)
+    _git("push", "-q", "origin", "HEAD:main", cwd=repo)
+
+    result, payload = _run(
+        repo,
+        _proposal(tmp_path),
+        tmp_path / "invalid-utf8-state",
+        "--mode",
+        "draft",
+        env=_env(tmp_path / "invalid-utf8"),
+    )
+
+    assert result.returncode != 0
+    assert payload["state"] == "failed"
+    assert payload["reason"] == "candidate_target_invalid_utf8"
+    assert "Traceback" not in result.stderr
 
 
 def test_noisy_validation_is_bounded_and_corrupt_resume_state_fails_closed(tmp_path):
@@ -391,6 +429,70 @@ def test_replay_and_atomic_leases_produce_one_fingerprint_branch_and_draft(tmp_p
     assert {p["proposal_id"] for p in sequential + concurrent_results} == {"proposal-safe-doc"}
 
 
+def test_terminal_failures_reopen_after_repair_but_completed_drafts_do_not(tmp_path):
+    repo, _ = _repo(tmp_path)
+    proposal = _proposal(tmp_path)
+    state = tmp_path / "retry-state"
+    env = _env(tmp_path / "retry")
+    dirty = repo / "operator-dirty.txt"
+    dirty.write_text("not part of the improvement\n", encoding="utf-8")
+
+    rejected, first = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert rejected.returncode != 0
+    assert first["reason"] == "operator_checkout_dirty"
+
+    dirty.unlink()
+    retried, completed = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert retried.returncode == 0, retried.stderr
+    assert completed["state"] == "draft_created"
+
+    replayed, same = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert replayed.returncode == 0
+    assert same["draft_pr"]["id"] == completed["draft_pr"]["id"]
+    assert open(env["FIXTURE_GH_LOG"], encoding="utf-8").read().count("pr create") == 1
+
+
+def test_baseline_terminal_reopens_when_external_validation_is_repaired(tmp_path):
+    repo, _ = _repo(tmp_path)
+    proposal = _proposal(tmp_path)
+    state = tmp_path / "baseline-repair-state"
+    env = _env(tmp_path / "baseline-repair")
+    env["FIXTURE_EVAL_MODE"] = "noisy"
+
+    rejected, failed = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert rejected.returncode != 0
+    assert failed["reason"] == "baseline_failed"
+
+    env.pop("FIXTURE_EVAL_MODE")
+    retried, completed = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert retried.returncode == 0, retried.stderr
+    assert completed["state"] == "draft_created"
+
+
+def test_terminal_review_rejection_reopens_after_the_remote_base_advances(tmp_path):
+    repo, _ = _repo(tmp_path)
+    proposal = _proposal(tmp_path)
+    state = tmp_path / "base-advance-state"
+    env = _env(tmp_path / "base-advance")
+    env["FIXTURE_REVIEW_MODE"] = "reject"
+
+    rejected, failed = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert rejected.returncode != 0
+    assert failed["reason"] == "review_requested_changes"
+    old_base = failed["base_sha"]
+
+    (repo / "remote-repair.md").write_text("repair\n", encoding="utf-8")
+    _git("add", "remote-repair.md", cwd=repo)
+    _git("commit", "-qm", "repair base", cwd=repo)
+    _git("push", "-q", "origin", "HEAD:main", cwd=repo)
+    env.pop("FIXTURE_REVIEW_MODE")
+
+    retried, completed = _run(repo, proposal, state, "--mode", "draft", env=env)
+    assert retried.returncode == 0, retried.stderr
+    assert completed["state"] == "draft_created"
+    assert completed["base_sha"] != old_base
+
+
 def test_replay_identity_ignores_growing_evidence_for_the_same_candidate(tmp_path):
     repo, _ = _repo(tmp_path)
     state = tmp_path / "state"
@@ -471,6 +573,32 @@ def test_queue_is_bounded_and_replays_terminal_proposals_without_republishing(tm
     assert second_payload["results"] == []
     assert not proposal.exists()
     assert open(env["FIXTURE_GH_LOG"], encoding="utf-8").read().count("pr create") == 1
+
+
+def test_queue_retries_repairable_terminal_proposals_instead_of_discarding_them(tmp_path):
+    repo, _ = _repo(tmp_path)
+    queue_dir = tmp_path / "retry-queue"
+    queue_dir.mkdir()
+    proposal = _proposal(queue_dir)
+    state = tmp_path / "retry-queue-state"
+    env = _env(tmp_path / "retry-queue-env")
+    env["FIXTURE_EVAL_MODE"] = "noisy"
+
+    first, failed = _queue(
+        repo, queue_dir, state, "--mode", "draft", "--max", "1", env=env
+    )
+    assert first.returncode != 0
+    assert failed["attempted"] == 1
+    assert failed["results"][0]["state"] == "rejected"
+    assert proposal.exists()
+
+    env.pop("FIXTURE_EVAL_MODE")
+    second, completed = _queue(
+        repo, queue_dir, state, "--mode", "draft", "--max", "1", env=env
+    )
+    assert second.returncode == 0, second.stderr
+    assert completed["attempted"] == 1
+    assert completed["results"][0]["state"] == "draft_created"
 
 
 def test_queue_quarantines_invalid_entries_and_dry_run_advances_to_later_work(tmp_path):
@@ -579,6 +707,94 @@ def test_draft_api_failure_retries_from_reviewed_state_without_rereview(tmp_path
     assert resumed.returncode == 0, resumed.stderr
     assert done["state"] == "draft_created"
     assert len(open(env["FIXTURE_REVIEW_LOG"], encoding="utf-8").read().splitlines()) == 1
+
+
+def test_existing_draft_pr_must_match_reviewed_base_branch_and_head(tmp_path):
+    repo, _ = _repo(tmp_path)
+    proposal = _proposal(tmp_path)
+
+    good_env = _env(tmp_path / "existing-good")
+    good_env["FIXTURE_GH_MODE"] = "existing-good"
+    accepted, payload = _run(
+        repo,
+        proposal,
+        tmp_path / "existing-good-state",
+        "--mode",
+        "draft",
+        env=good_env,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert payload["state"] == "draft_created"
+    assert "pr create" not in open(good_env["FIXTURE_GH_LOG"], encoding="utf-8").read()
+
+    bad_env = _env(tmp_path / "existing-wrong")
+    bad_env["FIXTURE_GH_MODE"] = "existing-wrong"
+    rejected, failed = _run(
+        repo,
+        proposal,
+        tmp_path / "existing-wrong-state",
+        "--mode",
+        "draft",
+        env=bad_env,
+    )
+    assert rejected.returncode != 0
+    assert failed["state"] == "failed"
+    assert failed["reason"] == "existing_pr_identity_mismatch"
+    assert "pr create" not in open(bad_env["FIXTURE_GH_LOG"], encoding="utf-8").read()
+
+
+def test_inspect_rejects_traversal_and_corrupt_records_without_echoing_them(tmp_path):
+    state = tmp_path / "state"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = "TOP_SECRET_INSPECT_PAYLOAD"
+    (outside / "leak.json").write_text(
+        json.dumps({"schema": "hostile", "secret": secret}), encoding="utf-8"
+    )
+
+    traversal = subprocess.run(
+        [
+            "bash",
+            CLI,
+            "inspect",
+            "--state-dir",
+            str(state),
+            "--fingerprint",
+            "../../outside/leak",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert traversal.returncode != 0
+    assert json.loads(traversal.stdout)["reason"] == "invalid_fingerprint"
+    assert secret not in traversal.stdout
+
+    fingerprint = "a" * 64
+    durable = state / "runs" / f"{fingerprint}.json"
+    durable.parent.mkdir(parents=True)
+    durable.write_text(
+        json.dumps({"schema": "hostile", "secret": secret}), encoding="utf-8"
+    )
+    corrupt = subprocess.run(
+        [
+            "bash",
+            CLI,
+            "inspect",
+            "--state-dir",
+            str(state),
+            "--fingerprint",
+            fingerprint,
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert corrupt.returncode != 0
+    assert json.loads(corrupt.stdout)["reason"] == "state_corrupt"
+    assert secret not in corrupt.stdout
 
 
 def test_explicit_remote_base_does_not_move_a_release_detached_checkout(tmp_path):

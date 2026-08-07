@@ -6,43 +6,43 @@
   "required": ["schema", "repository_identity", "entity", "stage", "limits", "usage", "selected_hints", "excluded_hints"],
   "properties": {
     "schema": {"const": "legion.learning-context.v1"},
-    "repository_identity": {"type": "string", "minLength": 1},
-    "entity": {"type": "string", "minLength": 1},
-    "stage": {"type": "string", "minLength": 1},
+    "repository_identity": {"type": "string", "minLength": 1, "maxLength": 256},
+    "entity": {"type": "string", "minLength": 1, "maxLength": 256},
+    "stage": {"type": "string", "minLength": 1, "maxLength": 256},
     "limits": {
       "type": "object",
       "required": ["max_hints", "max_tokens"],
-      "properties": {"max_hints": {"type": "integer", "minimum": 0}, "max_tokens": {"type": "integer", "minimum": 0}},
+      "properties": {"max_hints": {"type": "integer", "minimum": 0, "maximum": 100}, "max_tokens": {"type": "integer", "minimum": 0, "maximum": 10000}},
       "additionalProperties": false
     },
     "usage": {"$ref": "legion.learning-usage.v1.schema.json"},
     "selected_hints": {
       "type": "array",
+      "maxItems": 100,
       "items": {
         "type": "object",
         "required": ["id", "scope", "guidance", "selection_reason", "token_count"],
         "properties": {
-          "id": {"type": "string", "minLength": 1},
-          "scope": {"type": "string", "minLength": 1},
-          "guidance": {"type": "string", "minLength": 1},
-          "selection_reason": {"type": "string", "minLength": 1},
-          "token_count": {"type": "integer", "minimum": 0},
-          "entity": {"type": "string", "minLength": 1},
-          "stage": {"type": "string", "minLength": 1},
-          "selector": {"type": "object"},
-          "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}}
+          "id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "scope": {"enum": ["global", "selector", "exact"]},
+          "guidance": {"type": "string", "minLength": 1, "maxLength": 40000},
+          "selection_reason": {"enum": ["global", "selector", "exact"]},
+          "token_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+          "entity": {"type": "string", "minLength": 1, "maxLength": 256},
+          "stage": {"type": "string", "minLength": 1, "maxLength": 256}
         },
         "additionalProperties": false
       }
     },
     "excluded_hints": {
       "type": "array",
+      "maxItems": 200,
       "items": {
         "type": "object",
         "required": ["id", "exclusion_reason"],
         "properties": {
-          "id": {"type": "string", "minLength": 1},
-          "exclusion_reason": {"type": "string", "minLength": 1}
+          "id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "exclusion_reason": {"type": "string", "minLength": 1, "maxLength": 80}
         },
         "additionalProperties": false
       }

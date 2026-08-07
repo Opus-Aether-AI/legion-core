@@ -77,6 +77,9 @@ observe -> analyze -> propose -> baseline -> isolate -> mutate -> score -> keep/
 - **Analyze:** attach every outcome to a catalog entity (`plugin`, `skill`, `command`, `agent`, `hook`, or `mcp`) so slash commands and sub-agents improve too.
 - **Score:** run plugin + entity `legion-eval` datasets and `legion-doctor`, then persist metrics in `experiments.tsv`.
 - **Propose:** self-learning writes evidence and typed proposals; it never applies a source candidate to the operator checkout.
+- **Promote:** explicit `--apply-memory` syncs bounded entity/stage hints into the
+  project `learning/hints.json`, which official runs compile at each decision
+  boundary. Raw model review prose never becomes trusted guidance.
 - **Improve:** `legion-improve` is off by default. In `draft` mode it freezes the remote/base identity, confines an eligible documentation proposal to an isolated worktree and allowlists, rejects flake/regression gates, records an independent receipt, then opens a draft PR only. It never merges or deploys.
 
 The source-changing queue is deliberately narrower than memory. Only promoted

@@ -29,7 +29,9 @@ Legion implements that protocol locally:
   two projects, retiring laws when the current evidence no longer supports them;
 - mine spans, review findings, trigger misses, routing advice, and manual bugs;
 - attach every outcome to a catalog entity;
-- write durable entity-scoped hints and proposals;
+- write durable entity-scoped memory and proposals;
+- promote bounded, trusted memory into the typed `hints.json` store consumed by
+  later official runs;
 - run a deterministic baseline scorecard (`legion-eval` plugin + entity datasets
   and `legion-doctor`);
 - keep source proposals typed and maintainer-eligible; and
@@ -129,6 +131,7 @@ This writes under the project `state_root` reported by
 `legion-state --repo ~/.agents/sources/legion-core`:
 
 - `self-learn/harness-memory.json`
+- `learning/hints.json` (typed runtime guidance promoted by `--apply-memory`)
 - `self-learn/reports/<date>.json`
 - `self-learn/experiments.md`
 - `self-learn/experiments.tsv`
@@ -136,6 +139,12 @@ This writes under the project `state_root` reported by
 - `improve/runs/<proposal-fingerprint>.json` after an improvement mode processes it
 
 Memory mode is intentionally safe: it does not rewrite source or vendored skills.
+`--apply-memory` is the explicit promotion boundary. Manual corrections,
+session decisions, and promoted learning laws may contribute bounded guidance;
+model-authored review text is not copied into trusted executor instructions.
+Instead, review evidence promotes only Legion's fixed, typed guardrail for that
+finding class. Every promoted hint remains entity-scoped and may also be scoped
+to `plan`, `fanout`, `validate`, or `review`.
 The default cron run scans all available spans and manual records so bugs recorded
 after yesterday's cron are still ingested. Passing `--day YYYY-MM-DD` keeps an
 exact UTC-day report window for reproducible audits and tests. Durable memory
@@ -186,6 +195,12 @@ rejected. The proposal cannot supply a command. A bounded receipt from the
 external `legion-delegate review` boundary over exact base/head SHAs is required
 before an idempotent draft PR is created through `gh`. It never merges, deploys,
 or writes to the operator checkout.
+
+Recoverable terminal attempts are not dead letters. A repaired validator,
+cleaned operator checkout, newer proposal revision, or advanced remote base can
+reopen the same deterministic fingerprint from `eligible`; completed draft
+records never reopen. Reuse or creation of a draft is verified against its base
+and head branches plus both object IDs from the independently reviewed snapshot.
 
 Only active cross-project laws with confidence at least `0.9`, five supporting
 episodes, three projects, a bounded guidance string, and a safe non-vendored
@@ -271,9 +286,13 @@ legion-self-learn reconcile --repo . --legacy-state legacy-state.json --evidence
 These hints are failure evidence. They do not override the user, the repository's
 `AGENTS.md`, or normal validation gates.
 
-`legion-run` consumes this compiler at its planning boundary. It writes the
-schema-valid context and usage artifacts even when no hint is selected, hashes
-the immutable context as a revision, and carries only bounded trusted guidance
-to delegated slice and final-review inputs. Its `learning-receipts.json`
-records each delivery disposition and the deterministic-validation receipt;
-it never carries raw transcripts or evidence excerpts.
+`legion-run` compiles a separate context immediately before each `plan`,
+`fanout`, `validate`, and `review` decision boundary. This prevents a plan-only
+hint from leaking into review and lets newly promoted stage scopes take effect
+where intended. It writes schema-valid context and usage artifacts even when no
+hint is selected, hashes each safe context as a revision, and re-authenticates
+the bytes both before and after delivery so same-user file replacement fails
+closed. Hint counts, UTF-8-byte token budgets, selector values, evidence replay,
+and excluded metadata all have absolute caps. `learning-receipts.json` binds
+every delivery to its boundary, path, and revision; raw transcripts, selectors,
+and evidence excerpts never cross into executor context.

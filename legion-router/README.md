@@ -142,6 +142,9 @@ legion-router/
 - Delegation never auto-applies a diff unless `--apply` is given and the diff applies cleanly.
 - Reviews resolve `--base`/`--head` once to commit SHAs, retry transient
   executor failures at most twice by default, and write a durable terminal receipt.
+  Every Codex review attempt remains mechanically bound with `exec review
+  --base <resolved-sha>`; optional bounded task guidance is injected through
+  Codex developer instructions and never replaces the base argument.
 - Every executor receives `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`,
   `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized repository policy uses that
   context to prevent accidental recursive delegation.

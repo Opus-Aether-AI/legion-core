@@ -52,8 +52,30 @@ REVIEW_RETRYABLE = {"independent_review_unavailable", "independent_review_failed
 DRAFT_RETRYABLE = {
     "branch_push_failed",
     "gh_unavailable",
+    "draft_pr_list_failed",
     "draft_pr_create_failed",
     "draft_pr_response_invalid",
+    "draft_pr_verify_failed",
+}
+TERMINAL_RETRYABLE_WITHOUT_INPUT_CHANGE = {
+    "repository_unavailable",
+    "remote_not_configured",
+    "remote_tip_unavailable",
+    "remote_base_fetch_failed",
+    "base_not_remote_tip",
+    "operator_checkout_dirty",
+    "state_corrupt",
+    "internal_operation_failed",
+    "worktree_prepare_failed",
+    "candidate_reset_failed",
+    "candidate_target_unavailable",
+    "candidate_target_invalid_utf8",
+    "baseline_failed",
+    "baseline_variance",
+    "candidate_variance",
+    "review_snapshot_failed",
+    "review_snapshot_mismatch",
+    "independent_review_invalid",
 }
 
 
@@ -556,6 +578,23 @@ def terminal(record: dict[str, Any], state: str, reason: str) -> None:
     transition(record, state, reason=reason)
 
 
+def _retryable_terminal(
+    record: dict[str, Any], proposal: dict[str, Any], repo: str | Path
+) -> bool:
+    """Reopen only completed failures whose inputs or environment can recover."""
+    if record.get("state") not in TERMINAL or record.get("state") == "draft_created":
+        return False
+    if proposal["revision"] > record.get("revision", 0):
+        return True
+    if record.get("state") == "stale":
+        return True
+    if record.get("reason") in TERMINAL_RETRYABLE_WITHOUT_INPUT_CHANGE:
+        return True
+    if _valid_sha(record.get("base_sha")):
+        return _stale_reason(record, repo) is not None
+    return False
+
+
 def _remote_snapshot(repo: str | Path, base_ref: str = "") -> dict[str, str]:
     remote = git(repo, "remote", "get-url", "origin", check=False)
     if remote.returncode != 0 or not remote.stdout.strip():
@@ -742,7 +781,10 @@ def apply_candidate(
         raise ImproveError("failed", "candidate_reset_failed")
     relative = proposal["target"]["path"]
     target = _target_file(worktree, relative)
-    original = target.read_text(encoding="utf-8")
+    try:
+        original = target.read_text(encoding="utf-8")
+    except UnicodeError:
+        raise ImproveError("failed", "candidate_target_invalid_utf8") from None
     content = re.sub(r"\s+", " ", proposal["candidate"]["content"]).strip()
     marker = digest({"proposal_id": proposal["id"]})[:16]
     start = f"<!-- legion-improve:{marker}:start -->"
@@ -1032,6 +1074,25 @@ def _safe_pr_url(value: str) -> str:
     return value if re.fullmatch(r"https://[^\s]+", value) else ""
 
 
+def _pr_identity_error(
+    row: Any, record: dict[str, Any], branch: str, head_sha: str
+) -> str | None:
+    if not isinstance(row, dict):
+        return "existing_pr_identity_mismatch"
+    if row.get("isDraft") is not True:
+        return "existing_pr_not_draft"
+    if (
+        row.get("baseRefName") != record["base_branch"]
+        or row.get("baseRefOid") != record["base_sha"]
+        or row.get("headRefName") != branch
+        or row.get("headRefOid") != head_sha
+    ):
+        return "existing_pr_identity_mismatch"
+    if not _safe_pr_url(str(row.get("url") or "")):
+        return "existing_pr_identity_mismatch"
+    return None
+
+
 def draft(
     record: dict[str, Any], proposal: dict[str, Any], root: Path
 ) -> str | None:
@@ -1072,21 +1133,28 @@ def draft(
             "--state",
             "open",
             "--json",
-            "number,url,isDraft",
+            "number,url,isDraft,baseRefName,baseRefOid,headRefName,headRefOid",
         ],
         cwd=worktree,
         timeout=120,
     )
     pr_url = ""
-    if listed.returncode == 0:
-        try:
-            rows = json.loads(listed.stdout or "[]")
-        except ValueError:
-            rows = []
-        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
-            if rows[0].get("isDraft") is False:
-                return "existing_pr_not_draft"
-            pr_url = _safe_pr_url(str(rows[0].get("url") or ""))
+    if listed.returncode != 0:
+        return "draft_pr_list_failed"
+    try:
+        rows = json.loads(listed.stdout or "[]")
+    except ValueError:
+        return "draft_pr_list_failed"
+    if not isinstance(rows, list):
+        return "draft_pr_list_failed"
+    if rows:
+        if len(rows) != 1:
+            return "existing_pr_identity_mismatch"
+        existing_pr = rows[0]
+        identity_error = _pr_identity_error(existing_pr, record, branch, head_sha)
+        if identity_error:
+            return identity_error
+        pr_url = _safe_pr_url(str(existing_pr.get("url") or ""))
     body = (
         "Review-only Legion improvement. The exact remote base and candidate "
         "passed repeated paired gates plus an independent immutable review. "
@@ -1117,6 +1185,29 @@ def draft(
         pr_url = _safe_pr_url(lines[-1] if lines else "")
         if not pr_url:
             return "draft_pr_response_invalid"
+        verified = _bounded_process(
+            [
+                gh,
+                "pr",
+                "view",
+                pr_url,
+                "--json",
+                "number,url,isDraft,baseRefName,baseRefOid,headRefName,headRefOid",
+            ],
+            cwd=worktree,
+            timeout=120,
+        )
+        if verified.returncode != 0:
+            return "draft_pr_verify_failed"
+        try:
+            created_pr = json.loads(verified.stdout)
+        except ValueError:
+            return "draft_pr_verify_failed"
+        identity_error = _pr_identity_error(
+            created_pr, record, branch, head_sha
+        )
+        if identity_error:
+            return identity_error
     record["draft_pr"] = {
         "id": digest({"branch": branch, "fingerprint": record["fingerprint"]})[
             :24
@@ -1230,7 +1321,11 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         else:
             record = _initial_record(proposal, fingerprint, args.mode)
         if record.get("state") in TERMINAL:
-            return (0 if record["state"] == "draft_created" else 2), public(record)
+            if not _retryable_terminal(record, proposal, args.repo):
+                return (0 if record["state"] == "draft_created" else 2), public(record)
+            cleanup_worktrees(args.repo, root, fingerprint)
+            record = _initial_record(proposal, fingerprint, args.mode)
+            atomic_write(path, record)
         record["mode"] = args.mode
         if record["state"] != "eligible":
             stale = _stale_reason(record, args.repo)
@@ -1367,12 +1462,25 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
 
 
 def inspect(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+    if not re.fullmatch(r"[0-9a-f]{64}", args.fingerprint):
+        return 2, {
+            "schema": RUN_SCHEMA,
+            "state": "failed",
+            "reason": "invalid_fingerprint",
+        }
     record = read_json(state_path(Path(args.state_dir).resolve(), args.fingerprint))
     if not record:
         return 2, {
             "schema": RUN_SCHEMA,
             "state": "missing",
             "reason": "unknown_fingerprint",
+        }
+    proposal_identity = {"id": record.get("proposal_id")}
+    if not _valid_durable_record(record, proposal_identity, args.fingerprint):
+        return 2, {
+            "schema": RUN_SCHEMA,
+            "state": "failed",
+            "reason": "state_corrupt",
         }
     return 0, public(record)
 
@@ -1474,7 +1582,10 @@ def process_queue(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         if (
             valid_existing
             and (
-                existing.get("state") in TERMINAL
+                (
+                    existing.get("state") in TERMINAL
+                    and not _retryable_terminal(existing, proposal, args.repo)
+                )
                 or (args.mode == "dry-run" and existing.get("state") == "reviewed")
             )
         ):

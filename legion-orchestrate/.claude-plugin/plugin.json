@@ -1,7 +1,7 @@
 {
   "name": "legion-orchestrate",
   "description": "Legion's dynamic multi-model orchestrator: the active primary decomposes work, configured executor roles fan out scoped slices, independent roles cross-verify, and the primary synthesizes and gates. Ships `legion-fanout` plus the LEGION_ULTRACODE max-exhaustive workflow.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "author": {
     "name": "legion-core"
   },

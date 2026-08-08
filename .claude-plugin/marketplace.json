@@ -5,7 +5,7 @@
   },
   "version": "0.20.1",
   "metadata": {
-    "description": "Legion Core — the model-agnostic orchestration engine under the hood of an AI agent: models, harnesses, loops, self-improving agents. The stack, not another wrapper. Ships scoped delegation, multi-model fan-out, telemetry/cost reporting, doctor/self-learn/heal loops, and cross-harness setup for Claude Code, Codex, Cursor, and opencode. One orchestrator, a legion of models.",
+    "description": "Legion Core \u2014 the model-agnostic orchestration engine under the hood of an AI agent: models, harnesses, loops, self-improving agents. The stack, not another wrapper. Ships scoped delegation, multi-model fan-out, telemetry/cost reporting, doctor/self-learn/heal loops, and cross-harness setup for Claude Code, Codex, Cursor, and opencode. One orchestrator, a legion of models.",
     "repository": "https://github.com/Opus-Aether-AI/legion-core"
   },
   "plugins": [
@@ -13,7 +13,7 @@
       "name": "legion-router",
       "source": "./legion-router",
       "description": "Legion's multi-model brain: delegate scoped tasks to configured Codex, Cursor, Claude, and opencode executors, then bring back a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
-      "version": "0.5.8",
+      "version": "0.5.9",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",
@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic repeated gates, legion-self-learn evidence/proposals, review-only legion-improve draft PRs, legion-trace, legion-otel-export, and legion-doctor verification.",
-      "version": "0.2.12",
+      "version": "0.2.13",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -64,7 +64,7 @@
       "name": "legion-orchestrate",
       "source": "./legion-orchestrate",
       "description": "Legion's dynamic multi-model orchestrator: the active primary decomposes work, configured executor roles fan out scoped slices, independent roles cross-verify, and the primary synthesizes and gates. Ships `legion-fanout` plus the LEGION_ULTRACODE max-exhaustive workflow.",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "category": "agent-orchestration",
       "keywords": [
         "orchestration",
@@ -131,7 +131,7 @@
     {
       "name": "legion-codex-mode",
       "source": "./legion-codex-mode",
-      "description": "The Codex-CLI-primary routing brain for Legion — the mirror of legion-router. When you run Legion under Codex, the codex_workhorse ref does most of the work; this skill tells you when to hand a task up to the configured Claude role via `legion-claude` (deep architecture, polished/complex frontend with the impeccable skill, final cross-model review, tie-breaks, when stuck) versus inline — with automatic configured-Codex fallback if the Claude limit is hit. Also maps what runs natively on Codex (MCPs, mirrored skills, bridged commands/agents) so you don't reach for Claude needlessly. Triggers on running Legion under Codex, deep-design/frontend-polish/final-review smells, or 'ask claude' / 'second opinion from claude'.",
+      "description": "The Codex-CLI-primary routing brain for Legion \u2014 the mirror of legion-router. When you run Legion under Codex, the codex_workhorse ref does most of the work; this skill tells you when to hand a task up to the configured Claude role via `legion-claude` (deep architecture, polished/complex frontend with the impeccable skill, final cross-model review, tie-breaks, when stuck) versus inline \u2014 with automatic configured-Codex fallback if the Claude limit is hit. Also maps what runs natively on Codex (MCPs, mirrored skills, bridged commands/agents) so you don't reach for Claude needlessly. Triggers on running Legion under Codex, deep-design/frontend-polish/final-review smells, or 'ask claude' / 'second opinion from claude'.",
       "version": "0.1.1",
       "category": "agent-orchestration",
       "keywords": [
@@ -153,7 +153,7 @@
     {
       "name": "legion-opencode-mode",
       "source": "./legion-opencode-mode",
-      "description": "The decision guide for an opencode-primary Legion session — the opencode counterpart of legion-codex-mode. When you drive Legion under opencode you do most of the work yourself; this skill tells you WHICH kind of task is worth handing to another model and to WHOM — Claude for deep architecture and polished frontend (with the impeccable skill), a workhorse model for bulk implementation, a different model for a second opinion — versus keeping it inline. Triggers on running Legion under opencode, on deep-design / frontend-polish / final-review judgement calls, or on 'ask claude' / 'get a second opinion' while working in opencode.",
+      "description": "The decision guide for an opencode-primary Legion session \u2014 the opencode counterpart of legion-codex-mode. When you drive Legion under opencode you do most of the work yourself; this skill tells you WHICH kind of task is worth handing to another model and to WHOM \u2014 Claude for deep architecture and polished frontend (with the impeccable skill), a workhorse model for bulk implementation, a different model for a second opinion \u2014 versus keeping it inline. Triggers on running Legion under opencode, on deep-design / frontend-polish / final-review judgement calls, or on 'ask claude' / 'get a second opinion' while working in opencode.",
       "version": "0.1.1",
       "category": "agent-orchestration",
       "keywords": [
@@ -175,7 +175,7 @@
     {
       "name": "legion-hermes-mode",
       "source": "./legion-hermes-mode",
-      "description": "The metered-delegation guide for a hermes-primary Legion session. hermes is a long-running persona / messaging assistant / orchestrator — NOT a coding CLI — so when it needs code implemented, edited, tested, or reviewed it hands that work to a headless coding harness through METERED Legion CLIs (`legion-delegate run --executor …`, `legion-fanout`, `legion-run`) from its terminal tool, instead of a raw shell-out that leaves no telemetry. Triggers when hermes or one of its cron jobs / skills needs to build, fix, test, or review code, or on 'have hermes build/fix X'.",
+      "description": "The metered-delegation guide for a hermes-primary Legion session. hermes is a long-running persona / messaging assistant / orchestrator \u2014 NOT a coding CLI \u2014 so when it needs code implemented, edited, tested, or reviewed it hands that work to a headless coding harness through METERED Legion CLIs (`legion-delegate run --executor \u2026`, `legion-fanout`, `legion-run`) from its terminal tool, instead of a raw shell-out that leaves no telemetry. Triggers when hermes or one of its cron jobs / skills needs to build, fix, test, or review code, or on 'have hermes build/fix X'.",
       "version": "0.1.0",
       "category": "agent-orchestration",
       "keywords": [

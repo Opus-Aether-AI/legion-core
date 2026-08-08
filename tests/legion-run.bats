@@ -11,6 +11,11 @@ setup() {
   export LEGION_REPOS_FILE="$LEGION_STATE_ROOT/repos.jsonl"
   export LEGION_BENCH_DIR="$LEGION_STATE_ROOT/bench"
   export LEGION_REPORTS_DIR="$LEGION_STATE_ROOT/reports"
+  # Pin both learning stores. A Legion-managed parent environment exports these,
+  # and a test that resets only LEGION_STATE_ROOT would otherwise read and write
+  # the operator's real hints through the inherited path.
+  export LEGION_PROJECT_LEARNING_DIR="$LEGION_STATE_ROOT/learning"
+  export LEGION_GLOBAL_LEARNING_DIR="$LEGION_STATE_ROOT/global-learning"
 
   REPO="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$REPO"

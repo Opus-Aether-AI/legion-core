@@ -1347,6 +1347,25 @@ def _guidance_text(value: Any, limit: int = 360) -> str:
     return _short(_GUIDANCE_WHITESPACE.sub(" ", text).strip(), limit)
 
 
+# The complete set of sentences core composes for a run outcome. Validating a
+# record's provenance_summary against these on READ -- not merely trusting the
+# marker written at construction -- means a hand-edited or forged outcomes.jsonL
+# entry cannot smuggle chosen text into trusted guidance: an unrecognized
+# sentence is simply not first-party, and promotion falls back to Legion's fixed
+# guardrail. Keep in sync with the producers in legion-run.py.
+_CORE_SENTENCE = re.compile(
+    r"legion-doctor check [A-Za-z0-9._:-]{1,80} failed\.|"
+    r"legion-run failed at [A-Za-z0-9._:-]{1,80}\.|"
+    r"legion-fanout reported \d{1,9} failed slice\(s\) and \d{1,9} apply conflict\(s\)\."
+)
+
+
+def _core_composed_sentence(value: Any) -> str:
+    """Return the summary only when it is one core itself is known to produce."""
+    text = _guidance_text(value)
+    return text if text and _CORE_SENTENCE.fullmatch(text) else ""
+
+
 def _first_party_outcome(outcome: dict[str, Any]) -> bool:
     """True only when core composed the summary from deterministic tooling.
 
@@ -1354,11 +1373,12 @@ def _first_party_outcome(outcome: dict[str, Any]) -> bool:
     are treated as untrusted, so an upgrade can never retroactively promote old
     extension prose into trusted executor guidance.
 
-    The marker is set by ``_learning_outcome`` and is not re-derivable once a
-    record has round-tripped through outcomes.jsonl, so it is a provenance
-    label, not an authentication token: any process that can write that file
-    can assert it -- as it could already assert ``source: "manual"``. Treat the
-    outcomes log as trusted local state.
+    The marker itself is not an authentication token -- any process that can
+    write outcomes.jsonl can assert it, as it could already assert
+    ``source: "manual"``. What bounds the damage is that the accompanying
+    ``provenance_summary`` is re-validated on read against the closed set of
+    sentences core actually composes, so asserting the marker over chosen text
+    gains nothing.
     """
     return _text(outcome.get("provenance")) == "first-party"
 
@@ -1395,7 +1415,7 @@ def _typed_hint_from_proposal(
     # finding -- so it is never promoted. What may be promoted is the separate
     # core-composed sentence the producer supplied alongside it, which contains
     # only identifiers core controls.
-    first_party = _guidance_text(outcome.get("provenance_summary"))
+    first_party = _core_composed_sentence(outcome.get("provenance_summary"))
     if source in {"manual", "session-learn", "learning-law"}:
         guidance = _hint_from_proposal(proposal)
     elif _first_party_outcome(outcome) and first_party:

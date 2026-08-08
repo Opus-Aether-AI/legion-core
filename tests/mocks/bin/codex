@@ -4,6 +4,9 @@
 # Behaviour controls (env):
 #   MOCK_CALL_LOG   append "codex <args>" for assertions
 #   MOCK_CODEX_FAIL =1 -> emit a thread.started then exit 3 (failure path)
+#   MOCK_CODEX_REVIEW_FINDINGS=1 -> emit a request_changes verdict
+#   MOCK_CODEX_REVIEW_EXIT=N -> write the verdict, then exit N (real Codex does
+#     this when its prose does not satisfy --output-schema)
 #   MOCK_CODEX_REVIEW_TRANSIENT_FAILS=N -> fail the first N review attempts
 #   MOCK_CODEX_REVIEW_ATTEMPT_FILE=PATH -> persistent counter for transient failures
 #   MOCK_CODEX_REVIEW_NO_VERDICT=1 -> review exits 0 without writing its verdict
@@ -87,6 +90,8 @@ if [[ $review -eq 1 ]]; then
     msg='{"verdict":"approve","summary":"mock invalid review","findings":[{}]}'
   elif [[ "${MOCK_CODEX_REVIEW_CONTRADICTORY:-}" == "1" ]]; then
     msg='{"verdict":"approve","summary":"mock contradictory review","findings":[{"severity":"critical","title":"Blocking issue"}]}'
+  elif [[ "${MOCK_CODEX_REVIEW_FINDINGS:-}" == "1" ]]; then
+    msg='{"verdict":"request_changes","summary":"mock blocking review","findings":[{"severity":"high","title":"Needs work"}]}'
   elif [[ "${MOCK_CODEX_REVIEW_PROSE:-}" == "1" ]]; then
     msg='No findings.'
   else
@@ -112,5 +117,8 @@ if [[ -n "$out_file" ]]; then
   if [[ $review -ne 1 || "${MOCK_CODEX_REVIEW_NO_VERDICT:-}" != "1" ]]; then
     printf '%s\n' "$msg" > "$out_file"
   fi
+fi
+if [[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_EXIT:-}" ]]; then
+  exit "$MOCK_CODEX_REVIEW_EXIT"
 fi
 exit 0

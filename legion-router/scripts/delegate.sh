@@ -1213,6 +1213,30 @@ cmd_review() {
       reason="completed"
       break
     fi
+    # A nonzero exit does not always mean no review happened. Codex can emit a
+    # complete review and still exit nonzero -- it does so when its prose output
+    # does not satisfy --output-schema, which is the documented quirk this
+    # normalizer exists for. Discarding that result reports a finished review as
+    # a failure, and downstream that becomes a retryable "review unavailable"
+    # rather than the verdict the reviewer actually reached.
+    #
+    # Recovery is deliberately one-directional: only a NON-approving verdict is
+    # honored from a failed run. An approval is the outcome that authorizes
+    # publishing, so it must come from a reviewer that exited cleanly; a
+    # rejection recovered here can only ever withhold permission.
+    if [[ -s "$attempt_verdict" ]]; then
+      if ! review_verdict_is_valid "$attempt_verdict"; then
+        python3 "$REVIEW_NORMALIZER" "$attempt_verdict" --repo "$wt" \
+          >/dev/null 2>&1 || true
+      fi
+      if review_verdict_is_valid "$attempt_verdict" &&
+         [[ "$(jq -r '.verdict' "$attempt_verdict" 2>/dev/null)" != "approve" ]]; then
+        note "⚠ reviewer exited $rc but produced a usable non-approving verdict; honoring it"
+        status="ok"
+        reason="completed"
+        break
+      fi
+    fi
     if is_review_transient_failure "$rc" "$attempt_err"; then
       reason="transient-exhausted"
       if [[ "$attempt" -lt "$max_attempts" ]]; then

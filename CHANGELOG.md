@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.21.0...v0.21.1) (2026-08-08)
+
+
+### Fixed
+
+* **router:** honor a non-approving review verdict from a failed reviewer ([#122](https://github.com/Opus-Aether-AI/legion-core/issues/122)) ([2279ded](https://github.com/Opus-Aether-AI/legion-core/commit/2279dedb6c8dd9c3fe5e75555b4b7847af3bcbed))
+
 ## [0.21.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.20.1...v0.21.0) (2026-08-08)
 
 

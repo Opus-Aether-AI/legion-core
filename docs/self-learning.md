@@ -155,8 +155,11 @@ ordinary plugin and heavy-task runs. Hints may also be scoped to `plan`,
 `fanout`, `validate`, or `review`. Promotion holds a project lock across the
 read/merge/write transaction; durable memory uses the same serialization.
 Maintainer retirement/supersession decisions remain protected tombstones even
-under capacity pressure, and rejected promotions are reported while compiler
-space stays reserved for global hints. The improvement queue retains an active
+under capacity pressure, and rejected promotions are reported. Global hints are
+reserved space in the raw candidate pool that is read from storage, not in the
+compiled selection: selection is strictly by scope rank, so a saturated project
+store cannot hide a law from the compiler, but a busy entity can still outrank
+one within the hint cap. The improvement queue retains an active
 generated law when a later report does not re-emit it, replaces it when a
 re-emitted proposal has a new fingerprint, and removes it when the law is retired.
 The default cron run scans all available spans and manual records so bugs recorded

@@ -1580,33 +1580,42 @@ def test_reconciliation_wait_is_not_reported_as_a_queue_failure(tmp_path):
     high-severity self-learn failure record, so counting the publish
     reconciliation window as a failure would pollute the learning signal this
     engine exists to protect -- possibly on consecutive days for one proposal.
+
+    Driven through the real CLI: a record is parked in the reviewed state with a
+    publish intent whose pull request no listing will corroborate, which is
+    exactly the state a crash between `gh pr create` and its receipt leaves
+    behind.
     """
-    import importlib.util
-
-    module_path = os.path.join(
-        ROOT, "legion-observability", "scripts", "legion-improve.py"
+    repo, _ = _repo(tmp_path)
+    state = tmp_path / "state"
+    queue_dir = tmp_path / "queue"
+    queue_dir.mkdir()
+    env = _env(tmp_path)
+    proposal = _proposal(tmp_path)
+    (queue_dir / "a-first.json").write_text(
+        proposal.read_text(encoding="utf-8"), encoding="utf-8"
     )
-    spec = importlib.util.spec_from_file_location("legion_improve", module_path)
-    improve = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(improve)
 
-    assert "draft_pr_reconcile_pending" in improve.QUEUE_WAITING_REASONS
-    # It must still be retryable, so a later run can find the pull request.
-    assert "draft_pr_reconcile_pending" in improve.DRAFT_RETRYABLE
-    # Genuine failures must stay failures.
-    for reason in ("gh_unavailable", "branch_push_failed", "draft_pr_create_failed"):
-        assert reason not in improve.QUEUE_WAITING_REASONS, reason
-
-    schema = json.loads(
-        open(
-            os.path.join(
-                ROOT,
-                "legion-observability",
-                "schema",
-                "legion.improvement-queue-run.v1.schema.json",
-            ),
-            encoding="utf-8",
-        ).read()
+    # Reach the reviewed state, then plant the publish intent the reconciliation
+    # window keys on, and make the pull-request listing come back empty.
+    _, partial = _run(
+        repo, proposal, state, "--mode", "draft", "--stop-after", "reviewed", env=env
     )
-    status = schema["properties"]["results"]["items"]["properties"]["status"]["enum"]
-    assert "waiting" in status, status
+    record_path = state / "runs" / (partial["fingerprint"] + ".json")
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["publish_attempt"] = {
+        "repository": env["LEGION_IMPROVE_GITHUB_REPOSITORY"],
+        "head_branch": record["branch"],
+        "head_sha": record["review_receipt"]["reviewed_head_sha"],
+    }
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    result, payload = _queue(
+        repo, queue_dir, state, "--mode", "draft", "--max", "1", env=env
+    )
+
+    assert payload["results"], payload
+    assert payload["results"][0]["status"] == "waiting", payload
+    assert payload["failed"] == 0, payload
+    assert result.returncode == 0, result.stderr
+    assert "pr create" not in open(env["FIXTURE_GH_LOG"], encoding="utf-8").read()

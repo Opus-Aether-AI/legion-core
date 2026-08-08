@@ -2748,10 +2748,12 @@ def execute(
         # `required` mode permanently unsatisfiable for direct heavy-task runs
         # the moment a hint existed -- and it demanded it of the one branch that
         # can prove delivery directly, which is checked instead.
+        plan_acknowledged = False
         if learning_context_mode == "required" and not runner.get("plan_files"):
             _require_learning_context_ack(
                 plan_payload, plan_bundle, plan_guidance, "planner"
             )
+            plan_acknowledged = bool(plan_guidance)
         elif learning_context_mode == "required" and plan_guidance and not plan_delivered:
             raise LegionRunError(
                 "required learning guidance was not delivered into the plan file", 1
@@ -2759,13 +2761,17 @@ def execute(
         plan_payload["learning_context"] = plan_bundle["descriptor"]
         _write_json(plan_path, plan_payload)
         env["LEGION_TASK"] = task
+        # "acknowledged" means a planner echoed the revision back. Only the
+        # plan-command branch can produce that. The plan-file branch proves
+        # delivery instead, and must say so: claiming an acknowledgement that
+        # nothing produced would put a false attestation in a signed receipt.
         record_learning_receipt(
             plan_bundle,
             "plan",
             "delivery",
             (
                 "acknowledged"
-                if plan_delivered and learning_context_mode == "required"
+                if plan_acknowledged
                 else "delivered" if plan_delivered
                 else "not_delivered" if plan_guidance
                 else learning_context_mode

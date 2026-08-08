@@ -1731,12 +1731,21 @@ def draft(
             timeout=120,
         )
         if created.returncode != 0:
-            # A rejection by gh means no pull request exists and a straight
-            # retry is safe. A local timeout or an output-cap kill does NOT
-            # mean that: _bounded_process synthesizes those codes after killing
-            # the child, while the request it already sent can still land at
-            # GitHub. Those keep the intent so the next run reconciles instead
-            # of opening a duplicate.
+            # Distinguish who reported the failure. A code from gh itself means
+            # gh ran its own error handling and told us the create did not
+            # succeed, so an immediate retry is correct and is what an operator
+            # expects after a transient API error. 124/125 are synthesized
+            # locally by _bounded_process after it kills the child, so nobody
+            # observed the outcome and the request may still be in flight --
+            # those keep the intent and reconcile instead.
+            #
+            # A cross-model review argued for retaining the intent on every
+            # nonzero exit, since gh could in principle create the pull request
+            # and then fail reading the response. That residual case is already
+            # covered: the next run lists `--state all` and adopts an existing
+            # pull request before creating. Retaining on every exit would
+            # instead delay every genuinely failed create by RECONCILE_ATTEMPTS
+            # runs -- days, at the daily cron cadence this ships with.
             if created.returncode not in _AMBIGUOUS_PROCESS_CODES:
                 record.pop("publish_attempt", None)
                 _persist_draft_state(root, record)

@@ -2710,6 +2710,7 @@ def execute(
         # omit the field entirely, so inspecting plan.json would report a
         # delivery failure that did not happen.
         plan_delivered = False
+        plan_consumer_task = task
         if runner.get("plan_files"):
             # The plan-file branch assembles plan.json in-process and never
             # reads the environment, so guidance has to be threaded in
@@ -2724,8 +2725,13 @@ def execute(
                 guidance=plan_guidance,
             )
             # This branch assembles plan.json itself, so the artifact is the
-            # delivery and can be checked directly.
+            # delivery and can be checked directly. The same text is handed to
+            # slice generation below: writing it only into plan.json would
+            # deliver it to nothing, because default_tdd_slices builds slice
+            # tasks from the task argument, not from plan["task"].
             plan_delivered = _guidance_present(written.get("task"), plan_guidance)
+            if plan_delivered:
+                plan_consumer_task = _as_text(written.get("task"), task)
             _write_json(run_dir / "plan-command.json", {"ok": True, "source": "plan-file", "paths": runner["plan_files"]})
         else:
             run_process(
@@ -2786,7 +2792,7 @@ def execute(
             slices_path,
             plan_path,
             runner,
-            task,
+            plan_consumer_task,
             allow_generated_slices=allow_generated_slices,
         )
         slices = load_slices(slices_path)

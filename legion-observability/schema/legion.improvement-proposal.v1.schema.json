@@ -98,8 +98,7 @@
       "type": "object",
       "properties": {
         "source": {
-          "type": "string",
-          "maxLength": 80
+          "const": "learning-law"
         },
         "source_id": {
           "type": "string",
@@ -111,7 +110,7 @@
         },
         "confidence": {
           "type": "number",
-          "minimum": 0,
+          "minimum": 0.9,
           "maximum": 1
         },
         "support": {
@@ -119,14 +118,18 @@
           "properties": {
             "episodes": {
               "type": "integer",
-              "minimum": 0
+              "minimum": 5
             },
             "projects": {
               "type": "integer",
-              "minimum": 0
+              "minimum": 3
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "required": [
+            "episodes",
+            "projects"
+          ]
         },
         "evidence_ids": {
           "type": "array",
@@ -177,6 +180,12 @@
             }
           }
         }
+      ],
+      "required": [
+        "source",
+        "law_key",
+        "confidence",
+        "support"
       ]
     }
   },

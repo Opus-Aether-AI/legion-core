@@ -1077,3 +1077,30 @@ $run_error" ]
     [ "$status" -eq 1 ]
     [[ "$output" == *"macOS-only"* ]]
 }
+
+@test "delegate review: honors a non-approving verdict from a reviewer that exited nonzero" {
+    local repo; repo="$(make_test_repo review-recover-reject)"
+    # Real Codex writes a complete review and still exits nonzero when its prose
+    # does not satisfy --output-schema. Discarding that reports a finished review
+    # as unavailable, which downstream retries instead of acting on the verdict.
+    MOCK_CODEX_REVIEW_FINDINGS=1 MOCK_CODEX_REVIEW_EXIT=1 \
+      run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '
+      .status == "ok"
+      and .verdict.verdict == "request_changes"
+      and (.verdict.findings | length) == 1
+    '
+}
+
+@test "delegate review: never honors an approval from a reviewer that exited nonzero" {
+    local repo; repo="$(make_test_repo review-recover-approve)"
+    # Approval is what authorizes publishing, so it must come from a reviewer
+    # that exited cleanly. Recovery is one-directional by design.
+    MOCK_CODEX_REVIEW_EXIT=1 \
+      run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "failed" and .verdict == null'
+}

@@ -151,7 +151,10 @@ marker existed carry no provenance and are treated as untrusted.
 Instead, review evidence promotes only Legion's fixed, typed guardrail for that
 finding class. Local feedback remains entity-scoped; an active, supported
 cross-project learning law is promoted with `global` scope so it can reach
-ordinary plugin and heavy-task runs. Hints may also be scoped to `plan`,
+ordinary plugin and heavy-task runs. `global` here means "any entity in this
+project", not a store shared between projects: each project re-derives the law
+into its own `hints.json` from the shared `laws.json`, which is the only
+cross-project artifact. Hints may also be scoped to `plan`,
 `fanout`, `validate`, or `review`. Promotion holds a project lock across the
 read/merge/write transaction; durable memory uses the same serialization.
 Maintainer retirement/supersession decisions remain protected tombstones even

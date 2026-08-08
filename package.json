@@ -1,6 +1,6 @@
 {
   "name": "@opus-aether-ai/legion-core",
-  "version": "0.20.1",
+  "version": "0.21.0",
   "description": "Legion — the model-agnostic orchestration engine under the hood of an AI agent: models, harnesses, loops, self-improving agents. Scoped multi-model delegation (Codex, Cursor, Claude, opencode), telemetry, doctor/self-learn/heal loops, and cross-harness setup.",
   "keywords": [
     "ai-agents",

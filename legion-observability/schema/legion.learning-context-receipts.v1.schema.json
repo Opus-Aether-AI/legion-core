@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.learning-context-receipts.v1.schema.json",
+  "title": "legion.learning-context-receipts.v1",
+  "type": "object",
+  "$defs": {
+    "disposition": {
+      "type": "object",
+      "required": ["id", "disposition"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 160},
+        "disposition": {"type": "string", "minLength": 1, "maxLength": 80}
+      },
+      "additionalProperties": false
+    },
+    "descriptor": {
+      "type": "object",
+      "required": ["path", "revision", "mode", "dispositions"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "mode": {"enum": ["off", "observe", "advisory", "required"]},
+        "dispositions": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {"$ref": "#/$defs/disposition"}
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["schema", "receipt_id", "learning_context", "learning_contexts", "receipts"],
+  "properties": {
+    "schema": {"const": "legion.learning-context-receipts.v1"},
+    "receipt_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "learning_context": {"$ref": "#/$defs/descriptor"},
+    "learning_contexts": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 4,
+      "propertyNames": {"enum": ["plan", "fanout", "validate", "review"]},
+      "additionalProperties": {"$ref": "#/$defs/descriptor"}
+    },
+    "receipts": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": ["boundary", "context_boundary", "kind", "status", "path", "revision", "dispositions"],
+        "properties": {
+          "boundary": {"enum": ["plan", "fanout-apply", "validate", "final-review"]},
+          "context_boundary": {"enum": ["plan", "fanout", "validate", "review"]},
+          "kind": {"enum": ["delivery", "deterministic-verification"]},
+          "status": {"type": "string", "minLength": 1, "maxLength": 32},
+          "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "dispositions": {
+            "type": "array",
+            "maxItems": 300,
+            "items": {"$ref": "#/$defs/disposition"}
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

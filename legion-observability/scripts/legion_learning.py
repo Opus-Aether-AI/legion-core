@@ -4,8 +4,8 @@
 The v2 learning lane turns bounded agent-session events into explainable
 sessions, episodes, decisions, outcome links, behavior scores, and reusable
 laws. Raw transcript content is streamed, redacted, and discarded. The daily
-lane is report/proposal only; source mutation remains the responsibility of the
-existing explicitly invoked ``legion-self-learn --apply-source`` workflow.
+lane is report/proposal only; source candidates belong to the separate,
+review-only ``legion-improve`` state machine.
 """
 
 from __future__ import annotations

@@ -362,8 +362,9 @@ legion-self-learn run --repo . --apply-memory --quiet
 For the corpus path the outcome is **attributed to the failing harness mode**
 (`target_type: command`, `target_name: legion-delegate`/`legion-cursor`/`direct-*`),
 so a harness regression lands on the right entity. Those outcomes remain
-memory/proposal input only. Source mutation stays behind the existing
-`--apply-source` scorecard gate.
+memory/proposal input only. Source mutation stays behind the typed
+`legion-improve` queue gate. Proposals cannot supply executable
+commands, and candidate publication remains draft-only.
 
 ## Implementation Slices
 

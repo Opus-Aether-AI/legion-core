@@ -46,9 +46,15 @@ legion-delegate apply --run <RUN_ID> --repo .
 # Delegate a scoped task to Cursor Agent headless
 legion-cursor run --task "try the same fix with Cursor Agent; minimal edit" --repo .
 
-# Structured Codex review of an immutable base/head pair
-legion-delegate review --archetype security-review --base main --head HEAD --repo .
+# Structured Codex review of an immutable base/head pair, with optional bounded instructions
+legion-delegate review --archetype security-review --base main --head HEAD --repo . \
+  --task "Verify the selected security and learning guardrails."
 ```
+
+Review output is schema-gated. The adapter accepts schema-valid JSON and
+narrowly normalizes Codex's built-in `[P0]`–`[P3]` or explicit `No findings`
+formats; any other prose remains an invalid, fail-closed verdict. `approve` and
+`comment` cannot carry medium-or-higher findings.
 
 Requires the CLI for each executor you use, plus `jq` and `git`. The proxy
 additionally needs `bun`.
@@ -133,10 +139,14 @@ legion-router/
 
 - `run` defaults to the `workspace-write` sandbox; `review` to `read-only`.
 - `danger-full-access` is hard-blocked unless `LEGION_ALLOW_DANGER=1`.
-- Task text is scanned for dangerous/injection patterns before write runs (`LEGION_ALLOW_UNSAFE=1` to override).
+- Task text is scanned for dangerous/injection patterns before runs and reviews (`LEGION_ALLOW_UNSAFE=1` to override).
 - Delegation never auto-applies a diff unless `--apply` is given and the diff applies cleanly.
 - Reviews resolve `--base`/`--head` once to commit SHAs, retry transient
   executor failures at most twice by default, and write a durable terminal receipt.
+  Every Codex review attempt remains mechanically bound with `exec -s read-only
+  review --base <resolved-sha>`; optional bounded, scanned task guidance is
+  injected through Codex developer instructions and never replaces the base
+  argument.
 - Every executor receives `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`,
   `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized repository policy uses that
   context to prevent accidental recursive delegation.

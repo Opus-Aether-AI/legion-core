@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.improvement-run.v1.schema.json",
+  "title": "legion.improvement-run.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "fingerprint",
+    "state"
+  ],
+  "properties": {
+    "schema": {
+      "const": "legion.improvement-run.v1"
+    },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "state": {
+      "enum": [
+        "eligible",
+        "leased",
+        "prepared",
+        "candidate_ready",
+        "evaluated",
+        "reviewed",
+        "draft_created",
+        "rejected",
+        "stale",
+        "failed"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "off",
+        "dry-run",
+        "draft"
+      ]
+    },
+    "proposal_id": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "base_sha": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "remote_base_sha": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "remote_identity": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "base_branch": {
+      "type": "string"
+    },
+    "base_source": {
+      "enum": [
+        "operator",
+        "remote"
+      ]
+    },
+    "branch": {
+      "type": "string",
+      "pattern": "^legion-improve/[a-f0-9]{64}$"
+    },
+    "lease_id": {
+      "type": "string"
+    },
+    "published_remote_head": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "pending_rollback": {
+      "type": "object",
+      "required": [
+        "id",
+        "url",
+        "repository",
+        "head_branch",
+        "head_sha"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{24}$"
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "head_branch": {
+          "type": "string",
+          "pattern": "^legion-improve/[a-f0-9]{64}$"
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "worktree": {
+      "type": "string",
+      "pattern": "^/isolated-worktree/[a-f0-9]{64}$"
+    },
+    "transitions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "draft_pr": {
+      "type": "object",
+      "required": [
+        "id",
+        "draft",
+        "url",
+        "number",
+        "body",
+        "repository",
+        "remote_identity",
+        "base_branch",
+        "base_sha",
+        "head_branch",
+        "head_sha"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "remote_identity": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "base_branch": {
+          "type": "string"
+        },
+        "base_sha": {
+          "type": "string"
+        },
+        "head_branch": {
+          "type": "string"
+        },
+        "head_sha": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "review_receipt": {
+      "type": "object",
+      "required": [
+        "schema",
+        "id",
+        "independent",
+        "verdict",
+        "reviewed_base_sha",
+        "reviewed_head_sha",
+        "diff_digest",
+        "reviewer",
+        "attempts"
+      ],
+      "properties": {
+        "schema": {
+          "const": "legion.improvement-review-receipt.v1"
+        },
+        "id": {
+          "type": "string"
+        },
+        "independent": {
+          "const": true
+        },
+        "verdict": {
+          "const": "approved"
+        },
+        "reviewed_base_sha": {
+          "type": "string"
+        },
+        "reviewed_head_sha": {
+          "type": "string"
+        },
+        "diff_digest": {
+          "type": "string"
+        },
+        "reviewer": {
+          "type": "object",
+          "required": [
+            "kind",
+            "model"
+          ],
+          "properties": {
+            "kind": {
+              "const": "legion-delegate"
+            },
+            "model": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      },
+      "additionalProperties": false
+    },
+    "publish_attempt": {
+      "type": "object",
+      "description": "Durable intent recorded before the irreversible pull-request create.",
+      "required": [
+        "repository",
+        "head_branch",
+        "head_sha"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "head_branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+        },
+        "reconcile_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -29,13 +29,13 @@ Legion implements that protocol locally:
   two projects, retiring laws when the current evidence no longer supports them;
 - mine spans, review findings, trigger misses, routing advice, and manual bugs;
 - attach every outcome to a catalog entity;
-- write durable entity-scoped hints and proposals;
+- write durable entity-scoped memory and proposals;
+- promote bounded, trusted memory into the typed `hints.json` store consumed by
+  later official runs;
 - run a deterministic baseline scorecard (`legion-eval` plugin + entity datasets
   and `legion-doctor`);
-- optionally test source mutations in isolated temp copies;
-- keep only the best candidate that improves the score without metric
-  regressions; and
-- roll back the real checkout if the final scorecard fails or regresses.
+- keep source proposals typed and maintainer-eligible; and
+- hand source changes to the separate, review-only `legion-improve` engine.
 
 ## What It Observes
 
@@ -116,6 +116,8 @@ When enabled at install time, the `legion-core-refresh` cron runs:
 legion-learn analyze --repo ~/.agents/sources/legion-core
 legion-session-learn --repo ~/.agents/sources/legion-core --record
 legion-self-learn run --repo ~/.agents/sources/legion-core --apply-memory --quiet
+# Only when explicitly configured:
+legion-improve queue --repo ~/.agents/sources/legion-core --base-ref main --mode draft --max 1 --json
 ```
 
 The first step writes the project report under
@@ -129,11 +131,40 @@ This writes under the project `state_root` reported by
 `legion-state --repo ~/.agents/sources/legion-core`:
 
 - `self-learn/harness-memory.json`
+- `learning/hints.json` (typed runtime guidance promoted by `--apply-memory`)
 - `self-learn/reports/<date>.json`
 - `self-learn/experiments.md`
 - `self-learn/experiments.tsv`
+- `self-learn/improvement-queue/<proposal-fingerprint>.json`
+- `improve/runs/<proposal-fingerprint>.json` after an improvement mode processes it
 
 Memory mode is intentionally safe: it does not rewrite source or vendored skills.
+`--apply-memory` is the explicit promotion boundary. Manual corrections,
+session decisions, and promoted learning laws may contribute bounded guidance;
+model-authored review text is not copied into trusted executor instructions.
+A run outcome contributes only the short sentence core composed for it -- the
+failing doctor check, the failing stage, the fan-out counters -- recorded as
+`provenance_summary` alongside a `provenance` marker. Its human-facing summary
+quotes third-party detail (a doctor message naming a plugin, a slice error, a
+reviewer finding) and is never promoted. Outcome records written before that
+marker existed carry no provenance and are treated as untrusted.
+Instead, review evidence promotes only Legion's fixed, typed guardrail for that
+finding class. Local feedback remains entity-scoped; an active, supported
+cross-project learning law is promoted with `global` scope so it can reach
+ordinary plugin and heavy-task runs. `global` here means "any entity in this
+project", not a store shared between projects: each project re-derives the law
+into its own `hints.json` from the shared `laws.json`, which is the only
+cross-project artifact. Hints may also be scoped to `plan`,
+`fanout`, `validate`, or `review`. Promotion holds a project lock across the
+read/merge/write transaction; durable memory uses the same serialization.
+Maintainer retirement/supersession decisions remain protected tombstones even
+under capacity pressure, and rejected promotions are reported. Global hints are
+reserved space in the raw candidate pool that is read from storage, not in the
+compiled selection: selection is strictly by scope rank, so a saturated project
+store cannot hide a law from the compiler, but a busy entity can still outrank
+one within the hint cap. The improvement queue retains an active
+generated law when a later report does not re-emit it, replaces it when a
+re-emitted proposal has a new fingerprint, and removes it when the law is retired.
 The default cron run scans all available spans and manual records so bugs recorded
 after yesterday's cron are still ingested. Passing `--day YYYY-MM-DD` keeps an
 exact UTC-day report window for reproducible audits and tests. Durable memory
@@ -166,38 +197,77 @@ Setup bridges record failures into the same memory stream when Codex/Cursor MCP,
 agent, skill, or CLI verification fails. That lets daily refresh learn from broken
 installation paths, not only from model execution spans.
 
-## Source Mutation Mode
+## Review-only source improvement
 
-Source mutation is explicit:
+`legion-self-learn --apply-source` is retained only as a compatibility dry-run
+and cannot mutate a checkout. To evaluate an approved typed proposal, use:
 
 ```bash
-legion-self-learn run --apply-source
+legion-improve run --repo . --proposal proposal.json --state-dir .legion/improve --mode draft --json
 ```
 
-It creates isolated candidate copies, applies each mutable proposal, and scores
-the candidate with:
+`legion-improve` defaults to `off`; `dry-run` never creates a PR; and `draft`
+is the only publishing mode. It freezes the remote identity and base SHA,
+creates an isolated worktree, allows only a native Markdown-guardrail mutation,
+checks a bounded allowlisted diff, and runs immutable baseline and candidate
+gates repeatedly. Any baseline/candidate variance or candidate regression is
+rejected and may be retried after the external validator is repaired. A plugin
+guardrail also derives the required patch-version changes for its plugin
+manifest and marketplace entry; proposals still cannot supply those paths or a
+command. A bounded receipt from the
+external `legion-delegate review` boundary over exact base/head SHAs is required
+before an idempotent draft PR is created through `gh`. It never merges, deploys,
+or writes to the operator checkout.
 
-- `legion-eval --repo <repo> --json`
-- `legion-doctor --repo <repo>`
+Recoverable terminal attempts are not dead letters. A repaired validator,
+cleaned operator checkout, newer proposal revision, or advanced remote base can
+reopen the same deterministic fingerprint from `eligible`; completed draft
+records never reopen. Before publishing, the engine searches open, closed, and
+merged PRs for the deterministic head. It reclaims only its own unpublished
+branch with force-with-lease, rechecks the base around creation, and closes the
+new draft plus removes its owned branch if post-create identity verification
+fails. Durable state records the commit actually published—not merely the latest
+reviewed commit—so repeated stale generations can reclaim only their own branch.
+A pending-rollback receipt is persisted before verification; failed cleanup is
+retried before any later publication, including an already-closed PR response.
+Draft state binds a deterministic ID and fixed body to the GitHub repository,
+PR number, base/head branches, and both reviewed object IDs.
 
-Only candidates with a positive score delta and no metric regressions are
-eligible to be kept. Legion applies the best kept candidate to the real checkout,
-reruns the scorecard, and rolls back if the final checkout fails or regresses.
-The no-regression gate covers measured eval cases/accuracy plus misses,
-collisions, false-success signals, safety regressions, and gross latency
-regressions. Cost and token usage are not scorecard gates because these local
-deterministic subprocesses do not currently report either metric.
+Only active cross-project laws with confidence at least `0.9`, five supporting
+episodes, three projects, a bounded guidance string, and a safe non-vendored
+Markdown target enter this queue. Other observations still improve executor
+outputs through scoped memory, but cannot propose source changes.
 
-Vendored files are skipped unless `--allow-vendored` is passed.
+The daily refresh processes no source proposal by default. To enable the
+review-only automation explicitly:
 
-Two mutation families are supported today:
+```bash
+export LEGION_IMPROVE_MODE=dry-run  # evaluate + independent review, no PR
+export LEGION_IMPROVE_MODE=draft    # additionally create a draft PR
+export LEGION_IMPROVE_MAX=1         # bounded successful proposals per refresh
+```
 
-- command, agent, and skill trigger fixes patch markdown frontmatter
-  `description` fields with measured trigger terms so entity scorecards can see
-  the improvement;
-- non-trigger markdown proposals get a `Learned Guardrails` block; and
-- marketplace plugin trigger fixes patch `.claude-plugin/marketplace.json`
-  descriptions with measured trigger terms.
+`LEGION_IMPROVE_MAX` bounds the proposals a refresh *completes*, and it is a
+hard cap on draft PRs created. Attempts that fail do not consume that budget --
+otherwise one permanently failing fingerprint, which sorts first every run,
+would starve every later proposal forever -- so a refresh may attempt up to
+`LEGION_IMPROVE_MAX + 3` entries before stopping. Size the cron window for that
+worst case, not for the success count.
+
+A publish intent is persisted before the pull request is created. If that call
+is ambiguous -- a local timeout, or a success whose URL could not be parsed --
+the intent survives and the next refresh reports `draft_pr_reconcile_pending`
+rather than risking a duplicate, for up to three refreshes before concluding
+nothing was published.
+
+The refresh bases candidates on the exact remote `main` tip even when the
+installed source clone is detached at a stable release tag. Auto-update remains
+the separate release-pinned refresh step. A draft improvement still needs a
+working reviewer/model login and `gh` authentication.
+
+Durable state stores only bounded IDs, hashes, and summaries, so it is safe to
+inspect/replay after interruption without preserving prompts, outputs,
+credentials, or local checkout paths.
 
 ## Harness Parity Features
 
@@ -205,25 +275,24 @@ Two mutation families are supported today:
   `collision`, `precision_at_1`, `hit_at_k`, and `doctor_ok`.
 - **Entity scorecards:** `legion-eval` covers marketplace plugins plus command,
   agent, and skill routing cases.
-- **Candidate isolation:** source proposals run in isolated temp copies before
-  touching the real checkout.
+- **Candidate isolation:** `legion-improve` runs eligible source proposals in
+  isolated worktrees and never touches the real checkout.
 - **Hypothesis log:** every candidate records target, proposal IDs, hypothesis,
   score delta, status, and decision.
-- **Keep/discard gate:** Legion keeps only measured improvements and discards
-  failed, neutral, or regressing candidates.
+- **Keep/discard gate:** a candidate may only become a draft PR after stable,
+  non-regressing repeated gates and an independent receipt.
 - **Pass/fail contrast:** reports include success and failure examples by entity
   so future proposals can compare good and bad traces.
-- **Resolved-state tracking:** outcome IDs are marked processed only after a
-  kept source experiment resolves them. Unresolved bugs stay active in daily
-  reports; `--include-processed` restores audit visibility for resolved items.
+- **Resolved-state tracking:** outcomes remain evidence for future proposals;
+  a draft PR does not silently resolve or apply them.
 
 ## Remaining Extensions
 
 - Expand the Harness Bench-style workbench beyond the offline `core` suite; see
   [benchmarking.md](benchmarking.md).
 - Add hook and MCP-specific eval datasets once there are enough stable examples.
-- Expand source mutators beyond markdown guardrails and marketplace descriptions
-  only when each mutator has a scorecard that can prove improvement.
+- Add new typed mutators only when their path allowlists and scorecards
+  can prove safety and improvement.
 - Add evidence-backed scorers for new dimensions without changing existing
   versioned schema meanings.
 
@@ -238,5 +307,53 @@ legion-self-learn hints --entity skill:workflow-orchestrator
 legion-self-learn hints --entity plugin:legion-router
 ```
 
+## Typed executor context
+
+Use the context compiler when a runner needs learning guidance. It reads project
+and global `hints.json` collections, selects only trusted active hints, applies
+exact/selector/global scope in that order, and emits a deterministic token- and
+hint-bounded JSON document. Evidence, transcripts, excerpts, and other source
+payload fields are intentionally never included.
+
+```bash
+legion-self-learn compile-context --repo . --entity skill:release --stage plan --json
+```
+
+`reconcile` migrates only legacy path identities whose repository basename
+matches the canonical remote identity, deduplicates replayed evidence by ID, and
+replaces the resulting state file atomically:
+
+```bash
+legion-self-learn reconcile --repo . --legacy-state legacy-state.json --evidence evidence.jsonl --json
+```
+
 These hints are failure evidence. They do not override the user, the repository's
 `AGENTS.md`, or normal validation gates.
+
+Selection is strictly by scope rank -- exact, then selector, then global --
+within the hint and token caps. Guidance that is textually identical after
+normalization collapses to one entry, reported as `duplicate_guidance` in
+`excluded_hints`, so repeated boilerplate cannot crowd out a promoted law.
+
+One consequence follows from that ordering: an entity that accumulates more
+distinct entity-scoped hints than `max_hints` stops receiving cross-project
+laws, which are excluded as `hint_limit`. That is the intended precedence --
+specific guidance outranks general -- but it is worth watching in
+`excluded_hints` for a busy entity, and it is a reason to retire stale
+entity-scoped hints rather than to raise the cap.
+
+`legion-run` compiles a separate context immediately before each `plan`,
+`fanout`, `validate`, and `review` decision boundary. This prevents a plan-only
+hint from leaking into review and lets newly promoted stage scopes take effect
+where intended. It writes schema-valid context and usage artifacts even when no
+hint is selected, hashes each safe context as a revision, and re-authenticates
+the bytes both before and after delivery so same-user file replacement fails
+closed. Hint counts, UTF-8-byte token budgets, selector values, evidence replay,
+and excluded metadata all have absolute caps. In `required` mode, planners and
+validators must echo `learning_context_ack` with the exact boundary and revision;
+plan guidance is also placed in the actual `LEGION_TASK` input, while fanout and
+review guidance is injected directly into their bounded task inputs.
+`learning-receipts.json` binds every delivery to its boundary, path, and revision
+with a canonical receipt ID, and the artifact manifest records its SHA-256.
+Raw transcripts, selectors, and evidence excerpts never cross into executor
+context.

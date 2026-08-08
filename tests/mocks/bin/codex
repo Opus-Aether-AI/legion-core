@@ -8,6 +8,7 @@
 #   MOCK_CODEX_REVIEW_ATTEMPT_FILE=PATH -> persistent counter for transient failures
 #   MOCK_CODEX_REVIEW_NO_VERDICT=1 -> review exits 0 without writing its verdict
 #   MOCK_CODEX_REVIEW_INVALID_VERDICT=1 -> write a malformed review verdict
+#   MOCK_CODEX_REVIEW_CONTRADICTORY=1 -> approve while reporting a blocking finding
 #   MOCK_CODEX_REVIEW_DELAY=N -> keep a review alive for signal-handling tests
 #
 # Emits the codex-cli 0.139.x --json event shape. For `exec` with a writable
@@ -84,6 +85,10 @@ printf '%s\n' '{"type":"turn.started"}'
 if [[ $review -eq 1 ]]; then
   if [[ "${MOCK_CODEX_REVIEW_INVALID_VERDICT:-}" == "1" ]]; then
     msg='{"verdict":"approve","summary":"mock invalid review","findings":[{}]}'
+  elif [[ "${MOCK_CODEX_REVIEW_CONTRADICTORY:-}" == "1" ]]; then
+    msg='{"verdict":"approve","summary":"mock contradictory review","findings":[{"severity":"critical","title":"Blocking issue"}]}'
+  elif [[ "${MOCK_CODEX_REVIEW_PROSE:-}" == "1" ]]; then
+    msg='No findings.'
   else
     msg='{"verdict":"approve","summary":"mock review","findings":[]}'
   fi

@@ -289,6 +289,53 @@ SH
     grep -qF "self-learn run --repo $SOURCE_CLONE --apply-memory --quiet" "$MOCK_CALL_LOG"
 }
 
+@test "refresh.sh processes typed improvements only in an explicit bounded mode" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-self-learn" <<'SH'
+#!/usr/bin/env bash
+printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-improve" <<'SH'
+#!/usr/bin/env bash
+printf 'improve %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x \
+        "$SOURCE_CLONE/legion-observability/bin/legion-self-learn" \
+        "$SOURCE_CLONE/legion-observability/bin/legion-improve"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add improvement queue"
+    )
+
+    LEGION_UPDATE_REF=main LEGION_IMPROVE_MODE=draft LEGION_IMPROVE_MAX=2 \
+        run bash "$REFRESH_SH"
+
+    [ "$status" -eq 0 ]
+    grep -qF "improve queue --repo $SOURCE_CLONE --base-ref main --mode draft --max 2 --evaluation-repeats 2 --json" "$MOCK_CALL_LOG"
+}
+
+@test "refresh.sh leaves source improvement publication off by default" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-improve" <<'SH'
+#!/usr/bin/env bash
+printf 'improve %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x "$SOURCE_CLONE/legion-observability/bin/legion-improve"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add improve"
+    )
+
+    LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
+
+    [ "$status" -eq 0 ]
+    if grep -F "improve queue" "$MOCK_CALL_LOG"; then false; fi
+}
+
 @test "refresh.sh records session feedback before self-learning" {
     make_source_clone marketplace-minimal.json
     mkdir -p "$SOURCE_CLONE/legion-observability/bin"
@@ -354,6 +401,35 @@ SH
     [ "$session_line" -lt "$self_line" ]
 }
 
+@test "refresh.sh records evidence-linked learning failures and continues" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-learn" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/refresh-recorder" <<'SH'
+#!/usr/bin/env bash
+printf 'refresh-record %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x \
+        "$SOURCE_CLONE/legion-observability/bin/legion-learn" \
+        "$SOURCE_CLONE/legion-observability/bin/refresh-recorder"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add failing evidence learner"
+    )
+
+    LEGION_UPDATE_REF=main \
+        LEGION_SELF_LEARN_BIN="$SOURCE_CLONE/legion-observability/bin/refresh-recorder" \
+        run bash "$REFRESH_SH"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"evidence-linked learning scan failed"* ]]
+    grep -qF "Daily evidence-linked learning scan failed." "$MOCK_CALL_LOG"
+}
+
 @test "refresh.sh records session feedback failures and continues" {
     make_source_clone marketplace-minimal.json
     mkdir -p "$SOURCE_CLONE/legion-observability/bin"
@@ -380,6 +456,41 @@ SH
     [ "$status" -eq 0 ]
     [[ "$output" == *"session learning scan failed"* ]]
     grep -qF "Daily session learning scan failed." "$MOCK_CALL_LOG"
+}
+
+@test "refresh.sh records improvement queue failures and invalid modes" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$SOURCE_CLONE/legion-observability/bin"
+    cat > "$SOURCE_CLONE/legion-observability/bin/legion-improve" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    cat > "$SOURCE_CLONE/legion-observability/bin/refresh-recorder" <<'SH'
+#!/usr/bin/env bash
+printf 'refresh-record %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x \
+        "$SOURCE_CLONE/legion-observability/bin/legion-improve" \
+        "$SOURCE_CLONE/legion-observability/bin/refresh-recorder"
+    (
+        cd "$SOURCE_CLONE"
+        git -c user.email=test@test -c user.name=test add -A
+        git -c user.email=test@test -c user.name=test commit -q -m "add failing improvement queue"
+    )
+
+    LEGION_UPDATE_REF=main LEGION_IMPROVE_MODE=dry-run \
+        LEGION_SELF_LEARN_BIN="$SOURCE_CLONE/legion-observability/bin/refresh-recorder" \
+        run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"improvement queue had failures"* ]]
+    grep -qF "Daily review-only improvement queue failed." "$MOCK_CALL_LOG"
+
+    LEGION_UPDATE_REF=main LEGION_IMPROVE_MODE=invalid \
+        LEGION_SELF_LEARN_BIN="$SOURCE_CLONE/legion-observability/bin/refresh-recorder" \
+        run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"invalid LEGION_IMPROVE_MODE=invalid"* ]]
+    grep -qF "Daily improvement mode was invalid." "$MOCK_CALL_LOG"
 }
 
 @test "refresh.sh reports doctor and opt-in auto-heal failures without clobbering the refresh" {

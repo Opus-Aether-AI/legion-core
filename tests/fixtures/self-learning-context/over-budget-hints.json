@@ -1,0 +1,41 @@
+{
+  "schema": "legion.learning-hints.v1",
+  "hints": [
+    {
+      "schema": "legion.learning-hint.v1",
+      "id": "z-last",
+      "scope": "global",
+      "status": "active",
+      "trusted": true,
+      "guidance": "zulu zulu zulu zulu zulu zulu zulu zulu zulu zulu",
+      "evidence_ids": ["e-z"]
+    },
+    {
+      "schema": "legion.learning-hint.v1",
+      "id": "a-first",
+      "scope": "global",
+      "status": "active",
+      "trusted": true,
+      "guidance": "alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha",
+      "evidence_ids": ["e-a"]
+    },
+    {
+      "schema": "legion.learning-hint.v1",
+      "id": "m-middle",
+      "scope": "global",
+      "status": "active",
+      "trusted": true,
+      "guidance": "middle middle middle middle middle middle middle middle middle middle",
+      "evidence_ids": ["e-m"]
+    },
+    {
+      "schema": "legion.learning-hint.v1",
+      "id": "b-second",
+      "scope": "global",
+      "status": "active",
+      "trusted": true,
+      "guidance": "bravo bravo bravo bravo bravo bravo bravo bravo bravo bravo",
+      "evidence_ids": ["e-b"]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.learning-state.v1.schema.json",
+  "title": "legion.learning-state.v1",
+  "type": "object",
+  "required": ["schema", "repository_identity", "entities", "evidence"],
+  "properties": {
+    "schema": {"const": "legion.learning-state.v1"},
+    "repository_identity": {"type": "string", "minLength": 1},
+    "entities": {"type": "object"},
+    "evidence": {"type": "array"}
+  },
+  "additionalProperties": true
+}

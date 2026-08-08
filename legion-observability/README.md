@@ -15,7 +15,8 @@ See everything Legion's multi-model runs do — per-executor **cost, success rat
 | `legion-doctor` | `scripts/legion-doctor.sh` | CI-usable verifier; exits nonzero on any hard-check failure. |
 | `legion-catalog` | `scripts/legion-catalog.py` | Read-only inventory of plugins, skills, agents, commands, hooks, and MCPs. |
 | `legion-learn` | `scripts/legion_learning.py` | Stream and redact cross-harness sessions into versioned sessions, episodes, decisions, outcome links, five behavior axes, 14 code-quality dimensions, and cross-project learning laws. |
-| `legion-self-learn` | `scripts/legion-self-learn.py` | Daily self-learning loop: spans + review findings + trigger evals + benchmark misses + session feedback + manual bug records -> entity-scoped memory/proposals; optional source candidates run in isolated copies and are kept only on measured scorecard improvement. |
+| `legion-self-learn` | `scripts/legion-self-learn.py` | Daily self-learning loop: spans + review findings + trigger evals + benchmark misses + session feedback + manual bug records -> entity-scoped memory/proposals. `--apply-source` is a compatibility-only dry-run response. |
+| `legion-improve` | `scripts/legion-improve.py` | Consume a maintainer-eligible typed proposal in `off` (default), `dry-run`, or `draft` mode. It freezes a base SHA, uses isolated worktrees, repeats paired gates, requires a receipt, and creates only idempotent draft PRs. |
 | `legion-context-profile` | `scripts/legion-context-profile.py` | Reversibly shape active Codex/.agents skills and Claude plugins from external context profiles and skill groups when context budget gets noisy. |
 | `legion-session-learn` | `scripts/legion-session-learn.py` | Mine bounded, provenance-aware Claude/Codex/Cursor sessions and project memories for recurring gotchas and explicit corrections; output and recorded outcomes use hashes/counts instead of transcript text by default. |
 
@@ -39,7 +40,11 @@ legion-learn report --repo .
 legion-learn laws --repo .
 legion-session-learn --repo . --record     # scoped, privacy-safe session corrections
 legion-self-learn run --apply-memory       # synthesize safe memory/proposals
+legion-improve run --repo . --proposal proposal.json --state-dir .legion/improve --mode dry-run --json
+legion-improve queue --repo . --base-ref main --mode dry-run --max 1 --json
 legion-self-learn hints                    # active learned guardrails
+legion-self-learn compile-context --repo . --entity skill:release --stage plan --json
+legion-self-learn reconcile --repo . --legacy-state legacy-state.json --evidence evidence.jsonl --json
 legion-context-profile list                # discover external profiles
 legion-context-profile groups              # inspect reusable skill/plugin groups
 legion-context-profile suggest --query "frontend monorepo tests"
@@ -71,7 +76,22 @@ observe -> analyze -> propose -> baseline -> isolate -> mutate -> score -> keep/
 - **Observe:** normalize cross-harness sessions with `legion-learn`, then read durable spans, review verdict artifacts, trigger eval misses, routing optimizer advice, benchmark misses, compatibility session feedback, and manual `legion-self-learn record` bug reports.
 - **Analyze:** attach every outcome to a catalog entity (`plugin`, `skill`, `command`, `agent`, `hook`, or `mcp`) so slash commands and sub-agents improve too.
 - **Score:** run plugin + entity `legion-eval` datasets and `legion-doctor`, then persist metrics in `experiments.tsv`.
-- **Experiment:** source edits are opt-in (`--apply-source`); candidates run in isolated temp copies and only the best measured improvement is applied to the real checkout. Trigger fixes update markdown frontmatter or marketplace descriptions so the scorecard can measure them.
+- **Propose:** self-learning writes evidence and typed proposals; it never applies a source candidate to the operator checkout.
+- **Promote:** explicit `--apply-memory` syncs bounded entity/stage hints into the
+  project `learning/hints.json`, which official runs compile at each decision
+  boundary. Supported cross-project laws retain global scope; promotion is
+  locked, lifecycle-aware, capacity-bounded, and never trusts raw model prose.
+  Memory merges are serialized, terminal maintainer decisions survive capacity
+  pressure, and only the current active law revision stays queued.
+- **Improve:** `legion-improve` is off by default. In `draft` mode it freezes the remote/base identity, confines an eligible documentation proposal to an isolated worktree and derived plugin-version allowlists, rejects flake/regression gates, records an independent receipt, then opens a draft PR only. Publication is all-state/idempotent and force-with-lease guarded. The actually published head and any pending PR rollback are durable, so stale generations reclaim only their own branch and failed cleanup retries before new publication. It never merges or deploys.
+
+The source-changing queue is deliberately narrower than memory. Only promoted
+laws with confidence ≥0.9, at least five episodes across three projects, and a
+safe Markdown target are eligible. The proposal supplies bounded text to one
+native mutator; it cannot supply a shell or validator command. Independent
+approval comes from `legion-delegate review` over immutable base/head commits.
+Set `LEGION_IMPROVE_MODE=dry-run` or `draft` to let daily refresh process at most
+`LEGION_IMPROVE_MAX` proposals (default 1); the default remains `off`.
 
 When the optional daily `legion-refresh` cron is enabled, it first records
 recent session feedback, then runs the self-learning synthesis:
@@ -80,6 +100,7 @@ recent session feedback, then runs the self-learning synthesis:
 legion-learn analyze --repo .
 legion-session-learn --repo . --record
 legion-self-learn run --apply-memory --quiet
+# opt-in only: LEGION_IMPROVE_MODE=draft scripts/refresh.sh
 ```
 
 Promoted laws require three independent episodes across two projects. Active
@@ -117,6 +138,7 @@ legion-observability/
 │   ├── legion-report.sh         # aggregate | render
 │   ├── legion-otel-export.py    # spans -> OTLP/HTTP trace tree
 │   ├── legion-self-learn.py     # daily self-learning memory/proposals
+│   ├── legion-improve.py        # crash-safe review-only proposal engine
 │   ├── legion_learning.py       # evidence-linked session learning v2
 │   └── legion-doctor.sh         # install verifier
 └── SKILL.md
@@ -138,6 +160,11 @@ legion-observability/
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — enables real OTLP export; unset = no-op.
 - `LEGION_SESSION_LEARN=0` — disable refresh-time session mining.
 - `LEGION_EVIDENCE_LEARN=0` — disable refresh-time evidence-linked learning.
+- `LEGION_IMPROVE_MODE=off|dry-run|draft` — bounded refresh-time typed
+  improvement processing (default: `off`). `LEGION_IMPROVE_MAX` defaults to 1 and bounds completed proposals and created draft PRs; up to three additional failing entries may be attempted so one stuck proposal cannot starve the queue.
+- `LEGION_IMPROVE_REVIEW_BIN` — independent review boundary (default:
+  `legion-delegate`). `LEGION_IMPROVE_VALIDATOR_BIN` optionally adds one
+  operator-configured paired validator; proposals cannot set either command.
 - `LEGION_PROJECT_LEARNING_DIR`, `LEGION_GLOBAL_LEARNING_DIR` — override the
   project report and cross-project law roots.
 - `LEGION_SESSION_LEARN_DAYS`, `LEGION_SESSION_LEARN_LIMIT`, and

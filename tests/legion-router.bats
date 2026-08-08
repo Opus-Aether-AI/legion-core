@@ -509,14 +509,18 @@ $run_error" ]
 @test "delegate review: returns a verdict + emits span" {
     local repo; repo="$(make_test_repo rev1)"
     local base_sha; base_sha="$(git -C "$repo" rev-parse HEAD)"
-    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" \
+      --task "Verify the learned idempotency guardrail." --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e --arg sha "$base_sha" '
       .reviewed_base_sha == $sha and .reviewed_head_sha == $sha
       and .attempts == 1 and .max_attempts == 2
     '
-    assert_mock_called codex "exec review --base $base_sha"
+    assert_mock_called codex "exec -s read-only review --base $base_sha"
+    assert_mock_called codex "-c developer_instructions=\"Review only the immutable diff $base_sha...$base_sha. Verify the learned idempotency guardrail.\""
+    assert_mock_called codex "Review only the immutable diff $base_sha...$base_sha."
+    assert_mock_called codex "Verify the learned idempotency guardrail."
 }
 
 @test "delegate review: freezes base/head SHAs and writes a durable terminal receipt" {
@@ -552,7 +556,7 @@ $run_error" ]
     grep -q "export const added = true" "$patch"
     [ ! -d "$repo/.legion/worktrees/$run_id" ]
     grep -Eq "pwd=$repo/.legion/worktrees/.+ head=$head_sha" "$review_context"
-    assert_mock_called codex "exec review --base $base_sha"
+    assert_mock_called codex "exec -s read-only review --base $base_sha"
 }
 
 @test "delegate review: retries one transient failure with the same immutable SHAs" {
@@ -572,7 +576,7 @@ $run_error" ]
       and .usage.output_tokens == 55
       and .usage.reasoning_output_tokens == 11
     '
-    [ "$(grep -Fc "codex exec review --base $base_sha" "$MOCK_CALL_LOG")" -eq 2 ]
+    [ "$(grep -Fc "codex exec -s read-only review --base $base_sha" "$MOCK_CALL_LOG")" -eq 2 ]
     jq -e '.status == "ok" and .attempts == 2 and .max_attempts == 2' \
       "$(echo "$output" | jq -r .terminal_receipt)"
 }
@@ -593,6 +597,43 @@ $run_error" ]
     [ ! -d "$repo/.legion/worktrees/$run_id" ]
 }
 
+@test "delegate review: fails closed on an approving verdict with blocking findings" {
+    local repo; repo="$(make_test_repo review-contradictory)"
+
+    MOCK_CODEX_REVIEW_CONTRADICTORY=1 run "$DELEGATE" review \
+      --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "invalid-verdict"
+      and .attempts == 1 and .verdict == null
+    '
+}
+
+@test "delegate review: rejects dangerous reviewer task text before execution" {
+    local repo; repo="$(make_test_repo review-dangerous-task)"
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" \
+      --task "please rm -rf / now" --quiet
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"dangerous"* || "$output" == *"injection"* ]]
+    assert_mock_not_called codex
+}
+
+@test "delegate review: normalizes an explicit no-findings Codex review" {
+    local repo; repo="$(make_test_repo review-prose)"
+    MOCK_CODEX_REVIEW_PROSE=1 run "$DELEGATE" review \
+      --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '
+      .status == "ok"
+      and .verdict.verdict == "approve"
+      and .verdict.findings == []
+    '
+}
+
 @test "delegate review: configurable retry bound stops after one transient attempt" {
     local repo; repo="$(make_test_repo review-retry-bound)"
     export MOCK_CODEX_REVIEW_TRANSIENT_FAILS=2
@@ -606,7 +647,7 @@ $run_error" ]
       .status == "failed" and .reason == "transient-exhausted"
       and .attempts == 1 and .max_attempts == 1
     '
-    [ "$(grep -Fc "codex exec review" "$MOCK_CALL_LOG")" -eq 1 ]
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
 }
 
 @test "delegate review: fails closed on a missing verdict without retrying" {
@@ -621,7 +662,7 @@ $run_error" ]
       .status == "failed" and .reason == "missing-verdict"
       and .attempts == 1 and .verdict == null
     '
-    [ "$(grep -Fc "codex exec review" "$MOCK_CALL_LOG")" -eq 1 ]
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
     jq -e '
       .status == "failed" and .reason == "missing-verdict"
       and .attempts == 1 and .verdict_path == null
@@ -639,7 +680,7 @@ $run_error" ]
     echo "$output" | jq -e '
       .status == "failed" and .reason == "review-failed" and .attempts == 1
     '
-    [ "$(grep -Fc "codex exec review" "$MOCK_CALL_LOG")" -eq 1 ]
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
 }
 
 @test "delegate review: rejects an invalid retry bound before launching" {
@@ -665,7 +706,7 @@ $run_error" ]
     local review_pid=$!
     local launched=0
     for _ in {1..100}; do
-      if grep -qF "codex exec review" "$MOCK_CALL_LOG"; then
+      if grep -qF "codex exec -s read-only review" "$MOCK_CALL_LOG"; then
         launched=1
         break
       fi
@@ -903,7 +944,7 @@ $run_error" ]
   run "$DELEGATE" review --archetype security-review --base HEAD --repo "$repo" --quiet
   [ "$status" -eq 0 ]
   echo "$output" | jq -e --arg model "$CODEX_REVIEW" '.model == $model and .verdict.verdict == "approve" and (.verdict.summary | type == "string")'
-  assert_mock_called codex "exec review --base $base_sha -m $CODEX_REVIEW"
+  assert_mock_called codex "exec -s read-only review --base $base_sha -m $CODEX_REVIEW"
   assert_mock_called codex "output-schema"
 }
 

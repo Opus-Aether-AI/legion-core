@@ -23,5 +23,26 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": {"enum": ["approve", "comment"]}
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "findings": {
+            "items": {
+              "properties": {
+                "severity": {"const": "low"}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

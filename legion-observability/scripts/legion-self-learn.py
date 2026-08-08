@@ -9,7 +9,8 @@ This is intentionally local-first and validation-first:
    MCP) instead of only to a model route.
 3. Write a durable memory/proposal queue every day. This is the safe default the
    daily cron uses.
-4. Optionally test source candidates when an operator opts into --apply-source.
+4. Leave source proposals for the separate review-only ``legion-improve``
+   engine; this command only mines and records learning evidence.
 
 The shape is inspired by harness-bench and autoresearch style loops: establish a
 baseline, run a bounded experiment, record the score, keep safe improvements, and
@@ -22,10 +23,12 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+import fcntl
 import glob
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -33,22 +36,31 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
+import legion_learning_context  # noqa: E402
 
 SPAN_SCHEMA = "legion.span.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
 MEMORY_SCHEMA = "legion.self-learning.memory.v1"
 SCORECARD_SCHEMA = "legion.self-learning.scorecard.v1"
+IMPROVEMENT_PROPOSAL_SCHEMA = "legion.improvement-proposal.v1"
 DEFAULT_LOG_ROOT = ""
 SAFE_SOURCE_TYPES = {"skill", "command", "agent", "plugin"}
 SUCCESS_STATUSES = {"ok"}
 DEFAULT_MIN_SCORE_DELTA = 0.001
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+GLOBAL_HINT_RESERVE = 100
+PROJECT_HINT_CAP = (
+    legion_learning_context.MAX_HINTS
+    + legion_learning_context.MAX_EXCLUDED_HINTS
+    - GLOBAL_HINT_RESERVE
+)
 STOPWORDS = {
     "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with", "is",
     "are", "be", "this", "that", "it", "as", "at", "by", "from", "into", "via",
@@ -214,6 +226,10 @@ def outcomes_path(log_root: str) -> str:
     return os.path.join(self_learn_dir(log_root), "outcomes.jsonl")
 
 
+def improvement_queue_dir(log_root: str) -> str:
+    return os.path.join(self_learn_dir(log_root), "improvement-queue")
+
+
 def daily_report_path(log_root: str, day: str | None = None) -> str:
     return os.path.join(self_learn_dir(log_root), "reports", f"{day or _date_utc()}.json")
 
@@ -227,10 +243,7 @@ def _json_file(path: str) -> Any:
 
 
 def _write_json(path: str, payload: Any) -> None:
-    _ensure_dir(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    legion_learning_context.atomic_write_json(path, payload)
 
 
 def _append_jsonl(path: str, payload: dict[str, Any]) -> None:
@@ -240,11 +253,22 @@ def _append_jsonl(path: str, payload: dict[str, Any]) -> None:
         handle.write("\n")
 
 
-def load_spans(log_root: str, day: str | None = None) -> list[dict[str, Any]]:
+def load_spans(
+    log_root: str,
+    day: str | None = None,
+    *,
+    telemetry_dir: str = "",
+) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
-    spans_dir = os.environ.get("LEGION_TELEMETRY_DIR") or os.path.join(
-        os.path.expanduser(log_root), "spans"
-    )
+    # An explicit log root is a caller contract (and keeps report/test runs
+    # isolated); only fall back to the process telemetry directory when no root
+    # was supplied at all.
+    if telemetry_dir:
+        spans_dir = os.path.expanduser(telemetry_dir)
+    elif log_root:
+        spans_dir = os.path.join(os.path.expanduser(log_root), "spans")
+    else:
+        spans_dir = os.environ.get("LEGION_TELEMETRY_DIR") or "spans"
     spans_dir = os.path.expanduser(spans_dir)
     paths = (
         [os.path.join(spans_dir, f"{day}.jsonl")]
@@ -597,9 +621,14 @@ def learning_law_outcomes(repo: str) -> list[dict[str, Any]]:
         if not key:
             continue
         support = _dict(law.get("support"))
-        episodes = int(support.get("episodes") or 0)
-        projects = int(support.get("projects") or 0)
-        confidence = float(law.get("confidence") or 0.0)
+        try:
+            episodes = int(support.get("episodes") or 0)
+            projects = int(support.get("projects") or 0)
+            confidence = float(law.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(confidence) or episodes < 0 or projects < 0:
+            continue
         outcomes.append(
             _outcome(
                 source="learning-law",
@@ -627,6 +656,37 @@ def learning_law_outcomes(repo: str) -> list[dict[str, Any]]:
             )
         )
     return outcomes
+
+
+def learning_law_lifecycle(repo: str) -> dict[str, str] | None:
+    """Return the complete bounded law lifecycle, including retired laws.
+
+    Returns ``None`` when the law store could not be read at all -- no global
+    directory, a missing or unreadable ``laws.json``, or a malformed document.
+    That is deliberately distinct from an empty mapping, which means "read
+    successfully, and no laws exist". Callers use the difference to avoid
+    treating an unreadable store as proof that every law was retired, which
+    would delete queued proposals and retire live hints on a transient fault.
+    """
+    state = legion_state.resolve_state(repo)
+    global_dir = _text(state.get("global_learning_dir"))
+    if not global_dir:
+        return None
+    payload = _json_file(os.path.join(global_dir, "laws.json"))
+    if not isinstance(payload, dict):
+        return None
+    result: dict[str, str] = {}
+    for law in _list(_dict(payload).get("laws"))[
+        : legion_learning_context.MAX_HINTS
+        + legion_learning_context.MAX_EXCLUDED_HINTS
+    ]:
+        if not isinstance(law, dict):
+            continue
+        key = _short(_text(law.get("key")), 160)
+        status = _short(_text(law.get("status")), 40)
+        if key and status:
+            result[key] = status
+    return result
 
 
 def _proc_result(name: str, argv: list[str], repo: str, timeout: int = 60) -> dict[str, Any]:
@@ -935,6 +995,14 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
             "clearer artifact, or route to a stronger validator before returning."
         )
         validation = "Run legion-doctor, legion-eval, and a targeted delegated smoke run."
+    elif source.startswith("legion-run:"):
+        kind = "run_stage_guardrail"
+        stage = _short(source.split(":", 1)[1], 40) or "stage"
+        suggested = (
+            f"Prevent this {stage} failure recurring: address the recorded cause in the "
+            "target entity before the next run reaches that stage."
+        )
+        validation = f"Re-run the failing legion-run {stage} stage and require it to pass."
     else:
         kind = "memory_guardrail"
         suggested = (
@@ -960,6 +1028,179 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
     if law_key:
         proposal["law_key"] = law_key
     return proposal
+
+
+def _improvement_target(repo: str, source_path: str) -> str:
+    """Return a safe repo-relative Markdown target or an empty string."""
+    repo_abs = os.path.abspath(repo)
+    candidate = (
+        os.path.abspath(
+            source_path if os.path.isabs(source_path) else os.path.join(repo_abs, source_path)
+        )
+        if source_path
+        else ""
+    )
+    if candidate and os.path.isdir(candidate):
+        for name in ("SKILL.md", "README.md"):
+            nested = os.path.join(candidate, name)
+            if os.path.isfile(nested):
+                candidate = nested
+                break
+    if (
+        not candidate
+        or not os.path.isfile(candidate)
+        or not candidate.endswith(".md")
+        or not _path_in_repo(candidate, repo_abs)
+        or _path_uses_symlink(candidate, repo_abs)
+        or f"{os.sep}vendored{os.sep}" in candidate
+    ):
+        return ""
+    relative = os.path.relpath(candidate, repo_abs)
+    if relative == ".." or relative.startswith(f"..{os.sep}") or relative.startswith(f".legion{os.sep}"):
+        return ""
+    return relative.replace(os.sep, "/")
+
+
+def typed_improvement_proposal(
+    outcome: dict[str, Any], proposal: dict[str, Any], repo: str
+) -> dict[str, Any] | None:
+    """Promote only well-supported learning laws into the review-only queue.
+
+    Ordinary failures and model prose remain memory. The first source-changing
+    lane requires an active cross-project law with high confidence, at least
+    five episodes, and at least three independent projects.
+    """
+    if _text(outcome.get("source")) != "learning-law":
+        return None
+    metadata = _dict(outcome.get("metadata"))
+    support = _dict(metadata.get("support"))
+    try:
+        confidence = float(metadata.get("confidence") or 0.0)
+        episodes = int(support.get("episodes") or 0)
+        projects = int(support.get("projects") or 0)
+    except (TypeError, ValueError):
+        return None
+    guidance = _short(_text(metadata.get("guidance")), 500)
+    target = _improvement_target(repo, _text(proposal.get("source_path")))
+    if (
+        not math.isfinite(confidence)
+        or confidence < 0.9
+        or episodes < 5
+        or projects < 3
+        or not guidance
+        or not target
+    ):
+        return None
+    try:
+        evidence = json.loads(_text(outcome.get("evidence")))
+    except ValueError:
+        evidence = {}
+    evidence_ids = [
+        _short(_text(value), 160)
+        for value in _list(_dict(evidence).get("evidence_ids"))[:20]
+        if _text(value)
+    ]
+    law_key = _text(metadata.get("law_key"))
+    return {
+        "schema": IMPROVEMENT_PROPOSAL_SCHEMA,
+        "id": f"learning-law:{_stable_id([law_key or proposal.get('id')])}",
+        "revision": episodes,
+        "maintainer_eligible": True,
+        "kind": "documentation_guardrail",
+        "summary": _short(_text(proposal.get("summary")), 500),
+        "target": {"path": target},
+        "candidate": {
+            "operation": "append_markdown_guardrail",
+            "content": guidance,
+        },
+        "validation": {"profile": "documentation"},
+        "limits": {"max_changed_lines": 40},
+        "provenance": {
+            "source": "learning-law",
+            "source_id": _stable_id(["learning-law", law_key]),
+            "law_key": law_key,
+            "confidence": confidence,
+            "support": {"episodes": episodes, "projects": projects},
+            "evidence_ids": evidence_ids,
+        },
+    }
+
+
+def write_improvement_queue(report: dict[str, Any], log_root: str) -> list[str]:
+    queue_dir = improvement_queue_dir(log_root)
+    _ensure_dir(queue_dir)
+    lifecycle = _dict(report.get("learning_laws"))
+    has_lifecycle = "learning_laws" in report
+    proposals = [
+        proposal
+        for proposal in _list(report.get("improvement_proposals"))
+        if isinstance(proposal, dict)
+        and (
+            not has_lifecycle
+            or _dict(proposal.get("provenance")).get("source") != "learning-law"
+            or lifecycle.get(
+                _text(_dict(proposal.get("provenance")).get("law_key"))
+            )
+            == "active"
+        )
+    ]
+    proposal_entries = [
+        (
+            proposal,
+            hashlib.sha256(
+                json.dumps(
+                    proposal,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+        for proposal in proposals
+    ]
+    current_law_files = {
+        _text(_dict(proposal.get("provenance")).get("law_key")): (
+            f"{fingerprint}.json"
+        )
+        for proposal, fingerprint in proposal_entries
+        if _dict(proposal.get("provenance")).get("source") == "learning-law"
+        and _text(_dict(proposal.get("provenance")).get("law_key"))
+    }
+    lock_path = os.path.join(queue_dir, ".queue.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if has_lifecycle:
+            # Reconcile only Legion-generated law proposals. Maintainer-authored
+            # queue entries are never removed by the learning loop. Exactly one
+            # current revision is retained for each emitted active law.
+            for entry in list(os.scandir(queue_dir))[:10_000]:
+                if not entry.is_file(follow_symlinks=False) or not entry.name.endswith(".json"):
+                    continue
+                queued = _json_file(entry.path)
+                provenance = _dict(_dict(queued).get("provenance"))
+                if provenance.get("source") != "learning-law":
+                    continue
+                law_key = _text(provenance.get("law_key"))
+                if (
+                    law_key
+                    and (
+                        lifecycle.get(law_key) != "active"
+                        or (
+                            law_key in current_law_files
+                            and current_law_files[law_key] != entry.name
+                        )
+                    )
+                ):
+                    try:
+                        os.unlink(entry.path)
+                    except FileNotFoundError:
+                        pass
+        written: list[str] = []
+        for proposal, fingerprint in proposal_entries:
+            path = os.path.join(queue_dir, f"{fingerprint}.json")
+            _write_json(path, proposal)
+            written.append(path)
+    return written
 
 
 def trace_contrast(spans: list[dict[str, Any]], catalog: dict[str, Any]) -> dict[str, Any]:
@@ -1004,11 +1245,12 @@ def build_report(
     *,
     scan_all: bool = False,
     include_processed: bool = False,
+    telemetry_dir: str = "",
 ) -> dict[str, Any]:
     day = day or _date_utc()
     catalog = build_catalog(repo)
     scan_day = None if scan_all else day
-    spans = load_spans(log_root, scan_day)
+    spans = load_spans(log_root, scan_day, telemetry_dir=telemetry_dir)
     outcomes = dedupe_outcomes(
         span_outcomes(spans, catalog)
         + trigger_eval_outcomes(repo, catalog)
@@ -1020,11 +1262,16 @@ def build_report(
         processed = set(_list(load_memory(log_root).get("processed_outcome_ids")))
         outcomes = [outcome for outcome in outcomes if outcome.get("id") not in processed]
     proposals = [proposal_for_outcome(outcome, catalog) for outcome in outcomes]
+    improvement_proposals = [
+        typed
+        for outcome, proposal in zip(outcomes, proposals)
+        if (typed := typed_improvement_proposal(outcome, proposal, repo)) is not None
+    ]
     by_entity: dict[str, int] = defaultdict(int)
     for outcome in outcomes:
         by_entity[f"{outcome['target_type']}:{outcome['target_name']}"] += 1
     contrast = trace_contrast(spans, catalog)
-    return {
+    report = {
         "schema": "legion.self-learning.report.v1",
         "generated_at": _iso_utc(),
         "day": day,
@@ -1035,10 +1282,19 @@ def build_report(
         "catalog_entities": len(_list(catalog.get("entities"))),
         "outcomes": outcomes,
         "proposals": proposals,
+        "improvement_proposals": improvement_proposals,
         "by_entity": dict(sorted(by_entity.items())),
         "scorecard": run_scorecard(repo),
         "trace_contrast": contrast,
     }
+    # Only publish a lifecycle the loop actually read. Consumers treat the
+    # absence of this key as "lifecycle unknown" and skip every reconciliation
+    # that would otherwise retire hints or delete queued proposals, so a
+    # transient read failure degrades to a no-op instead of a purge.
+    lifecycle = learning_law_lifecycle(repo)
+    if lifecycle is not None:
+        report["learning_laws"] = lifecycle
+    return report
 
 
 def _empty_memory() -> dict[str, Any]:
@@ -1060,14 +1316,325 @@ def load_memory(log_root: str) -> dict[str, Any]:
     return _empty_memory()
 
 
-def _hint_from_proposal(proposal: dict[str, Any]) -> str:
-    return _short(
-        f"{proposal.get('summary')} Suggested: {proposal.get('suggested_change')}",
-        360,
+_GUIDANCE_WHITESPACE = re.compile(r"\s+")
+
+
+def _guidance_text(value: Any, limit: int = 360) -> str:
+    """Flatten one guidance string for prompt delivery.
+
+    Guidance is rendered as a single bullet line inside an executor prompt, so
+    embedded newlines and control characters would let a summary break out of
+    the surrounding list structure. Collapse them before the length bound
+    rather than after, so the bound applies to what is actually delivered.
+    """
+    text = _text(value)
+    if not text:
+        return ""
+    # Drop C0/C1 controls and every Unicode format character. The format class
+    # (Cf) covers bidirectional overrides and zero-width joiners, which are
+    # printable to this filter and invisible to `\s`, yet let a bullet render
+    # differently from its bytes to anyone auditing hints.json or reading the
+    # prompt. Surrogates are dropped for the same reason.
+    text = "".join(
+        char
+        for char in text
+        # Tab, newline and carriage return are kept here so the collapse below
+        # turns them into a single separating space; dropping them outright
+        # would run adjacent words together.
+        if char in "\t\n\r"
+        or unicodedata.category(char) not in {"Cc", "Cf", "Cs"}
     )
+    return _short(_GUIDANCE_WHITESPACE.sub(" ", text).strip(), limit)
 
 
-def apply_memory(report: dict[str, Any], log_root: str) -> dict[str, Any]:
+# The complete set of sentences core composes for a run outcome. Validating a
+# record's provenance_summary against these on READ -- not merely trusting the
+# marker written at construction -- means a hand-edited or forged outcomes.jsonL
+# entry cannot smuggle chosen text into trusted guidance: an unrecognized
+# sentence is simply not first-party, and promotion falls back to Legion's fixed
+# guardrail. Keep in sync with the producers in legion-run.py.
+_CORE_SENTENCE = re.compile(
+    r"legion-doctor check [A-Za-z0-9._:-]{1,80} failed\.|"
+    r"legion-run failed at [A-Za-z0-9._:-]{1,80}\.|"
+    r"legion-fanout reported \d{1,9} failed slice\(s\) and \d{1,9} apply conflict\(s\)\."
+)
+
+
+def _core_composed_sentence(value: Any) -> str:
+    """Return the summary only when it is one core itself is known to produce."""
+    text = _guidance_text(value)
+    return text if text and _CORE_SENTENCE.fullmatch(text) else ""
+
+
+def _first_party_outcome(outcome: dict[str, Any]) -> bool:
+    """True only when core composed the summary from deterministic tooling.
+
+    Records written before this marker existed carry no ``provenance`` field and
+    are treated as untrusted, so an upgrade can never retroactively promote old
+    extension prose into trusted executor guidance.
+
+    The marker itself is not an authentication token -- any process that can
+    write outcomes.jsonl can assert it, as it could already assert
+    ``source: "manual"``. What bounds the damage is that the accompanying
+    ``provenance_summary`` is re-validated on read against the closed set of
+    sentences core actually composes, so asserting the marker over chosen text
+    gains nothing.
+    """
+    return _text(outcome.get("provenance")) == "first-party"
+
+
+def _hint_from_proposal(proposal: dict[str, Any]) -> str:
+    summary = _guidance_text(proposal.get("summary"))
+    suggested = _guidance_text(proposal.get("suggested_change"))
+    return _short(" ".join(part for part in [summary, f"Suggested: {suggested}" if suggested else ""] if part), 360)
+
+
+def _typed_hint_from_proposal(
+    proposal: dict[str, Any], outcome: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Promote safe memory into the typed runtime store.
+
+    ``--apply-memory`` is the explicit promotion boundary. Deterministic source
+    classes may include their bounded summary; model-authored review prose is
+    reduced to Legion's fixed suggested guardrail before becoming trusted
+    executor guidance.
+    """
+    target_type = _short(_text(proposal.get("target_type")), 80)
+    target_name = _short(_text(proposal.get("target_name")), 160)
+    proposal_id = _short(_text(proposal.get("id")), 120)
+    source = _text(outcome.get("source"))
+    if not target_type or not target_name or not proposal_id:
+        return None
+    suggested = _guidance_text(proposal.get("suggested_change"))
+    # Deterministic source classes may carry their bounded summary: operator
+    # entered notes, the fixed session-learn rule set, and promoted
+    # cross-project laws all originate as text Legion composed or curated.
+    #
+    # A run outcome is different. Its human-facing summary quotes third-party
+    # detail -- a doctor message naming a plugin, a slice error, a reviewer
+    # finding -- so it is never promoted. What may be promoted is the separate
+    # core-composed sentence the producer supplied alongside it, which contains
+    # only identifiers core controls.
+    first_party = _core_composed_sentence(outcome.get("provenance_summary"))
+    if source in {"manual", "session-learn", "learning-law"}:
+        guidance = _hint_from_proposal(proposal)
+    elif _first_party_outcome(outcome) and first_party:
+        guidance = _short(
+            " ".join(part for part in [first_party, f"Suggested: {suggested}" if suggested else ""] if part),
+            360,
+        )
+    else:
+        guidance = suggested
+    if not guidance:
+        return None
+    scope = "global" if source == "learning-law" else "exact"
+    hint: dict[str, Any] = {
+        "schema": legion_learning_context.HINT_SCHEMA,
+        "id": f"memory:{_stable_id([proposal_id])}",
+        "scope": scope,
+        "status": "active",
+        "trusted": True,
+        "guidance": guidance,
+        "evidence_ids": [
+            value
+            for value in (
+                _short(_text(outcome.get("id")), 160),
+                _short(proposal_id, 160),
+            )
+            if value
+        ],
+        "origin": "self-learn-memory",
+    }
+    if scope == "exact":
+        hint["entity"] = f"{target_type}:{target_name}"
+    law_key = _short(_text(_dict(outcome.get("metadata")).get("law_key")), 160)
+    if law_key:
+        hint["law_key"] = law_key
+    stage = _text(_dict(outcome.get("metadata")).get("stage"))
+    stage = {
+        "fanout-apply": "fanout",
+        "final-review": "review",
+    }.get(stage, stage)
+    if stage in {"plan", "fanout", "validate", "review"}:
+        hint["stage"] = stage
+    return hint
+
+
+def sync_typed_hints(
+    report: dict[str, Any], project_learning_dir: str
+) -> dict[str, Any]:
+    """Merge promoted memory hints without overwriting maintainer-owned hints."""
+    path = os.path.join(project_learning_dir, "hints.json")
+    _ensure_dir(project_learning_dir)
+    lock_path = os.path.join(project_learning_dir, ".hints.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        existing = legion_learning_context.read_bounded_json(
+            path, legion_learning_context.MAX_HINT_DOCUMENT_BYTES
+        )
+        # An unreadable store is not an empty one. read_bounded_json returns
+        # None for a document that is oversized, truncated, or not an object --
+        # exactly the states in which the maintainer-owned hints it holds are
+        # most worth preserving. Treating that as "no hints yet" and writing
+        # this run's promotions over the top silently destroys them, so refuse
+        # to write and surface the condition instead.
+        if existing is None and os.path.exists(path):
+            return {
+                "path": path,
+                "promoted": 0,
+                "rejected": 0,
+                "rejected_ids": [],
+                "total": 0,
+                "project_cap": PROJECT_HINT_CAP,
+                "global_reserve": GLOBAL_HINT_RESERVE,
+                "protected_decisions": 0,
+                "skipped": "unreadable_hint_store",
+            }
+        maintainers: dict[str, dict[str, Any]] = {}
+        generated: dict[str, dict[str, Any]] = {}
+        for hint in _list(_dict(existing).get("hints"))[
+            : legion_learning_context.MAX_HINTS
+            + legion_learning_context.MAX_EXCLUDED_HINTS
+        ]:
+            if not isinstance(hint, dict):
+                continue
+            hint_id = _text(hint.get("id"))
+            if not hint_id:
+                continue
+            bucket = generated if hint.get("origin") == "self-learn-memory" else maintainers
+            bucket.setdefault(hint_id, hint)
+
+        lifecycle = _dict(report.get("learning_laws"))
+        if "learning_laws" in report:
+            for hint_id, hint in list(generated.items()):
+                law_key = _text(hint.get("law_key"))
+                if law_key and lifecycle.get(law_key) != "active":
+                    retired = dict(hint)
+                    if _text(retired.get("status")) == "active":
+                        retired["status"] = "retired"
+                        retired["lifecycle_owner"] = "learning-law"
+                    generated[hint_id] = retired
+
+        outcomes = {
+            _text(item.get("id")): item
+            for item in _list(report.get("outcomes"))
+            if isinstance(item, dict) and _text(item.get("id"))
+        }
+        incoming: dict[str, dict[str, Any]] = {}
+        for proposal in _list(report.get("proposals")):
+            if not isinstance(proposal, dict):
+                continue
+            outcome = outcomes.get(_text(proposal.get("outcome_id")), {})
+            hint = _typed_hint_from_proposal(proposal, outcome)
+            if hint is None:
+                continue
+            prior = generated.get(hint["id"])
+            # A maintainer may explicitly retire or supersede a generated ID.
+            # Never reactivate that terminal decision during the next scan.
+            if (
+                prior
+                and _text(prior.get("status")) in {"retired", "superseded"}
+                and prior.get("lifecycle_owner") != "learning-law"
+            ):
+                incoming[hint["id"]] = prior
+            else:
+                incoming[hint["id"]] = hint
+        generated.update(incoming)
+
+        protected_decisions = {
+            hint_id: hint
+            for hint_id, hint in generated.items()
+            if _text(hint.get("status")) in {"retired", "superseded"}
+            and hint.get("lifecycle_owner") != "learning-law"
+        }
+        evictable_generated = {
+            hint_id: hint
+            for hint_id, hint in generated.items()
+            if hint_id not in protected_decisions
+        }
+        status_rank = {"active": 0, "superseded": 1, "retired": 2}
+        scope_rank = {"exact": 0, "selector": 1, "global": 2}
+        ordered_maintainers = list(maintainers.values())
+        ordered_generated = sorted(
+            evictable_generated.values(),
+            key=lambda hint: (
+                status_rank.get(_text(hint.get("status")), 3),
+                scope_rank.get(_text(hint.get("scope")), 3),
+                _text(hint.get("id")),
+            ),
+        )
+        ordered_decisions = [
+            protected_decisions[hint_id] for hint_id in sorted(protected_decisions)
+        ]
+        storage_cap = (
+            legion_learning_context.MAX_HINTS
+            + legion_learning_context.MAX_EXCLUDED_HINTS
+        )
+        # Maintainer terminal decisions are durable tombstones. Keep them
+        # outside the active/evictable slice, append them after compiler-visible
+        # entries, and reduce active capacity rather than ever dropping one.
+        available = min(
+            max(0, PROJECT_HINT_CAP - len(ordered_maintainers)),
+            max(
+                0,
+                storage_cap - len(ordered_maintainers) - len(ordered_decisions),
+            ),
+        )
+        kept_generated = ordered_generated[:available]
+        kept_ids = {
+            _text(hint.get("id"))
+            for hint in kept_generated + ordered_decisions
+        }
+        rejected_ids = sorted(
+            hint_id
+            for hint_id, hint in incoming.items()
+            if hint_id not in kept_ids or _text(hint.get("status")) != "active"
+        )
+        payload = {
+            "schema": "legion.learning-hints.v1",
+            "hints": ordered_maintainers + kept_generated + ordered_decisions,
+        }
+        _write_json(path, payload)
+        promoted = sum(
+            1
+            for hint_id, hint in incoming.items()
+            if hint_id in kept_ids and _text(hint.get("status")) == "active"
+        )
+    return {
+        "path": path,
+        "promoted": promoted,
+        "rejected": len(rejected_ids),
+        "rejected_ids": rejected_ids,
+        "total": len(payload["hints"]),
+        "project_cap": PROJECT_HINT_CAP,
+        "global_reserve": GLOBAL_HINT_RESERVE,
+        "protected_decisions": len(ordered_decisions),
+    }
+
+
+def apply_memory(
+    report: dict[str, Any],
+    log_root: str,
+    *,
+    project_learning_dir: str = "",
+) -> dict[str, Any]:
+    _ensure_dir(self_learn_dir(log_root))
+    lock_path = memory_path(log_root) + ".lock"
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _apply_memory_locked(
+            report,
+            log_root,
+            project_learning_dir=project_learning_dir,
+        )
+
+
+def _apply_memory_locked(
+    report: dict[str, Any],
+    log_root: str,
+    *,
+    project_learning_dir: str = "",
+) -> dict[str, Any]:
     memory = load_memory(log_root)
     if not isinstance(memory.get("entities"), dict):
         memory["entities"] = {}
@@ -1135,6 +1702,12 @@ def apply_memory(report: dict[str, Any], log_root: str) -> dict[str, Any]:
     if report_ref not in reports:
         reports.append(report_ref)
     memory["updated_at"] = report.get("generated_at")
+    typed_hints = sync_typed_hints(
+        report,
+        project_learning_dir
+        or os.path.join(os.path.expanduser(log_root), "learning"),
+    )
+    memory["typed_hints"] = typed_hints
     _write_json(memory_path(log_root), memory)
     append_experiment_log(report, log_root)
     return memory
@@ -1878,6 +2451,17 @@ def record_manual_outcome(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_command(args: argparse.Namespace) -> int:
+    # Kept solely so old automation gets a clear, safe migration response.
+    # In particular, it must not re-enable the historical path that eventually
+    # copied a candidate back into the operator checkout.
+    if args.apply_source:
+        payload = {
+            "status": "compatibility_dry_run",
+            "source_mutation": False,
+            "message": "--apply-source is compatibility-only; submit an eligible typed proposal to legion-improve run --mode dry-run or --mode draft.",
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json else payload["message"])
+        return 2
     day = args.day or _date_utc()
     report = build_report(
         args.repo,
@@ -1885,6 +2469,7 @@ def run_command(args: argparse.Namespace) -> int:
         day,
         scan_all=not bool(args.day),
         include_processed=args.include_processed,
+        telemetry_dir=getattr(args, "telemetry_dir", ""),
     )
     report_path = daily_report_path(args.logs, day)
 
@@ -1903,23 +2488,35 @@ def run_command(args: argparse.Namespace) -> int:
         changed = _list(experiments.get("changed_source"))
 
     _write_json(report_path, report)
+    improvement_queue = write_improvement_queue(report, args.logs)
 
     memory = None
     if args.apply_memory or args.apply_source:
-        memory = apply_memory(report, args.logs)
+        state = legion_state.resolve_state(args.repo)
+        memory = apply_memory(
+            report,
+            args.logs,
+            project_learning_dir=state["project_learning_dir"],
+        )
 
     payload = {
         "report_path": report_path,
         "memory_path": memory_path(args.logs),
+        "hints_path": _text(
+            _dict(_dict(memory or {}).get("typed_hints")).get("path")
+        ),
+        "typed_hints": _dict(_dict(memory or {}).get("typed_hints")),
         "applied_memory": memory is not None,
         "changed_source": changed,
         "experiments": experiments,
+        "improvement_queue": improvement_queue,
         "scorecard": report.get("scorecard"),
         "summary": {
             "spans": report["spans"],
             "catalog_entities": report["catalog_entities"],
             "outcomes": len(report["outcomes"]),
             "proposals": len(report["proposals"]),
+            "improvement_proposals": len(report["improvement_proposals"]),
         },
         "by_entity": report["by_entity"],
     }
@@ -1935,12 +2532,43 @@ def run_command(args: argparse.Namespace) -> int:
         print(f"report: {payload['report_path']}")
         if payload["applied_memory"]:
             print(f"memory: {payload['memory_path']}")
+            print(
+                "typed hints: "
+                f"promoted={payload['typed_hints'].get('promoted', 0)} "
+                f"rejected={payload['typed_hints'].get('rejected', 0)}"
+            )
         if changed:
             print("changed source:")
             for path in changed:
                 print(f"  {path}")
     if experiments and experiments.get("status") == "rolled_back":
         return 1
+    return 0
+
+
+def compile_context_command(args: argparse.Namespace) -> int:
+    state = legion_state.resolve_state(args.repo)
+    payload = legion_learning_context.compile_context(
+        repository_identity=state["repository_identity"],
+        entity=args.entity,
+        stage=args.stage,
+        hint_directories=[state["project_learning_dir"], state["global_learning_dir"]],
+        max_hints=args.max_hints,
+        max_tokens=args.max_tokens,
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def reconcile_command(args: argparse.Namespace) -> int:
+    state = legion_state.resolve_state(args.repo)
+    payload = legion_learning_context.reconcile_state(
+        repository_identity=state["repository_identity"],
+        state_path=os.path.join(state["project_learning_dir"], "state.json"),
+        legacy_state_path=args.legacy_state,
+        evidence_path=args.evidence,
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
@@ -1977,13 +2605,29 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--evidence", default="")
     rec.add_argument("--json", action="store_true")
 
+    context = sub.add_parser("compile-context", help="compile trusted typed learning guidance")
+    context.add_argument("--repo", default=default_repo())
+    context.add_argument("--entity", required=True, help="TYPE:NAME target receiving guidance")
+    context.add_argument("--stage", required=True, help="lifecycle stage receiving guidance")
+    context.add_argument("--max-hints", type=int, default=20)
+    context.add_argument("--max-tokens", type=int, default=1200)
+    context.add_argument("--json", action="store_true", help="reserved for CLI compatibility; output is JSON")
+
+    reconcile = sub.add_parser("reconcile", help="rehome compatible legacy learning state")
+    reconcile.add_argument("--repo", default=default_repo())
+    reconcile.add_argument("--legacy-state", default="")
+    reconcile.add_argument("--evidence", default="")
+    reconcile.add_argument("--json", action="store_true", help="reserved for CLI compatibility; output is JSON")
+
     args = parser.parse_args(argv)
+    if args.cmd is None:
+        args = parser.parse_args(["run", *(argv or [])])
     if hasattr(args, "logs") and not args.logs:
         repo_for_state = getattr(args, "repo", os.getcwd())
-        args.logs = legion_state.resolve_state(repo_for_state)["state_root"]
-    if args.cmd in (None, "run"):
-        if args.cmd is None:
-            args = parser.parse_args(["run", *(argv or [])])
+        resolved = legion_state.resolve_state(repo_for_state)
+        args.logs = resolved["state_root"]
+        args.telemetry_dir = resolved["telemetry_dir"]
+    if args.cmd == "run":
         return run_command(args)
     if args.cmd == "hints":
         payload = hints(args.logs, args.entity, args.limit)
@@ -1999,6 +2643,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"recorded {outcome['id']} -> {outcome['target_type']}:{outcome['target_name']}")
         return 0
+    if args.cmd == "compile-context":
+        return compile_context_command(args)
+    if args.cmd == "reconcile":
+        return reconcile_command(args)
     parser.print_help()
     return 2
 

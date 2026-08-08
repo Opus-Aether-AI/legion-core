@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.local/schema/legion.learning-usage.v1.schema.json",
+  "title": "legion.learning-usage.v1",
+  "type": "object",
+  "required": ["schema", "hint_count", "token_count"],
+  "properties": {
+    "schema": {"const": "legion.learning-usage.v1"},
+    "hint_count": {"type": "integer", "minimum": 0, "maximum": 100},
+    "token_count": {"type": "integer", "minimum": 0, "maximum": 10000}
+  },
+  "additionalProperties": false
+}

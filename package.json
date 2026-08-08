@@ -43,6 +43,7 @@
     "legion-eval": "legion-observability/bin/legion-eval",
     "legion-heal": "legion-observability/bin/legion-heal",
     "legion-learn": "legion-observability/bin/legion-learn",
+    "legion-improve": "legion-observability/bin/legion-improve",
     "legion-otel-export": "legion-observability/bin/legion-otel-export",
     "legion-report": "legion-observability/bin/legion-report",
     "legion-self-learn": "legion-observability/bin/legion-self-learn",

@@ -85,6 +85,30 @@ and tree SHAs rather than relying on a moving branch name. The source worktree
 must be clean when `legion-run` starts; this prevents unrelated local or secret
 files from being included in the external review snapshot.
 
+### Learning-context boundary
+
+Before planning, `legion-run` compiles one trusted, bounded
+`learning-context.json` and its matching `learning-usage.json`. It exposes the
+immutable path and content revision through `LEGION_LEARNING_CONTEXT_PATH` and
+`LEGION_LEARNING_CONTEXT_REVISION`; planners and deterministic validators can
+therefore consume the same bytes. Plan guidance is included in `LEGION_TASK`;
+in required mode a planner or validator must return
+`learning_context_ack: {boundary, revision}` before delivery is attested. The
+plan contract, delegated slice tasks,
+review input, and `learning-receipts.json` retain only dispositions and
+maintainer-authored guidance. Raw session transcripts, evidence payloads, and
+evidence excerpts never cross this boundary.
+
+Use `--learning-context-mode off|observe|advisory|required` (or
+`LEGION_LEARNING_CONTEXT_MODE`) to choose compatibility behavior. The default
+is `advisory`: trusted selected guidance is delivered but ordinary delivery
+remains non-blocking. `observe` records the typed context without inserting its
+guidance; `off` produces an empty typed contract for older callers; `required`
+marks every selected trusted hint as required and fails closed when compilation,
+direct injection, boundary/revision acknowledgement, or deterministic
+verification cannot be completed. Aggregate delivery receipts have a canonical
+receipt ID and are SHA-256-bound by the artifact manifest.
+
 ## `legion-fanout`
 
 Run many scoped slices in **parallel** across executors and collect verified diffs + cost:

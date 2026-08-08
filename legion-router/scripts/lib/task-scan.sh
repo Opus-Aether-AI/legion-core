@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared best-effort dangerous-task classifier for write-capable executors.
+# Shared best-effort dangerous-task classifier for delegated executors.
 #
 # This is deliberately a tripwire, not a security boundary. The executor
 # sandbox and isolated worktree remain the containment layer. Keep command
@@ -72,6 +72,6 @@ legion_scan_task_text() {
   local text="${1:-}" reason=""
   [[ "${LEGION_ALLOW_UNSAFE:-0}" == "1" ]] && return 0
   if reason="$(legion_task_danger_reason "$text")"; then
-    die "task text matched dangerous/injection rule '$reason'; refusing write delegation. Review the task, or set LEGION_ALLOW_UNSAFE=1 to override."
+    die "task text matched dangerous/injection rule '$reason'; refusing delegation. Review the task, or set LEGION_ALLOW_UNSAFE=1 to override."
   fi
 }

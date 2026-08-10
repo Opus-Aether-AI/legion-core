@@ -1109,10 +1109,95 @@ def test_write_run_artifacts_and_span(tmp_path):
     assert os.path.exists(artifacts["run_path"])
     assert os.path.exists(artifacts["summary_path"])
     assert os.path.exists(artifacts["cases_path"])
+    run_payload = json.loads(open(artifacts["run_path"], encoding="utf-8").read())
+    assert run_payload["schema"] == "legion.bench.run.v2"
+    assert run_payload["case_count"] == 1
+    assert "cases" not in run_payload
+    assert bench.load_run_or_summary(artifacts["run_path"]) == summary
     assert os.path.exists(span_path)
     span = json.loads(open(span_path, encoding="utf-8").read())
     assert span["executor"] == "legion-bench"
     assert span["artifacts"]["bench_run"] == artifacts["run_path"]
+
+
+def test_load_run_or_summary_accepts_legacy_v1_run_artifact(tmp_path):
+    summary = {
+        "schema": bench.SUMMARY_SCHEMA,
+        "run_id": "legacy-run",
+        "suite": "core",
+        "metrics": {"score": 1.0},
+    }
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "legion.bench.run.v1",
+                "run_id": "legacy-run",
+                "summary": summary,
+                "cases": [{"id": "legacy-case", "status": "pass"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert bench.load_run_or_summary(str(path)) == summary
+
+
+def test_corpus_artifacts_are_bounded_and_do_not_duplicate_cases(tmp_path, monkeypatch):
+    bench_dir = tmp_path / "bench"
+    corpus = {"corpus": "demo", "_path": str(tmp_path / "corpus.json")}
+    results = [{"id": "case", "mode": "direct", "status": "pass"}]
+    monkeypatch.setenv("LEGION_BENCH_RETAIN_CORPUS_RUNS", "1")
+    monkeypatch.setenv("LEGION_BENCH_PRUNE_GRACE_SEC", "0")
+
+    first = bench.write_corpus_artifacts(
+        str(bench_dir),
+        "run-1",
+        corpus,
+        results,
+        {"generated_at": "2026-08-10T00:00:00Z"},
+    )
+    second = bench.write_corpus_artifacts(
+        str(bench_dir),
+        "run-2",
+        corpus,
+        results,
+        {"generated_at": "2026-08-10T00:01:00Z"},
+    )
+
+    payload = json.loads(open(second["run_path"], encoding="utf-8").read())
+    assert payload["schema"] == "legion.bench.corpus-run.v2"
+    assert payload["case_count"] == 1
+    assert "cases" not in payload
+    assert os.path.exists(second["cases_path"])
+    assert not os.path.exists(first["run_dir"])
+
+
+def test_corpus_retention_keeps_an_active_run_with_an_old_root_mtime(
+    tmp_path, monkeypatch
+):
+    bench_dir = tmp_path / "bench"
+    active = bench_dir / "corpus" / "active"
+    newer = bench_dir / "corpus" / "newer"
+    active.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    old = 1_000_000_000
+    os.utime(active, (old, old))
+    os.utime(newer, (old + 100, old + 100))
+    monkeypatch.setenv("LEGION_BENCH_PRUNE_GRACE_SEC", "0")
+
+    with bench._bench_run_lease(str(active)):
+        assert (active.parent / "active.active.lock").is_file()
+        # Restore the old timestamp to prove liveness comes from the lock
+        # rather than mtime heuristics.
+        os.utime(active, (old, old))
+        bench._prune_bench_runs(str(bench_dir), 1, subdirectory="corpus")
+        assert active.is_dir()
+
+    assert not (active.parent / "active.active.lock").exists()
+    bench._prune_bench_runs(str(bench_dir), 1, subdirectory="corpus")
+    assert not active.exists()
+    assert newer.is_dir()
 
 
 def test_write_run_artifacts_summarizes_nested_legion_run_learning(tmp_path):

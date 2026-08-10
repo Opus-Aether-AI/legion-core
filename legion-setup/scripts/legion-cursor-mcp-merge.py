@@ -30,13 +30,23 @@ def normalize_spec(name: str, spec: dict) -> dict:
     return normalized
 
 
-def merge(config: dict, servers: dict, force: bool) -> tuple[dict, dict]:
+def merge(
+    config: dict,
+    servers: dict,
+    force: bool,
+    managed_names: set[str] | None = None,
+) -> tuple[dict, dict]:
     if not isinstance(config.get("mcpServers"), dict):
         config["mcpServers"] = {}
     current = config["mcpServers"]
     added: list[str] = []
     skipped: list[str] = []
     updated: list[str] = []
+    removed: list[str] = []
+    for name in sorted((managed_names or set()) - set(servers)):
+        if name in current:
+            del current[name]
+            removed.append(name)
     for name in sorted(servers):
         spec = normalize_spec(name, servers[name])
         if name in current and not force and current[name] == spec:
@@ -47,7 +57,12 @@ def merge(config: dict, servers: dict, force: bool) -> tuple[dict, dict]:
         else:
             added.append(name)
         current[name] = spec
-    return config, {"added": added, "skipped": skipped, "updated": updated}
+    return config, {
+        "added": added,
+        "skipped": skipped,
+        "updated": updated,
+        "removed": removed,
+    }
 
 
 def main(argv=None) -> int:
@@ -55,6 +70,11 @@ def main(argv=None) -> int:
     parser.add_argument("--config", required=True, help="path to ~/.cursor/mcp.json")
     parser.add_argument("--force", action="store_true", help="replace existing matching servers")
     parser.add_argument("--dry-run", action="store_true", help="do not write")
+    parser.add_argument(
+        "--managed-names-json",
+        default="[]",
+        help="JSON array of marketplace-owned names eligible for pruning",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -64,6 +84,16 @@ def main(argv=None) -> int:
         return 2
     if not isinstance(servers, dict):
         print(json.dumps({"error": "stdin must be a JSON object of {name: spec}"}))
+        return 2
+    try:
+        managed_names_raw = json.loads(args.managed_names_json)
+    except json.JSONDecodeError as exc:
+        print(json.dumps({"error": f"bad managed names json: {exc}"}))
+        return 2
+    if not isinstance(managed_names_raw, list) or not all(
+        isinstance(name, str) for name in managed_names_raw
+    ):
+        print(json.dumps({"error": "managed names must be a JSON string array"}))
         return 2
 
     try:
@@ -78,10 +108,17 @@ def main(argv=None) -> int:
         print(json.dumps({"error": "Cursor MCP config must be a JSON object"}))
         return 2
 
-    new_config, summary = merge(config, servers, args.force)
+    new_config, summary = merge(
+        config,
+        servers,
+        args.force,
+        set(managed_names_raw),
+    )
     summary["config"] = args.config
 
-    if not args.dry_run and (summary["added"] or summary["updated"]):
+    if not args.dry_run and (
+        summary["added"] or summary["updated"] or summary["removed"]
+    ):
         directory = os.path.dirname(os.path.abspath(args.config)) or "."
         os.makedirs(directory, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".cursor-mcp-")

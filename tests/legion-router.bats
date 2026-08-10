@@ -816,6 +816,24 @@ $run_error" ]
   echo "$output" | jq -e '.model == "test-model-beta"'
 }
 
+@test "delegate run: a pre-resolved route preserves its fallback without resolving again" {
+  local repo; repo="$(make_test_repo pre-resolved-route)"
+  local route_env="$TEST_TMPDIR/pre-resolved-worker-env.log"
+  LEGION_ROUTE_PRE_RESOLVED=1 \
+    LEGION_RESOLVED_EXECUTOR=codex \
+    LEGION_RESOLVED_FALLBACK=test-model-beta \
+    MOCK_ROUTE_ENV_LOG="$route_env" \
+    MOCK_CODEX_QUOTA_FAIL="$CODEX_WORKHORSE" \
+    run "$DELEGATE" run --archetype route-does-not-exist \
+      --executor codex --model "$CODEX_WORKHORSE" --sandbox workspace-write \
+      --reasoning-effort high --task x --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "ok" and .model == "test-model-beta"'
+  [ -s "$route_env" ]
+  ! grep -Eq 'pre=1|executor=codex|fallback=test-model-beta' "$route_env"
+}
+
 @test "delegate run: --archetype routing to executor=self is refused" {
   local repo; repo="$(make_test_repo arch3)"
   run "$DELEGATE" run --archetype deep-reasoning --task x --repo "$repo" --quiet

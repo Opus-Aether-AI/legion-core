@@ -23,6 +23,33 @@ def _session(path, messages):
     return path
 
 
+def test_repo_file_scan_prunes_generated_and_nested_worktree_trees(
+    tmp_path, monkeypatch
+):
+    keep = tmp_path / "src" / "keep.py"
+    generated = tmp_path / "node_modules" / "package" / "ignored.js"
+    nested_worktree = tmp_path / ".claude" / "worktrees" / "old" / "ignored.py"
+    for path in (keep, generated, nested_worktree):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("content", encoding="utf-8")
+
+    real_walk = learning.legion_session_io.os.walk
+    visited = []
+
+    def tracking_walk(*args, **kwargs):
+        for current, dirs, files in real_walk(*args, **kwargs):
+            visited.append(os.path.relpath(current, tmp_path))
+            yield current, dirs, files
+
+    monkeypatch.setattr(learning.legion_session_io.os, "walk", tracking_walk)
+
+    scanned = learning._repo_files(str(tmp_path))
+
+    assert scanned == [keep]
+    assert not any(path.startswith("node_modules") for path in visited)
+    assert not any(path.startswith(os.path.join(".claude", "worktrees")) for path in visited)
+
+
 def test_redact_text_is_fail_closed_for_credentials_identity_and_paths():
     raw = (
         "email me at dev@example.com using ghp_abcdefghijklmnopqrstuvwxyz123456 "
@@ -946,3 +973,40 @@ def test_redact_payload_recurses_without_corrupting_json():
     assert redacted["nested"][0]["connection"] == "[credential-url]"
     assert "dev@example.com" not in redacted["nested"][1]
     json.dumps(redacted)
+
+
+def test_v2_session_discovery_prunes_generated_and_worktree_trees(tmp_path):
+    live = tmp_path / ".codex" / "sessions" / "live.jsonl"
+    stale = tmp_path / ".codex" / "sessions" / ".legion" / "worktrees" / "stale.jsonl"
+    live.parent.mkdir(parents=True)
+    stale.parent.mkdir(parents=True)
+    live.write_text("{}\n", encoding="utf-8")
+    stale.write_text("{}\n", encoding="utf-8")
+
+    files = learning._iter_session_files(
+        tmp_path, lookback_days=0, max_file_mb=0
+    )
+
+    assert live in files
+    assert stale not in files
+
+
+def test_normalization_stops_at_event_budget(tmp_path):
+    session = tmp_path / "session.jsonl"
+    session.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": str(index)},
+                }
+            )
+            for index in range(10)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events = learning.normalize_session_file(session, home=tmp_path, max_events=3)
+
+    assert len(events) == 3

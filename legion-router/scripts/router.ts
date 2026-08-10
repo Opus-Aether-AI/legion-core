@@ -86,9 +86,29 @@ function configuredModel(ref: string): string {
 }
 
 // ── Upstream configs ────────────────────────────────────────────────
-const ANTHROPIC_BASE = "https://api.anthropic.com";
-const MINIMAX_BASE = "https://api.minimax.io/anthropic";
+// Keep router upstream overrides distinct from the client-facing
+// ANTHROPIC_BASE_URL. The latter is intentionally set to this proxy by callers;
+// treating it as our upstream would recursively proxy the request back to self.
+const ANTHROPIC_BASE = _optionalEnv("LEGION_ANTHROPIC_UPSTREAM_URL", "https://api.anthropic.com");
+const MINIMAX_BASE = _optionalEnv("LEGION_MINIMAX_UPSTREAM_URL", "https://api.minimax.io/anthropic");
 const OLLAMA_BASE = _optionalEnv("OLLAMA_BASE_URL", "http://localhost:11434");
+
+function targetsRouter(base: string): boolean {
+	try {
+		const target = new URL(base);
+		const host = target.hostname.toLowerCase();
+		const loopback = host === "localhost" || host === "127.0.0.1"
+			|| host === "0.0.0.0" || host === "[::1]" || host === "::1";
+		const port = Number.parseInt(target.port || (target.protocol === "https:" ? "443" : "80"), 10);
+		return loopback && port === PORT;
+	} catch {
+		return false;
+	}
+}
+
+if (targetsRouter(ANTHROPIC_BASE) || targetsRouter(MINIMAX_BASE) || targetsRouter(OLLAMA_BASE)) {
+	throw new Error("router upstream URL must not target the Legion router itself");
+}
 
 // Both optional — the Legion router starts even with no keys. With no Anthropic
 // key, claude-* requests pass through the client's own auth header; with no
@@ -275,35 +295,56 @@ function extractUsageFromBody(body: string): Record<string, unknown> | undefined
 	}
 }
 
-// Parse a single SSE data line and merge usage fields into accumulator
-function mergeSSEUsage(data: string, acc: Record<string, unknown>): Record<string, unknown> {
-	if (data === "[DONE]") return acc;
+// Parse a single SSE data line, merge usage, and retain the terminal marker.
+// Some HTTP clients expose an upstream socket close as a clean body EOF, so a
+// successful Anthropic-compatible stream is complete only after message_stop
+// (or the equivalent [DONE] marker used by a few compatible providers).
+function mergeSSEUsage(
+	data: string,
+	acc: Record<string, unknown>,
+): { usage: Record<string, unknown>; terminal: boolean } {
+	if (data === "[DONE]") return { usage: acc, terminal: true };
 	try {
 		const parsed = JSON.parse(data);
 		// message_start carries input_tokens
 		if (parsed.type === "message_start" && parsed.message?.usage) {
-			return { ...acc, ...(parsed.message.usage as Record<string, unknown>) };
+			return {
+				usage: { ...acc, ...(parsed.message.usage as Record<string, unknown>) },
+				terminal: false,
+			};
 		}
 		// message_delta carries output_tokens
 		if (parsed.usage) {
-			return { ...acc, ...(parsed.usage as Record<string, unknown>) };
+			return {
+				usage: { ...acc, ...(parsed.usage as Record<string, unknown>) },
+				terminal: parsed.type === "message_stop",
+			};
 		}
+		return { usage: acc, terminal: parsed.type === "message_stop" };
 	} catch {
 		// Not valid JSON — skip
 	}
-	return acc;
+	return { usage: acc, terminal: false };
 }
 
-function parseSSEUsageChunk(text: string, acc: Record<string, unknown>): { buffer: string; usage: Record<string, unknown> } {
+function parseSSEUsageChunk(
+	text: string,
+	acc: Record<string, unknown>,
+): { buffer: string; usage: Record<string, unknown>; terminal: boolean } {
 	let usage = acc;
+	let terminal = false;
 	const lines = text.split("\n");
 	const buffer = lines.pop() ?? "";
 	for (const line of lines) {
-		if (line.startsWith("data: ")) {
-			usage = mergeSSEUsage(line.slice(6).trim(), usage);
+		if (line.startsWith("data:")) {
+			// SSE permits both `data: value` and `data:value`. Strip the field
+			// name first, then tolerate the optional post-colon whitespace.
+			const parsed = mergeSSEUsage(line.slice(5).trimStart(), usage);
+			usage = parsed.usage;
+			terminal ||= parsed.terminal;
 		}
 	}
-	return { buffer, usage };
+	return { buffer, usage, terminal };
 }
 
 // Forward an SSE response with one reader while metering usage from the same
@@ -321,53 +362,117 @@ function meteredSSEStream(
 	const reader = stream.getReader();
 	let buffer = "";
 	let usage: Record<string, unknown> = {};
+	let terminalSeen = false;
 	let recorded = false;
+	let released = false;
 
 	const record = (finalStatus: number) => {
 		if (recorded) return;
 		recorded = true;
 		recordUsage(model, upstream, finalStatus, Object.keys(usage).length > 0 ? usage : undefined);
 	};
+	const release = () => {
+		if (released) return;
+		released = true;
+		reader.releaseLock();
+	};
+	const fail = (
+		controller: ReadableStreamDefaultController<Uint8Array>,
+		err: unknown,
+	) => {
+		log("warn", "upstream stream interrupted", { model, upstream, error: String(err) });
+		record(599);
+		release();
+		try {
+			controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
+				type: "error",
+				error: { type: "upstream_stream_error", message: "upstream stream interrupted" },
+			})}\n\n`));
+			controller.close();
+		} catch {
+			try { controller.error(err); } catch { /* already closed */ }
+		}
+	};
+	const finish = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+		const tail = decoder.decode();
+		if (tail || buffer) {
+			const parsed = parseSSEUsageChunk(`${buffer}${tail}\n`, usage);
+			usage = parsed.usage;
+			terminalSeen ||= parsed.terminal;
+		}
+		if (status >= 200 && status < 300 && !terminalSeen) {
+			fail(controller, new Error("upstream stream ended before a terminal event"));
+			return;
+		}
+		record(status);
+		release();
+		controller.close();
+	};
 
 	return new ReadableStream<Uint8Array>({
-		async start(controller) {
+		async pull(controller) {
 			try {
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					if (!value) continue;
-					controller.enqueue(value);
-					const parsed = parseSSEUsageChunk(buffer + decoder.decode(value, { stream: true }), usage);
-					buffer = parsed.buffer;
-					usage = parsed.usage;
+				const { done, value } = await reader.read();
+				if (done) {
+					finish(controller);
+					return;
 				}
-				const tail = decoder.decode();
-				if (tail || buffer) {
-					const parsed = parseSSEUsageChunk(`${buffer}${tail}\n`, usage);
-					usage = parsed.usage;
-				}
-				record(status);
-				controller.close();
+				if (!value) return;
+				const parsed = parseSSEUsageChunk(buffer + decoder.decode(value, { stream: true }), usage);
+				buffer = parsed.buffer;
+				usage = parsed.usage;
+				terminalSeen ||= parsed.terminal;
+				controller.enqueue(value);
 			} catch (err) {
-				log("warn", "upstream stream interrupted", { model, upstream, error: String(err) });
-				record(599);
-				try {
-					controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
-						type: "error",
-						error: { type: "upstream_stream_error", message: "upstream stream interrupted" },
-					})}\n\n`));
-					controller.close();
-				} catch {
-					try { controller.error(err); } catch { /* already closed */ }
-				}
-			} finally {
-				reader.releaseLock();
+				fail(controller, err);
 			}
 		},
-		cancel(reason) {
+		async cancel(reason) {
 			record(499);
-			return reader.cancel(reason);
+			try {
+				await reader.cancel(reason);
+			} finally {
+				release();
+			}
 		},
+	});
+}
+
+async function meteredUpstreamResponse(
+	upstreamRes: Response,
+	model: string,
+	upstream: string,
+	isStream: boolean,
+): Promise<Response> {
+	const responseHeaders = new Headers(upstreamRes.headers);
+	responseHeaders.delete("content-encoding");
+	responseHeaders.delete("content-length");
+
+	if (!isStream && upstreamRes.body) {
+		const body = await upstreamRes.text();
+		recordUsage(model, upstream, upstreamRes.status, extractUsageFromBody(body));
+		return new Response(body, {
+			status: upstreamRes.status,
+			statusText: upstreamRes.statusText,
+			headers: responseHeaders,
+		});
+	}
+	if (isStream && upstreamRes.body) {
+		return new Response(
+			meteredSSEStream(upstreamRes.body, model, upstream, upstreamRes.status),
+			{
+				status: upstreamRes.status,
+				statusText: upstreamRes.statusText,
+				headers: responseHeaders,
+			},
+		);
+	}
+
+	recordUsage(model, upstream, upstreamRes.status);
+	return new Response(null, {
+		status: upstreamRes.status,
+		statusText: upstreamRes.statusText,
+		headers: responseHeaders,
 	});
 }
 
@@ -596,19 +701,36 @@ async function handleMiniMaxFetchError(
 	req: Request,
 	path: string,
 	originalModel: string,
+	routedModel: string,
 	parsedBody: Record<string, unknown> | null,
 	err: unknown,
 ): Promise<Response> {
 	recordMiniMaxFailure();
+	recordUsage(routedModel, MINIMAX_BASE, 599);
 	if (ANTHROPIC_KEY) {
 		log("warn", "MiniMax fetch error, falling back to Anthropic", { error: String(err) });
-		try {
-			return await fallbackToAnthropic(req, path, originalModel, parsedBody);
-		} catch (fallbackErr) {
-			return new Response(`Both upstreams failed. MiniMax: ${err}. Anthropic: ${fallbackErr}`, { status: 502 });
-		}
+		return await fallbackAfterMiniMaxFailure(
+			req, path, originalModel, parsedBody, String(err),
+		);
 	}
 	return new Response(`Upstream error: ${err}`, { status: 502 });
+}
+
+async function fallbackAfterMiniMaxFailure(
+	req: Request,
+	path: string,
+	originalModel: string,
+	parsedBody: Record<string, unknown> | null,
+	primaryError: string,
+): Promise<Response> {
+	try {
+		return await fallbackToAnthropic(req, path, originalModel, parsedBody);
+	} catch (fallbackErr) {
+		return new Response(
+			`Both upstreams failed. MiniMax: ${primaryError}. Anthropic: ${fallbackErr}`,
+			{ status: 502 },
+		);
+	}
 }
 
 // ── Stream validation ───────────────────────────────────────────────
@@ -642,74 +764,60 @@ async function proxyUpstream(req: Request, path: string, parsed: ParsedRequest):
 
 	const headers = buildHeaders(req, routing.authHeader, routing.upstream);
 
+	const timeout = upstreamFetchTimeout(isStream);
+	let upstreamRes: Response;
 	try {
-		const timeout = upstreamFetchTimeout(isStream);
-		let upstreamRes: Response;
-		try {
-			upstreamRes = await fetch(target, {
-				method: req.method,
-				headers,
-				body,
-				signal: timeout.signal,
-			});
-		} finally {
-			timeout.clearAfterHeaders();
-		}
-
-		if (isMiniMax && upstreamRes.status >= 500 && ANTHROPIC_KEY) {
-			recordMiniMaxFailure();
-			log("warn", "MiniMax error, falling back to Anthropic", { status: upstreamRes.status });
-			return await fallbackToAnthropic(req, path, routing.originalModel, parsedBody);
-		}
-
-		// Stream format validation: if we requested streaming but MiniMax didn't return SSE
-		if (isStreamFormatInvalid(isStream, isMiniMax, upstreamRes)) {
-			recordMiniMaxFailure();
-			return await fallbackToAnthropic(req, path, routing.originalModel, parsedBody);
-		}
-
-		if (isMiniMax) recordMiniMaxSuccess();
-
-		// Strip content-encoding since Bun's fetch auto-decompresses the body,
-		// but the header would cause the client to try decompressing again (ZlibError)
-		const responseHeaders = new Headers(upstreamRes.headers);
-		responseHeaders.delete("content-encoding");
-		responseHeaders.delete("content-length"); // length no longer matches after decompression
-
-		// Track usage from non-streaming responses
-		if (!isStream && upstreamRes.status === 200 && upstreamRes.body) {
-			const resBody = await upstreamRes.text();
-			const usage = extractUsageFromBody(resBody);
-			recordUsage(routing.model, routing.upstream, upstreamRes.status, usage);
-			return new Response(resBody, {
-				status: upstreamRes.status,
-				statusText: upstreamRes.statusText,
-				headers: responseHeaders,
-			});
-		}
-
-		// For streaming responses, meter from the same reader that forwards to
-		// the client. This keeps concurrent streams independent and avoids tee
-		// backpressure/buffering interactions.
-		if (isStream && upstreamRes.body) {
-			const clientStream = meteredSSEStream(upstreamRes.body, routing.model, routing.upstream, upstreamRes.status);
-			return new Response(clientStream, {
-				status: upstreamRes.status,
-				statusText: upstreamRes.statusText,
-				headers: responseHeaders,
-			});
-		}
-
-		// No body or non-200 — just record the request
-		recordUsage(routing.model, routing.upstream, upstreamRes.status);
-		return new Response(upstreamRes.body, {
-			status: upstreamRes.status,
-			statusText: upstreamRes.statusText,
-			headers: responseHeaders,
+		upstreamRes = await fetch(target, {
+			method: req.method,
+			headers,
+			body,
+			signal: timeout.signal,
 		});
 	} catch (err) {
 		if (isMiniMax) {
-			return await handleMiniMaxFetchError(req, path, routing.originalModel, parsedBody, err);
+			return await handleMiniMaxFetchError(
+				req, path, routing.originalModel, routing.model, parsedBody, err,
+			);
+		}
+		return new Response(`Upstream error: ${err}`, { status: 502 });
+	} finally {
+		timeout.clearAfterHeaders();
+	}
+
+	if (isMiniMax && upstreamRes.status >= 500 && ANTHROPIC_KEY) {
+		recordMiniMaxFailure();
+		recordUsage(routing.model, routing.upstream, upstreamRes.status);
+		await upstreamRes.body?.cancel();
+		log("warn", "MiniMax error, falling back to Anthropic", { status: upstreamRes.status });
+		return await fallbackAfterMiniMaxFailure(
+			req, path, routing.originalModel, parsedBody, `HTTP ${upstreamRes.status}`,
+		);
+	}
+
+	// Stream format validation: if we requested streaming but MiniMax didn't return SSE
+	if (isStreamFormatInvalid(isStream, isMiniMax, upstreamRes)) {
+		recordMiniMaxFailure();
+		recordUsage(routing.model, routing.upstream, 502);
+		await upstreamRes.body?.cancel();
+		return await fallbackAfterMiniMaxFailure(
+			req, path, routing.originalModel, parsedBody, "invalid stream format",
+		);
+	}
+
+	if (isMiniMax) recordMiniMaxSuccess();
+
+	try {
+		return await meteredUpstreamResponse(
+			upstreamRes,
+			routing.model,
+			routing.upstream,
+			isStream,
+		);
+	} catch (err) {
+		if (isMiniMax) {
+			return await handleMiniMaxFetchError(
+				req, path, routing.originalModel, routing.model, parsedBody, err,
+			);
 		}
 		return new Response(`Upstream error: ${err}`, { status: 502 });
 	}
@@ -907,21 +1015,26 @@ async function fallbackToAnthropic(
 			body: fallbackBody,
 			signal: timeout.signal,
 		});
+	} catch (err) {
+		recordUsage(originalModel, ANTHROPIC_BASE, 599);
+		throw err;
 	} finally {
 		timeout.clearAfterHeaders();
 	}
 
 	log("info", "Anthropic fallback", { status: res.status });
 
-	const fbRespHeaders = new Headers(res.headers);
-	fbRespHeaders.delete("content-encoding");
-	fbRespHeaders.delete("content-length");
-
-	return new Response(res.body, {
-		status: res.status,
-		statusText: res.statusText,
-		headers: fbRespHeaders,
-	});
+	try {
+		return await meteredUpstreamResponse(
+			res,
+			originalModel,
+			ANTHROPIC_BASE,
+			parsedBody?.stream === true,
+		);
+	} catch (err) {
+		recordUsage(originalModel, ANTHROPIC_BASE, 599);
+		throw err;
+	}
 }
 
 // ── Graceful shutdown ───────────────────────────────────────────────

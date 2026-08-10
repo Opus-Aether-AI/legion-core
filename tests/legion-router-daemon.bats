@@ -52,6 +52,15 @@ teardown() {
   echo "$output" | jq -e '.minimaxTokenSet == false'
 }
 
+@test "router: rejects an upstream URL that targets itself" {
+  local self_port=8211
+  run env ROUTER_PORT="$self_port" \
+    LEGION_ANTHROPIC_UPSTREAM_URL="http://127.0.0.1:$self_port" \
+    bun run "$REPO_ROOT/legion-router/scripts/router.ts"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"upstream URL must not target the Legion router itself"* ]]
+}
+
 @test "router: /ingest folds a codex test-model-alpha run into stats with cost" {
   run curl -s -X POST "http://127.0.0.1:$PORT/ingest" \
     -d '{"model":"test-model-alpha","upstream":"codex","usage":{"input_tokens":89124,"cached_input_tokens":71552,"output_tokens":806,"reasoning_output_tokens":214}}'
@@ -142,4 +151,126 @@ teardown() {
     -d '{\"model\":\"local-stream\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'"
   [ "$status" -eq 0 ]
   [ "$output" = "502" ]
+}
+
+@test "router: downstream cancellation cancels and meters the upstream stream" {
+  run bun -e '
+    const response = await fetch(process.argv[1], {
+      method: "POST",
+      headers: {"content-type":"application/json", "x-test-slow-stream":"1"},
+      body: JSON.stringify({model:"local-stream",stream:true,messages:[{role:"user",content:"hi"}]})
+    });
+    const reader = response.body.getReader();
+    await reader.read();
+    await reader.cancel("test-client-cancel");
+  ' "http://127.0.0.1:$PORT/v1/messages"
+  [ "$status" -eq 0 ]
+
+  for _ in {1..50}; do
+    output="$(curl -s "http://127.0.0.1:$PORT/stats")"
+    echo "$output" | jq -e '.totalRequests == 1' >/dev/null && break
+    sleep 0.02
+  done
+  echo "$output" | jq -e '.totalRequests == 1 and .recentEntries[0].status == 499'
+}
+
+@test "router: truncated upstream streams terminate with an error SSE event" {
+  run curl -sS -N -m 3 -X POST "http://127.0.0.1:$PORT/v1/messages" \
+    -H 'content-type: application/json' \
+    -H 'x-test-error-stream: 1' \
+    -d '{"model":"local-stream","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'upstream_stream_error'* ]]
+
+  run curl -s "http://127.0.0.1:$PORT/stats"
+  echo "$output" | jq -e '.totalRequests == 1 and .recentEntries[0].status == 599'
+}
+
+@test "router: Anthropic fallback uses the same non-streaming accounting path" {
+  kill "$ROUTER_PID" 2>/dev/null || true
+  wait "$ROUTER_PID" 2>/dev/null || true
+  ROUTER_PID=""
+
+  ROUTER_PORT="$PORT" \
+    MINIMAX_MODELS="minimax-fallback" \
+    LEGION_MINIMAX_UPSTREAM_URL="http://127.0.0.1:$UPSTREAM_PORT/minimax" \
+    LEGION_ANTHROPIC_UPSTREAM_URL="http://127.0.0.1:$UPSTREAM_PORT/anthropic" \
+    MINIMAX_AUTH_TOKEN="test-minimax" ANTHROPIC_API_KEY="test-anthropic" \
+    UPSTREAM_TIMEOUT_MS=200 STREAM_UPSTREAM_TIMEOUT_MS=0 \
+    bun run "$REPO_ROOT/legion-router/scripts/router.ts" \
+    >"$BATS_TEST_TMPDIR/router-fallback.log" 2>&1 &
+  ROUTER_PID=$!
+  curl -sf --retry 40 --retry-connrefused --retry-delay 1 -m 2 \
+    "http://127.0.0.1:$PORT/health" >/dev/null
+
+  run curl -sS -X POST "http://127.0.0.1:$PORT/v1/messages" \
+    -H 'content-type: application/json' \
+    -d '{"model":"minimax-fallback","stream":false,"messages":[{"role":"user","content":"hi"}]}'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.usage.input_tokens == 11 and .usage.output_tokens == 5'
+
+  run curl -s "http://127.0.0.1:$PORT/stats"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .totalRequests == 2
+    and .totalInputTokens == 11
+    and .totalOutputTokens == 5
+    and .byUpstream.minimax.requests == 1
+    and .byUpstream.anthropic.requests == 1
+    and [.recentEntries[].status] == [503, 200]
+  '
+
+  run curl -sS -N -X POST "http://127.0.0.1:$PORT/v1/messages" \
+    -H 'content-type: application/json' \
+    -d '{"model":"minimax-fallback","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'message_stop'* ]]
+
+  run curl -s "http://127.0.0.1:$PORT/stats"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .totalRequests == 4
+    and .totalInputTokens == 14
+    and .totalOutputTokens == 12
+    and .byUpstream.minimax.requests == 2
+    and .byUpstream.anthropic.requests == 2
+    and [.recentEntries[].status] == [503, 200, 503, 200]
+  '
+}
+
+@test "router: a failed fallback is not retried and attributes the failed primary to its routed model" {
+  kill "$ROUTER_PID" 2>/dev/null || true
+  wait "$ROUTER_PID" 2>/dev/null || true
+  ROUTER_PID=""
+
+  ROUTER_PORT="$PORT" \
+    MINIMAX_MODEL_MAP="alias-claude:minimax-fallback" \
+    LEGION_MINIMAX_UPSTREAM_URL="http://127.0.0.1:$UPSTREAM_PORT/minimax" \
+    LEGION_ANTHROPIC_UPSTREAM_URL="http://127.0.0.1:8212/anthropic" \
+    MINIMAX_AUTH_TOKEN="test-minimax" ANTHROPIC_API_KEY="test-anthropic" \
+    UPSTREAM_TIMEOUT_MS=100 STREAM_UPSTREAM_TIMEOUT_MS=0 \
+    bun run "$REPO_ROOT/legion-router/scripts/router.ts" \
+    >"$BATS_TEST_TMPDIR/router-double-failure.log" 2>&1 &
+  ROUTER_PID=$!
+  curl -sf --retry 40 --retry-connrefused --retry-delay 1 -m 2 \
+    "http://127.0.0.1:$PORT/health" >/dev/null
+
+  run curl -sS -o "$BATS_TEST_TMPDIR/double-failure.body" -w '%{http_code}' \
+    -X POST "http://127.0.0.1:$PORT/v1/messages" \
+    -H 'content-type: application/json' \
+    -d '{"model":"alias-claude","stream":false,"messages":[{"role":"user","content":"hi"}]}'
+  [ "$status" -eq 0 ]
+  [ "$output" = "502" ]
+  grep -q "Both upstreams failed" "$BATS_TEST_TMPDIR/double-failure.body"
+
+  run curl -s "http://127.0.0.1:$PORT/stats"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .totalRequests == 2
+    and .byUpstream.minimax.requests == 1
+    and .byUpstream.anthropic.requests == 1
+    and .byModel["minimax-fallback"].requests == 1
+    and .byModel["alias-claude"].requests == 1
+    and [.recentEntries[].status] == [503, 599]
+  '
 }

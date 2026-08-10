@@ -39,6 +39,20 @@ _mkt_with_mcp() {  # $1 = marketplace dir
     > "$1/dummy-mcp/.claude-plugin/plugin.json"
 }
 
+_mkt_with_profile() {  # $1 = marketplace dir
+  local mkt="$1" plugin
+  mkdir -p "$mkt/.claude-plugin"
+  printf '%s\n' '{"name":"fixture","owner":{"name":"o"},"version":"0.0.0","plugins":[{"name":"selected","source":"./selected"},{"name":"excluded","source":"./excluded"}]}' \
+    > "$mkt/.claude-plugin/marketplace.json"
+  for plugin in selected excluded; do
+    mkdir -p "$mkt/$plugin/.claude-plugin" "$mkt/$plugin/commands"
+    printf '%s\n' "{\"name\":\"$plugin\",\"version\":\"0.0.0\",\"description\":\"d\",\"mcpServers\":{\"$plugin\":{\"command\":\"echo\",\"args\":[\"$plugin\"]}}}" \
+      > "$mkt/$plugin/.claude-plugin/plugin.json"
+    printf -- '%s\n' '---' "description: $plugin command" '---' '# Command' \
+      > "$mkt/$plugin/commands/$plugin.md"
+  done
+}
+
 @test "cursor setup: mcp wires a marketplace MCP server into Cursor; verify confirms it" {
   local mkt="$BATS_TEST_TMPDIR/mkt"; _mkt_with_mcp "$mkt"
 
@@ -62,6 +76,123 @@ _mkt_with_mcp() {  # $1 = marketplace dir
 
   [ "$(cat "$CURSOR_MCP_CONFIG")" = "$first" ]
   jq -e '.mcpServers["user-server"].command == "echo"' "$CURSOR_MCP_CONFIG"
+}
+
+@test "cursor setup: selected plugin profile scopes MCP and agent bridges" {
+  local mkt="$BATS_TEST_TMPDIR/mkt" selected="$BATS_TEST_TMPDIR/plugins.txt"
+  _mkt_with_profile "$mkt"
+  LEGION_MARKETPLACE_ROOT="$mkt" run "$SETUP_SH" all
+  [ "$status" -eq 0 ]
+  jq -e '.mcpServers.selected and .mcpServers.excluded' "$CURSOR_MCP_CONFIG"
+
+  printf '%s\n' selected > "$selected"
+
+  LEGION_MARKETPLACE_ROOT="$mkt" LEGION_SELECTED_PLUGINS_FILE="$selected" run "$SETUP_SH" all
+  [ "$status" -eq 0 ]
+  jq -e '.mcpServers.selected and (.mcpServers.excluded | not)' "$CURSOR_MCP_CONFIG"
+  [ -f "$CURSOR_AGENTS/legion-cmd-selected.md" ]
+  [ ! -e "$CURSOR_AGENTS/legion-cmd-excluded.md" ]
+
+  : > "$selected"
+  LEGION_MARKETPLACE_ROOT="$mkt" LEGION_SELECTED_PLUGINS_FILE="$selected" run "$SETUP_SH" all
+  [ "$status" -eq 0 ]
+  jq -e '(.mcpServers.selected | not) and (.mcpServers.excluded | not)' "$CURSOR_MCP_CONFIG"
+  [ ! -e "$CURSOR_AGENTS/legion-cmd-selected.md" ]
+  [ ! -e "$CURSOR_AGENTS/legion-cmd-excluded.md" ]
+}
+
+@test "cursor setup: missing selected profile fails closed before changing bridges" {
+  local mkt="$BATS_TEST_TMPDIR/mkt" missing="$BATS_TEST_TMPDIR/missing.txt"
+  _mkt_with_profile "$mkt"
+
+  LEGION_MARKETPLACE_ROOT="$mkt" LEGION_SELECTED_PLUGINS_FILE="$missing" run "$SETUP_SH" all
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"selected plugins file not found"* ]]
+  [ ! -e "$CURSOR_MCP_CONFIG" ]
+  [ ! -d "$CURSOR_AGENTS" ]
+}
+
+@test "cursor setup: malformed selected marketplace preserves existing MCPs and agents" {
+  local mkt="$BATS_TEST_TMPDIR/mkt" selected="$BATS_TEST_TMPDIR/plugins.txt"
+  _mkt_with_profile "$mkt"
+  printf '%s\n' selected > "$selected"
+  mkdir -p "$CURSOR_AGENTS"
+  printf '%s\n' '{"mcpServers":{"managed":{"command":"old"},"user":{"command":"user"}}}' \
+    > "$CURSOR_MCP_CONFIG"
+  printf '%s\n' existing > "$CURSOR_AGENTS/legion-cmd-existing.md"
+  printf '%s\n' '{bad json' > "$mkt/.claude-plugin/marketplace.json"
+
+  LEGION_MARKETPLACE_ROOT="$mkt" LEGION_SELECTED_PLUGINS_FILE="$selected" run "$SETUP_SH" all
+
+  [ "$status" -ne 0 ]
+  jq -e '.mcpServers.managed.command == "old" and .mcpServers.user.command == "user"' \
+    "$CURSOR_MCP_CONFIG"
+  [ -f "$CURSOR_AGENTS/legion-cmd-existing.md" ]
+}
+
+@test "cursor bridge: invalid selected marketplace preserves the last generated agents" {
+  local mkt="$BATS_TEST_TMPDIR/mkt" selected="$BATS_TEST_TMPDIR/plugins.txt"
+  _mkt_with_profile "$mkt"
+  printf '%s\n' selected > "$selected"
+  mkdir -p "$CURSOR_AGENTS"
+  printf '%s\n' existing > "$CURSOR_AGENTS/legion-cmd-existing.md"
+  printf '%s\n' '{bad json' > "$mkt/.claude-plugin/marketplace.json"
+
+  run python3 "$ROOT/legion-setup/scripts/legion-cursor-bridge.py" \
+    --root "$mkt" --out "$CURSOR_AGENTS" --skills-dir "$AGENTS_HOME/skills" \
+    --plugins-file "$selected"
+
+  [ "$status" -ne 0 ]
+  [ -f "$CURSOR_AGENTS/legion-cmd-existing.md" ]
+}
+
+@test "cursor bridge: selected profile requires a marketplace manifest" {
+  local mkt="$BATS_TEST_TMPDIR/missing-marketplace" selected="$BATS_TEST_TMPDIR/plugins.txt"
+  mkdir -p "$mkt" "$CURSOR_AGENTS"
+  printf '%s\n' selected > "$selected"
+  printf '%s\n' existing > "$CURSOR_AGENTS/legion-cmd-existing.md"
+
+  run python3 "$ROOT/legion-setup/scripts/legion-cursor-bridge.py" \
+    --root "$mkt" --out "$CURSOR_AGENTS" --skills-dir "$AGENTS_HOME/skills" \
+    --plugins-file "$selected"
+
+  [ "$status" -ne 0 ]
+  [ -f "$CURSOR_AGENTS/legion-cmd-existing.md" ]
+}
+
+@test "cursor bridge: selected plugin sources cannot escape the marketplace root" {
+  local mkt="$BATS_TEST_TMPDIR/mkt" outside="$BATS_TEST_TMPDIR/outside"
+  local selected="$BATS_TEST_TMPDIR/plugins.txt"
+  mkdir -p "$mkt/.claude-plugin" "$outside/agents" "$CURSOR_AGENTS"
+  printf '%s\n' '{"plugins":[{"name":"escaped","source":"./../outside"}]}' \
+    > "$mkt/.claude-plugin/marketplace.json"
+  printf '%s\n' escaped > "$selected"
+  printf '%s\n' existing > "$CURSOR_AGENTS/legion-cmd-existing.md"
+
+  run python3 "$ROOT/legion-setup/scripts/legion-cursor-bridge.py" \
+    --root "$mkt" --out "$CURSOR_AGENTS" --skills-dir "$AGENTS_HOME/skills" \
+    --plugins-file "$selected"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"escapes marketplace root"* ]]
+  [ -f "$CURSOR_AGENTS/legion-cmd-existing.md" ]
+}
+
+@test "cursor setup: selected plugin sources cannot escape the marketplace root" {
+  local mkt="$BATS_TEST_TMPDIR/mkt" outside="$BATS_TEST_TMPDIR/outside"
+  local selected="$BATS_TEST_TMPDIR/plugins.txt"
+  mkdir -p "$mkt/.claude-plugin" "$outside/.claude-plugin"
+  printf '%s\n' '{"plugins":[{"name":"escaped","source":"./../outside"}]}' \
+    > "$mkt/.claude-plugin/marketplace.json"
+  printf '%s\n' '{"name":"escaped","mcpServers":{"escaped":{"command":"outside"}}}' \
+    > "$outside/.claude-plugin/plugin.json"
+  printf '%s\n' escaped > "$selected"
+
+  LEGION_MARKETPLACE_ROOT="$mkt" LEGION_SELECTED_PLUGINS_FILE="$selected" run "$SETUP_SH" mcp
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"escapes marketplace root"* ]]
+  [ ! -e "$CURSOR_MCP_CONFIG" ]
 }
 
 @test "cursor setup: auto-detects the consumer marketplace when legion-core is vendored" {

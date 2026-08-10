@@ -30,6 +30,11 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8082 claude ...
 curl -s http://127.0.0.1:8082/stats | jq '{totalCostUsd, byUpstream}'
 ```
 
+`ANTHROPIC_BASE_URL` is client-facing only; the router never treats it as an
+upstream. Advanced or test deployments can override upstream endpoints with
+`LEGION_ANTHROPIC_UPSTREAM_URL` and `LEGION_MINIMAX_UPSTREAM_URL`. The router
+fails fast if an override points back to its own loopback port.
+
 The proxy binds **loopback only** — that is the sole auth on `/ingest`. Secrets resolve from direct env vars first, then from the best available local store at runtime: macOS Keychain via `security` on Darwin, `secret-tool`/libsecret on Linux when present, then 0600 files under `${XDG_CONFIG_HOME:-~/.config}/legion/router`. Per-model cost comes from `config/costs.json` (one source of truth, shared with `legion-delegate` and `legion-report`).
 
 ## Why a sidecar, not a proxy, for GPT

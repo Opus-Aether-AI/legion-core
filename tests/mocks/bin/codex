@@ -22,6 +22,9 @@ set -euo pipefail
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'codex %s\n' "$*" >> "$MOCK_CALL_LOG"
 [[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'codex active=%s executor=%s depth=%s run=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
+[[ -n "${MOCK_ROUTE_ENV_LOG:-}" ]] && printf 'pre=%s executor=%s fallback=%s\n' \
+  "${LEGION_ROUTE_PRE_RESOLVED:-}" "${LEGION_RESOLVED_EXECUTOR:-}" \
+  "${LEGION_RESOLVED_FALLBACK:-}" >> "$MOCK_ROUTE_ENV_LOG"
 
 args=("$@")
 cd_dir="."; out_file=""; sandbox="read-only"; model="mock"; review=0; resume=0

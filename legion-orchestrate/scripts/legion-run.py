@@ -765,18 +765,7 @@ def run_process(
     try:
         stdout, stderr = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            stdout, stderr = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            stdout, stderr = proc.communicate()
+        stdout, stderr = _terminate_process_group(proc, grace_seconds=5)
         payload = {
             "ok": False,
             "status": "timed_out",
@@ -788,6 +777,21 @@ def run_process(
         }
         _write_json(artifact, payload)
         raise LegionRunError(f"stage timed out ({artifact.name}) after {timeout_seconds}s", 124)
+    except BaseException as exc:
+        stdout, stderr = _terminate_process_group(proc, grace_seconds=1)
+        code = exc.code if isinstance(exc, LegionRunError) else 130
+        _write_json(
+            artifact,
+            {
+                "ok": False,
+                "status": "cancelled" if code == 130 else "interrupted",
+                "exit_code": code,
+                "command": argv,
+                "stdout": _short(stdout, 2000),
+                "stderr": _short(stderr, 2000),
+            },
+        )
+        raise
     payload = _json_or_text(stdout)
     if isinstance(payload, dict):
         payload.setdefault("exit_code", proc.returncode)
@@ -797,6 +801,42 @@ def run_process(
     if proc.returncode != 0:
         raise LegionRunError(f"stage failed ({artifact.name}): exit {proc.returncode}", 1)
     return payload
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[str], *, grace_seconds: int
+) -> tuple[str, str]:
+    """Terminate and reap a stage's process group without an interrupt gap."""
+
+    # A second Ctrl-C/SIGTERM must not interrupt the TERM -> grace -> KILL
+    # sequence.  Otherwise grandchildren can survive after legion-run exits.
+    previous_handlers: dict[signal.Signals, Any] = {}
+    for managed_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[managed_signal] = signal.getsignal(managed_signal)
+            signal.signal(managed_signal, signal.SIG_IGN)
+        except ValueError:
+            # Signal handlers can only be changed by the main thread.  The
+            # production path is main-threaded; keep the helper usable in tests.
+            previous_handlers.clear()
+            break
+    try:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+        return stdout or "", stderr or ""
+    finally:
+        for managed_signal, previous_handler in previous_handlers.items():
+            signal.signal(managed_signal, previous_handler)
 
 
 def _git_output(
@@ -823,22 +863,14 @@ def _git_output(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.communicate(timeout=2)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.communicate()
+        _terminate_process_group(process, grace_seconds=2)
         raise LegionRunError(
             f"immutable review input timed out after {timeout_seconds}s: git {' '.join(args)}",
             124,
         ) from exc
+    except BaseException:
+        _terminate_process_group(process, grace_seconds=2)
+        raise
     if process.returncode != 0:
         detail = _short(stderr or stdout, 1000)
         raise LegionRunError(f"could not create immutable review input: git {' '.join(args)}: {detail}", 1)
@@ -2814,7 +2846,7 @@ def execute(
             if not archetype:
                 raise LegionRunError("slice missing archetype")
             route = run_process(
-                [_cmd("legion-route"), archetype, "--task", str(item.get("task") or "")],
+                [_cmd("legion-route"), archetype, "--preflight"],
                 env,
                 repo,
                 run_dir / f"route-{len(routes)}.json",
@@ -2831,13 +2863,17 @@ def execute(
         activate_learning_context(fanout_bundle)
         fanout_error: LegionRunError | None = None
         try:
-            fanout_payload = stage_run("fanout-apply", [_cmd("legion-fanout"), "--slices", str(slices_path), "--repo", str(repo), "--apply", "--json"], run_dir / "fanout.json")
+            fanout_payload = stage_run("fanout-apply", [_cmd("legion-fanout"), "--slices", str(slices_path), "--routes", str(run_dir / "routes.json"), "--repo", str(repo), "--apply", "--json"], run_dir / "fanout.json")
         except LegionRunError as exc:
             fanout_error = exc
             fanout_payload = _load_json_value(run_dir / "fanout.json")
         ledger_source = ""
+        routes_source = ""
         if isinstance(fanout_payload, dict):
             ledger_source = str(fanout_payload.get("task_ledger_path") or "")
+            routes_source = str(fanout_payload.get("routes_path") or "")
+        if routes_source and Path(routes_source).is_file():
+            shutil.copyfile(routes_source, run_dir / "routes.json")
         if ledger_source and Path(ledger_source).is_file():
             shutil.copyfile(ledger_source, run_dir / "task-ledger.json")
         else:
@@ -3006,8 +3042,13 @@ def main(argv: list[str] | None = None) -> int:
 
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     previous_sigint = signal.getsignal(signal.SIGINT)
+    cancellation_started = False
 
     def _cancel(signum: int, _frame: Any) -> None:
+        nonlocal cancellation_started
+        if cancellation_started:
+            return
+        cancellation_started = True
         raise LegionRunError(f"run cancelled by {signal.Signals(signum).name}", 130)
 
     signal.signal(signal.SIGTERM, _cancel)

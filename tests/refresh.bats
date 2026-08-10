@@ -252,6 +252,7 @@ SH
     assert_mock_called claude "plugin update plugin-with-skill@legion-core"
     assert_mock_called claude "plugin update plugin-nested@legion-core"
     assert_mock_called claude "plugin update plugin-claude-only@legion-core"
+    [ "$(grep -c '^claude plugin list$' "$MOCK_CALL_LOG")" -eq 1 ]
 }
 
 @test "refresh.sh fails when an installed Legion plugin cannot be updated" {

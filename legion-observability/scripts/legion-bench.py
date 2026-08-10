@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -21,9 +23,11 @@ from typing import Any
 SUITE_SCHEMA = "legion.bench.suite.v1"
 CORPUS_SCHEMA = "legion.bench.corpus.v1"
 CASE_RESULT_SCHEMA = "legion.bench.case-result.v1"
-RUN_SCHEMA = "legion.bench.run.v1"
+RUN_SCHEMA = "legion.bench.run.v2"
+LEGACY_RUN_SCHEMA = "legion.bench.run.v1"
 SUMMARY_SCHEMA = "legion.bench.summary.v1"
 LATEST_SCHEMA = "legion.bench.latest.v1"
+CORPUS_RUN_SCHEMA = "legion.bench.corpus-run.v2"
 COMPARE_SCHEMA = "legion.bench.compare.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
 SPAN_SCHEMA = "legion.span.v1"
@@ -1066,7 +1070,53 @@ def collect_legion_run_self_learning(results: list[dict[str, Any]]) -> dict[str,
     return summary
 
 
-def _prune_bench_runs(root: str, keep: int) -> None:
+@contextlib.contextmanager
+def _bench_run_lease(run_dir: str):
+    """Hold a cross-process lease while a benchmark run mutates its tree."""
+    # The sidecar is created before the run directory. A pruner can therefore
+    # never observe the directory in the gap before its lease exists.
+    parent = os.path.dirname(run_dir) or "."
+    os.makedirs(parent, exist_ok=True)
+    lock_path = f"{run_dir}.active.lock"
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            os.makedirs(run_dir, exist_ok=True)
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    try:
+        os.unlink(lock_path)
+    except FileNotFoundError:
+        pass
+
+
+def _bench_run_is_active(run_dir: str) -> bool:
+    lock_path = f"{run_dir}.active.lock"
+    if not os.path.isfile(lock_path):
+        return False
+    try:
+        with open(lock_path, "a+", encoding="utf-8") as lock:
+            acquired = False
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                return True
+            finally:
+                if acquired:
+                    try:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+    except OSError:
+        # A concurrently disappearing directory is already outside the set we
+        # can safely prune.
+        return True
+    return False
+
+
+def _prune_bench_runs(root: str, keep: int, *, subdirectory: str = "runs") -> None:
     """Retain only the most recent ``keep`` bench run directories under
     ``root/runs``.
 
@@ -1074,15 +1124,12 @@ def _prune_bench_runs(root: str, keep: int) -> None:
     nothing ever pruned them, so the bench dir grew without bound (WS6). Keep a
     bounded, most-recent window; override the count with LEGION_BENCH_RETAIN_RUNS.
 
-    Best-effort and concurrency-safe: mtimes are read defensively (a dir that
-    vanishes mid-prune never raises out of here), and any run touched within a
-    grace window (LEGION_BENCH_PRUNE_GRACE_SEC, default 300s) is retained so a
-    CONCURRENT in-progress run sharing this bench dir is never deleted out from
-    under it.
+    Best-effort and concurrency-safe: active commands hold a per-run file lock,
+    while recently completed unlocked runs also receive an mtime grace window.
     """
     if keep <= 0:
         return
-    runs_root = os.path.join(root, "runs")
+    runs_root = os.path.join(root, subdirectory)
     try:
         run_dirs = [
             os.path.join(runs_root, name)
@@ -1105,11 +1152,17 @@ def _prune_bench_runs(root: str, keep: int) -> None:
     except ValueError:
         grace = 300.0
     now = time.time()
-    run_dirs.sort(key=_mtime, reverse=True)
+    run_dirs.sort(key=lambda path: (_mtime(path), path), reverse=True)
     for stale in run_dirs[keep:]:
+        if _bench_run_is_active(stale):
+            continue
         if grace > 0 and (now - _mtime(stale)) < grace:
             continue  # still fresh — could be a concurrent run mid-write
         shutil.rmtree(stale, ignore_errors=True)
+        try:
+            os.unlink(f"{stale}.active.lock")
+        except FileNotFoundError:
+            pass
 
 
 def write_run_artifacts(
@@ -1142,7 +1195,7 @@ def write_run_artifacts(
         "repo": summary.get("repo"),
         "commit": summary.get("commit"),
         "summary": summary,
-        "cases": results,
+        "case_count": len(results),
         "artifacts": {
             "run": run_path,
             "summary": summary_path,
@@ -1347,14 +1400,17 @@ def record_failed_corpus_outcomes(
 def load_run_or_summary(path: str) -> dict[str, Any]:
     payload = _json_file(os.path.abspath(os.path.expanduser(path)))
     schema = payload.get("schema")
-    if schema == RUN_SCHEMA:
+    if schema in {RUN_SCHEMA, LEGACY_RUN_SCHEMA}:
         summary = _dict(payload.get("summary"))
         if summary.get("schema") != SUMMARY_SCHEMA:
             raise ValueError(f"{path} has no valid summary")
         return summary
     if schema == SUMMARY_SCHEMA:
         return payload
-    raise ValueError(f"{path} is not a {RUN_SCHEMA} or {SUMMARY_SCHEMA} artifact")
+    raise ValueError(
+        f"{path} is not a {RUN_SCHEMA}, {LEGACY_RUN_SCHEMA}, "
+        f"or {SUMMARY_SCHEMA} artifact"
+    )
 
 
 def _metric(summary: dict[str, Any], key: str) -> float:
@@ -2461,13 +2517,13 @@ def write_corpus_artifacts(
     _write_json(
         run_path,
         {
-            "schema": "legion.bench.corpus-run.v1",
+            "schema": CORPUS_RUN_SCHEMA,
             "run_id": run_id,
             "generated_at": summary.get("generated_at"),
             "corpus": corpus.get("corpus"),
             "corpus_path": corpus.get("_path"),
             "summary": summary,
-            "cases": results,
+            "case_count": len(results),
             "artifacts": {
                 "run": run_path,
                 "summary": summary_path,
@@ -2487,6 +2543,11 @@ def write_corpus_artifacts(
             "generated_at": summary.get("generated_at"),
         },
     )
+    try:
+        keep = int(os.environ.get("LEGION_BENCH_RETAIN_CORPUS_RUNS", "10"))
+    except ValueError:
+        keep = 10
+    _prune_bench_runs(root, keep, subdirectory="corpus")
     return {
         "run_dir": run_dir,
         "run_path": run_path,
@@ -2706,47 +2767,48 @@ def corpus_command(args: argparse.Namespace) -> int:
                 return 1
         return 0
     run_dir = os.path.join(os.path.abspath(os.path.expanduser(args.bench_dir)), "corpus", run_id)
-    results: list[dict[str, Any]] = []
-    for mode in modes:
-        for attempt in range(1, repeat + 1):
-            for case in _list(corpus.get("cases")):
-                results.append(
-                    run_corpus_case_mode(
-                        _dict(case),
-                        mode,
-                        repo=repo,
-                        run_dir=run_dir,
-                        repeat_index=attempt,
+    with _bench_run_lease(run_dir):
+        results: list[dict[str, Any]] = []
+        for mode in modes:
+            for attempt in range(1, repeat + 1):
+                for case in _list(corpus.get("cases")):
+                    results.append(
+                        run_corpus_case_mode(
+                            _dict(case),
+                            mode,
+                            repo=repo,
+                            run_dir=run_dir,
+                            repeat_index=attempt,
+                        )
                     )
-                )
-    summary = summarize_corpus_run(
-        corpus,
-        results,
-        run_id=run_id,
-        repo=repo,
-        baseline_mode=baseline_mode,
-        reliability_min_cases=reliability_min_cases,
-    )
-    artifacts = write_corpus_artifacts(args.bench_dir, run_id, corpus, results, summary)
-    recorded_outcomes: list[dict[str, Any]] = []
-    if getattr(args, "record_failures", False):
-        recorded_outcomes = record_failed_corpus_outcomes(
+        summary = summarize_corpus_run(
+            corpus,
             results,
-            log_root=args.logs,
-            run_path=artifacts["run_path"],
             run_id=run_id,
-            corpus_name=_text(corpus.get("corpus")) or args.corpus,
+            repo=repo,
+            baseline_mode=baseline_mode,
+            reliability_min_cases=reliability_min_cases,
         )
-        artifacts["recorded_outcomes"] = len(recorded_outcomes)
-    report_path = ""
-    if args.report_md:
-        report_path = os.path.abspath(os.path.expanduser(args.report_md))
-        report_dir = os.path.dirname(report_path)
-        if report_dir:
-            os.makedirs(report_dir, exist_ok=True)
-        with open(report_path, "w", encoding="utf-8") as handle:
-            handle.write(render_corpus_markdown(summary, artifacts))
-        artifacts["report_md"] = report_path
+        artifacts = write_corpus_artifacts(args.bench_dir, run_id, corpus, results, summary)
+        recorded_outcomes: list[dict[str, Any]] = []
+        if getattr(args, "record_failures", False):
+            recorded_outcomes = record_failed_corpus_outcomes(
+                results,
+                log_root=args.logs,
+                run_path=artifacts["run_path"],
+                run_id=run_id,
+                corpus_name=_text(corpus.get("corpus")) or args.corpus,
+            )
+            artifacts["recorded_outcomes"] = len(recorded_outcomes)
+        report_path = ""
+        if args.report_md:
+            report_path = os.path.abspath(os.path.expanduser(args.report_md))
+            report_dir = os.path.dirname(report_path)
+            if report_dir:
+                os.makedirs(report_dir, exist_ok=True)
+            with open(report_path, "w", encoding="utf-8") as handle:
+                handle.write(render_corpus_markdown(summary, artifacts))
+            artifacts["report_md"] = report_path
     payload = {**artifacts, "summary": summary}
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))

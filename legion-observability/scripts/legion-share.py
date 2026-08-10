@@ -21,7 +21,10 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
+import time
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
@@ -45,7 +48,36 @@ def _num(x):
     return x if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x else 0
 
 
-def load_spans(d):
+_WINDOW_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_window(value):
+    if not value:
+        return None
+    match = re.fullmatch(r"([1-9][0-9]*)([smhdw])", str(value).strip().lower())
+    if not match:
+        raise ValueError("window must be a positive duration such as 12h, 7d, or 2w")
+    return int(match.group(1)) * _WINDOW_SECONDS[match.group(2)]
+
+
+def _timestamp(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def load_spans(d, since=None):
     spans = []
     for p in sorted(glob.glob(os.path.join(d, "*.jsonl"))):
         try:
@@ -58,7 +90,12 @@ def load_spans(d):
                         s = json.loads(line)
                     except (ValueError, TypeError):
                         continue
-                    if isinstance(s, dict) and s.get("schema") == "legion.span.v1":
+                    timestamp = _timestamp(s.get("ts")) if isinstance(s, dict) else None
+                    if (
+                        isinstance(s, dict)
+                        and s.get("schema") == "legion.span.v1"
+                        and (since is None or (timestamp is not None and timestamp >= since))
+                    ):
                         spans.append(s)
         except OSError:
             continue
@@ -161,10 +198,15 @@ def main(argv=None):
     ap.add_argument("--dir", default=_DEF_SPANS)
     ap.add_argument("--routing", default=_DEF_ROUTING)
     ap.add_argument("--target", type=float, default=None)
-    ap.add_argument("--window", default=None, help="accepted report window label, e.g. 7d")
+    ap.add_argument("--window", default=None, help="measurement window, e.g. 12h, 7d, or 2w")
     ap.add_argument("--json", action="store_true", help="accepted for report compatibility; report output is JSON by default")
     a = ap.parse_args(argv)
-    c = compute(load_spans(a.dir))
+    try:
+        window_seconds = parse_window(a.window)
+    except ValueError as exc:
+        ap.error(str(exc))
+    since = time.time() - window_seconds if window_seconds is not None else None
+    c = compute(load_spans(a.dir, since=since))
     tgt = target_share(a.target, a.routing)
     if a.cmd == "next":
         print(recommend_next(c["codex_share_runs"], c["total_runs"], tgt))

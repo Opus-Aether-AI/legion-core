@@ -65,3 +65,16 @@ setup() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.total_runs == 2 and .window == "7d"'
 }
+
+@test "share: --window excludes stale spans" {
+  mkdir -p "$LEGION_TELEMETRY_DIR"
+  cat > "$LEGION_TELEMETRY_DIR/history.jsonl" <<'JSON'
+{"schema":"legion.span.v1","ts":"2020-01-01T00:00:00Z","run_id":"old","executor":"codex","status":"ok","tokens":{}}
+JSON
+  "$TRACE" emit --executor opus --model fixture-claude --status ok >/dev/null
+
+  run "$SHARE" --window 1d --json
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.total_runs == 1 and .codex_runs == 0 and .opus_runs == 1'
+}

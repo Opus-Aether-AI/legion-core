@@ -90,13 +90,13 @@ emit_span() {
   } 2>/dev/null || true
 }
 
-# Parse the opencode JSONL event stream into a compact
-# {cost, model, usage:{…canonical snake_case…}, result} object (one jq pass).
-# A message streams as many message.updated events sharing one id; take the LAST
-# state per id (group_by(.id)|map(.[-1])) then SUM across distinct assistant
-# messages so a multi-turn run is metered correctly (never per-event double-count).
-# Relies on opencode emitting ascending (chronological) message + part ids, so
-# .[-1] per id is the final state — opencode guarantees this (Identifier.ascending).
+# Parse the opencode JSONL event stream into a compact result (one jq pass).
+# OpenCode <=1.2 emitted message.updated/message.part.updated events; 1.3 emits
+# top-level text/step_finish/error events. Accept both contracts so an installed
+# CLI upgrade cannot silently turn a failed run into an empty success.
+#
+# Streaming updates can repeat an id. Take the last state per id, then sum across
+# distinct assistant messages/steps so a multi-turn run is never double-counted.
 # Tolerant of stray non-JSON stdout lines (e.g. a plugin's console.log poisoning
 # the stream): each line is parsed with `fromjson?`, so one bad line costs at most
 # that event, not the whole run's cost/result/token metering.
@@ -106,23 +106,38 @@ parse_opencode_output() {
     [ splits("\n") | select(length > 0) | fromjson? ] as $events
     | ([ $events[] | select(.type=="message.updated" and (.properties.info.role? == "assistant"))
          | .properties.info ] | group_by(.id) | map(.[-1])) as $msgs
+    | ([ $events[] | select(.type=="step_finish" and (.part.type? == "step-finish"))
+         | .part ] | group_by(.id) | map(.[-1])) as $steps
     | ([ $events[] | select(.type=="message.part.updated" and (.properties.part.type? == "text")) ]
-         | group_by(.properties.part.id) | map(.[-1].properties.part.text) | join("\n")) as $text
+         | group_by(.properties.part.id) | map(.[-1].properties.part.text)) as $legacy_text
+    | ([ $events[] | select(.type=="text" and (.part.type? == "text")) ]
+         | group_by(.part.id) | map(.[-1].part.text)) as $current_text
+    | ([ $events[] | select(.type=="error") ] | last) as $error
     | {
-        cost:  ([$msgs[].cost] | add // 0),
+        cost:  (([$msgs[].cost] | add // 0) + ([$steps[].cost] | add // 0)),
         model: ($msgs | last
                  | if . == null or ((.providerID // "") == "") or ((.modelID // "") == "") then ""
                    else (.providerID + "/" + .modelID) end),
         usage: {
-          input_tokens:                ([$msgs[].tokens.input]       | add // 0),
-          output_tokens:               ([$msgs[].tokens.output]      | add // 0),
-          reasoning_output_tokens:     ([$msgs[].tokens.reasoning]   | add // 0),
-          cache_read_input_tokens:     ([$msgs[].tokens.cache.read]  | add // 0),
-          cache_creation_input_tokens: ([$msgs[].tokens.cache.write] | add // 0)
+          input_tokens:                (([$msgs[].tokens.input]       | add // 0) + ([$steps[].tokens.input]       | add // 0)),
+          output_tokens:               (([$msgs[].tokens.output]      | add // 0) + ([$steps[].tokens.output]      | add // 0)),
+          reasoning_output_tokens:     (([$msgs[].tokens.reasoning]   | add // 0) + ([$steps[].tokens.reasoning]   | add // 0)),
+          cache_read_input_tokens:     (([$msgs[].tokens.cache.read]  | add // 0) + ([$steps[].tokens.cache.read]  | add // 0)),
+          cache_creation_input_tokens: (([$msgs[].tokens.cache.write] | add // 0) + ([$steps[].tokens.cache.write] | add // 0))
         },
-        result: ($text // "")
+        result: ([$legacy_text[], $current_text[]] | map(select(. != null and . != "")) | join("\n")),
+        event_count: ($events | length),
+        recognized_event_count: ([ $events[] | select(.type == "message.updated"
+          or .type == "message.part.updated" or .type == "step_start"
+          or .type == "step_finish" or .type == "text" or .type == "error") ] | length),
+        has_error: ($error != null),
+        error: (if $error == null then null else {
+          name: ($error.error.name // "OpenCodeError"),
+          message: ($error.error.data.message // $error.error.message // "opencode emitted an error event"),
+          status_code: ($error.error.data.statusCode // $error.error.statusCode // null)
+        } end)
       }' "$file" 2>/dev/null)" || out=""
-  [[ -n "$out" ]] && printf '%s' "$out" || printf '{"cost":0,"model":"","usage":{},"result":""}'
+  [[ -n "$out" ]] && printf '%s' "$out" || printf '{"cost":0,"model":"","usage":{},"result":"","event_count":0,"recognized_event_count":0,"has_error":false,"error":null}'
 }
 
 cmd_run() {
@@ -215,13 +230,16 @@ cmd_run() {
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 
-  local parsed usage cost result actual_model diff_rc=0 status="ok"
+  local parsed usage cost result actual_model opencode_error has_error recognized_events diff_rc=0 status="ok"
   parsed="$(parse_opencode_output "$out_file")"
   usage="$(jq -c '.usage // {}' <<<"$parsed" 2>/dev/null || printf '{}')"
   cost="$(jq -r '.cost // 0' <<<"$parsed" 2>/dev/null || printf '0')"
   actual_model="$(jq -r '.model // ""' <<<"$parsed" 2>/dev/null || printf '')"
   [[ -n "$actual_model" && "$actual_model" != "/" ]] || actual_model="$model"
   result="$(jq -r '.result // ""' <<<"$parsed" 2>/dev/null || printf '')"
+  has_error="$(jq -r '.has_error // false' <<<"$parsed" 2>/dev/null || printf 'false')"
+  opencode_error="$(jq -r '.error.message // ""' <<<"$parsed" 2>/dev/null || printf '')"
+  recognized_events="$(jq -r '.recognized_event_count // 0' <<<"$parsed" 2>/dev/null || printf '0')"
 
   # opencode omits `cost` for models it can't price (custom / some local providers).
   # When the precomputed cost is 0 but tokens were used, fall back to Legion's own
@@ -240,6 +258,14 @@ cmd_run() {
   git -C "$wt" add -A 2>/dev/null || diff_rc=1
   git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
   [[ "$rc" -ne 0 ]] && status="failed"
+  if [[ "$has_error" == "true" ]]; then
+    status="failed"
+    [[ -n "$result" ]] && result="${result}"$'\n'
+    result="${result}opencode error: ${opencode_error:-unknown error}"
+  elif [[ "$recognized_events" == "0" && "$status" == "ok" ]]; then
+    status="error"
+    result="opencode returned no recognized JSONL events; inspect the captured stdout/stderr artifacts."
+  fi
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
   # Reject a read-only run only if it changed files OUTSIDE .opencode/plans/.
   # opencode's (experimental) plan mode writes its plan there via the write tool;
@@ -250,6 +276,10 @@ cmd_run() {
     status="error"
     [[ -n "$result" ]] && result="${result}"$'\n'
     result="${result}opencode produced file changes during a read-only run; refusing to apply or report ok."
+  fi
+  if [[ "$status" == "ok" && -z "$result" && ! -s "$art/diff.patch" ]]; then
+    status="error"
+    result="opencode completed without a result or a captured diff; refusing to report an empty success."
   fi
   printf '%s\n' "$result" > "$art/last-message.txt"
 
@@ -282,9 +312,11 @@ cmd_run() {
 
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --arg result "$result" --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
+    --arg result "$result" --arg opencode_error "$opencode_error" \
+    --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"opencode", model:$model, opencode_exit:$rc,
-     result:$result, worktree:$wt, diff_path:$diff, last_message_path:$last,
+     result:$result, opencode_error:(if $opencode_error == "" then null else $opencode_error end),
+     worktree:$wt, diff_path:$diff, last_message_path:$last,
      usage:$usage, cost_usd:$cost}'
   [[ "$status" == "ok" ]] || exit 1
 }

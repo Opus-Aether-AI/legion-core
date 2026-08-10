@@ -13,7 +13,7 @@
       "name": "legion-router",
       "source": "./legion-router",
       "description": "Legion's multi-model brain: delegate scoped tasks to configured Codex, Cursor, Claude, and opencode executors, then bring back a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
-      "version": "0.5.11",
+      "version": "0.5.12",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",

@@ -27,6 +27,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state
+import legion_session_io
 
 EVENT_SCHEMA = "legion.session-event.v1"
 SESSION_SCHEMA = "legion.session-summary.v1"
@@ -550,7 +551,12 @@ def _dispatches(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def normalize_session_file(path: Path, *, home: Path | None = None) -> list[dict[str, Any]]:
+def normalize_session_file(
+    path: Path,
+    *,
+    home: Path | None = None,
+    max_events: int = 0,
+) -> list[dict[str, Any]]:
     """Stream one session file into bounded normalized events."""
     path = Path(path)
     source = _source_for_path(path)
@@ -558,63 +564,55 @@ def normalize_session_file(path: Path, *, home: Path | None = None) -> list[dict
     session_id = _stable_id([source, str(path)])
     events: list[dict[str, Any]] = []
     cwd_project = ""
-    try:
-        handle = path.open(encoding="utf-8", errors="ignore")
-    except OSError:
-        return []
-    with handle:
-        for index, line in enumerate(handle):
-            try:
-                payload = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            cwd = _session_cwd(payload)
-            if cwd:
-                cwd_project = _project_for_cwd(cwd)
-            timestamp = str(
-                payload.get("timestamp")
-                or payload.get("ts")
-                or payload.get("created_at")
-                or ""
-            )
-            role = _message_role(payload)
-            text = _message_text(payload)
-            if text:
-                excerpt = redact_text(text)
-                if excerpt:
-                    events.append(
-                        {
-                            "schema": EVENT_SCHEMA,
-                            "id": _stable_id([session_id, index, role, excerpt]),
-                            "session_id": session_id,
-                            "source": source,
-                            "project": project,
-                            "ts": timestamp,
-                            "sequence": index,
-                            "role": role,
-                            "event_type": "message",
-                            "excerpt": excerpt,
-                        }
-                    )
-            for offset, dispatch in enumerate(_dispatches(payload)):
+    for index, payload in legion_session_io.iter_jsonl_objects(path):
+        cwd = _session_cwd(payload)
+        if cwd:
+            cwd_project = _project_for_cwd(cwd)
+        timestamp = str(
+            payload.get("timestamp")
+            or payload.get("ts")
+            or payload.get("created_at")
+            or ""
+        )
+        role = _message_role(payload)
+        text = _message_text(payload)
+        if text:
+            excerpt = redact_text(text)
+            if excerpt:
                 events.append(
                     {
                         "schema": EVENT_SCHEMA,
-                        "id": _stable_id([session_id, index, "dispatch", offset, dispatch["hash"]]),
+                        "id": _stable_id([session_id, index, role, excerpt]),
                         "session_id": session_id,
                         "source": source,
                         "project": project,
                         "ts": timestamp,
                         "sequence": index,
-                        "role": "assistant",
-                        "event_type": "dispatch",
-                        "excerpt": f"{dispatch['name']} dispatch",
-                        "dispatch_hash": dispatch["hash"],
-                        "run_in_background": dispatch["background"],
+                        "role": role,
+                        "event_type": "message",
+                        "excerpt": excerpt,
                     }
                 )
+        for offset, dispatch in enumerate(_dispatches(payload)):
+            events.append(
+                {
+                    "schema": EVENT_SCHEMA,
+                    "id": _stable_id([session_id, index, "dispatch", offset, dispatch["hash"]]),
+                    "session_id": session_id,
+                    "source": source,
+                    "project": project,
+                    "ts": timestamp,
+                    "sequence": index,
+                    "role": "assistant",
+                    "event_type": "dispatch",
+                    "excerpt": f"{dispatch['name']} dispatch",
+                    "dispatch_hash": dispatch["hash"],
+                    "run_in_background": dispatch["background"],
+                }
+            )
+        if max_events > 0 and len(events) >= max_events:
+            events = events[:max_events]
+            break
     if cwd_project:
         for event in events:
             event["project"] = cwd_project
@@ -774,15 +772,11 @@ def _repo_files(repo: str, limit: int = 5000) -> list[Path]:
     root = Path(repo)
     if not root.is_dir():
         return []
-    ignored = {".git", "node_modules", ".venv", "venv", "dist", "build", ".next"}
     files: list[Path] = []
-    for path in root.rglob("*"):
-        if any(part in ignored for part in path.parts):
-            continue
-        if path.is_file():
-            files.append(path)
-            if len(files) >= limit:
-                break
+    for path in legion_session_io.walk_files([root]):
+        files.append(path)
+        if len(files) >= limit:
+            break
     return files
 
 
@@ -1147,21 +1141,18 @@ def _iter_session_files(
     max_bytes = int(max_file_mb * 1024 * 1024) if max_file_mb > 0 else 0
     max_total_bytes = int(max_total_mb * 1024 * 1024) if max_total_mb > 0 else 0
     candidates: dict[Path, tuple[int, int]] = {}
-    for root in roots:
-        if not root.exists():
+    for path in legion_session_io.walk_files(roots, suffixes={".jsonl"}):
+        try:
+            stat = path.stat()
+        except OSError:
             continue
-        for path in root.rglob("*.jsonl"):
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if cutoff and stat.st_mtime < cutoff:
-                continue
-            # JSONL is streamed, but this cap protects accidentally selected
-            # machine-generated logs in non-standard roots.
-            if max_bytes and stat.st_size > max_bytes:
-                continue
-            candidates[path] = (stat.st_mtime_ns, stat.st_size)
+        if cutoff and stat.st_mtime < cutoff:
+            continue
+        # JSONL is streamed, but this cap protects accidentally selected
+        # machine-generated logs in non-standard roots.
+        if max_bytes and stat.st_size > max_bytes:
+            continue
+        candidates[path] = (stat.st_mtime_ns, stat.st_size)
 
     ordered = sorted(
         candidates.items(),
@@ -1219,7 +1210,15 @@ def analyze_command(args: argparse.Namespace) -> int:
             break
         if args.repo_only and args.max_files > 0 and matched_files >= args.max_files:
             break
-        normalized = normalize_session_file(path, home=home)
+        remaining = max(0, args.max_events - len(events)) if args.max_events > 0 else 0
+        normalized = normalize_session_file(
+            path,
+            home=home,
+            # Repo filtering depends on provenance that may occur later in a
+            # transcript; keep that path's existing behavior. The normal daily
+            # lane stops decoding once its global event budget is satisfied.
+            max_events=0 if args.repo_only else remaining,
+        )
         files_scanned += 1
         if args.repo_only:
             normalized = filter_events_for_repo(normalized, args.repo)

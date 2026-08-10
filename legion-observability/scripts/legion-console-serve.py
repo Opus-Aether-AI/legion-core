@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -56,6 +57,36 @@ CFG = {"registry": None, "spans": None, "interval": 1.5, "repo": None,
 CTRL = None  # lazy-loaded legion-control client (it lives in legion-router/scripts)
 
 
+class SnapshotCache:
+    """Build at most one telemetry snapshot per configured polling interval."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._key = None
+        self._built_at = 0.0
+        self._value = None
+
+    def get(self) -> dict:
+        key = (CFG.get("registry"), CFG.get("spans"))
+        now = time.monotonic()
+        interval = max(0.0, float(CFG.get("interval") or 0.0))
+        with self._lock:
+            if (
+                self._value is not None
+                and self._key == key
+                and now - self._built_at < interval
+            ):
+                return self._value
+            value = IDX.build_snapshot(CFG["registry"], CFG["spans"])
+            self._key = key
+            self._built_at = time.monotonic()
+            self._value = value
+            return value
+
+
+SNAPSHOTS = SnapshotCache()
+
+
 def _repo() -> str:
     return CFG.get("repo") or os.path.abspath(os.path.join(_HERE, "..", ".."))
 
@@ -92,7 +123,7 @@ def control(req: dict) -> dict:
 
 
 def snapshot() -> dict:
-    return IDX.build_snapshot(CFG["registry"], CFG["spans"])
+    return SNAPSHOTS.get()
 
 
 def activity() -> dict:
@@ -102,6 +133,7 @@ def activity() -> dict:
             CFG["registry"],
             os.path.join(_repo(), ".legion", "runs"),
             os.path.join(_repo(), "legion-router", "config", "costs.json"),
+            CFG["spans"],
         )
     except Exception as exc:  # noqa: BLE001 - dashboard must never 500
         return {"error": str(exc), "runs": [], "sessions": [], "totals": {}}
@@ -193,6 +225,8 @@ def main(argv=None):
     ap.add_argument("--control-sock", default=os.path.expanduser("~/.claude/legion/console.sock"),
                     help="legion-control daemon socket (for steer actions)")
     args = ap.parse_args(argv)
+    if args.interval <= 0:
+        ap.error("--interval must be > 0")
     CFG["control_sock"] = args.control_sock
     CFG.update(registry=args.registry, spans=args.spans, interval=args.interval, repo=args.repo)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)

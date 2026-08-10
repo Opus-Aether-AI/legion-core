@@ -782,13 +782,20 @@ cmd_run() {
   require_git_repo "$repo"
   # Archetype fills model/sandbox/effort/fallback from routing + model config; explicit flags win.
   local r_exec="" r_fallback=""
-  if [[ -n "$archetype" ]]; then
+  if [[ -n "$archetype" && "${LEGION_ROUTE_PRE_RESOLVED:-0}" == "1" ]]; then
+    r_exec="${LEGION_RESOLVED_EXECUTOR:-$forced_executor}"
+    r_fallback="${LEGION_RESOLVED_FALLBACK:-}"
+  elif [[ -n "$archetype" ]]; then
     local r_model r_sandbox r_effort
     IFS='|' read -r r_exec r_model r_sandbox r_effort r_fallback <<< "$(resolve_archetype "$archetype")"
     [[ -n "$model" ]]   || model="$r_model"
     [[ -n "$sandbox" ]] || sandbox="$r_sandbox"
     [[ -n "$effort" ]]  || effort="$r_effort"
   fi
+  # These variables are a one-hop optimization contract between fanout and
+  # this delegate invocation. Never let them escape into the worker: a nested
+  # explicit handoff must resolve its own archetype and sandbox.
+  unset LEGION_ROUTE_PRE_RESOLVED LEGION_RESOLVED_EXECUTOR LEGION_RESOLVED_FALLBACK
   # --executor forces a specific harness (symmetric reverse-delegate: any primary
   # can hand work to any other harness). Apply it BEFORE the low-credit bias and the
   # dispatch below so both see the final resolved target.

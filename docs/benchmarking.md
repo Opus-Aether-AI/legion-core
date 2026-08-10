@@ -169,6 +169,14 @@ per-model span rollups.
 Relative lift is only marked reliable once the comparison has at least
 `reliability_min_cases` case-runs, default `30`.
 
+Completed corpus directories are retained per benchmark root (10 by default;
+set `LEGION_BENCH_RETAIN_CORPUS_RUNS`, or `0` to disable pruning). The detailed
+case payload is authoritative in each run's `cases.jsonl`; v2 run artifacts
+store `case_count` and the cases artifact path instead of duplicating the full
+array. The same single-copy contract applies to ordinary
+`legion.bench.run.v2` artifacts. Compare/gate readers remain compatible with
+legacy `legion.bench.run.v1` artifacts whose `cases` array was embedded.
+
 `heldout-oss-36` (36 micro tasks, parity floor) and `heldout-oss-hard` (19
 multi-file / longer-horizon tasks, discriminating tier) are the two packaged
 reliable corpora. Both default to `scripted-baseline` and `scripted-oracle`, so

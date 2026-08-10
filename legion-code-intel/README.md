@@ -4,10 +4,11 @@ Optional code-intelligence diagnostics for Legion.
 
 `legion-code-intel` gives the orchestrator a stable artifact for static
 diagnostic signals without making LSP servers a hard dependency of
-`legion-core`. The first adapters use repo-native tools:
+`legion-core`. The first adapters use repo-native tools once per detected
+project configuration:
 
-- TypeScript: `tsc --noEmit --pretty false`
-- Python: `pyright --outputjson`
+- TypeScript: `tsc --noEmit --pretty false --project <config>`
+- Python: `pyright --outputjson --project <config>`
 
 Both are optional. If the target repo does not have a supported project marker
 or the adapter binary is missing, the command reports `status=skipped` and exits
@@ -19,6 +20,12 @@ or the adapter binary is missing, the command reports `status=skipped` and exits
 legion-code-intel diagnostics --repo . --adapter auto --json
 legion-code-intel diagnostics --repo . --adapter typescript --changed-only --base HEAD --emit-span
 ```
+
+Auto mode requires a TypeScript or Pyright configuration; selecting an adapter
+explicitly retains loose-file fallback. `--timeout` is one total deadline per
+adapter across all configured projects. At most 50 configured projects run by
+default; use `--max-projects` to lower that fail-closed guard, or `0` for an
+intentional unlimited audit.
 
 Exit codes:
 

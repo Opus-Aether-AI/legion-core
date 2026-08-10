@@ -19,6 +19,11 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.9/3.10 compatibility
+    tomllib = None  # type: ignore[assignment]
+
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "legion-observability", "scripts"))
 try:
@@ -30,6 +35,7 @@ except ModuleNotFoundError:  # code-intel can ship without the observability plu
 RESULT_SCHEMA = "legion.code-intel.v1"
 SPAN_SCHEMA = "legion.span.v1"
 DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_MAX_PROJECTS = 50
 SKIP_DIRS = {
     ".git",
     ".hg",
@@ -43,6 +49,14 @@ SKIP_DIRS = {
     "build",
     ".next",
     ".turbo",
+    ".legion",
+    ".claude",
+    ".codex-worktrees",
+}
+TSC_SHARED_CONFIG_NAMES = {
+    "tsconfig.base.json",
+    "tsconfig.options.json",
+    "tsconfig.shared.json",
 }
 
 
@@ -165,7 +179,7 @@ def _command_result(
     argv: list[str],
     *,
     repo: str,
-    timeout: int,
+    timeout: float,
 ) -> dict[str, Any]:
     start = time.monotonic()
     try:
@@ -215,16 +229,39 @@ def _local_typescript_bin(repo: str) -> str:
     )
 
 
-def _detect_typescript(repo: str) -> bool:
-    if _has_file(repo, "tsconfig.json"):
-        return True
-    package_json = _load_json(os.path.join(repo, "package.json"))
-    deps = {}
-    for key in ("dependencies", "devDependencies", "peerDependencies"):
-        value = package_json.get(key)
-        if isinstance(value, dict):
-            deps.update(value)
-    return "typescript" in deps or _has_any_file(repo, (".ts", ".tsx"), limit=1)
+def _typescript_projects(repo: str) -> list[str]:
+    """Find executable project configs, excluding conventional shared bases."""
+    projects: list[str] = []
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for name in sorted(files):
+            if name in TSC_SHARED_CONFIG_NAMES:
+                continue
+            if name == "tsconfig.json" or (
+                name.startswith("tsconfig.") and name.endswith(".json")
+            ):
+                projects.append(_rel(repo, os.path.join(root, name)))
+    return projects
+
+
+def _project_limit_error(
+    adapter: str,
+    projects: list[str],
+    max_projects: int,
+) -> dict[str, Any] | None:
+    if max_projects <= 0 or len(projects) <= max_projects:
+        return None
+    return {
+        "name": adapter,
+        "status": "error",
+        "projects": projects,
+        "project_count": len(projects),
+        "diagnostics": [],
+        "parse_error": (
+            f"configured project count {len(projects)} exceeds configured "
+            f"limit {max_projects}"
+        ),
+    }
 
 
 _TSC_DIAG_RE = re.compile(
@@ -255,31 +292,77 @@ def _parse_tsc(repo: str, text: str) -> list[dict[str, Any]]:
     return diagnostics
 
 
-def _typescript_adapter(repo: str, timeout: int) -> dict[str, Any]:
-    if not _detect_typescript(repo):
-        return {"name": "typescript", "status": "skipped", "reason": "no TypeScript project markers"}
+def _typescript_adapter(
+    repo: str,
+    timeout: int,
+    *,
+    explicit: bool = False,
+    max_projects: int = DEFAULT_MAX_PROJECTS,
+) -> dict[str, Any]:
+    projects = _typescript_projects(repo)
+    if not projects and not (
+        explicit and _has_any_file(repo, (".ts", ".tsx"), limit=1)
+    ):
+        return {
+            "name": "typescript",
+            "status": "skipped",
+            "reason": "no configured TypeScript projects",
+        }
+    limit_error = _project_limit_error("typescript", projects, max_projects)
+    if limit_error:
+        return limit_error
     tsc = _local_typescript_bin(repo)
     if not tsc:
         return {"name": "typescript", "status": "skipped", "reason": "tsc not found"}
-    argv = [tsc, "--noEmit", "--pretty", "false"]
-    result = _command_result(argv, repo=repo, timeout=timeout)
-    combined = f"{result['stdout']}\n{result['stderr']}"
-    diagnostics = _parse_tsc(repo, combined)
-    status = "ok" if result["returncode"] == 0 else "failed"
-    if result["timed_out"]:
-        status = "error"
-    elif result["returncode"] != 0 and not diagnostics:
-        status = "error"
+    configured = projects or [""]
+    commands: list[list[str]] = []
+    results: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    status = "ok"
+    parse_errors: list[str] = []
+    deadline = time.monotonic() + max(0, timeout)
+    for project in configured:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            status = "error"
+            parse_errors.append(
+                f"adapter deadline exhausted before {project or '<loose-files>'}"
+            )
+            break
+        argv = [tsc, "--noEmit", "--pretty", "false"]
+        if project:
+            argv.extend(["--project", project])
+        result = _command_result(argv, repo=repo, timeout=remaining)
+        commands.append(argv)
+        results.append(result)
+        parsed = _parse_tsc(repo, f"{result['stdout']}\n{result['stderr']}")
+        diagnostics.extend(parsed)
+        if result["timed_out"]:
+            status = "error"
+            parse_errors.append(f"{project or '<loose-files>'}: timed out")
+            parse_errors.append("adapter deadline exhausted")
+            break
+        elif result["returncode"] != 0 and not parsed:
+            status = "error"
+            parse_errors.append(
+                f"{project or '<loose-files>'}: tsc exited nonzero without parseable diagnostics"
+            )
+        elif result["returncode"] != 0 and status != "error":
+            status = "failed"
     return {
         "name": "typescript",
         "status": status,
-        "cmd": argv,
-        "returncode": result["returncode"],
-        "duration_ms": result["duration_ms"],
+        "cmd": commands[0] if len(commands) == 1 else commands,
+        "projects": projects,
+        "returncode": max(
+            (int(item["returncode"]) for item in results),
+            default=124,
+        ),
+        "duration_ms": sum(int(item["duration_ms"]) for item in results),
         "diagnostics": diagnostics,
-        "parse_error": "tsc exited nonzero without parseable diagnostics" if status == "error" and not diagnostics else "",
-        "raw_stdout_tail": result["stdout"][-4000:],
-        "raw_stderr_tail": result["stderr"][-4000:],
+        "parse_error": "; ".join(parse_errors),
+        "raw_stdout_tail": "\n".join(str(item["stdout"])[-2000:] for item in results)[-4000:],
+        "raw_stderr_tail": "\n".join(str(item["stderr"])[-2000:] for item in results)[-4000:],
     }
 
 
@@ -291,12 +374,37 @@ def _local_pyright_bin(repo: str) -> str:
     )
 
 
-def _detect_python(repo: str) -> bool:
-    return (
-        _has_file(repo, "pyrightconfig.json")
-        or _has_file(repo, "pyproject.toml")
-        or _has_any_file(repo, (".py",), limit=1)
-    )
+def _pyproject_configures_pyright(path: str) -> bool:
+    if tomllib is None:
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as handle:
+                return any(
+                    re.match(r"^\s*\[\s*tool\.pyright(?:\.|\s*\])", line)
+                    for line in handle
+                )
+        except OSError:
+            return False
+    try:
+        with open(path, "rb") as handle:
+            payload = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    tool = payload.get("tool") if isinstance(payload, dict) else None
+    return isinstance(tool, dict) and isinstance(tool.get("pyright"), dict)
+
+
+def _pyright_projects(repo: str) -> list[str]:
+    """Find configured Pyright projects and return their config paths."""
+    projects: list[str] = []
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        if "pyrightconfig.json" in files:
+            projects.append(_rel(repo, os.path.join(root, "pyrightconfig.json")))
+        elif "pyproject.toml" in files and _pyproject_configures_pyright(
+            os.path.join(root, "pyproject.toml")
+        ):
+            projects.append(_rel(repo, os.path.join(root, "pyproject.toml")))
+    return projects
 
 
 def _parse_pyright(repo: str, stdout: str) -> list[dict[str, Any]]:
@@ -327,36 +435,82 @@ def _parse_pyright(repo: str, stdout: str) -> list[dict[str, Any]]:
     return diagnostics
 
 
-def _pyright_adapter(repo: str, timeout: int) -> dict[str, Any]:
-    if not _detect_python(repo):
-        return {"name": "pyright", "status": "skipped", "reason": "no Python project markers"}
+def _pyright_adapter(
+    repo: str,
+    timeout: int,
+    *,
+    explicit: bool = False,
+    max_projects: int = DEFAULT_MAX_PROJECTS,
+) -> dict[str, Any]:
+    projects = _pyright_projects(repo)
+    if not projects and not (
+        explicit and _has_any_file(repo, (".py",), limit=1)
+    ):
+        return {
+            "name": "pyright",
+            "status": "skipped",
+            "reason": "no configured Python project",
+        }
+    limit_error = _project_limit_error("pyright", projects, max_projects)
+    if limit_error:
+        return limit_error
     pyright = _local_pyright_bin(repo)
     if not pyright:
         return {"name": "pyright", "status": "skipped", "reason": "pyright not found"}
-    argv = [pyright, "--outputjson"]
-    result = _command_result(argv, repo=repo, timeout=timeout)
+    configured = projects or [""]
+    commands: list[list[str]] = []
+    results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
-    parse_error = ""
-    try:
-        diagnostics = _parse_pyright(repo, result["stdout"])
-    except ValueError as exc:
-        parse_error = str(exc)
-    status = "ok" if result["returncode"] == 0 else "failed"
-    if result["timed_out"] or parse_error:
-        status = "error"
-    elif result["returncode"] != 0 and not diagnostics:
-        status = "error"
-        parse_error = "pyright exited nonzero without diagnostics"
+    status = "ok"
+    parse_errors: list[str] = []
+    deadline = time.monotonic() + max(0, timeout)
+    for project in configured:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            status = "error"
+            parse_errors.append(
+                f"adapter deadline exhausted before {project or '<loose-files>'}"
+            )
+            break
+        argv = [pyright, "--outputjson"]
+        if project:
+            argv.extend(["--project", project])
+        result = _command_result(argv, repo=repo, timeout=remaining)
+        commands.append(argv)
+        results.append(result)
+        parsed: list[dict[str, Any]] = []
+        try:
+            parsed = _parse_pyright(repo, result["stdout"])
+        except ValueError as exc:
+            parse_errors.append(f"{project or '<loose-files>'}: {exc}")
+            status = "error"
+        diagnostics.extend(parsed)
+        if result["timed_out"]:
+            status = "error"
+            parse_errors.append(f"{project or '<loose-files>'}: timed out")
+            parse_errors.append("adapter deadline exhausted")
+            break
+        elif result["returncode"] != 0 and not parsed:
+            status = "error"
+            parse_errors.append(
+                f"{project or '<loose-files>'}: pyright exited nonzero without diagnostics"
+            )
+        elif result["returncode"] != 0 and status != "error":
+            status = "failed"
     return {
         "name": "pyright",
         "status": status,
-        "cmd": argv,
-        "returncode": result["returncode"],
-        "duration_ms": result["duration_ms"],
+        "cmd": commands[0] if len(commands) == 1 else commands,
+        "projects": projects,
+        "returncode": max(
+            (int(item["returncode"]) for item in results),
+            default=124,
+        ),
+        "duration_ms": sum(int(item["duration_ms"]) for item in results),
         "diagnostics": diagnostics,
-        "parse_error": parse_error,
-        "raw_stdout_tail": result["stdout"][-4000:],
-        "raw_stderr_tail": result["stderr"][-4000:],
+        "parse_error": "; ".join(parse_errors),
+        "raw_stdout_tail": "\n".join(str(item["stdout"])[-2000:] for item in results)[-4000:],
+        "raw_stderr_tail": "\n".join(str(item["stderr"])[-2000:] for item in results)[-4000:],
     }
 
 
@@ -366,11 +520,28 @@ def _selected_adapters(name: str) -> list[str]:
     return [name]
 
 
-def _run_adapter(name: str, repo: str, timeout: int) -> dict[str, Any]:
+def _run_adapter(
+    name: str,
+    repo: str,
+    timeout: int,
+    *,
+    explicit: bool = False,
+    max_projects: int = DEFAULT_MAX_PROJECTS,
+) -> dict[str, Any]:
     if name == "typescript":
-        return _typescript_adapter(repo, timeout)
+        return _typescript_adapter(
+            repo,
+            timeout,
+            explicit=explicit,
+            max_projects=max_projects,
+        )
     if name == "pyright":
-        return _pyright_adapter(repo, timeout)
+        return _pyright_adapter(
+            repo,
+            timeout,
+            explicit=explicit,
+            max_projects=max_projects,
+        )
     return {"name": name, "status": "error", "reason": f"unknown adapter: {name}"}
 
 
@@ -452,11 +623,22 @@ def _emit_span(payload: dict[str, Any], telemetry_dir: str) -> str:
 
 def run_diagnostics(args: argparse.Namespace) -> int:
     repo = _repo_path(args.repo)
+    if args.max_projects < 0:
+        raise ValueError("--max-projects must be >= 0")
     started = time.monotonic()
     run_id = args.run_id or _run_id()
     changed_files = _git_changed_files(repo, args.base) if args.changed_only else []
     changed = set(changed_files)
-    adapter_results = [_run_adapter(name, repo, args.timeout) for name in _selected_adapters(args.adapter)]
+    adapter_results = [
+        _run_adapter(
+            name,
+            repo,
+            args.timeout,
+            explicit=args.adapter != "auto",
+            max_projects=args.max_projects,
+        )
+        for name in _selected_adapters(args.adapter)
+    ]
     diagnostics = [
         item
         for adapter in adapter_results
@@ -534,6 +716,15 @@ def build_parser() -> argparse.ArgumentParser:
     diag.add_argument("--changed-only", action="store_true", help="report diagnostics only in changed files")
     diag.add_argument("--base", default="HEAD", help="git base for --changed-only")
     diag.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="adapter timeout in seconds")
+    diag.add_argument(
+        "--max-projects",
+        type=int,
+        default=DEFAULT_MAX_PROJECTS,
+        help=(
+            "maximum configured projects per adapter "
+            f"(default: {DEFAULT_MAX_PROJECTS}; 0 = unlimited)"
+        ),
+    )
     diag.add_argument("--run-id", default="", help="stable run id for telemetry correlation")
     diag.add_argument("--output", default="", help="write the JSON artifact to this path")
     diag.add_argument("--emit-span", action="store_true", help="append a legion.span.v1 telemetry span")

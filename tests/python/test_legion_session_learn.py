@@ -843,3 +843,92 @@ def test_session_rules_cover_review_validation_worktree_and_policy_failures(tmp_
         "validation-environment-drift",
         "worktree-application-lifecycle",
     }.issubset(categories)
+
+
+def test_jsonl_record_extraction_is_lazy(monkeypatch, tmp_path):
+    path = tmp_path / "session.jsonl"
+    path.write_text("unused\n", encoding="utf-8")
+    consumed = []
+
+    def objects(_path):
+        consumed.append("first")
+        yield 0, {
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "first"},
+        }
+        consumed.append("second")
+        yield 1, {
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "second"},
+        }
+
+    monkeypatch.setattr(lsl.legion_session_io, "iter_jsonl_objects", objects)
+    records = lsl._extract_records(path)
+
+    assert consumed == []
+    assert next(records)["text"] == "first"
+    assert consumed == ["first"]
+
+
+def test_scan_enforces_global_record_budget(tmp_path):
+    session = tmp_path / ".codex" / "sessions" / "session.jsonl"
+    session.parent.mkdir(parents=True)
+    session.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": f"record {index}"},
+                }
+            )
+            for index in range(10)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = lsl.scan(tmp_path, days=0, session_limit=0, record_limit=3)
+
+    assert result["records_scanned"] == 3
+    assert result["record_limit_reached"] is True
+
+
+def test_record_limit_counts_filtered_tool_objects_before_message_extraction(tmp_path):
+    session = tmp_path / ".codex" / "sessions" / "tool-heavy.jsonl"
+    session.parent.mkdir(parents=True)
+    tool_record = {
+        "type": "response_item",
+        "payload": {"type": "function_call_output", "output": "ignored"},
+    }
+    message_record = {
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": "You used the wrong source; verify the authoritative source first.",
+        },
+    }
+    session.write_text(
+        "\n".join(json.dumps(item) for item in [tool_record] * 3 + [message_record])
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = lsl.scan(tmp_path, days=0, session_limit=0, record_limit=3)
+
+    assert result["records_scanned"] == 3
+    assert result["record_limit_reached"] is True
+    assert result["candidates"] == []
+
+
+def test_session_discovery_prunes_generated_and_worktree_trees(tmp_path):
+    live = tmp_path / ".codex" / "sessions" / "live.jsonl"
+    stale = tmp_path / ".codex" / "sessions" / ".legion" / "worktrees" / "stale.jsonl"
+    live.parent.mkdir(parents=True)
+    stale.parent.mkdir(parents=True)
+    live.write_text("{}\n", encoding="utf-8")
+    stale.write_text("{}\n", encoding="utf-8")
+
+    files, _skipped = lsl._iter_files(tmp_path, days=0, max_file_mb=0)
+
+    assert live in files
+    assert stale not in files

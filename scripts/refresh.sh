@@ -136,8 +136,18 @@ reconcile_claude_plugins() {
             failed=1
             continue
         fi
+    done < <(jq -r '.plugins[] | "\(.name)\t\(.version)"' "$SOURCE_CLONE/.claude-plugin/marketplace.json")
+
+    local installed_plugins
+    if ! installed_plugins="$(claude plugin list 2>/dev/null)"; then
+        printf 'legion refresh: could not inspect installed Claude plugin versions\n' >&2
+        return 1
+    fi
+    while IFS=$'\t' read -r plugin version; do
+        local cache_dir="$HOME/.claude/plugins/cache/$MARKETPLACE_SLUG/$plugin"
+        [ -d "$cache_dir" ] || continue
         local installed_version
-        installed_version="$(claude plugin list 2>/dev/null \
+        installed_version="$(printf '%s\n' "$installed_plugins" \
             | awk -v id="$plugin@$MARKETPLACE_SLUG" 'index($0, id) { found=1; next } found && $1 == "Version:" { print $2; exit }')"
         if [ "$installed_version" != "$version" ]; then
             printf 'legion refresh: installed plugin %s is not at marketplace version %s (reported %s)\n' \

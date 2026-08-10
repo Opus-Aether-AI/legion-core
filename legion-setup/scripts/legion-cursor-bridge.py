@@ -14,7 +14,9 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 
 _FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 _AGENT_PREFIX = "legion-agent-"
@@ -123,51 +125,96 @@ Do not invent skill behavior from memory. The filesystem copy is authoritative.
 """
 
 
-def bridge(root: str, out_dir: str, skills_dir: str) -> dict[str, object]:
-    pruned = _prune_generated(out_dir)
+def _selected_roots(root: str, plugin_names: set[str] | None) -> list[str]:
+    if plugin_names is None:
+        return [root]
+    manifest_path = os.path.join(root, ".claude-plugin", "marketplace.json")
+    if not os.path.isfile(manifest_path):
+        raise FileNotFoundError(
+            f"selected-profile bridge requires marketplace manifest: {manifest_path}"
+        )
+    with open(manifest_path, encoding="utf-8") as handle:
+        marketplace = json.load(handle)
+    root_real = os.path.realpath(root)
+    selected: list[str] = []
+    for plugin in marketplace.get("plugins", []):
+        if plugin.get("name") not in plugin_names:
+            continue
+        source = plugin.get("source")
+        if not isinstance(source, str) or not source.startswith("./"):
+            continue
+        candidate = os.path.realpath(os.path.join(root, source[2:]))
+        if os.path.commonpath([root_real, candidate]) != root_real:
+            raise ValueError(
+                f"selected plugin source escapes marketplace root: {source}"
+            )
+        if os.path.isdir(candidate):
+            selected.append(candidate)
+    return selected
+
+
+def bridge(
+    root: str,
+    out_dir: str,
+    skills_dir: str,
+    plugin_names: set[str] | None = None,
+) -> dict[str, object]:
     agents: list[str] = []
     commands: list[str] = []
+    # Resolve and validate the selected marketplace before changing the live
+    # Cursor directory. Generation also happens off to the side so malformed
+    # source files cannot destroy the last known-good bridge.
+    search_roots = _selected_roots(root, plugin_names)
+    parent = os.path.dirname(out_dir) or "."
+    os.makedirs(parent, exist_ok=True)
+    stage = tempfile.mkdtemp(prefix=".legion-cursor-agents-", dir=parent)
+    try:
+        for path in sorted(path for search_root in search_roots for path in _find(search_root, "agents")):
+            fm, body = _split_frontmatter(open(path, encoding="utf-8").read())
+            base = fm.get("name") or os.path.splitext(os.path.basename(path))[0]
+            name = _AGENT_PREFIX + base
+            desc = fm.get("description") or f"Legion {base} subagent."
+            prefix = f"[Legion agent: {base}] "
+            note = (
+                f"> Bridged from Legion subagent `{base}` so it works as a Cursor "
+                "subagent. Apply this role inline and keep changes scoped.\n\n"
+            )
+            _write_agent(
+                stage,
+                name,
+                prefix + _compact_description(desc, DESCRIPTION_LIMIT - len(prefix)),
+                note + body,
+            )
+            agents.append(name)
 
-    for path in _find(root, "agents"):
-        fm, body = _split_frontmatter(open(path, encoding="utf-8").read())
-        base = fm.get("name") or os.path.splitext(os.path.basename(path))[0]
-        name = _AGENT_PREFIX + base
-        desc = fm.get("description") or f"Legion {base} subagent."
-        prefix = f"[Legion agent: {base}] "
-        note = (
-            f"> Bridged from Legion subagent `{base}` so it works as a Cursor "
-            "subagent. Apply this role inline and keep changes scoped.\n\n"
-        )
+        for path in sorted(path for search_root in search_roots for path in _find(search_root, "commands")):
+            fm, body = _split_frontmatter(open(path, encoding="utf-8").read())
+            base = os.path.splitext(os.path.basename(path))[0]
+            name = _CMD_PREFIX + base
+            desc = fm.get("description") or f"Legion {base} workflow."
+            prefix = f"[Legion /{base}] "
+            suffix = f" Use when the user asks to '{base}' or describes this workflow."
+            desc_budget = max(80, DESCRIPTION_LIMIT - len(prefix) - len(suffix))
+            note = (
+                f"> Bridged from Legion slash command `/{base}` so it works as a Cursor "
+                "subagent. Treat the user's message as the command arguments.\n\n"
+            )
+            trigger = prefix + _compact_description(desc, desc_budget) + suffix
+            _write_agent(stage, name, trigger, note + body)
+            commands.append(name)
+
         _write_agent(
-            out_dir,
-            name,
-            prefix + _compact_description(desc, DESCRIPTION_LIMIT - len(prefix)),
-            note + body,
+            stage,
+            _SKILL_RUNNER,
+            "[Legion skills] Load and apply mirrored Legion/Claude/Codex skills from ~/.agents/skills.",
+            _skill_runner_body(skills_dir),
         )
-        agents.append(name)
-
-    for path in _find(root, "commands"):
-        fm, body = _split_frontmatter(open(path, encoding="utf-8").read())
-        base = os.path.splitext(os.path.basename(path))[0]
-        name = _CMD_PREFIX + base
-        desc = fm.get("description") or f"Legion {base} workflow."
-        prefix = f"[Legion /{base}] "
-        suffix = f" Use when the user asks to '{base}' or describes this workflow."
-        desc_budget = max(80, DESCRIPTION_LIMIT - len(prefix) - len(suffix))
-        note = (
-            f"> Bridged from Legion slash command `/{base}` so it works as a Cursor "
-            "subagent. Treat the user's message as the command arguments.\n\n"
-        )
-        trigger = prefix + _compact_description(desc, desc_budget) + suffix
-        _write_agent(out_dir, name, trigger, note + body)
-        commands.append(name)
-
-    _write_agent(
-        out_dir,
-        _SKILL_RUNNER,
-        "[Legion skills] Load and apply mirrored Legion/Claude/Codex skills from ~/.agents/skills.",
-        _skill_runner_body(skills_dir),
-    )
+        pruned = _prune_generated(out_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        for entry in os.listdir(stage):
+            os.replace(os.path.join(stage, entry), os.path.join(out_dir, entry))
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
 
     return {
         "pruned": pruned,
@@ -176,6 +223,7 @@ def bridge(root: str, out_dir: str, skills_dir: str) -> dict[str, object]:
         "skill_runner": _SKILL_RUNNER,
         "count": len(agents) + len(commands) + 1,
         "out": out_dir,
+        "selected_plugins": sorted(plugin_names) if plugin_names is not None else None,
     }
 
 
@@ -188,15 +236,27 @@ def main(argv=None) -> int:
         default=os.path.expanduser("~/.agents/skills"),
         help="mirrored skill directory the skill-runner should read",
     )
+    parser.add_argument(
+        "--plugins-file",
+        help="optional newline-delimited marketplace plugin allowlist",
+    )
     args = parser.parse_args(argv)
 
     root = os.path.abspath(os.path.expanduser(args.root))
     out = os.path.abspath(os.path.expanduser(args.out))
     skills_dir = os.path.abspath(os.path.expanduser(args.skills_dir))
+    plugin_names = None
+    if args.plugins_file:
+        plugins_file = os.path.abspath(os.path.expanduser(args.plugins_file))
+        if not os.path.isfile(plugins_file):
+            print(json.dumps({"error": f"plugins file not found: {plugins_file}"}))
+            return 2
+        with open(plugins_file, encoding="utf-8") as handle:
+            plugin_names = {line.strip() for line in handle if line.strip()}
     if not os.path.isdir(root):
         print(json.dumps({"error": f"root not found: {root}"}))
         return 2
-    print(json.dumps(bridge(root, out, skills_dir)))
+    print(json.dumps(bridge(root, out, skills_dir, plugin_names)))
     return 0
 
 

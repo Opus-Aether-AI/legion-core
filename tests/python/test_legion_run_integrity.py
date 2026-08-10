@@ -4,8 +4,12 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import stat
+import subprocess
+import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -21,6 +25,98 @@ def load_legion_run():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def test_stage_cancellation_terminates_the_owned_process_group(tmp_path):
+    ready = tmp_path / "ready"
+    child_pid_path = tmp_path / "child.pid"
+    artifact = tmp_path / "stage.json"
+    stage = tmp_path / "stage.py"
+    stage.write_text(
+        """
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+child = subprocess.Popen([
+    sys.executable,
+    "-c",
+    "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+])
+pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+pathlib.Path(sys.argv[2]).write_text("ready", encoding="utf-8")
+while True:
+    time.sleep(1)
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    wrapper = tmp_path / "wrapper.py"
+    wrapper.write_text(
+        f"""
+import importlib.util
+import os
+import signal
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("legion_run_cancel", {str(LEGION_RUN_PATH)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def cancel(_signum, _frame):
+    raise KeyboardInterrupt("cancelled")
+
+signal.signal(signal.SIGTERM, cancel)
+module.run_process(
+    [sys.executable, {str(stage)!r}, {str(child_pid_path)!r}, {str(ready)!r}],
+    dict(os.environ),
+    Path({str(tmp_path)!r}),
+    Path({str(artifact)!r}),
+    timeout_seconds=60,
+)
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    worker = subprocess.Popen([sys.executable, str(wrapper)])
+    child_pid = 0
+    leaked = False
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.01)
+        assert ready.exists()
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+        worker.send_signal(signal.SIGTERM)
+        time.sleep(0.1)
+        worker.send_signal(signal.SIGTERM)
+        worker.wait(timeout=8)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            leaked = True
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait(timeout=5)
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    assert leaked is False
 
 
 def test_same_second_run_reservations_are_atomic_and_unique(tmp_path):

@@ -165,10 +165,13 @@ store cannot hide a law from the compiler, but a busy entity can still outrank
 one within the hint cap. The improvement queue retains an active
 generated law when a later report does not re-emit it, replaces it when a
 re-emitted proposal has a new fingerprint, and removes it when the law is retired.
-The default cron run scans all available spans and manual records so bugs recorded
-after yesterday's cron are still ingested. Passing `--day YYYY-MM-DD` keeps an
-exact UTC-day report window for reproducible audits and tests. Durable memory
-preserves unresolved hints until a kept source experiment resolves them.
+The default cron run advances a durable byte cursor for every span and manual
+record file. It reads only complete records appended since the previous run,
+while detecting truncation, replacement, and in-place rewrites and safely
+rebuilding aggregates when needed. This catches bugs recorded after yesterday's
+cron without rescanning the full history. Passing `--day YYYY-MM-DD` keeps an
+exact UTC-day full-scan window for reproducible audits and tests. Durable memory
+preserves unresolved hints until a maintainer disposition resolves them.
 
 The evidence and compatibility session-learning steps are separately bounded.
 The evidence lane defaults to the newest 100 eligible files, 64 MiB in aggregate,
@@ -178,9 +181,9 @@ and 20,000 normalized events; tune those limits with
 after provenance filtering while bounding candidate discovery to the newest 1,000
 files and 256 MiB. Set `LEGION_EVIDENCE_LEARN=0` or `LEGION_SESSION_LEARN=0` to
 disable either refresh lane. The compatibility lane uses the newest 100 eligible
-sources. Run
-`legion-session-learn --session-limit 0` manually only for an intentional
-unbounded audit.
+sources and stops after 20,000 decoded records by default. Use
+`legion-session-learn --session-limit 0 --record-limit 0` manually only for an
+intentional unbounded audit.
 
 `experiments.tsv` is the daily scorecard and experiment ledger:
 

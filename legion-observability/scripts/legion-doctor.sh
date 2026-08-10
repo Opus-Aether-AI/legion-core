@@ -58,7 +58,9 @@ legion_resolve_state "$REPO"
 # to know what to fix. _CHECK names the active check for attribution.
 _CHECK=""
 _FINDINGS_FILE="$(mktemp)"
-trap 'rm -f "$_FINDINGS_FILE"' EXIT
+_SKILL_META_FILE="$(mktemp)"
+_SKILL_META_READY=0
+trap 'rm -f "$_FINDINGS_FILE" "$_SKILL_META_FILE"' EXIT
 
 FAILS=0
 WARNS=0
@@ -94,14 +96,60 @@ resolve_legion_cmd() {
   return 1
 }
 
-find_skill_files() {
+build_skill_metadata() {
   local root="$1"
-  [[ "$root" != "/" ]] && root="${root%/}"
-  find "$root" -name SKILL.md \
-    -not -path '*/node_modules/*' \
-    -not -path '*/.git/*' \
-    -not -path "$root/.legion/*" \
-    2>/dev/null
+  [[ "$_SKILL_META_READY" == "1" ]] && return 0
+  command -v python3 >/dev/null 2>&1 || return 1
+  if ! python3 - "$root" > "$_SKILL_META_FILE" <<'PY'
+import os
+import re
+import sys
+
+root = os.path.abspath(sys.argv[1])
+pruned = {
+    ".git", ".hg", ".svn", ".legion", ".codex-worktrees",
+    "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".next", ".turbo", "dist", "build",
+}
+for current, dirs, files in os.walk(root):
+    dirs[:] = sorted(name for name in dirs if name not in pruned)
+    if os.path.basename(current) == ".claude":
+        dirs[:] = [name for name in dirs if name != "worktrees"]
+    if "SKILL.md" not in files:
+        continue
+    path = os.path.join(current, "SKILL.md")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError:
+        continue
+    first = bool(lines and lines[0].startswith("---"))
+    frontmatter = []
+    if first:
+        for line in lines[1:]:
+            if re.match(r"^---[ \t]*(?:\r?\n)?$", line):
+                break
+            frontmatter.append(line.rstrip("\r\n"))
+    name = any(re.match(r"^name:[ \t]*\S", line) for line in frontmatter)
+    descriptions = [
+        re.sub(r"^description:[ \t]*", "", line, count=1)
+        for line in frontmatter
+        if re.match(r"^description:", line)
+    ]
+    value = descriptions[0].strip() if descriptions else ""
+    desc = bool(value)
+    block = bool(re.fullmatch(r"[>|][+-]?", value))
+    safe = lambda text: str(text).replace("|", "/").replace("\t", " ")
+    print("|".join([
+        safe(path), "1" if first else "0", "1" if name else "0",
+        "1" if desc else "0", "1" if block else "0", safe(value),
+        safe(os.path.basename(current)),
+    ]))
+PY
+  then
+    return 1
+  fi
+  _SKILL_META_READY=1
 }
 
 check_marketplace_schema() {
@@ -129,14 +177,15 @@ check_plugins() {
 }
 
 check_frontmatter() {
-  local bad=0 f
-  while IFS= read -r f; do
-    if ! head -1 "$f" | grep -q '^---'; then
+  local bad=0 f has_front has_name _has_desc _block _val _skill
+  build_skill_metadata "$REPO" || { fail "could not scan SKILL.md metadata (python3 unavailable or failed)"; return; }
+  while IFS='|' read -r f has_front has_name _has_desc _block _val _skill; do
+    if [[ "$has_front" != "1" ]]; then
       fail "SKILL.md missing frontmatter: ${f#"$REPO/"}"; bad=1; continue
     fi
-    grep -qE '^name:[[:space:]]*\S' "$f"        || { fail "SKILL.md missing name: ${f#"$REPO/"}"; bad=1; }
-    grep -qE '^description:[[:space:]]*\S' "$f"  || { fail "SKILL.md missing description: ${f#"$REPO/"}"; bad=1; }
-  done < <(find_skill_files "$REPO")
+    [[ "$has_name" == "1" ]] || { fail "SKILL.md missing name: ${f#"$REPO/"}"; bad=1; }
+    [[ "$_has_desc" == "1" ]] || { fail "SKILL.md missing description: ${f#"$REPO/"}"; bad=1; }
+  done < "$_SKILL_META_FILE"
   [[ "$bad" -eq 0 ]] && pass "all SKILL.md frontmatter has name + description"
 }
 
@@ -170,27 +219,19 @@ check_telemetry_schema() {
 # A `description: >` / `| ` block scalar collapses to just ">"/"|" under the
 # line-based frontmatter readers used by the Cursor bridge and some skill
 # loaders — blanking the description + auto-trigger. Empty descriptions fail too.
-_desc_value() {
-  awk '
-    NR==1 && $0 !~ /^---[ \t]*$/ { exit }
-    /^---[ \t]*$/ { f++; if (f==2) exit; next }
-    f==1 && /^[ \t]*description:/ {
-      sub(/^[ \t]*description:[ \t]*/, ""); print; exit
-    }' "$1"
-}
 check_descriptions() {
-  local bad=0 f val rel
-  while IFS= read -r f; do
+  local bad=0 f _front _name has_desc block val skill rel
+  build_skill_metadata "$REPO" || { fail "could not scan SKILL.md metadata (python3 unavailable or failed)"; return; }
+  while IFS='|' read -r f _front _name has_desc block val skill; do
     rel="${f#"$REPO/"}"
-    val="$(_desc_value "$f")"
-    if [[ -z "${val//[[:space:]]/}" ]]; then
-      fail "SKILL.md empty/missing description: $rel" "skill:$(basename "$(dirname "$f")")"; bad=1; continue
+    if [[ "$has_desc" != "1" ]]; then
+      fail "SKILL.md empty/missing description: $rel" "skill:$skill"; bad=1; continue
     fi
-    if [[ "$val" =~ ^[\>\|][+-]?[[:space:]]*$ ]]; then
+    if [[ "$block" == "1" ]]; then
       fail "SKILL.md block-scalar description ('$val') blanks line-based readers: $rel" \
-        "skill:$(basename "$(dirname "$f")")"; bad=1
+        "skill:$skill"; bad=1
     fi
-  done < <(find_skill_files "$REPO")
+  done < "$_SKILL_META_FILE"
   [[ "$bad" -eq 0 ]] && pass "all SKILL.md descriptions are single-line + non-empty"
 }
 

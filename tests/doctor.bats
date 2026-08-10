@@ -87,6 +87,19 @@ _make_good() {
   [ "$status" -eq 1 ]
 }
 
+@test "doctor: skill scan prunes nested worktrees and generated trees" {
+  repo="$BATS_TEST_TMPDIR/pruned"
+  mkdir -p "$repo/skill" "$repo/.claude/worktrees/stale" "$repo/node_modules/pkg"
+  printf -- '---\nname: live\ndescription: live skill\n---\n' > "$repo/skill/SKILL.md"
+  printf 'bad\n' > "$repo/.claude/worktrees/stale/SKILL.md"
+  printf 'bad\n' > "$repo/node_modules/pkg/SKILL.md"
+
+  run "$DOCTOR" --repo "$repo" --only frontmatter
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS"* ]]
+}
+
 @test "doctor: install-checks pass when --repo is a non-Legion project" {
   # Regression: an agent running the doctor from a product repo (no Legion
   # files) must NOT false-fail the install-checks. LEGION_ROOT resolves to the

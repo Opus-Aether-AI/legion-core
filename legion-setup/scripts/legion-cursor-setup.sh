@@ -58,10 +58,48 @@ cursor_agent_bin() {
   command -v agent 2>/dev/null || command -v cursor-agent 2>/dev/null || true
 }
 
+plugin_manifest_paths() {
+  local scope="${1:-selected}"
+  local marketplace="$MARKETPLACE_ROOT/.claude-plugin/marketplace.json"
+  if [[ "$scope" != "all" && -n "${LEGION_SELECTED_PLUGINS_FILE:-}" ]]; then
+    [[ -f "$marketplace" ]] || {
+      red "marketplace manifest not found: $marketplace"
+      return 1
+    }
+    local source manifest plugin_dir root_real sources
+    root_real="$(cd -P "$MARKETPLACE_ROOT" >/dev/null 2>&1 && pwd)" || return 1
+    if ! sources="$(jq -r --rawfile selected "$LEGION_SELECTED_PLUGINS_FILE" '
+      ($selected | split("\n") | map(select(length > 0))) as $names
+      | .plugins[]
+      | select(.name as $name | ($names | index($name)) != null)
+      | select(.source | type == "string" and startswith("./") and (startswith("./vendored/") | not))
+      | .source
+    ' "$marketplace")"; then
+      red "could not parse selected plugins from $marketplace"
+      return 1
+    fi
+    while IFS= read -r source; do
+      [[ -n "$source" ]] || continue
+      plugin_dir="$(cd -P "$MARKETPLACE_ROOT/${source#./}" >/dev/null 2>&1 && pwd)" || continue
+      case "$plugin_dir" in
+        "$root_real"|"$root_real"/*) ;;
+        *) red "selected plugin source escapes marketplace root: $source"; return 1 ;;
+      esac
+      manifest="$plugin_dir/.claude-plugin/plugin.json"
+      [[ -f "$manifest" ]] && printf '%s\n' "$manifest"
+    done <<< "$sources"
+    return 0
+  fi
+  find "$MARKETPLACE_ROOT" -maxdepth 3 -path '*/.claude-plugin/plugin.json' \
+    -not -path '*/vendored/*' 2>/dev/null | sort
+}
+
 collect_mcp_servers() {
   need jq
-  local acc='{}' pj plugin_dir servers
+  local scope="${1:-selected}" acc='{}' pj plugin_dir servers manifests
+  manifests="$(plugin_manifest_paths "$scope")" || return 1
   while IFS= read -r pj; do
+    [[ -n "$pj" ]] || continue
     jq -e 'has("mcpServers") and (.mcpServers | length > 0)' "$pj" >/dev/null 2>&1 || continue
     plugin_dir="$(cd "$(dirname "$pj")/.." >/dev/null 2>&1 && pwd)"
     servers="$(jq -c --arg root "$plugin_dir" '
@@ -69,7 +107,7 @@ collect_mcp_servers() {
       | walk(if type == "string" then gsub("\\$\\{CLAUDE_PLUGIN_ROOT\\}"; $root) else . end)
     ' "$pj")"
     acc="$(jq -c --argjson add "$servers" '. + $add' <<<"$acc")"
-  done < <(find "$MARKETPLACE_ROOT" -maxdepth 3 -path '*/.claude-plugin/plugin.json' -not -path '*/vendored/*' 2>/dev/null | sort)
+  done <<< "$manifests"
   printf '%s' "$acc"
 }
 
@@ -90,15 +128,17 @@ normalize_mcp_servers() {
 cmd_mcp() {
   need python3
   [[ -f "$MCP_MERGE_PY" ]] || { red "merge helper not found: $MCP_MERGE_PY"; exit 1; }
-  local servers count out added skipped updated
+  local servers managed_names count out added skipped updated removed
   servers="$(collect_mcp_servers)"
+  managed_names="$(collect_mcp_servers all | jq -c 'keys')"
   count="$(jq -r 'length' <<<"$servers")"
-  if [[ "$count" == "0" ]]; then
+  if [[ "$count" == "0" && -z "${LEGION_SELECTED_PLUGINS_FILE:-}" ]]; then
     yellow "No MCP servers declared in the marketplace at $MARKETPLACE_ROOT"
     return 0
   fi
   green "Registering $count marketplace MCP server(s) into $CURSOR_MCP_CONFIG ..."
-  out="$(printf '%s' "$servers" | python3 "$MCP_MERGE_PY" --config "$CURSOR_MCP_CONFIG" "$@")"
+  out="$(printf '%s' "$servers" | python3 "$MCP_MERGE_PY" \
+    --config "$CURSOR_MCP_CONFIG" --managed-names-json "$managed_names" "$@")"
   if [[ "$(jq -r 'has("error")' <<<"$out")" == "true" ]]; then
     red "  $(jq -r '.error' <<<"$out")"
     record_setup_failure "Cursor MCP registration failed." "$out"
@@ -107,8 +147,10 @@ cmd_mcp() {
   added="$(jq -r '.added | join(", ")' <<<"$out")"
   skipped="$(jq -r '.skipped | join(", ")' <<<"$out")"
   updated="$(jq -r '.updated | join(", ")' <<<"$out")"
+  removed="$(jq -r '.removed | join(", ")' <<<"$out")"
   [[ -n "$added"   ]] && green "  + added:   $added"
   [[ -n "$updated" ]] && green "  ~ updated: $updated"
+  [[ -n "$removed" ]] && yellow "  - removed: $removed"
   [[ -n "$skipped" ]] && dim   "  = already present: $skipped"
   green "Cursor MCP servers in sync. Restart Cursor or reload Agent to pick them up."
 }
@@ -119,7 +161,11 @@ cmd_agents() {
   mkdir -p "$CURSOR_AGENTS"
   green "Bridging Legion commands, agents, and skills into Cursor agents ($CURSOR_AGENTS) ..."
   local out count pruned agents commands
-  out="$(python3 "$BRIDGE_PY" --root "$MARKETPLACE_ROOT" --out "$CURSOR_AGENTS" --skills-dir "$AGENTS_SKILLS")"
+  local bridge_args=(--root "$MARKETPLACE_ROOT" --out "$CURSOR_AGENTS" --skills-dir "$AGENTS_SKILLS")
+  if [[ -n "${LEGION_SELECTED_PLUGINS_FILE:-}" ]]; then
+    bridge_args+=(--plugins-file "$LEGION_SELECTED_PLUGINS_FILE")
+  fi
+  out="$(python3 "$BRIDGE_PY" "${bridge_args[@]}")"
   if [[ "$(jq -r 'has("error")' <<<"$out")" == "true" ]]; then
     red "  $(jq -r '.error' <<<"$out")"
     record_setup_failure "Cursor agent bridge failed." "$out"
@@ -192,6 +238,11 @@ cmd_verify() {
   fi
   return "$ok"
 }
+
+if [[ -n "${LEGION_SELECTED_PLUGINS_FILE:-}" && ! -f "$LEGION_SELECTED_PLUGINS_FILE" ]]; then
+  red "selected plugins file not found: $LEGION_SELECTED_PLUGINS_FILE"
+  exit 1
+fi
 
 case "${1:-all}" in
   mcp)     shift || true; cmd_mcp "$@" ;;

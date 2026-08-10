@@ -208,6 +208,278 @@ SH
   echo "$output" | jq -e '.results[0].error | contains("tomllib unavailable")'
 }
 
+@test "fanout: completion-driven pool fills a slot before the slowest sibling finishes" {
+  local bin="$BATS_TEST_TMPDIR/pool-bin"
+  mkdir -p "$bin"
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "--primary" ]] && { echo codex; exit 0; }
+printf '{"executor":"codex","effective_executor":"codex","model":"fake-codex","sandbox":"workspace-write","reasoning_effort":"high","fallback":[],"resolved":true}\n'
+SH
+  cat > "$bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+task=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in --task) task="$2"; shift 2 ;; *) shift ;; esac
+done
+python3 - "$POOL_LOG" "$task" <<'PY'
+import sys, time
+with open(sys.argv[1], "a", encoding="utf-8") as f:
+    f.write(f"start {sys.argv[2]} {time.monotonic_ns()}\n")
+time.sleep(0.45 if "slow" in sys.argv[2] else 0.05)
+with open(sys.argv[1], "a", encoding="utf-8") as f:
+    f.write(f"end {sys.argv[2]} {time.monotonic_ns()}\n")
+PY
+printf '{"status":"ok","model":"fake-codex","cost_usd":0}\n'
+SH
+  chmod +x "$bin"/*
+  export POOL_LOG="$BATS_TEST_TMPDIR/pool.log"
+  printf '%s\n' \
+    '{"archetype":"implement-feature","task":"slow-one"}' \
+    '{"archetype":"implement-feature","task":"quick-one"}' \
+    '{"archetype":"implement-feature","task":"slow-two"}' \
+    > "$BATS_TEST_TMPDIR/pool.jsonl"
+
+  LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
+    run "$FANOUT" --slices "$BATS_TEST_TMPDIR/pool.jsonl" --repo "$REPO" --max-concurrency 2
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 3 and .failed == 0'
+  python3 - "$POOL_LOG" <<'PY'
+import sys
+events = {}
+for line in open(sys.argv[1], encoding="utf-8"):
+    kind, task, stamp = line.split()
+    events[(kind, task)] = int(stamp)
+assert events[("start", "slow-two")] < events[("end", "slow-one")]
+PY
+}
+
+@test "fanout: a ready DAG dependant launches while an unrelated root is still running" {
+  local bin="$BATS_TEST_TMPDIR/dag-pool-bin"
+  mkdir -p "$bin"
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "--primary" ]] && { echo codex; exit 0; }
+printf '{"executor":"codex","effective_executor":"codex","model":"fake-codex","sandbox":"workspace-write","reasoning_effort":"high","fallback":[],"resolved":true}\n'
+SH
+  cat > "$bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+task=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in --task) task="$2"; shift 2 ;; *) shift ;; esac
+done
+python3 - "$DAG_POOL_LOG" "$task" <<'PY'
+import sys, time
+with open(sys.argv[1], "a", encoding="utf-8") as f:
+    f.write(f"start {sys.argv[2]} {time.monotonic_ns()}\n")
+time.sleep(1.0 if sys.argv[2] == "slow-root" else 0.05)
+with open(sys.argv[1], "a", encoding="utf-8") as f:
+    f.write(f"end {sys.argv[2]} {time.monotonic_ns()}\n")
+PY
+printf '{"status":"ok","model":"fake-codex","cost_usd":0}\n'
+SH
+  chmod +x "$bin"/*
+  export DAG_POOL_LOG="$BATS_TEST_TMPDIR/dag-pool.log"
+  printf '%s\n' \
+    '{"id":"slow","archetype":"implement-feature","task":"slow-root"}' \
+    '{"id":"quick","archetype":"implement-feature","task":"quick-root"}' \
+    '{"id":"dependent","depends_on":["quick"],"archetype":"write-tests","task":"quick-dependent"}' \
+    > "$BATS_TEST_TMPDIR/dag-pool.jsonl"
+
+  LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
+    run "$FANOUT" --slices "$BATS_TEST_TMPDIR/dag-pool.jsonl" --repo "$REPO" --max-concurrency 2
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 3 and .failed == 0'
+  python3 - "$DAG_POOL_LOG" <<'PY'
+import sys
+events = {}
+for line in open(sys.argv[1], encoding="utf-8"):
+    kind, task, stamp = line.split()
+    events[(kind, task)] = int(stamp)
+assert events[("start", "quick-dependent")] < events[("end", "slow-root")]
+PY
+}
+
+@test "fanout: a dependant base contains only declared prerequisites regardless of completion order" {
+  local bin="$BATS_TEST_TMPDIR/prerequisite-base-bin"
+  mkdir -p "$bin"
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "--primary" ]] && { echo codex; exit 0; }
+printf '{"executor":"codex","effective_executor":"codex","model":"fake-codex","sandbox":"workspace-write","reasoning_effort":"high","fallback":[],"resolved":true}\n'
+SH
+  cat > "$bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+repo="" base="HEAD" task="" run_id="fake"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    --base) base="$2"; shift 2 ;;
+    --task) task="$2"; shift 2 ;;
+    --run-id) run_id="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+art="$repo/.legion/prerequisite-base/$run_id"
+mkdir -p "$art"
+diff="$art/diff.patch"
+case "$task" in
+  root-a)
+    sleep 0.15
+    cat > "$diff" <<'PATCH'
+diff --git a/a-root.txt b/a-root.txt
+new file mode 100644
+--- /dev/null
++++ b/a-root.txt
+@@ -0,0 +1 @@
++a
+PATCH
+    ;;
+  root-b)
+    sleep "$B_ROOT_DELAY"
+    cat > "$diff" <<'PATCH'
+diff --git a/b-root.txt b/b-root.txt
+new file mode 100644
+--- /dev/null
++++ b/b-root.txt
+@@ -0,0 +1 @@
++b
+PATCH
+    ;;
+  child-of-a)
+    if git -C "$repo" cat-file -e "$base:b-root.txt" 2>/dev/null; then
+      echo present >> "$PREREQUISITE_BASE_LOG"
+    else
+      echo absent >> "$PREREQUISITE_BASE_LOG"
+    fi
+    : > "$diff"
+    ;;
+  child-of-both)
+    git -C "$repo" cat-file -e "$base:a-root.txt"
+    git -C "$repo" cat-file -e "$base:b-root.txt"
+    : > "$diff"
+    ;;
+esac
+printf '{"status":"ok","model":"fake-codex","diff_path":%s,"base_ref":%s,"cost_usd":0}\n' \
+  "$(jq -Rn --arg value "$diff" '$value')" "$(jq -Rn --arg value "$base" '$value')"
+SH
+  chmod +x "$bin"/*
+  export PREREQUISITE_BASE_LOG="$BATS_TEST_TMPDIR/prerequisite-base.log"
+  printf '%s\n' \
+    '{"id":"a","archetype":"implement-feature","task":"root-a"}' \
+    '{"id":"b","archetype":"implement-feature","task":"root-b"}' \
+    '{"id":"child","depends_on":["a"],"archetype":"write-tests","task":"child-of-a"}' \
+    '{"id":"joint","depends_on":["a","b"],"archetype":"write-tests","task":"child-of-both"}' \
+    > "$BATS_TEST_TMPDIR/prerequisite-base.jsonl"
+
+  for B_ROOT_DELAY in 0.02 0.35; do
+    export B_ROOT_DELAY
+    LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
+      run "$FANOUT" --slices "$BATS_TEST_TMPDIR/prerequisite-base.jsonl" \
+        --repo "$REPO" --max-concurrency 2
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.ok == 4 and .failed == 0'
+  done
+  [ "$(cat "$PREREQUISITE_BASE_LOG")" = $'absent\nabsent' ]
+}
+
+@test "fanout: DAG completion polling does not rescan every blocked slice" {
+  local bin="$BATS_TEST_TMPDIR/dag-scale-bin"
+  local real_jq
+  real_jq="$(command -v jq)"
+  mkdir -p "$bin"
+  cat > "$bin/jq" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -e "$DAG_SCALE_MARKER" ]]; then
+  printf 'polled\n' >> "$DAG_SCALE_JQ_LOG"
+fi
+exec "$DAG_SCALE_REAL_JQ" "$@"
+SH
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "--primary" ]] && { echo codex; exit 0; }
+printf '{"executor":"codex","effective_executor":"codex","model":"fake-codex","sandbox":"workspace-write","reasoning_effort":"high","fallback":[],"resolved":true}\n'
+SH
+  cat > "$bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+task=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in --task) task="$2"; shift 2 ;; *) shift ;; esac
+done
+if [[ "$task" == "scale-root" ]]; then
+  : > "$DAG_SCALE_MARKER"
+  sleep 0.35
+  rm -f "$DAG_SCALE_MARKER"
+fi
+printf '{"status":"ok","model":"fake-codex","cost_usd":0}\n'
+SH
+  chmod +x "$bin"/*
+  export DAG_SCALE_MARKER="$BATS_TEST_TMPDIR/dag-scale.running"
+  export DAG_SCALE_JQ_LOG="$BATS_TEST_TMPDIR/dag-scale-jq.log"
+  export DAG_SCALE_REAL_JQ="$real_jq"
+  printf '%s\n' '{"id":"root","archetype":"implement-feature","task":"scale-root"}' \
+    > "$BATS_TEST_TMPDIR/dag-scale.jsonl"
+  for i in {1..40}; do
+    printf '{"id":"child-%s","depends_on":["root"],"archetype":"write-tests","task":"scale-child-%s"}\n' \
+      "$i" "$i" >> "$BATS_TEST_TMPDIR/dag-scale.jsonl"
+  done
+
+  PATH="$bin:$PATH" LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
+    run "$FANOUT" --slices "$BATS_TEST_TMPDIR/dag-scale.jsonl" \
+      --repo "$REPO" --max-concurrency 8
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.slices == 41 and .ok == 41 and .failed == 0'
+  [ ! -s "$DAG_SCALE_JQ_LOG" ]
+}
+
+@test "fanout: one preflight decision is passed to the delegate and retained as evidence" {
+  local bin="$BATS_TEST_TMPDIR/route-once-bin"
+  mkdir -p "$bin"
+  cat > "$bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--primary" ]]; then echo codex; exit 0; fi
+printf '%s\n' "$*" >> "$ROUTE_CALLS"
+printf '{"executor":"codex","effective_executor":"codex","model":"one-model","sandbox":"read-only","reasoning_effort":"medium","fallback":["fallback-model"],"resolved":true}\n'
+SH
+  cat > "$bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${LEGION_ROUTE_PRE_RESOLVED:-}" == "1" ]]
+[[ "${LEGION_RESOLVED_FALLBACK:-}" == "fallback-model" ]]
+case " $* " in
+  *" --executor codex "*" --model one-model "*" --sandbox read-only "*" --reasoning-effort medium "*) ;;
+  *) printf 'missing resolved route args: %s\n' "$*" >&2; exit 9 ;;
+esac
+printf '{"status":"ok","model":"one-model","cost_usd":0}\n'
+SH
+  chmod +x "$bin"/*
+  export ROUTE_CALLS="$BATS_TEST_TMPDIR/route-calls.log"
+  printf '%s\n' '{"id":"one","archetype":"implement-feature","task":"route once"}' \
+    > "$BATS_TEST_TMPDIR/route-once.jsonl"
+
+  LEGION_ROUTE="$bin/legion-route" LEGION_DELEGATE="$bin/legion-delegate" \
+    run "$FANOUT" --slices "$BATS_TEST_TMPDIR/route-once.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$ROUTE_CALLS" | tr -d ' ')" = "1" ]
+  local routes_path
+  routes_path="$(echo "$output" | jq -r '.routes_path')"
+  jq -e '.routes[0].slice.id == "one" and .routes[0].route.model == "one-model"' "$routes_path"
+}
+
 @test "fanout: all delegate spans + the root span share ONE trace_id (OTel tree)" {
   printf '%s\n' \
     '{"archetype":"implement-feature","task":"build A"}' \
@@ -765,6 +1037,8 @@ SH
     [[ -s "$INTERRUPT_LATE_READY" ]] && break
     sleep 0.02
   done
+  [ -s "$INTERRUPT_LATE_READY" ]
+  kill -TERM "$fanout_pid" 2>/dev/null || true
   local ledger_status_during_cleanup
   ledger_status_during_cleanup="$(jq -r '.status' "$ledger")"
   local fanout_rc=0

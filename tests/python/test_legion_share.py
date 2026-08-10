@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 
 HERE = os.path.dirname(__file__)
@@ -6,6 +7,38 @@ _PATH = os.path.join(HERE, "..", "..", "legion-observability", "scripts", "legio
 _spec = importlib.util.spec_from_file_location("legion_share", _PATH)
 ls = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ls)
+
+
+def test_load_spans_enforces_window_timestamp(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "2026-08-10.jsonl").write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {"schema": "legion.span.v1", "run_id": "old", "ts": "2026-08-01T00:00:00Z"},
+                {"schema": "legion.span.v1", "run_id": "new", "ts": "2026-08-10T00:00:00Z"},
+                {"schema": "legion.span.v1", "run_id": "missing"},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = ls.load_spans(str(spans), since=ls._timestamp("2026-08-09T00:00:00Z"))
+
+    assert [item["run_id"] for item in loaded] == ["new"]
+
+
+def test_parse_window_rejects_labels_that_would_silently_mean_all_time():
+    assert ls.parse_window("7d") == 7 * 86400
+    for value in ("0d", "seven-days", "7"):
+        try:
+            ls.parse_window(value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid window: {value}")
 
 
 def _span(executor, model, out):

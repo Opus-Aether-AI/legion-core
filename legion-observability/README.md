@@ -112,7 +112,8 @@ system/developer catalogs, tool results, collaboration subagents, and sources
 marked as benchmark/eval fixtures. Equivalent records emitted twice by a
 harness are deduplicated. `--repo`, `--harness`, `--role`, and `--source-kind`
 provide tighter provenance scope; `--session-limit 0` explicitly restores an
-unbounded scan.
+unbounded file scan. Decoding also stops after 20,000 records by default;
+`--record-limit 0` explicitly restores unbounded decoding.
 
 Candidate and recorded evidence contains only counts, stable hashes, roles, and
 source kinds. `--show-evidence` adds best-effort-redacted snippets and
@@ -170,3 +171,6 @@ legion-observability/
 - `LEGION_SESSION_LEARN_DAYS`, `LEGION_SESSION_LEARN_LIMIT`, and
   `LEGION_SESSION_LEARN_MAX_FILE_MB` — bound the repo-scoped refresh scan
   (defaults: 3 days, 100 sources, 8 MiB for non-JSONL files).
+- `LEGION_BENCH_RETAIN_CORPUS_RUNS` — completed corpus run directories retained
+  per benchmark root (default: 10). Per-case payloads live once in `cases.jsonl`;
+  summary artifacts carry `case_count` instead of embedding a duplicate array.

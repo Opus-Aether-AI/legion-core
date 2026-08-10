@@ -13,16 +13,14 @@ This is intentionally local-first and validation-first:
    engine; this command only mines and records learning evidence.
 
 The shape is inspired by harness-bench and autoresearch style loops: establish a
-baseline, run a bounded experiment, record the score, keep safe improvements, and
-discard failed source mutations. Legion already has traces, catalog, trigger eval,
-and routing optimizer; this script connects those pieces.
+baseline, record evidence, and hand bounded proposals to a separately reviewed
+improvement engine. Legion already has traces, catalog, trigger eval, and routing
+optimizer; this script connects those pieces.
 """
 
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
-import copy
 import fcntl
 import glob
 import hashlib
@@ -31,10 +29,8 @@ import json
 import math
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unicodedata
 from collections import defaultdict
@@ -51,10 +47,10 @@ MEMORY_SCHEMA = "legion.self-learning.memory.v1"
 SCORECARD_SCHEMA = "legion.self-learning.scorecard.v1"
 IMPROVEMENT_PROPOSAL_SCHEMA = "legion.improvement-proposal.v1"
 DEFAULT_LOG_ROOT = ""
-SAFE_SOURCE_TYPES = {"skill", "command", "agent", "plugin"}
 SUCCESS_STATUSES = {"ok"}
-DEFAULT_MIN_SCORE_DELTA = 0.001
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+INPUT_CURSOR_SCHEMA = "legion.self-learning.input-cursor.v1"
+CURSOR_TAIL_BYTES = 4096
 GLOBAL_HINT_RESERVE = 100
 PROJECT_HINT_CAP = (
     legion_learning_context.MAX_HINTS
@@ -218,10 +214,6 @@ def experiment_ledger_path(log_root: str) -> str:
     return os.path.join(self_learn_dir(log_root), "experiments.tsv")
 
 
-def candidate_pool_path(log_root: str) -> str:
-    return os.path.join(self_learn_dir(log_root), "candidate-pool.json")
-
-
 def outcomes_path(log_root: str) -> str:
     return os.path.join(self_learn_dir(log_root), "outcomes.jsonl")
 
@@ -253,6 +245,100 @@ def _append_jsonl(path: str, payload: dict[str, Any]) -> None:
         handle.write("\n")
 
 
+def _spans_dir(log_root: str, telemetry_dir: str = "") -> str:
+    if telemetry_dir:
+        path = telemetry_dir
+    elif log_root:
+        path = os.path.join(log_root, "spans")
+    else:
+        path = os.environ.get("LEGION_TELEMETRY_DIR") or "spans"
+    return os.path.abspath(os.path.expanduser(path))
+
+
+def _tail_digest(handle: Any, offset: int) -> str:
+    start = max(0, offset - CURSOR_TAIL_BYTES)
+    handle.seek(start)
+    return hashlib.sha256(handle.read(offset - start)).hexdigest()
+
+
+def _read_jsonl_since(
+    path: str,
+    previous: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Read complete JSONL rows after a verified append-only byte cursor.
+
+    The hash of the bytes immediately preceding the cursor detects in-place
+    rewrites. Truncation, replacement, or a changed tail resets to byte zero.
+    A final partial line is deliberately left unread for the next invocation.
+    """
+    records: list[dict[str, Any]] = []
+    canonical = os.path.realpath(path)
+    try:
+        stat = os.stat(canonical)
+        handle = open(canonical, "rb")
+    except OSError:
+        return records, {}
+    with handle:
+        prior = _dict(previous)
+        offset = int(prior.get("offset") or 0)
+        can_resume = (
+            offset >= 0
+            and offset <= stat.st_size
+            and int(prior.get("device") or -1) == int(stat.st_dev)
+            and int(prior.get("inode") or -1) == int(stat.st_ino)
+            and _text(prior.get("tail_sha256")) == _tail_digest(handle, offset)
+        )
+        if not can_resume:
+            offset = 0
+        handle.seek(offset)
+        committed = offset
+        while True:
+            raw = handle.readline()
+            if not raw:
+                break
+            if not raw.endswith(b"\n"):
+                break
+            committed = handle.tell()
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, TypeError):
+                continue
+            if isinstance(payload, dict):
+                records.append(payload)
+        cursor = {
+            "device": int(stat.st_dev),
+            "inode": int(stat.st_ino),
+            "offset": committed,
+            "tail_sha256": _tail_digest(handle, committed),
+            "reset": bool(prior and not can_resume),
+        }
+    return records, cursor
+
+
+def _load_jsonl_paths(
+    paths: list[str],
+    cursor: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    next_files: dict[str, Any] = {}
+    prior_files = _dict(_dict(cursor).get("files"))
+    reset = False
+    for path in paths:
+        canonical = os.path.realpath(path)
+        batch, position = _read_jsonl_since(
+            canonical, _dict(prior_files.get(canonical))
+        )
+        records.extend(batch)
+        if position:
+            reset = reset or bool(position.get("reset"))
+            next_files[canonical] = position
+    return records, {
+        "schema": INPUT_CURSOR_SCHEMA,
+        "files": next_files,
+        "reset": reset,
+    }
+
+
 def load_spans(
     log_root: str,
     day: str | None = None,
@@ -260,16 +346,7 @@ def load_spans(
     telemetry_dir: str = "",
 ) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
-    # An explicit log root is a caller contract (and keeps report/test runs
-    # isolated); only fall back to the process telemetry directory when no root
-    # was supplied at all.
-    if telemetry_dir:
-        spans_dir = os.path.expanduser(telemetry_dir)
-    elif log_root:
-        spans_dir = os.path.join(os.path.expanduser(log_root), "spans")
-    else:
-        spans_dir = os.environ.get("LEGION_TELEMETRY_DIR") or "spans"
-    spans_dir = os.path.expanduser(spans_dir)
+    spans_dir = _spans_dir(log_root, telemetry_dir)
     paths = (
         [os.path.join(spans_dir, f"{day}.jsonl")]
         if day
@@ -291,6 +368,20 @@ def load_spans(
         except OSError:
             continue
     return spans
+
+
+def load_spans_incremental(
+    log_root: str,
+    *,
+    telemetry_dir: str = "",
+    cursor: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    paths = sorted(glob.glob(os.path.join(_spans_dir(log_root, telemetry_dir), "*.jsonl")))
+    records, next_cursor = _load_jsonl_paths(paths, cursor)
+    if next_cursor.get("reset"):
+        records, next_cursor = _load_jsonl_paths(paths, None)
+        next_cursor["rebuilt"] = True
+    return [item for item in records if item.get("schema") == SPAN_SCHEMA], next_cursor
 
 
 def load_manual_outcomes(log_root: str, day: str | None = None) -> list[dict[str, Any]]:
@@ -315,6 +406,15 @@ def load_manual_outcomes(log_root: str, day: str | None = None) -> list[dict[str
     except OSError:
         pass
     return out
+
+
+def load_manual_outcomes_incremental(
+    log_root: str,
+    *,
+    cursor: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    records, next_cursor = _load_jsonl_paths([outcomes_path(log_root)], cursor)
+    return [item for item in records if item.get("schema") == OUTCOME_SCHEMA], next_cursor
 
 
 def build_catalog(repo: str) -> dict[str, Any]:
@@ -841,72 +941,6 @@ def run_scorecard(repo: str) -> dict[str, Any]:
     }
 
 
-def _score_metric(scorecard: dict[str, Any], key: str) -> float:
-    if key == "score":
-        try:
-            return float(scorecard.get("score") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-    try:
-        return float(_dict(scorecard.get("metrics")).get(key) or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def compare_scorecards(
-    baseline: dict[str, Any],
-    candidate: dict[str, Any],
-    *,
-    min_score_delta: float = DEFAULT_MIN_SCORE_DELTA,
-) -> dict[str, Any]:
-    positive_metrics = ["score", "cases", "precision_at_1", "hit_at_k", "pass_rate"]
-    negative_metrics = [
-        "collision",
-        "miss",
-        "false_success",
-        "safety_regressions",
-    ]
-    delta = round(_score_metric(candidate, "score") - _score_metric(baseline, "score"), 6)
-    if not candidate.get("ok"):
-        return {
-            "status": "crash",
-            "decision": "validation_failed",
-            "delta": delta,
-            "regressions": ["scorecard_ok"],
-        }
-    regressions = [
-        key
-        for key in positive_metrics
-        if _score_metric(candidate, key) + 1e-9 < _score_metric(baseline, key)
-    ]
-    regressions.extend(
-        key
-        for key in negative_metrics
-        if _score_metric(candidate, key) > _score_metric(baseline, key) + 1e-9
-    )
-    baseline_duration = _score_metric(baseline, "duration_ms")
-    candidate_duration = _score_metric(candidate, "duration_ms")
-    if baseline_duration > 0 and candidate_duration > max(
-        baseline_duration * 2.0, baseline_duration + 2500.0
-    ):
-        regressions.append("duration_ms")
-    if regressions:
-        return {
-            "status": "discard",
-            "decision": "metric_regression",
-            "delta": delta,
-            "regressions": regressions,
-        }
-    if delta < min_score_delta:
-        return {
-            "status": "discard",
-            "decision": "score_delta_below_min",
-            "delta": delta,
-            "regressions": [],
-        }
-    return {"status": "keep", "decision": "measured_improvement", "delta": delta, "regressions": []}
-
-
 def dedupe_outcomes(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_id: dict[str, dict[str, Any]] = {}
     for outcome in outcomes:
@@ -986,7 +1020,7 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
             "Turn the promoted cross-project behavior into a scoped, durable harness guardrail."
         )
         validation = _text(metadata.get("validation")) or (
-            "Replay representative supporting workflows before source mutation."
+            "Replay representative supporting workflows before proposing a reviewed change."
         )
     elif source == "span-status":
         kind = "run_failure_guardrail"
@@ -1009,7 +1043,7 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
             "Record the issue as a reusable harness memory and turn it into a source "
             "patch when it repeats or blocks work."
         )
-        validation = "Run the target entity's normal validation before source mutation."
+        validation = "Run the target entity's normal validation before proposing a reviewed change."
 
     proposal = {
         "id": _stable_id(["proposal", proposal_identity, kind]),
@@ -1238,6 +1272,38 @@ def trace_contrast(spans: list[dict[str, Any]], catalog: dict[str, Any]) -> dict
     return {"entities": dict(sorted(entities.items()))}
 
 
+def merge_trace_contrast(
+    historical: dict[str, Any], current: dict[str, Any]
+) -> dict[str, Any]:
+    merged: dict[str, dict[str, Any]] = {}
+    keys = set(_dict(_dict(historical).get("entities"))) | set(
+        _dict(_dict(current).get("entities"))
+    )
+    for key in sorted(keys):
+        old = _dict(_dict(_dict(historical).get("entities")).get(key))
+        new = _dict(_dict(_dict(current).get("entities")).get(key))
+        statuses: dict[str, int] = defaultdict(int)
+        for source in (_dict(old).get("statuses"), _dict(new).get("statuses")):
+            for status, count in _dict(source).items():
+                statuses[str(status)] += int(count or 0)
+        merged[key] = {
+            "target_type": new.get("target_type") or old.get("target_type"),
+            "target_name": new.get("target_name") or old.get("target_name"),
+            "ok": int(old.get("ok") or 0) + int(new.get("ok") or 0),
+            "failed": int(old.get("failed") or 0) + int(new.get("failed") or 0),
+            "statuses": dict(sorted(statuses.items())),
+            "success_examples": (
+                _list(old.get("success_examples"))
+                + _list(new.get("success_examples"))
+            )[:3],
+            "failure_examples": (
+                _list(old.get("failure_examples"))
+                + _list(new.get("failure_examples"))
+            )[:3],
+        }
+    return {"entities": merged}
+
+
 def build_report(
     repo: str,
     log_root: str,
@@ -1250,16 +1316,45 @@ def build_report(
     day = day or _date_utc()
     catalog = build_catalog(repo)
     scan_day = None if scan_all else day
-    spans = load_spans(log_root, scan_day, telemetry_dir=telemetry_dir)
+    memory = load_memory(log_root)
+    incremental = bool(scan_all and not include_processed)
+    input_cursor: dict[str, Any] = {}
+    input_cursor_base: dict[str, Any] = {}
+    bootstrap_trace_contrast = False
+    if incremental:
+        prior_cursor = _dict(memory.get("input_cursor"))
+        input_cursor_base = prior_cursor
+        prior_span_cursor = _dict(prior_cursor.get("spans"))
+        bootstrap_trace_contrast = bool(
+            _dict(_dict(memory.get("trace_contrast")).get("entities"))
+            and not prior_span_cursor
+        )
+        spans, span_cursor = load_spans_incremental(
+            log_root,
+            telemetry_dir=telemetry_dir,
+            cursor=_dict(prior_cursor.get("spans")),
+        )
+        manual_outcomes, outcome_cursor = load_manual_outcomes_incremental(
+            log_root,
+            cursor=_dict(prior_cursor.get("manual_outcomes")),
+        )
+        input_cursor = {
+            "schema": INPUT_CURSOR_SCHEMA,
+            "spans": span_cursor,
+            "manual_outcomes": outcome_cursor,
+        }
+    else:
+        spans = load_spans(log_root, scan_day, telemetry_dir=telemetry_dir)
+        manual_outcomes = load_manual_outcomes(log_root, scan_day)
     outcomes = dedupe_outcomes(
         span_outcomes(spans, catalog)
         + trigger_eval_outcomes(repo, catalog)
         + routing_outcomes(repo, log_root, spans)
-        + load_manual_outcomes(log_root, scan_day)
+        + manual_outcomes
         + learning_law_outcomes(repo)
     )
     if not include_processed:
-        processed = set(_list(load_memory(log_root).get("processed_outcome_ids")))
+        processed = set(_list(memory.get("processed_outcome_ids")))
         outcomes = [outcome for outcome in outcomes if outcome.get("id") not in processed]
     proposals = [proposal_for_outcome(outcome, catalog) for outcome in outcomes]
     improvement_proposals = [
@@ -1270,7 +1365,29 @@ def build_report(
     by_entity: dict[str, int] = defaultdict(int)
     for outcome in outcomes:
         by_entity[f"{outcome['target_type']}:{outcome['target_name']}"] += 1
-    contrast = trace_contrast(spans, catalog)
+    current_contrast = trace_contrast(spans, catalog)
+    if bootstrap_trace_contrast:
+        # A pre-cursor memory already summarizes the history we are replaying
+        # to establish byte offsets. Preserve that aggregate and add only
+        # timestamped spans that are newer than the memory snapshot. Real
+        # telemetry has ``ts``; excluding undated replay is safer than silently
+        # double-counting historical observations.
+        memory_cutoff = _text(memory.get("updated_at"))
+        post_memory_spans = [
+            span
+            for span in spans
+            if memory_cutoff and _text(span.get("ts")) > memory_cutoff
+        ]
+        contrast = merge_trace_contrast(
+            _dict(memory.get("trace_contrast")),
+            trace_contrast(post_memory_spans, catalog),
+        )
+    elif incremental and not _dict(input_cursor.get("spans")).get("rebuilt"):
+        contrast = merge_trace_contrast(
+            _dict(memory.get("trace_contrast")), current_contrast
+        )
+    else:
+        contrast = current_contrast
     report = {
         "schema": "legion.self-learning.report.v1",
         "generated_at": _iso_utc(),
@@ -1278,6 +1395,7 @@ def build_report(
         "repo": os.path.abspath(repo),
         "log_root": os.path.expanduser(log_root),
         "scan_scope": "all" if scan_all else day,
+        "incremental": incremental,
         "spans": len(spans),
         "catalog_entities": len(_list(catalog.get("entities"))),
         "outcomes": outcomes,
@@ -1287,6 +1405,9 @@ def build_report(
         "scorecard": run_scorecard(repo),
         "trace_contrast": contrast,
     }
+    if input_cursor:
+        report["input_cursor"] = input_cursor
+        report["input_cursor_base"] = input_cursor_base
     # Only publish a lifecycle the loop actually read. Consumers treat the
     # absence of this key as "lifecycle unknown" and skip every reconciliation
     # that would otherwise retire hints or delete queued proposals, so a
@@ -1305,7 +1426,8 @@ def _empty_memory() -> dict[str, Any]:
         "entities": {},
         "processed_outcome_ids": [],
         "reports": [],
-        "candidate_pool": [],
+        "input_cursor": {},
+        "trace_contrast": {"entities": {}},
     }
 
 
@@ -1668,29 +1790,31 @@ def _apply_memory_locked(
             key=lambda value: SEVERITY_ORDER[_severity(value, "info")],
         )
 
-    resolved_outcome_ids = _resolved_outcome_ids(report)
     processed = _list(memory.setdefault("processed_outcome_ids", []))
     processed_set = set(processed)
     for outcome in _list(report.get("outcomes")):
         oid = _text(outcome.get("id"))
-        if oid and oid in resolved_outcome_ids and oid not in processed_set:
+        if oid and oid not in processed_set:
             processed.append(oid)
             processed_set.add(oid)
-
-    candidate_pool = _list(memory.setdefault("candidate_pool", []))
-    experiments = _dict(report.get("experiments"))
-    for candidate in _list(experiments.get("candidates")):
-        candidate_ref = {
-            "id": candidate.get("id"),
-            "target": candidate.get("target"),
-            "status": candidate.get("status"),
-            "decision": candidate.get("decision"),
-            "delta": candidate.get("delta"),
-            "generated_at": experiments.get("generated_at"),
-            "proposal_ids": candidate.get("proposal_ids", []),
-        }
-        if candidate_ref not in candidate_pool:
-            candidate_pool.append(candidate_ref)
+    report_cursor = report.get("input_cursor")
+    if isinstance(report_cursor, dict):
+        # A report is derived from a specific cursor snapshot. If another
+        # learner advanced memory after the report was built, keep the newer
+        # cursor and its matching aggregate. The next incremental run will
+        # consume any bytes unique to the stale report without replaying old
+        # history.
+        base_cursor = report.get("input_cursor_base")
+        current_cursor = _dict(memory.get("input_cursor"))
+        cursor_is_current = (
+            isinstance(base_cursor, dict) and current_cursor == base_cursor
+        )
+        if cursor_is_current:
+            memory["input_cursor"] = report_cursor
+            if isinstance(report.get("trace_contrast"), dict):
+                memory["trace_contrast"] = report["trace_contrast"]
+    elif isinstance(report.get("trace_contrast"), dict):
+        memory["trace_contrast"] = report["trace_contrast"]
 
     reports = _list(memory.setdefault("reports", []))
     report_ref = {
@@ -1722,7 +1846,7 @@ def append_experiment_log(report: dict[str, Any], log_root: str) -> None:
             handle.write("# Legion Self-Learning Experiments\n\n")
             handle.write(
                 "Daily loop: observe spans/evals/review findings -> analyze failures -> "
-                "write proposals and memory -> validate before source mutation.\n\n"
+                "write proposals and memory -> validate through legion-improve.\n\n"
             )
         handle.write(f"## {_text(report.get('day')) or _date_utc()} - daily loop\n\n")
         handle.write(f"- Outcomes: {len(_list(report.get('outcomes')))}\n")
@@ -1738,18 +1862,6 @@ def append_experiment_log(report: dict[str, Any], log_root: str) -> None:
                 f"hit@k={metrics.get('hit_at_k', 0)}, "
                 f"doctor={'ok' if _doctor_ok(scorecard) else 'fail'})\n"
             )
-        experiments = _dict(report.get("experiments"))
-        if experiments:
-            handle.write(f"- Experiment status: {experiments.get('status')}\n")
-            selected = _text(experiments.get("selected_candidate"))
-            if selected:
-                handle.write(f"- Selected candidate: `{selected}`\n")
-            for candidate in _list(experiments.get("candidates"))[:8]:
-                handle.write(
-                    f"  - `{candidate.get('id')}` {candidate.get('target')} "
-                    f"{candidate.get('status')} ({candidate.get('decision')}), "
-                    f"delta={candidate.get('delta')}\n"
-                )
         top = sorted(
             _dict(report.get("by_entity")).items(),
             key=lambda item: (-item[1], item[0]),
@@ -1825,26 +1937,6 @@ def append_experiment_ledger(report: dict[str, Any], log_root: str) -> None:
         "report-only",
         description,
     ]]
-    experiments = _dict(report.get("experiments"))
-    for candidate in _list(experiments.get("candidates")):
-        scorecard = _dict(candidate.get("scorecard"))
-        rows.append([
-            _text(report.get("day")) or _date_utc(),
-            _git_commit(_text(report.get("repo"))),
-            "candidate",
-            candidate.get("id"),
-            candidate.get("target"),
-            report.get("spans", 0),
-            outcomes,
-            proposals,
-            *_ledger_score_fields(scorecard),
-            _score_metric(baseline, "score"),
-            _score_metric(scorecard, "score"),
-            candidate.get("delta", 0),
-            candidate.get("status"),
-            candidate.get("decision"),
-            candidate.get("hypothesis") or "",
-        ])
     with open(path, "a", encoding="utf-8") as handle:
         if not exists:
             handle.write(
@@ -1855,285 +1947,6 @@ def append_experiment_ledger(report: dict[str, Any], log_root: str) -> None:
             )
         for row in rows:
             handle.write("\t".join(_tsv(item) for item in row) + "\n")
-
-
-def _learned_block_lines(proposals: list[dict[str, Any]]) -> list[str]:
-    lines = ["<!-- legion-self-learn:start -->", "## Learned Guardrails", ""]
-    for proposal in proposals:
-        lines.append(
-            f"- [{_date_utc()}] {proposal.get('summary')} "
-            f"Validation: {proposal.get('validation')}"
-        )
-    lines.append("<!-- legion-self-learn:end -->")
-    return lines
-
-
-def _replace_learned_block(text: str, block: str) -> str:
-    pattern = re.compile(
-        r"\n?<!-- legion-self-learn:start -->.*?<!-- legion-self-learn:end -->\n?",
-        re.DOTALL,
-    )
-    if pattern.search(text):
-        return pattern.sub("\n\n" + block.rstrip() + "\n", text).rstrip() + "\n"
-    return text.rstrip() + "\n\n" + block.rstrip() + "\n"
-
-
-def _prompt_keywords(prompt: str, existing: str, limit: int = 10) -> list[str]:
-    existing_tokens = _tokenize(existing)
-    seen: set[str] = set()
-    out: list[str] = []
-    for raw in re.split(r"[^a-zA-Z0-9]+", prompt):
-        token = raw.lower()
-        if len(token) <= 2 or token in STOPWORDS or token in existing_tokens or token in seen:
-            continue
-        seen.add(token)
-        out.append(token)
-        if len(out) >= limit:
-            break
-    return out
-
-
-def _proposal_prompt(proposal: dict[str, Any]) -> str:
-    try:
-        evidence = json.loads(_text(proposal.get("evidence")))
-    except ValueError:
-        return ""
-    return _text(_dict(evidence).get("prompt"))
-
-
-def _apply_marketplace_description_fixes(text: str, proposals: list[dict[str, Any]]) -> str:
-    try:
-        payload = json.loads(text)
-    except ValueError:
-        return text
-    plugins = payload.get("plugins")
-    if not isinstance(plugins, list):
-        return text
-    changed = False
-    for proposal in proposals:
-        if _text(proposal.get("kind")) != "trigger_description_fix":
-            continue
-        target_name = _text(proposal.get("target_name"))
-        prompt = _proposal_prompt(proposal)
-        if not target_name or not prompt:
-            continue
-        for plugin in plugins:
-            if not isinstance(plugin, dict) or plugin.get("name") != target_name:
-                continue
-            description = _text(plugin.get("description"))
-            keywords = _prompt_keywords(prompt, description)
-            if not keywords:
-                continue
-            hint = " Trigger hints: " + ", ".join(keywords) + "."
-            if hint.strip() in description:
-                continue
-            plugin["description"] = (description.rstrip() + hint).strip()
-            changed = True
-            break
-    if not changed:
-        return text
-    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
-
-
-def _format_frontmatter_description(value: str, new_inner: str) -> str:
-    stripped = value.strip()
-    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
-        if stripped[0] == '"':
-            return json.dumps(new_inner)
-        if "'" not in new_inner:
-            return f"'{new_inner}'"
-        return json.dumps(new_inner)
-    return new_inner
-
-
-def _replace_frontmatter_description(text: str, new_value: str) -> str:
-    match = re.match(r"^(\ufeff?---[ \t]*\r?\n)(.*?)(\r?\n---(?:[ \t]*\r?\n|[ \t]*$))", text, re.DOTALL)
-    if not match:
-        return text
-    body = match.group(2)
-    desc = re.search(r"(?m)^(description:\s*)(.+?)\s*$", body)
-    if not desc:
-        return text
-    old_value = desc.group(2)
-    formatted = _format_frontmatter_description(old_value, new_value)
-    new_body = body[: desc.start()] + f"{desc.group(1)}{formatted}" + body[desc.end():]
-    return match.group(1) + new_body + match.group(3) + text[match.end():]
-
-
-def _frontmatter_description(text: str) -> str:
-    match = re.match(r"^\ufeff?---[ \t]*\r?\n(.*?)\r?\n---(?:[ \t]*\r?\n|[ \t]*$)", text, re.DOTALL)
-    if not match:
-        return ""
-    desc = re.search(r"(?m)^description:\s*(.+?)\s*$", match.group(1))
-    if not desc:
-        return ""
-    value = desc.group(1).strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        try:
-            if value[0] == '"':
-                return str(json.loads(value))
-        except ValueError:
-            pass
-        return value[1:-1]
-    return value
-
-
-def _apply_markdown_description_fixes(text: str, proposals: list[dict[str, Any]]) -> str:
-    description = _frontmatter_description(text)
-    if not description:
-        return text
-    new_description = description
-    for proposal in proposals:
-        if _text(proposal.get("kind")) != "trigger_description_fix":
-            continue
-        prompt = _proposal_prompt(proposal)
-        if not prompt:
-            continue
-        keywords = _prompt_keywords(prompt, new_description)
-        if not keywords:
-            continue
-        hint = " Trigger hints: " + ", ".join(keywords) + "."
-        if hint.strip() not in new_description:
-            new_description = (new_description.rstrip() + hint).strip()
-    if new_description == description:
-        return text
-    return _replace_frontmatter_description(text, new_description)
-
-
-def _source_path_allowed(path: str, *, repo: str = "", allow_vendored: bool = False) -> bool:
-    if not path.endswith((".md", "SKILL.md", "marketplace.json")):
-        return False
-    if "/vendored/" in path and not allow_vendored:
-        return False
-    if repo:
-        if not _path_in_repo(path, repo):
-            return False
-        if _path_uses_symlink(path, repo):
-            return False
-    return True
-
-
-def apply_source(
-    report: dict[str, Any], *, allow_vendored: bool = False
-) -> tuple[list[str], dict[str, str]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    repo = _text(report.get("repo"))
-    for proposal in _list(report.get("proposals")):
-        source_path = _text(proposal.get("source_path"))
-        target_type = _text(proposal.get("target_type"))
-        if not source_path or target_type not in SAFE_SOURCE_TYPES:
-            continue
-        if not _source_path_allowed(source_path, repo=repo, allow_vendored=allow_vendored):
-            continue
-        grouped[source_path].append(proposal)
-
-    changed: list[str] = []
-    originals: dict[str, str] = {}
-    try:
-        for path, proposals in grouped.items():
-            try:
-                with open(path, encoding="utf-8") as handle:
-                    old_text = handle.read()
-            except OSError:
-                continue
-            if path.endswith("marketplace.json"):
-                new_text = _apply_marketplace_description_fixes(old_text, proposals)
-            else:
-                trigger_proposals = [
-                    proposal
-                    for proposal in proposals
-                    if _text(proposal.get("kind")) == "trigger_description_fix"
-                ]
-                guardrail_proposals = [
-                    proposal
-                    for proposal in proposals
-                    if _text(proposal.get("kind")) != "trigger_description_fix"
-                ]
-                new_text = _apply_markdown_description_fixes(old_text, trigger_proposals)
-                if guardrail_proposals:
-                    block = "\n".join(_learned_block_lines(guardrail_proposals))
-                    new_text = _replace_learned_block(new_text, block)
-                elif trigger_proposals and new_text == old_text:
-                    block = "\n".join(_learned_block_lines(trigger_proposals))
-                    new_text = _replace_learned_block(new_text, block)
-            if new_text == old_text:
-                continue
-            originals[path] = old_text
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(new_text)
-            changed.append(path)
-    except Exception:
-        restore_sources(originals)
-        raise
-    return changed, originals
-
-
-def restore_sources(originals: dict[str, str]) -> None:
-    for path, old_text in originals.items():
-        try:
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(old_text)
-        except OSError:
-            continue
-
-
-def _is_mutable_proposal(
-    proposal: dict[str, Any], *, repo: str = "", allow_vendored: bool = False
-) -> bool:
-    source_path = _text(proposal.get("source_path"))
-    target_type = _text(proposal.get("target_type"))
-    if not source_path or target_type not in SAFE_SOURCE_TYPES:
-        return False
-    return _source_path_allowed(source_path, repo=repo, allow_vendored=allow_vendored)
-
-
-def candidate_groups(
-    report: dict[str, Any],
-    *,
-    max_candidates: int = 4,
-    allow_vendored: bool = False,
-) -> list[dict[str, Any]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    repo = _text(report.get("repo"))
-    for proposal in _list(report.get("proposals")):
-        if _is_mutable_proposal(proposal, repo=repo, allow_vendored=allow_vendored):
-            grouped[_text(proposal.get("source_path"))].append(proposal)
-    groups: list[dict[str, Any]] = []
-    for source_path, proposals in sorted(grouped.items()):
-        target = f"{proposals[0].get('target_type')}:{proposals[0].get('target_name')}"
-        groups.append(
-            {
-                "id": _stable_id(["candidate", source_path, [p.get("id") for p in proposals]]),
-                "source_path": source_path,
-                "target": target,
-                "proposal_ids": [p.get("id") for p in proposals],
-                "hypothesis": _short(
-                    "; ".join(_text(p.get("suggested_change")) or _text(p.get("summary")) for p in proposals),
-                    500,
-                ),
-                "proposals": proposals,
-            }
-        )
-    if max_candidates > 0:
-        return groups[:max_candidates]
-    return groups
-
-
-def _copy_repo_to_candidate(repo: str, destination: str) -> None:
-    ignore = shutil.ignore_patterns(
-        ".git",
-        ".legion",
-        "node_modules",
-        ".venv",
-        "__pycache__",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        "dist",
-        "build",
-        "coverage",
-    )
-    shutil.copytree(repo, destination, ignore=ignore)
 
 
 def _path_in_repo(path: str, repo: str) -> bool:
@@ -2163,242 +1976,6 @@ def _path_uses_symlink(path: str, repo: str) -> bool:
         if os.path.islink(current):
             return True
     return False
-
-
-def _rebase_path(path: str, source_repo: str, target_repo: str) -> str:
-    if not _path_in_repo(path, source_repo):
-        return path
-    rel = os.path.relpath(os.path.abspath(path), os.path.abspath(source_repo))
-    return os.path.join(os.path.abspath(target_repo), rel)
-
-
-def _report_for_candidate(
-    report: dict[str, Any],
-    group: dict[str, Any],
-    source_repo: str,
-    candidate_repo: str,
-) -> dict[str, Any]:
-    candidate_report = copy.deepcopy(report)
-    candidate_report["repo"] = os.path.abspath(candidate_repo)
-    proposals = copy.deepcopy(_list(group.get("proposals")))
-    for proposal in proposals:
-        proposal["source_path"] = _rebase_path(_text(proposal.get("source_path")), source_repo, candidate_repo)
-    candidate_report["proposals"] = proposals
-    return candidate_report
-
-
-def _run_one_candidate(
-    repo: str,
-    report: dict[str, Any],
-    group: dict[str, Any],
-    baseline: dict[str, Any],
-    *,
-    allow_vendored: bool,
-    min_score_delta: float,
-) -> dict[str, Any]:
-    temp_root = tempfile.mkdtemp(prefix="legion-self-learn-")
-    candidate_repo = os.path.join(temp_root, "repo")
-    result = {
-        "id": group.get("id"),
-        "target": group.get("target"),
-        "source_path": group.get("source_path"),
-        "proposal_ids": group.get("proposal_ids", []),
-        "hypothesis": group.get("hypothesis"),
-        "isolation": "copy",
-        "status": "crash",
-        "decision": "not_run",
-        "delta": 0.0,
-        "changed_source": [],
-    }
-    try:
-        _copy_repo_to_candidate(repo, candidate_repo)
-        candidate_report = _report_for_candidate(report, group, repo, candidate_repo)
-        changed, _originals = apply_source(candidate_report, allow_vendored=allow_vendored)
-        result["changed_source"] = [
-            _rebase_path(path, candidate_repo, repo) if _path_in_repo(path, candidate_repo) else path
-            for path in changed
-        ]
-        if not changed:
-            result.update({"status": "discard", "decision": "no_source_change", "scorecard": empty_scorecard(candidate_repo)})
-            return result
-        scorecard = run_scorecard(candidate_repo)
-        decision = compare_scorecards(baseline, scorecard, min_score_delta=min_score_delta)
-        result.update(decision)
-        result["scorecard"] = scorecard
-        return result
-    except Exception as exc:  # pragma: no cover - defensive candidate isolation
-        result.update({"status": "crash", "decision": "exception", "error": str(exc)})
-        return result
-    finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
-
-
-def _best_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
-    kept = [candidate for candidate in candidates if candidate.get("status") == "keep"]
-    if not kept:
-        return None
-    return sorted(
-        kept,
-        key=lambda item: (
-            -float(item.get("delta") or 0.0),
-            _text(item.get("target")),
-            _text(item.get("source_path")),
-        ),
-    )[0]
-
-
-def run_candidate_experiments(
-    report: dict[str, Any],
-    repo: str,
-    *,
-    max_candidates: int = 4,
-    max_workers: int = 2,
-    min_score_delta: float = DEFAULT_MIN_SCORE_DELTA,
-    allow_vendored: bool = False,
-) -> dict[str, Any]:
-    baseline = _dict(report.get("scorecard")) or run_scorecard(repo)
-    groups = candidate_groups(report, max_candidates=max_candidates, allow_vendored=allow_vendored)
-    result = {
-        "schema": "legion.self-learning.experiments.v1",
-        "generated_at": _iso_utc(),
-        "baseline": baseline,
-        "candidates": [],
-        "selected_candidate": None,
-        "changed_source": [],
-        "final": None,
-        "rolled_back": False,
-    }
-    if not groups:
-        result["status"] = "no_candidates"
-        return result
-
-    worker_count = max(1, min(max_workers, len(groups)))
-    if worker_count == 1:
-        candidates = [
-            _run_one_candidate(
-                repo,
-                report,
-                group,
-                baseline,
-                allow_vendored=allow_vendored,
-                min_score_delta=min_score_delta,
-            )
-            for group in groups
-        ]
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-                executor.submit(
-                    _run_one_candidate,
-                    repo,
-                    report,
-                    group,
-                    baseline,
-                    allow_vendored=allow_vendored,
-                    min_score_delta=min_score_delta,
-                )
-                for group in groups
-            ]
-            candidates = [future.result() for future in futures]
-    result["candidates"] = sorted(candidates, key=lambda item: _text(item.get("id")))
-
-    selected = _best_candidate(result["candidates"])
-    if not selected:
-        result["status"] = "discarded"
-        return result
-
-    selected_ids = set(_list(selected.get("proposal_ids")))
-    selected_report = copy.deepcopy(report)
-    selected_report["proposals"] = [
-        proposal for proposal in _list(report.get("proposals")) if proposal.get("id") in selected_ids
-    ]
-    selected_report["repo"] = os.path.abspath(repo)
-    originals: dict[str, str] = {}
-    changed: list[str] = []
-    try:
-        changed, originals = apply_source(selected_report, allow_vendored=allow_vendored)
-        final_scorecard = run_scorecard(repo)
-        final_decision = compare_scorecards(baseline, final_scorecard, min_score_delta=min_score_delta)
-    except Exception as exc:
-        restore_sources(originals)
-        result["rolled_back"] = True
-        result["status"] = "rolled_back"
-        result["final"] = empty_scorecard(repo, reason="final scorecard exception")
-        result["final_decision"] = {
-            "status": "crash",
-            "decision": "exception",
-            "delta": 0.0,
-            "regressions": ["exception"],
-            "error": str(exc),
-        }
-        result["changed_source"] = []
-        return result
-    if final_decision.get("status") != "keep":
-        restore_sources(originals)
-        result["rolled_back"] = True
-        result["status"] = "rolled_back"
-        result["final_decision"] = final_decision
-        changed = []
-    else:
-        result["status"] = "kept"
-        result["selected_candidate"] = selected.get("id")
-    result["changed_source"] = changed
-    result["final"] = final_scorecard
-    return result
-
-
-def _resolved_outcome_ids(report: dict[str, Any]) -> set[str]:
-    experiments = _dict(report.get("experiments"))
-    if experiments.get("status") != "kept":
-        return set()
-    selected = _text(experiments.get("selected_candidate"))
-    selected_proposal_ids: set[str] = set()
-    for candidate in _list(experiments.get("candidates")):
-        if _text(candidate.get("id")) == selected and candidate.get("status") == "keep":
-            selected_proposal_ids.update(_text(pid) for pid in _list(candidate.get("proposal_ids")))
-            break
-    if not selected_proposal_ids:
-        return set()
-    return {
-        _text(proposal.get("outcome_id"))
-        for proposal in _list(report.get("proposals"))
-        if proposal.get("id") in selected_proposal_ids and _text(proposal.get("outcome_id"))
-    }
-
-
-def validate_source(repo: str) -> dict[str, Any]:
-    checks = [
-        ["legion-eval", "--repo", repo, "--json"],
-        ["legion-doctor", "--repo", repo],
-    ]
-    results: list[dict[str, Any]] = []
-    ok = True
-    for argv in checks:
-        try:
-            proc = subprocess.run(
-                argv,
-                cwd=repo,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            ok = False
-            results.append({"cmd": argv, "ok": False, "error": str(exc)})
-            continue
-        cmd_ok = proc.returncode == 0
-        ok = ok and cmd_ok
-        results.append(
-            {
-                "cmd": argv,
-                "ok": cmd_ok,
-                "returncode": proc.returncode,
-                "stdout": proc.stdout[-4000:],
-                "stderr": proc.stderr[-4000:],
-            }
-        )
-    return {"ok": ok, "checks": results}
 
 
 def hints(log_root: str, entity: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -2473,25 +2050,11 @@ def run_command(args: argparse.Namespace) -> int:
     )
     report_path = daily_report_path(args.logs, day)
 
-    experiments: dict[str, Any] | None = None
-    changed: list[str] = []
-    if args.apply_source:
-        experiments = run_candidate_experiments(
-            report,
-            args.repo,
-            max_candidates=args.max_candidates,
-            max_workers=args.max_workers,
-            min_score_delta=args.min_score_delta,
-            allow_vendored=args.allow_vendored,
-        )
-        report["experiments"] = experiments
-        changed = _list(experiments.get("changed_source"))
-
     _write_json(report_path, report)
     improvement_queue = write_improvement_queue(report, args.logs)
 
     memory = None
-    if args.apply_memory or args.apply_source:
+    if args.apply_memory:
         state = legion_state.resolve_state(args.repo)
         memory = apply_memory(
             report,
@@ -2507,8 +2070,8 @@ def run_command(args: argparse.Namespace) -> int:
         ),
         "typed_hints": _dict(_dict(memory or {}).get("typed_hints")),
         "applied_memory": memory is not None,
-        "changed_source": changed,
-        "experiments": experiments,
+        "changed_source": [],
+        "experiments": None,
         "improvement_queue": improvement_queue,
         "scorecard": report.get("scorecard"),
         "summary": {
@@ -2537,12 +2100,6 @@ def run_command(args: argparse.Namespace) -> int:
                 f"promoted={payload['typed_hints'].get('promoted', 0)} "
                 f"rejected={payload['typed_hints'].get('rejected', 0)}"
             )
-        if changed:
-            print("changed source:")
-            for path in changed:
-                print(f"  {path}")
-    if experiments and experiments.get("status") == "rolled_back":
-        return 1
     return 0
 
 
@@ -2685,11 +2242,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--day", default="", help="UTC day to score (YYYY-MM-DD, default today)")
     run.add_argument("--apply-memory", action="store_true")
     run.add_argument("--apply-source", action="store_true")
-    run.add_argument("--allow-vendored", action="store_true")
     run.add_argument("--include-processed", action="store_true")
-    run.add_argument("--max-candidates", type=int, default=4)
-    run.add_argument("--max-workers", type=int, default=2)
-    run.add_argument("--min-score-delta", type=float, default=DEFAULT_MIN_SCORE_DELTA)
     run.add_argument("--json", action="store_true")
     run.add_argument("--quiet", action="store_true")
 

@@ -811,83 +811,6 @@ def test_manual_bug_record_becomes_active_memory_hint(tmp_path):
     assert "\tbaseline\t\t\t1\t1\t1\t" in ledger_text
 
 
-def test_apply_source_skips_vendored_by_default_and_writes_guardrail_block(tmp_path):
-    local = tmp_path / "plugin" / "SKILL.md"
-    vendored = tmp_path / "vendored" / "skill" / "SKILL.md"
-    local.parent.mkdir(parents=True)
-    vendored.parent.mkdir(parents=True)
-    local.write_text("# Local\n", encoding="utf-8")
-    vendored.write_text("# Vendored\n", encoding="utf-8")
-    report = {
-        "proposals": [
-            {
-                "target_type": "skill",
-                "target_name": "local",
-                "source_path": str(local),
-                "summary": "Local skill missed a validation step.",
-                "validation": "Run targeted tests.",
-            },
-            {
-                "target_type": "skill",
-                "target_name": "vendored",
-                "source_path": str(vendored),
-                "summary": "Vendored skill missed a validation step.",
-                "validation": "Run targeted tests.",
-            },
-        ]
-    }
-
-    changed, originals = self_learn.apply_source(report)
-
-    assert changed == [str(local)]
-    assert str(local) in originals
-    assert "legion-self-learn:start" in local.read_text(encoding="utf-8")
-    assert "legion-self-learn:start" not in vendored.read_text(encoding="utf-8")
-    self_learn.restore_sources(originals)
-    assert local.read_text(encoding="utf-8") == "# Local\n"
-
-
-def test_apply_source_updates_markdown_description_for_trigger_fix(tmp_path):
-    skill = tmp_path / "plugin" / "SKILL.md"
-    skill.parent.mkdir(parents=True)
-    skill.write_text(
-        "---\n"
-        "name: local\n"
-        'description: "Local workflow skill"\n'
-        "---\n"
-        "\n"
-        "# Local\n",
-        encoding="utf-8",
-    )
-    evidence = {
-        "prompt": "Use local skill for release gate validation and scorecard experiments"
-    }
-    report = {
-        "proposals": [
-            {
-                "id": "p1",
-                "kind": "trigger_description_fix",
-                "target_type": "skill",
-                "target_name": "local",
-                "source_path": str(skill),
-                "summary": "Trigger eval missed local.",
-                "evidence": json.dumps(evidence),
-                "validation": "Run entity eval.",
-            }
-        ]
-    }
-
-    changed, originals = self_learn.apply_source(report)
-
-    assert changed == [str(skill)]
-    text = skill.read_text(encoding="utf-8")
-    assert "Trigger hints:" in text
-    assert "release" in text
-    assert "legion-self-learn:start" not in text
-    self_learn.restore_sources(originals)
-    assert 'description: "Local workflow skill"' in skill.read_text(encoding="utf-8")
-
-
 def test_apply_memory_preserves_existing_entity_hints(tmp_path):
     logs = str(tmp_path / "logs")
     existing = self_learn._empty_memory()
@@ -1013,7 +936,7 @@ def test_apply_memory_replaces_legacy_law_hint_and_renders_revision_first(tmp_pa
     assert "Validate the representative workflow." not in rendered
 
 
-def test_apply_memory_keeps_unresolved_outcomes_active(tmp_path, monkeypatch):
+def test_apply_memory_marks_mined_outcomes_processed(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     logs = str(tmp_path / "logs")
     repo.mkdir()
@@ -1041,12 +964,175 @@ def test_apply_memory_keeps_unresolved_outcomes_active(tmp_path, monkeypatch):
     first = self_learn.build_report(str(repo), logs, "2026-06-19")
     assert [item["id"] for item in first["outcomes"]] == ["processed-once"]
     memory = self_learn.apply_memory(first, logs)
-    assert "processed-once" not in memory["processed_outcome_ids"]
+    assert "processed-once" in memory["processed_outcome_ids"]
 
     second = self_learn.build_report(str(repo), logs, "2026-06-19")
-    assert [item["id"] for item in second["outcomes"]] == ["processed-once"]
+    assert second["outcomes"] == []
     audit = self_learn.build_report(str(repo), logs, "2026-06-19", include_processed=True)
     assert [item["id"] for item in audit["outcomes"]] == ["processed-once"]
+
+
+def test_incremental_scan_reads_only_appended_rows_and_keeps_late_records(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    logs = tmp_path / "logs"
+    spans_dir = logs / "spans"
+    repo.mkdir()
+    spans_dir.mkdir(parents=True)
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
+    monkeypatch.setattr(self_learn, "run_scorecard", lambda _repo: self_learn.empty_scorecard(str(repo)))
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
+    span_path = spans_dir / "2026-06-19.jsonl"
+    first_span = {
+        "schema": self_learn.SPAN_SCHEMA,
+        "run_id": "first",
+        "status": "ok",
+        "target_type": "command",
+        "target_name": "feature",
+    }
+    span_path.write_text(json.dumps(first_span) + "\n", encoding="utf-8")
+
+    first = self_learn.build_report(str(repo), str(logs), scan_all=True)
+    assert first["spans"] == 1
+    self_learn.apply_memory(first, str(logs))
+
+    late = {
+        "schema": self_learn.OUTCOME_SCHEMA,
+        "id": "late-after-first-scan",
+        "ts": "2026-06-18T23:59:00Z",
+        "source": "manual",
+        "target_type": "command",
+        "target_name": "feature",
+        "severity": "high",
+        "summary": "Late record in an older window.",
+        "evidence": "late",
+        "metadata": {},
+    }
+    self_learn._append_jsonl(self_learn.outcomes_path(str(logs)), late)
+    with span_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({**first_span, "run_id": "second", "status": "failed"}) + "\n")
+
+    second = self_learn.build_report(str(repo), str(logs), scan_all=True)
+
+    assert second["incremental"] is True
+    assert second["spans"] == 1
+    assert "late-after-first-scan" in {item["id"] for item in second["outcomes"]}
+    assert second["trace_contrast"]["entities"]["command:feature"]["ok"] == 1
+    assert second["trace_contrast"]["entities"]["command:feature"]["failed"] == 1
+
+
+def test_incremental_scan_bootstraps_cursor_without_recounting_legacy_contrast(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    logs = tmp_path / "logs"
+    spans_dir = logs / "spans"
+    repo.mkdir()
+    spans_dir.mkdir(parents=True)
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
+    monkeypatch.setattr(self_learn, "run_scorecard", lambda _repo: self_learn.empty_scorecard(str(repo)))
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
+    span = {
+        "schema": self_learn.SPAN_SCHEMA,
+        "run_id": "already-counted",
+        "ts": "2026-06-18T23:59:00Z",
+        "status": "ok",
+        "target_type": "command",
+        "target_name": "feature",
+    }
+    (spans_dir / "2026-06-19.jsonl").write_text(
+        json.dumps(span)
+        + "\n"
+        + json.dumps(
+            {
+                **span,
+                "run_id": "after-memory",
+                "ts": "2026-06-19T00:01:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    legacy = self_learn._empty_memory()
+    legacy.pop("input_cursor")
+    legacy["updated_at"] = "2026-06-19T00:00:00Z"
+    legacy["trace_contrast"] = {
+        "entities": {
+            "command:feature": {
+                "target_type": "command",
+                "target_name": "feature",
+                "ok": 1,
+                "failed": 0,
+                "statuses": {"ok": 1},
+                "success_examples": ["already-counted"],
+                "failure_examples": [],
+            }
+        }
+    }
+    self_learn._write_json(self_learn.memory_path(str(logs)), legacy)
+
+    report = self_learn.build_report(str(repo), str(logs), scan_all=True)
+
+    assert report["input_cursor_base"] == {}
+    assert report["trace_contrast"]["entities"]["command:feature"]["ok"] == 2
+    self_learn.apply_memory(report, str(logs))
+    assert self_learn.load_memory(str(logs))["input_cursor"] == report["input_cursor"]
+
+
+def test_apply_memory_does_not_rewind_incremental_cursor_with_stale_report(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    logs = tmp_path / "logs"
+    spans_dir = logs / "spans"
+    repo.mkdir()
+    spans_dir.mkdir(parents=True)
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
+    monkeypatch.setattr(self_learn, "run_scorecard", lambda _repo: self_learn.empty_scorecard(str(repo)))
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
+    span_path = spans_dir / "2026-06-19.jsonl"
+    base = {
+        "schema": self_learn.SPAN_SCHEMA,
+        "target_type": "command",
+        "target_name": "feature",
+    }
+    span_path.write_text(
+        json.dumps({**base, "run_id": "first", "status": "ok"}) + "\n",
+        encoding="utf-8",
+    )
+    stale = self_learn.build_report(str(repo), str(logs), scan_all=True)
+    with span_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({**base, "run_id": "second", "status": "failed"}) + "\n")
+    newer = self_learn.build_report(str(repo), str(logs), scan_all=True)
+
+    self_learn.apply_memory(newer, str(logs))
+    self_learn.apply_memory(stale, str(logs))
+
+    memory = self_learn.load_memory(str(logs))
+    assert memory["input_cursor"] == newer["input_cursor"]
+    assert memory["trace_contrast"] == newer["trace_contrast"]
+    follow_up = self_learn.build_report(str(repo), str(logs), scan_all=True)
+    assert follow_up["spans"] == 0
+    assert follow_up["trace_contrast"] == newer["trace_contrast"]
+
+
+def test_jsonl_cursor_resets_after_in_place_rewrite(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text('{"id":"old"}\n', encoding="utf-8")
+    first, cursor = self_learn._read_jsonl_since(str(path))
+    assert first == [{"id": "old"}]
+
+    path.write_text('{"id":"replacement"}\n', encoding="utf-8")
+    second, _cursor = self_learn._read_jsonl_since(str(path), cursor)
+
+    assert second == [{"id": "replacement"}]
 
 
 def test_apply_memory_promotes_safe_typed_hints_used_by_the_runtime_compiler(tmp_path):
@@ -1439,216 +1525,6 @@ def test_scorecards_omit_unmeasured_cost_and_token_metrics():
     for scorecard in scorecards:
         assert "cost_usd" not in scorecard["metrics"]
         assert "tokens" not in scorecard["metrics"]
-
-
-def test_compare_scorecards_rejects_negative_metric_regression():
-    baseline = _score(0.5, pass_count=1, cases=2)
-    candidate = _score(0.8, pass_count=2, cases=2)
-    baseline["metrics"].update({"cost_usd": 0.1, "tokens": 100, "safety_regressions": 0})
-    candidate["metrics"].update({"cost_usd": 0.1, "tokens": 100, "safety_regressions": 1})
-
-    result = self_learn.compare_scorecards(baseline, candidate)
-
-    assert result["status"] == "discard"
-    assert result["decision"] == "metric_regression"
-    assert "safety_regressions" in result["regressions"]
-
-
-def test_compare_scorecards_ignores_unmeasured_cost_and_token_fields():
-    baseline = _score(0.5, pass_count=1, cases=2)
-    candidate = _score(1.0, pass_count=2, cases=2)
-    baseline["metrics"].update({"cost_usd": 0.1, "tokens": 100})
-    candidate["metrics"].update({"cost_usd": 5.0, "tokens": 5000})
-
-    result = self_learn.compare_scorecards(baseline, candidate)
-
-    assert result == {
-        "status": "keep",
-        "decision": "measured_improvement",
-        "delta": 0.5,
-        "regressions": [],
-    }
-
-
-def test_candidate_experiment_discards_non_improving_source_patch(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    source = repo / "plugin" / "SKILL.md"
-    source.parent.mkdir(parents=True)
-    source.write_text("# Skill\n", encoding="utf-8")
-    report = {
-        "repo": str(repo),
-        "day": "2026-06-19",
-        "spans": 0,
-        "outcomes": [],
-        "proposals": [
-            {
-                "id": "p1",
-                "kind": "review_guardrail",
-                "target_type": "skill",
-                "target_name": "plugin",
-                "source_path": str(source),
-                "summary": "Add a guardrail.",
-                "validation": "Run eval.",
-            }
-        ],
-        "scorecard": _score(1.0),
-    }
-    monkeypatch.setattr(self_learn, "run_scorecard", lambda _repo: _score(1.0))
-
-    result = self_learn.run_candidate_experiments(
-        report,
-        str(repo),
-        max_candidates=2,
-        max_workers=1,
-        min_score_delta=0.001,
-    )
-
-    assert result["selected_candidate"] is None
-    assert result["candidates"][0]["status"] == "discard"
-    assert result["candidates"][0]["decision"] == "score_delta_below_min"
-    assert source.read_text(encoding="utf-8") == "# Skill\n"
-
-
-def test_candidate_experiment_skips_external_source_paths(tmp_path):
-    repo = tmp_path / "repo"
-    source = tmp_path / "outside" / "SKILL.md"
-    repo.mkdir()
-    source.parent.mkdir()
-    source.write_text("# External\n", encoding="utf-8")
-    report = {
-        "repo": str(repo),
-        "proposals": [
-            {
-                "id": "p1",
-                "kind": "review_guardrail",
-                "target_type": "skill",
-                "target_name": "external",
-                "source_path": str(source),
-                "summary": "This must not mutate outside the repo.",
-            }
-        ],
-        "scorecard": _score(1.0),
-    }
-
-    result = self_learn.run_candidate_experiments(report, str(repo), max_workers=1)
-
-    assert result["status"] == "no_candidates"
-    assert source.read_text(encoding="utf-8") == "# External\n"
-
-
-def test_candidate_experiment_skips_symlink_source_paths(tmp_path):
-    repo = tmp_path / "repo"
-    source = repo / "plugin" / "SKILL.md"
-    target = tmp_path / "outside" / "SKILL.md"
-    source.parent.mkdir(parents=True)
-    target.parent.mkdir()
-    target.write_text("# External target\n", encoding="utf-8")
-    os.symlink(target, source)
-    report = {
-        "repo": str(repo),
-        "proposals": [
-            {
-                "id": "p1",
-                "kind": "review_guardrail",
-                "target_type": "skill",
-                "target_name": "symlinked",
-                "source_path": str(source),
-                "summary": "This must not follow a symlink target.",
-            }
-        ],
-        "scorecard": _score(1.0),
-    }
-
-    result = self_learn.run_candidate_experiments(report, str(repo), max_workers=1)
-
-    assert result["status"] == "no_candidates"
-    assert target.read_text(encoding="utf-8") == "# External target\n"
-
-
-def test_candidate_experiment_keeps_measured_improvement(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    source = repo / "plugin" / "SKILL.md"
-    source.parent.mkdir(parents=True)
-    source.write_text("# Skill\n", encoding="utf-8")
-    report = {
-        "repo": str(repo),
-        "day": "2026-06-19",
-        "spans": 0,
-        "outcomes": [],
-        "proposals": [
-            {
-                "id": "p1",
-                "kind": "review_guardrail",
-                "target_type": "skill",
-                "target_name": "plugin",
-                "source_path": str(source),
-                "summary": "Add a guardrail.",
-                "validation": "Run eval.",
-            }
-        ],
-        "scorecard": _score(0.5, pass_count=1, cases=2),
-    }
-    scores = [_score(0.8, pass_count=2, cases=2), _score(0.8, pass_count=2, cases=2)]
-    monkeypatch.setattr(self_learn, "run_scorecard", lambda _repo: scores.pop(0))
-
-    result = self_learn.run_candidate_experiments(
-        report,
-        str(repo),
-        max_candidates=2,
-        max_workers=1,
-        min_score_delta=0.001,
-    )
-
-    assert result["selected_candidate"] == result["candidates"][0]["id"]
-    assert result["candidates"][0]["status"] == "keep"
-    assert result["changed_source"] == [str(source)]
-    assert "legion-self-learn:start" in source.read_text(encoding="utf-8")
-
-
-def test_candidate_experiment_rolls_back_when_final_scorecard_raises(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    source = repo / "plugin" / "SKILL.md"
-    source.parent.mkdir(parents=True)
-    source.write_text("# Skill\n", encoding="utf-8")
-    report = {
-        "repo": str(repo),
-        "day": "2026-06-19",
-        "spans": 0,
-        "outcomes": [],
-        "proposals": [
-            {
-                "id": "p1",
-                "kind": "review_guardrail",
-                "target_type": "skill",
-                "target_name": "plugin",
-                "source_path": str(source),
-                "summary": "Add a guardrail.",
-                "validation": "Run eval.",
-            }
-        ],
-        "scorecard": _score(0.5, pass_count=1, cases=2),
-    }
-    calls = {"count": 0}
-
-    def score_or_raise(_repo):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return _score(0.8, pass_count=2, cases=2)
-        raise RuntimeError("scorecard failed")
-
-    monkeypatch.setattr(self_learn, "run_scorecard", score_or_raise)
-
-    result = self_learn.run_candidate_experiments(
-        report,
-        str(repo),
-        max_candidates=2,
-        max_workers=1,
-        min_score_delta=0.001,
-    )
-
-    assert result["status"] == "rolled_back"
-    assert result["final_decision"]["decision"] == "exception"
-    assert source.read_text(encoding="utf-8") == "# Skill\n"
 
 
 def test_forged_first_party_marker_gains_nothing(tmp_path):

@@ -19,15 +19,17 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
+import legion_session_io  # noqa: E402
 
 OUTCOME_SCHEMA = "legion.outcome.v1"
 DEFAULT_LOG_ROOT = ""
 MAX_BLOCK_CHARS = 20000
 DEFAULT_SESSION_LIMIT = 100
+DEFAULT_RECORD_LIMIT = 20_000
 DEFAULT_ROLES = {"assistant", "unknown", "user"}
 VALID_HARNESSES = {"claude", "codex", "cursor"}
 VALID_ROLES = {"assistant", "developer", "system", "tool", "unknown", "user"}
@@ -454,54 +456,47 @@ def _metadata_strings(obj: dict[str, Any], *keys: str) -> list[str]:
 
 def _inspect_jsonl_metadata(info: SourceInfo, max_lines: int = 200) -> None:
     try:
-        with info.path.open(encoding="utf-8", errors="ignore") as handle:
-            for index, line in enumerate(handle):
-                if index >= max_lines:
-                    break
-                try:
-                    obj = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                cwd_values = _metadata_strings(obj, "cwd", "repo_root", "workspace_root")
-                if cwd_values and not info.cwd:
-                    info.cwd = cwd_values[0]
-                for value in _metadata_strings(
-                    obj, "repository_url", "repositoryUrl", "repo_url", "remote_url"
-                ):
-                    normalized = _normalize_repository_url(value)
-                    if normalized:
-                        info.repository_urls.add(normalized)
-                info.session_ids.update(
-                    _metadata_strings(
-                        obj,
-                        "session_id",
-                        "sessionId",
-                        "thread_id",
-                        "threadId",
-                    )
+        for _index, obj in legion_session_io.iter_jsonl_objects(
+            info.path, max_lines=max_lines
+        ):
+            cwd_values = _metadata_strings(obj, "cwd", "repo_root", "workspace_root")
+            if cwd_values and not info.cwd:
+                info.cwd = cwd_values[0]
+            for value in _metadata_strings(
+                obj, "repository_url", "repositoryUrl", "repo_url", "remote_url"
+            ):
+                normalized = _normalize_repository_url(value)
+                if normalized:
+                    info.repository_urls.add(normalized)
+            info.session_ids.update(
+                _metadata_strings(
+                    obj,
+                    "session_id",
+                    "sessionId",
+                    "thread_id",
+                    "threadId",
                 )
-                if str(obj.get("type") or "").lower() == "session_meta":
-                    info.session_ids.update(_metadata_strings(obj, "id"))
-                if _metadata_strings(obj, "agent_path", "parent_thread_id", "parentThreadId"):
-                    info.subagent = True
-                if any(
-                    value is True
-                    for value in (
-                        obj.get("isSidechain"),
-                        obj.get("is_sidechain"),
-                        (obj.get("payload") or {}).get("isSidechain")
-                        if isinstance(obj.get("payload"), dict)
-                        else False,
-                    )
-                ):
-                    info.subagent = True
-                provenance = _metadata_strings(
-                    obj, "originator", "source", "source_kind", "run_kind", "mode"
+            )
+            if str(obj.get("type") or "").lower() == "session_meta":
+                info.session_ids.update(_metadata_strings(obj, "id"))
+            if _metadata_strings(obj, "agent_path", "parent_thread_id", "parentThreadId"):
+                info.subagent = True
+            if any(
+                value is True
+                for value in (
+                    obj.get("isSidechain"),
+                    obj.get("is_sidechain"),
+                    (obj.get("payload") or {}).get("isSidechain")
+                    if isinstance(obj.get("payload"), dict)
+                    else False,
                 )
-                if any(BENCHMARK_TOKEN.search(value) for value in provenance):
-                    info.benchmark = True
+            ):
+                info.subagent = True
+            provenance = _metadata_strings(
+                obj, "originator", "source", "source_kind", "run_kind", "mode"
+            )
+            if any(BENCHMARK_TOKEN.search(value) for value in provenance):
+                info.benchmark = True
     except OSError:
         return
 
@@ -574,22 +569,17 @@ def _iter_files(home: Path, days: int, max_file_mb: float) -> tuple[list[Path], 
     suffixes = {".md", ".txt", ".jsonl", ".json", ".log"}
     out: list[Path] = []
     skipped = 0
-    for root in roots:
-        if not root.exists():
+    for path in legion_session_io.walk_files(roots, suffixes=suffixes):
+        try:
+            stat = path.stat()
+            if cutoff and stat.st_mtime < cutoff:
+                continue
+            if max_bytes and stat.st_size > max_bytes and path.suffix != ".jsonl":
+                skipped += 1
+                continue
+        except OSError:
             continue
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix not in suffixes:
-                continue
-            try:
-                stat = path.stat()
-                if cutoff and stat.st_mtime < cutoff:
-                    continue
-                if max_bytes and stat.st_size > max_bytes and path.suffix != ".jsonl":
-                    skipped += 1
-                    continue
-            except OSError:
-                continue
-            out.append(path)
+        out.append(path)
     def mtime(path: Path) -> float:
         try:
             return path.stat().st_mtime
@@ -684,59 +674,57 @@ def _record_is_message(obj: dict[str, Any], *, include_tool_results: bool) -> bo
     return True
 
 
-def _extract_records(path: Path, *, include_tool_results: bool = False) -> list[dict[str, str]]:
+def _extract_records(
+    path: Path, *, include_tool_results: bool = False
+) -> Iterator[dict[str, str]]:
     if path.suffix == ".jsonl":
-        records: list[dict[str, str]] = []
-        try:
-            with path.open(encoding="utf-8", errors="ignore") as handle:
-                for line in handle:
-                    try:
-                        payload = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(payload, dict):
-                        if not _record_is_message(
-                            payload, include_tool_results=include_tool_results
-                        ):
-                            continue
-                        block = _message_text(
-                            payload, include_tool_results=include_tool_results
-                        )
-                        if block:
-                            records.append(
-                                {
-                                    "text": block[:MAX_BLOCK_CHARS],
-                                    "role": _message_role(payload),
-                                }
-                            )
-        except OSError:
-            return []
-        return records
+        for _index, payload in legion_session_io.iter_jsonl_objects(path):
+            if not _record_is_message(
+                payload, include_tool_results=include_tool_results
+            ):
+                # The caller's record budget is a decoded-object budget, not a
+                # post-filter message budget. Preserve one empty record so tool
+                # and metadata-heavy transcripts cannot bypass the cap.
+                yield {"text": "", "role": ""}
+                continue
+            block = _message_text(
+                payload, include_tool_results=include_tool_results
+            )
+            if block:
+                yield {
+                    "text": block[:MAX_BLOCK_CHARS],
+                    "role": _message_role(payload),
+                }
+            else:
+                yield {"text": "", "role": ""}
+        return
 
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return []
+        return
     if path.suffix == ".json":
         try:
             payload = json.loads(text)
         except ValueError:
-            return []
+            return
         if isinstance(payload, dict):
             if not _record_is_message(payload, include_tool_results=include_tool_results):
-                return []
+                return
             block = _message_text(payload, include_tool_results=include_tool_results)
-            return [{"text": block[:MAX_BLOCK_CHARS], "role": _message_role(payload)}]
-        return []
-    return [
-        {"text": part[:MAX_BLOCK_CHARS], "role": ""}
-        for part in re.split(r"\n\s*\n", text)
-        if part.strip()
-    ]
+            if block:
+                yield {
+                    "text": block[:MAX_BLOCK_CHARS],
+                    "role": _message_role(payload),
+                }
+        return
+    for part in re.split(r"\n\s*\n", text):
+        if part.strip():
+            yield {"text": part[:MAX_BLOCK_CHARS], "role": ""}
 
 
 def _extract_blocks(path: Path) -> list[str]:
-    return [record["text"] for record in _extract_records(path)]
+    return [record["text"] for record in _extract_records(path) if record["text"]]
 
 
 def _matches_query(block: str, queries: list[str]) -> bool:
@@ -806,6 +794,7 @@ def scan(
     roles: set[str] | None = None,
     source_kinds: set[str] | None = None,
     session_limit: int = DEFAULT_SESSION_LIMIT,
+    record_limit: int = DEFAULT_RECORD_LIMIT,
     include_subagents: bool = False,
     include_benchmarks: bool = False,
     include_tool_results: bool = False,
@@ -854,11 +843,19 @@ def scan(
     records_filtered_by_role = 0
     records_deduplicated = 0
     seen_records: set[str] = set()
+    record_limit_reached = False
     for info in sources:
-        for record in _extract_records(
+        records = _extract_records(
             info.path, include_tool_results=include_tool_results
-        ):
+        )
+        while record_limit <= 0 or records_scanned < record_limit:
+            try:
+                record = next(records)
+            except StopIteration:
+                break
             records_scanned += 1
+            if not record["text"]:
+                continue
             role = _normalized_role(record.get("role", ""))
             if role not in roles:
                 records_filtered_by_role += 1
@@ -912,6 +909,9 @@ def scan(
                 )
                 if len(group["evidence"]) < limit:
                     group["evidence"].append(evidence)
+        if record_limit > 0 and records_scanned >= record_limit:
+            record_limit_reached = True
+            break
     candidates = []
     for category in sorted(grouped):
         group = grouped[category]
@@ -948,6 +948,7 @@ def scan(
             "roles": sorted(roles),
             "source_kinds": sorted(source_kinds),
             "session_limit": session_limit,
+            "record_limit": record_limit,
             "include_benchmarks": include_benchmarks,
             "include_subagents": include_subagents,
             "include_tool_results": include_tool_results,
@@ -961,6 +962,7 @@ def scan(
         "records_scanned": records_scanned,
         "records_filtered_by_role": records_filtered_by_role,
         "records_deduplicated": records_deduplicated,
+        "record_limit_reached": record_limit_reached,
         "max_file_mb": max_file_mb,
         "candidates": candidates,
     }
@@ -1130,6 +1132,12 @@ def main(argv: list[str] | None = None) -> int:
         help=f"newest eligible source files to scan (default: {DEFAULT_SESSION_LIMIT}; 0 = unlimited)",
     )
     parser.add_argument(
+        "--record-limit",
+        type=int,
+        default=DEFAULT_RECORD_LIMIT,
+        help=f"maximum records to inspect across selected sources (default: {DEFAULT_RECORD_LIMIT}; 0 = unlimited)",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=5,
@@ -1189,6 +1197,7 @@ def main(argv: list[str] | None = None) -> int:
         roles=set(args.role or []) or set(DEFAULT_ROLES),
         source_kinds=set(args.source_kind or []),
         session_limit=max(0, args.session_limit),
+        record_limit=max(0, args.record_limit),
         include_subagents=args.include_subagents,
         include_benchmarks=args.include_benchmarks,
         include_tool_results=args.include_tool_results,

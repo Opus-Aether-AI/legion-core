@@ -166,3 +166,7 @@ Do **not** set a global `ANTHROPIC_BASE_URL=http://127.0.0.1:8082` unless
 `legion-doctor --only router` is clean in the same environment. A forced global
 proxy turns router downtime, launchd drift, or stream timeout bugs into repeated
 Claude API failures. Prefer per-command opt-in for metering experiments.
+
+Keep `ANTHROPIC_BASE_URL` client-facing. Override the router's actual upstreams
+only with `LEGION_ANTHROPIC_UPSTREAM_URL` or
+`LEGION_MINIMAX_UPSTREAM_URL`; self-targeting loopback overrides are rejected.

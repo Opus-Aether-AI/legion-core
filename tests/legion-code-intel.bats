@@ -43,6 +43,121 @@ SH
   ' <<<"$output" >/dev/null
 }
 
+@test "legion-code-intel: auto mode ignores incidental TypeScript source without a config" {
+  repo="$BATS_TEST_TMPDIR/incidental-ts"
+  fakebin="$BATS_TEST_TMPDIR/incidental-bin"
+  mkdir -p "$repo" "$fakebin"
+  printf '%s\n' 'export const incidental = true' > "$repo/incidental.ts"
+  cat > "$fakebin/tsc" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected tsc invocation\n' >&2
+exit 99
+SH
+  chmod +x "$fakebin/tsc"
+
+  PATH="$fakebin:$PATH" run "$CODE_INTEL" diagnostics --repo "$repo" --adapter auto --json
+
+  [ "$status" -eq 0 ]
+  jq -e '.status == "skipped" and .summary.adapters_run == 0' <<<"$output" >/dev/null
+}
+
+@test "legion-code-intel: auto mode ignores incidental Python and unrelated pyproject" {
+  repo="$BATS_TEST_TMPDIR/incidental-python"
+  fakebin="$BATS_TEST_TMPDIR/incidental-python-bin"
+  mkdir -p "$repo" "$fakebin"
+  printf '%s\n' 'print("incidental")' > "$repo/app.py"
+  printf '%s\n' '[project]' 'name = "incidental"' > "$repo/pyproject.toml"
+  cat > "$fakebin/pyright" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected pyright invocation\n' >&2
+exit 99
+SH
+  chmod +x "$fakebin/pyright"
+
+  PATH="$fakebin:$PATH" run "$CODE_INTEL" diagnostics --repo "$repo" --adapter auto --json
+
+  [ "$status" -eq 0 ]
+  jq -e '.status == "skipped" and .summary.adapters_run == 0' <<<"$output" >/dev/null
+}
+
+@test "legion-code-intel: configured nested TypeScript projects each run once" {
+  repo="$BATS_TEST_TMPDIR/ts-monorepo"
+  fakebin="$BATS_TEST_TMPDIR/ts-monorepo-bin"
+  calls="$BATS_TEST_TMPDIR/tsc-calls"
+  mkdir -p "$repo/packages/a" "$repo/packages/b" "$fakebin"
+  printf '{}\n' > "$repo/packages/a/tsconfig.json"
+  printf '{}\n' > "$repo/packages/a/tsconfig.base.json"
+  printf '{}\n' > "$repo/packages/b/tsconfig.build.json"
+  cat > "$fakebin/tsc" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TSC_CALLS"
+exit 0
+SH
+  chmod +x "$fakebin/tsc"
+
+  TSC_CALLS="$calls" PATH="$fakebin:$PATH" run "$CODE_INTEL" diagnostics \
+    --repo "$repo" --adapter typescript --json
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 2 ]
+  grep -q -- '--project packages/a/tsconfig.json' "$calls"
+  grep -q -- '--project packages/b/tsconfig.build.json' "$calls"
+  ! grep -q -- 'tsconfig.base.json' "$calls"
+  jq -e '.status == "ok" and (.adapters[0].projects | length) == 2' <<<"$output" >/dev/null
+}
+
+@test "legion-code-intel: configured project cap fails closed before execution" {
+  repo="$BATS_TEST_TMPDIR/ts-project-cap"
+  fakebin="$BATS_TEST_TMPDIR/ts-project-cap-bin"
+  calls="$BATS_TEST_TMPDIR/ts-project-cap-calls"
+  mkdir -p "$repo/a" "$repo/b" "$repo/c" "$fakebin"
+  printf '{}\n' > "$repo/a/tsconfig.json"
+  printf '{}\n' > "$repo/b/tsconfig.json"
+  printf '{}\n' > "$repo/c/tsconfig.json"
+  cat > "$fakebin/tsc" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TSC_CALLS"
+exit 0
+SH
+  chmod +x "$fakebin/tsc"
+
+  TSC_CALLS="$calls" PATH="$fakebin:$PATH" run "$CODE_INTEL" diagnostics \
+    --repo "$repo" --adapter typescript --max-projects 2 --json
+
+  [ "$status" -eq 2 ]
+  [ ! -e "$calls" ]
+  jq -e '
+    .status == "error"
+    and .adapters[0].project_count == 3
+    and (.adapters[0].parse_error | contains("exceeds configured limit 2"))
+  ' <<<"$output" >/dev/null
+}
+
+@test "legion-code-intel: timeout is one total adapter deadline" {
+  repo="$BATS_TEST_TMPDIR/ts-total-deadline"
+  fakebin="$BATS_TEST_TMPDIR/ts-total-deadline-bin"
+  calls="$BATS_TEST_TMPDIR/ts-total-deadline-calls"
+  mkdir -p "$repo/a" "$repo/b" "$fakebin"
+  printf '{}\n' > "$repo/a/tsconfig.json"
+  printf '{}\n' > "$repo/b/tsconfig.json"
+  cat > "$fakebin/tsc" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TSC_CALLS"
+exec sleep 2
+SH
+  chmod +x "$fakebin/tsc"
+
+  TSC_CALLS="$calls" PATH="$fakebin:$PATH" run "$CODE_INTEL" diagnostics \
+    --repo "$repo" --adapter typescript --timeout 1 --json
+
+  [ "$status" -eq 2 ]
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ]
+  jq -e '
+    .status == "error"
+    and (.adapters[0].parse_error | contains("adapter deadline exhausted"))
+  ' <<<"$output" >/dev/null
+}
+
 @test "legion-code-intel: TypeScript diagnostics fail the gate and emit a span" {
   repo="$BATS_TEST_TMPDIR/tsrepo"
   fakebin="$BATS_TEST_TMPDIR/bin"
@@ -99,7 +214,7 @@ SH
   ' <<<"$output" >/dev/null
 }
 
-@test "legion-code-intel: Pyright adapter parses JSON diagnostics" {
+@test "legion-code-intel: auto mode detects configured pyproject and parses Pyright diagnostics" {
   repo="$BATS_TEST_TMPDIR/pyrepo"
   fakebin="$BATS_TEST_TMPDIR/pybin"
   mkdir -p "$repo" "$fakebin"
@@ -112,11 +227,12 @@ exit 1
 SH
   chmod +x "$fakebin/pyright"
 
-  PATH="$fakebin:$PATH" run "$CODE_INTEL" diagnostics --repo "$repo" --adapter pyright --json
+  PATH="$fakebin:$PATH" run "$CODE_INTEL" diagnostics --repo "$repo" --adapter auto --json
 
   [ "$status" -eq 1 ]
   jq -e '
     .status == "failed"
+    and .summary.adapters_run == 1
     and .summary.errors == 1
     and .diagnostics[0].adapter == "pyright"
     and .diagnostics[0].file == "app.py"
@@ -124,4 +240,47 @@ SH
     and .diagnostics[0].column == 8
     and .diagnostics[0].code == "reportMissingImports"
   ' <<<"$output" >/dev/null
+}
+
+@test "legion-code-intel: configured nested Pyright projects each run once" {
+  repo="$BATS_TEST_TMPDIR/pyright-monorepo"
+  fakebin="$BATS_TEST_TMPDIR/pyright-monorepo-bin"
+  calls="$BATS_TEST_TMPDIR/pyright-calls"
+  mkdir -p "$repo/packages/a" "$repo/packages/b" "$fakebin"
+  printf '{}\n' > "$repo/packages/a/pyrightconfig.json"
+  printf '%s\n' '[tool.pyright]' > "$repo/packages/b/pyproject.toml"
+  cat > "$fakebin/pyright" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$PYRIGHT_CALLS"
+printf '{"generalDiagnostics":[]}\n'
+exit 0
+SH
+  chmod +x "$fakebin/pyright"
+
+  PYRIGHT_CALLS="$calls" PATH="$fakebin:$PATH" run "$CODE_INTEL" diagnostics \
+    --repo "$repo" --adapter pyright --json
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 2 ]
+  grep -q -- '--project packages/a/pyrightconfig.json' "$calls"
+  grep -q -- '--project packages/b/pyproject.toml' "$calls"
+  jq -e '.status == "ok" and (.adapters[0].projects | length) == 2' <<<"$output" >/dev/null
+}
+
+@test "legion-code-intel: explicit Pyright adapter keeps loose-file fallback" {
+  repo="$BATS_TEST_TMPDIR/explicit-python"
+  fakebin="$BATS_TEST_TMPDIR/explicit-python-bin"
+  mkdir -p "$repo" "$fakebin"
+  printf '%s\n' 'print("loose")' > "$repo/app.py"
+  cat > "$fakebin/pyright" <<'SH'
+#!/usr/bin/env bash
+printf '{"generalDiagnostics":[]}\n'
+exit 0
+SH
+  chmod +x "$fakebin/pyright"
+
+  PATH="$fakebin:$PATH" run "$CODE_INTEL" diagnostics --repo "$repo" --adapter pyright --json
+
+  [ "$status" -eq 0 ]
+  jq -e '.status == "ok" and .summary.adapters_run == 1' <<<"$output" >/dev/null
 }

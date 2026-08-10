@@ -170,8 +170,21 @@ def _is_synthetic_primary_baseline(span):
     )
 
 
-def load_spans(spans_dir):
+def _classification_payload(delegated, classified, unclassified, unclassified_cost):
+    return {
+        "delegated_runs": delegated,
+        "classified_runs": classified,
+        "unclassified_runs": unclassified,
+        "classification_rate": round(classified / delegated, 4) if delegated else 0,
+        "unclassified_cost_usd": round(unclassified_cost, 6),
+    }
+
+
+def load_spans(spans_dir, *, with_classification=False):
+    """Load only rankable spans while streaming unclassified coverage counters."""
     spans = []
+    delegated = classified = unclassified = 0
+    unclassified_cost = 0.0
     pattern = os.path.join(os.path.expanduser(str(spans_dir)), "*.jsonl")
     for path in sorted(glob.glob(pattern)):
         try:
@@ -192,40 +205,42 @@ def load_spans(spans_dir):
                         continue
                     if not is_delegated_executor(span.get("executor")):
                         continue
-                    spans.append(span)
+                    delegated += 1
+                    archetype = span.get("archetype")
+                    if isinstance(archetype, str) and archetype.strip():
+                        classified += 1
+                        spans.append(span)
+                    else:
+                        unclassified += 1
+                        unclassified_cost += _nonnegative_num(span.get("cost_usd")) or 0.0
         except OSError:
             continue
-    return spans
+    classification = _classification_payload(
+        delegated, classified, unclassified, unclassified_cost
+    )
+    return (spans, classification) if with_classification else spans
 
 
 def classification_summary(spans):
-    delegated = [
-        span for span in spans
-        if isinstance(span, dict)
-        and not _is_synthetic_primary_baseline(span)
-        and is_delegated_executor(span.get("executor"))
-    ]
-    classified = [
-        span for span in delegated
-        if isinstance(span.get("archetype"), str) and span["archetype"].strip()
-    ]
-    unclassified = [
-        span for span in delegated
-        if not (
-            isinstance(span.get("archetype"), str) and span["archetype"].strip()
-        )
-    ]
-    total = len(delegated)
-    return {
-        "delegated_runs": total,
-        "classified_runs": len(classified),
-        "unclassified_runs": len(unclassified),
-        "classification_rate": round(len(classified) / total, 4) if total else 0,
-        "unclassified_cost_usd": round(
-            sum(_nonnegative_num(span.get("cost_usd")) or 0.0 for span in unclassified),
-            6,
-        ),
-    }
+    delegated = classified = unclassified = 0
+    unclassified_cost = 0.0
+    for span in spans:
+        if (
+            not isinstance(span, dict)
+            or _is_synthetic_primary_baseline(span)
+            or not is_delegated_executor(span.get("executor"))
+        ):
+            continue
+        delegated += 1
+        archetype = span.get("archetype")
+        if isinstance(archetype, str) and archetype.strip():
+            classified += 1
+        else:
+            unclassified += 1
+            unclassified_cost += _nonnegative_num(span.get("cost_usd")) or 0.0
+    return _classification_payload(
+        delegated, classified, unclassified, unclassified_cost
+    )
 
 
 def _route_key(executor, model):
@@ -527,14 +542,13 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     try:
-        spans = load_spans(a.spans)
+        spans, classification = load_spans(a.spans, with_classification=True)
         routing = load_routing(a.routing)
     except (OSError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"legion-optimize: {e}\n")
         return 2
 
     proposals = optimize(spans, routing, min_samples=a.min_samples)
-    classification = classification_summary(spans)
     payload = _build_payload(
         a.spans, a.routing, proposals, a.min_samples, classification
     )

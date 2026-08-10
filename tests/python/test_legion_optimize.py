@@ -115,7 +115,7 @@ def test_propose_holds_when_current_is_already_cheapest_clearing_bar():
     assert got["reason"] == "already_optimal"
 
 
-def test_load_spans_keeps_unclassified_delegations_for_coverage(tmp_path):
+def test_load_spans_streams_unclassified_coverage_without_retaining_it(tmp_path):
     spans = tmp_path / "2026-06-15.jsonl"
     rows = [
         {
@@ -177,8 +177,16 @@ def test_load_spans_keeps_unclassified_delegations_for_coverage(tmp_path):
         },
     ]
     spans.write_text("\n".join(json.dumps(row) for row in rows) + "\nNOT JSON\n")
-    got = opt.load_spans(tmp_path)
-    assert got == [rows[0], rows[1], rows[3], rows[5], rows[6]]
+    got, classification = opt.load_spans(tmp_path, with_classification=True)
+
+    assert got == [rows[0], rows[1], rows[5], rows[6]]
+    assert classification == {
+        "delegated_runs": 5,
+        "classified_runs": 4,
+        "unclassified_runs": 1,
+        "classification_rate": 0.8,
+        "unclassified_cost_usd": 0.0,
+    }
 
 
 def test_stats_normalize_codex_review_to_registered_codex_family():

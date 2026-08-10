@@ -208,6 +208,7 @@ EOF
     recovery_gate_line="$(grep -n 'control/scripts/await-required-workflows.sh' "$release" | cut -d: -f1)"
     recovery_asset_line="$(grep -n 'gh release upload' "$release" | tail -n1 | cut -d: -f1)"
     recovery_publish_line="$(grep -n 'npm publish --access public' "$release" | tail -n1 | cut -d: -f1)"
+    [ "$(grep -Fc "if: \${{ github.event.repository.visibility == 'public' }}" "$release")" -eq 2 ]
     [ "$(grep -Fc "NPM_CONFIG_PROVENANCE: \${{ github.event.repository.visibility == 'public' }}" "$release")" -eq 2 ]
     ! grep -q 'npm publish --provenance' "$release"
     [ "$gate_line" -lt "$action_line" ]

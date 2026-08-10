@@ -4,8 +4,9 @@ name: release-please
 #  1. release-please opens or updates a Release PR on pushes to main.
 #  2. The Release PR is flagged for GitHub-native auto-merge.
 #  3. When that Release PR lands, release-please creates the tag + Release and
-#     this same workflow publishes @opus-aether-ai/legion-core to npmjs and
-#     GitHub Packages.
+#     this same workflow publishes @opus-aether-ai/legion-core to GitHub
+#     Packages. npmjs publication is additionally gated on the source repository
+#     being public so a private pre-OSS release cannot expose the implementation.
 #
 # The publish step lives in this workflow because GitHub does not trigger
 # downstream workflows from tags/releases created by the default GITHUB_TOKEN.
@@ -238,10 +239,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ needs.release-please.outputs.tag_name }}" scripts/install.sh --clobber
 
-      # npm Trusted Publishing supports private GitHub repositories, but its
-      # Sigstore provenance does not. Keep OIDC authentication in both cases and
-      # enable provenance only while the source repository is public.
-      - name: Publish to npm with visibility-aware provenance
+      # A public npm tarball contains the implementation. Keep npmjs disabled
+      # while Legion is private; GitHub Packages below remains the private
+      # distribution channel for authorized consumers.
+      - name: Publish to npm when the source repository is public
+        if: ${{ github.event.repository.visibility == 'public' }}
         env:
           NPM_CONFIG_PROVENANCE: ${{ github.event.repository.visibility == 'public' }}
         run: npm publish --access public --ignore-scripts --tag latest
@@ -383,7 +385,8 @@ jobs:
       - name: Use pinned npm
         run: npm install -g npm@12.0.2
 
-      - name: Publish to npm with visibility-aware provenance
+      - name: Publish to npm when the source repository is public
+        if: ${{ github.event.repository.visibility == 'public' }}
         working-directory: release
         env:
           PACKAGE_NAME: ${{ steps.recovery_ref.outputs.package }}

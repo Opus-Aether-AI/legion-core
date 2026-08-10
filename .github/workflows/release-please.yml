@@ -238,8 +238,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ needs.release-please.outputs.tag_name }}" scripts/install.sh --clobber
 
-      - name: Publish to npm with provenance
-        run: npm publish --provenance --access public --ignore-scripts --tag latest
+      # npm Trusted Publishing supports private GitHub repositories, but its
+      # Sigstore provenance does not. Keep OIDC authentication in both cases and
+      # enable provenance only while the source repository is public.
+      - name: Publish to npm with visibility-aware provenance
+        env:
+          NPM_CONFIG_PROVENANCE: ${{ github.event.repository.visibility == 'public' }}
+        run: npm publish --access public --ignore-scripts --tag latest
 
       - name: Set up Node for GitHub Packages
         uses: actions/setup-node@v5
@@ -378,18 +383,19 @@ jobs:
       - name: Use pinned npm
         run: npm install -g npm@12.0.2
 
-      - name: Publish to npm with provenance
+      - name: Publish to npm with visibility-aware provenance
         working-directory: release
         env:
           PACKAGE_NAME: ${{ steps.recovery_ref.outputs.package }}
           PACKAGE_VERSION: ${{ steps.recovery_ref.outputs.version }}
+          NPM_CONFIG_PROVENANCE: ${{ github.event.repository.visibility == 'public' }}
         run: |
           set -euo pipefail
           published="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
           if [ "$published" = "$PACKAGE_VERSION" ]; then
             echo "${PACKAGE_NAME}@${PACKAGE_VERSION} already exists on npmjs; skipping."
           else
-            npm publish --provenance --access public --ignore-scripts --tag latest
+            npm publish --access public --ignore-scripts --tag latest
           fi
 
       - name: Set up Node for GitHub Packages

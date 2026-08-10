@@ -198,7 +198,7 @@ EOF
     gate_line="$(grep -n 'needs: await-checks' "$release" | head -n1 | cut -d: -f1)"
     action_line="$(grep -n 'googleapis/release-please-action' "$release" | head -n1 | cut -d: -f1)"
     automatic_asset_line="$(grep -n 'gh release upload' "$release" | head -n1 | cut -d: -f1)"
-    automatic_publish_line="$(grep -n 'npm publish --provenance' "$release" | head -n1 | cut -d: -f1)"
+    automatic_publish_line="$(grep -n 'npm publish --access public' "$release" | head -n1 | cut -d: -f1)"
     recovery_job_line="$(grep -n '^  recovery-publish:' "$release" | cut -d: -f1)"
     recovery_repo_line="$(grep -n 'GH_REPO: \${{ github.repository }}' "$release" | tail -n1 | cut -d: -f1)"
     control_checkout_line="$(grep -n 'ref: \${{ github.workflow_sha }}' "$release" | cut -d: -f1)"
@@ -207,7 +207,9 @@ EOF
     recovery_verify_line="$(grep -n 'control/scripts/verify-release-recovery.sh' "$release" | cut -d: -f1)"
     recovery_gate_line="$(grep -n 'control/scripts/await-required-workflows.sh' "$release" | cut -d: -f1)"
     recovery_asset_line="$(grep -n 'gh release upload' "$release" | tail -n1 | cut -d: -f1)"
-    recovery_publish_line="$(grep -n 'npm publish --provenance' "$release" | tail -n1 | cut -d: -f1)"
+    recovery_publish_line="$(grep -n 'npm publish --access public' "$release" | tail -n1 | cut -d: -f1)"
+    [ "$(grep -Fc "NPM_CONFIG_PROVENANCE: \${{ github.event.repository.visibility == 'public' }}" "$release")" -eq 2 ]
+    ! grep -q 'npm publish --provenance' "$release"
     [ "$gate_line" -lt "$action_line" ]
     [ "$automatic_asset_line" -lt "$automatic_publish_line" ]
     [ "$recovery_job_line" -lt "$recovery_repo_line" ]

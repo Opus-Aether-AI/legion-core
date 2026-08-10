@@ -4,9 +4,9 @@ name: release-please
 #  1. release-please opens or updates a Release PR on pushes to main.
 #  2. The Release PR is flagged for GitHub-native auto-merge.
 #  3. When that Release PR lands, release-please creates the tag + Release and
-#     this same workflow publishes @opus-aether-ai/legion-core to GitHub
-#     Packages. npmjs publication is additionally gated on the source repository
-#     being public so a private pre-OSS release cannot expose the implementation.
+#     this same workflow publishes @opus-aether-ai/legion-core to npmjs and
+#     GitHub Packages. Package availability is independent of source-repository
+#     visibility; only provenance depends on the repository being public.
 #
 # The publish step lives in this workflow because GitHub does not trigger
 # downstream workflows from tags/releases created by the default GITHUB_TOKEN.
@@ -239,11 +239,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ needs.release-please.outputs.tag_name }}" scripts/install.sh --clobber
 
-      # A public npm tarball contains the implementation. Keep npmjs disabled
-      # while Legion is private; GitHub Packages below remains the private
-      # distribution channel for authorized consumers.
-      - name: Publish to npm when the source repository is public
-        if: ${{ github.event.repository.visibility == 'public' }}
+      # npm Trusted Publishing supports private GitHub repositories, but its
+      # Sigstore provenance does not. Keep public package distribution enabled
+      # and emit provenance only while the source repository is public.
+      - name: Publish to npm with visibility-aware provenance
         env:
           NPM_CONFIG_PROVENANCE: ${{ github.event.repository.visibility == 'public' }}
         run: npm publish --access public --ignore-scripts --tag latest
@@ -385,8 +384,7 @@ jobs:
       - name: Use pinned npm
         run: npm install -g npm@12.0.2
 
-      - name: Publish to npm when the source repository is public
-        if: ${{ github.event.repository.visibility == 'public' }}
+      - name: Publish to npm with visibility-aware provenance
         working-directory: release
         env:
           PACKAGE_NAME: ${{ steps.recovery_ref.outputs.package }}

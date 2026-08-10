@@ -44,10 +44,18 @@ def test_valid_primary_only_registry_stays_empty(tmp_path, monkeypatch):
     assert registry.load_coding_executor_families(path) == set()
 
 
-def test_malformed_executor_table_uses_builtin_fallback(tmp_path):
+def test_malformed_executor_table_uses_builtin_fallback(tmp_path, monkeypatch):
     path = tmp_path / "executors.toml"
     path.write_text("executors = []\n", encoding="utf-8")
 
+    assert registry.load_coding_executor_families(path) == {
+        "claude",
+        "codex",
+        "cursor",
+        "opencode",
+    }
+
+    monkeypatch.setattr(registry, "tomllib", None)
     assert registry.load_coding_executor_families(path) == {
         "claude",
         "codex",

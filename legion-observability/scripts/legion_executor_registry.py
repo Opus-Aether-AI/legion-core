@@ -33,9 +33,15 @@ def _fallback_table(path):
                 current = match.group(1)
                 executors.setdefault(current, {})
                 continue
-            if current is None or "=" not in line:
+            if "=" not in line:
                 continue
             key, value = (part.strip() for part in line.split("=", 1))
+            if current is None:
+                # A root assignment named `executors` is not an executor table.
+                # Preserve that invalid shape for the caller's fallback guard.
+                if key == "executors":
+                    return {"executors": None}
+                continue
             if key == "kind" and len(value) >= 2 and value[0] == value[-1] == '"':
                 executors[current][key] = value[1:-1]
     return {"executors": executors}

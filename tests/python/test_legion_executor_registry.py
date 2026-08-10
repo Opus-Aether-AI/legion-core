@@ -32,3 +32,13 @@ def test_fallback_parser_accepts_top_level_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "tomllib", None)
 
     assert registry.load_coding_executor_families(path) == {"aider"}
+
+
+def test_valid_primary_only_registry_stays_empty(tmp_path, monkeypatch):
+    path = tmp_path / "executors.toml"
+    path.write_text('[hermes]\nkind = "primary"\n', encoding="utf-8")
+
+    assert registry.load_coding_executor_families(path) == set()
+
+    monkeypatch.setattr(registry, "tomllib", None)
+    assert registry.load_coding_executor_families(path) == set()

@@ -65,7 +65,10 @@ def load_coding_executor_families(path=None):
         and isinstance(config, dict)
         and "coding" in str(config.get("kind") or "").split()
     }
-    return frozenset(families) if families else _FALLBACK_CODING_FAMILIES
+    # A successfully parsed registry may intentionally contain only primary
+    # orchestrators. Do not re-enable built-ins that the active router cannot
+    # dispatch; the built-in fallback is reserved for read/parse failures above.
+    return frozenset(families)
 
 
 CODING_EXECUTOR_FAMILIES = load_coding_executor_families()

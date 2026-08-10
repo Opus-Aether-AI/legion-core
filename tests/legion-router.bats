@@ -836,22 +836,23 @@ $run_error" ]
   assert_mock_called codex "exec --json -m test-model-beta"
 }
 
-@test "delegate run: delegated executor context blocks nested Legion with telemetry" {
+@test "delegate run: delegated executor context blocks implicit nested Legion with telemetry" {
   local repo; repo="$(make_test_repo nested-codex)"
   LEGION_PRIMARY=codex LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=1 \
+    LEGION_EXECUTOR_NAME=codex LEGION_RUN_ID=parent-codex \
     run "$DELEGATE" run --model test-model-beta --task x --repo "$repo" --quiet
   [ "$status" -eq 2 ]
   echo "$output" | jq -e '.schema == "legion.route-preflight.v1"
     and .status == "blocked"
-    and .reason == "nested-delegation"
+    and .reason == "nested-delegation-requires-explicit-executor"
     and .primary == "codex"
     and .executor == "codex"
     and (.receipt | endswith("/route-preflight.json"))'
   local receipt; receipt="$(echo "$output" | jq -r .receipt)"
-  jq -e '.reason == "nested-delegation" and .primary == "codex"' "$receipt"
+  jq -e '.reason == "nested-delegation-requires-explicit-executor" and .primary == "codex"' "$receipt"
   run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec \
     'select(.executor==\"legion-route\" and .status==\"blocked\")
-     | .artifacts.reason == \"nested-delegation\"
+     | .artifacts.reason == \"nested-delegation-requires-explicit-executor\"
        and .artifacts.primary == \"codex\"
        and .artifacts.target_executor == \"codex\"'"
   [ "$status" -eq 0 ]
@@ -864,13 +865,13 @@ $run_error" ]
   LEGION_EXECUTOR=1 run "$DELEGATE" run --model test-model-beta \
     --task x --repo "$repo" --quiet
   [ "$status" -eq 2 ]
-  echo "$output" | jq -e '.reason == "nested-delegation"'
+  echo "$output" | jq -e '.reason == "nested-delegation-requires-explicit-executor"'
 
   unset LEGION_EXECUTOR
   LEGION_DEPTH=1 run "$DELEGATE" run --model test-model-beta \
     --task x --repo "$repo" --quiet
   [ "$status" -eq 2 ]
-  echo "$output" | jq -e '.reason == "nested-delegation"'
+  echo "$output" | jq -e '.reason == "nested-delegation-requires-explicit-executor"'
   assert_mock_not_called codex
 }
 
@@ -886,7 +887,7 @@ $run_error" ]
     _ "$logical_cwd" "$DELEGATE" "$repo"
 
   [ "$status" -eq 2 ]
-  echo "$output" | jq -e '.reason == "nested-delegation"'
+  echo "$output" | jq -e '.reason == "nested-delegation-requires-explicit-executor"'
   assert_mock_not_called codex
 }
 
@@ -916,22 +917,79 @@ $run_error" ]
     --task "$secret_task" --repo "$repo" --quiet
 
   [ "$status" -eq 2 ]
-  echo "$output" | jq -e '.reason == "nested-delegation"'
+  echo "$output" | jq -e '.reason == "nested-delegation-requires-explicit-executor"'
   [ -z "$(find "$external" -mindepth 1 -print -quit)" ]
   ! grep -R -Fq "$secret_task" "$LEGION_STATE_ROOT"
   ! grep -R -Fq "$secret_task" "$LEGION_TELEMETRY_DIR"
 }
 
-@test "delegate run: delegated executor cannot pivot into nested Claude delegation" {
+@test "delegate run: delegated executor cannot use an implicit cross-harness archetype" {
   local repo; repo="$(make_test_repo caller-claude)"
   LEGION_PRIMARY=codex LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=2 \
+    LEGION_EXECUTOR_NAME=codex LEGION_RUN_ID=parent-codex \
     run "$DELEGATE" run --archetype frontend-polish --task x --repo "$repo" --quiet
   [ "$status" -eq 2 ]
-  echo "$output" | jq -e '.reason == "nested-delegation"
+  echo "$output" | jq -e '.reason == "nested-delegation-requires-explicit-executor"
     and .primary == "codex"
     and .executor == "claude"
     and .archetype == "frontend-polish"'
   assert_mock_not_called claude
+}
+
+@test "delegate run: a Codex worker explicitly hands off to Cursor with child depth, trace, and isolation" {
+  local repo; repo="$(make_test_repo codex-to-cursor)"
+  local context="$TEST_TMPDIR/cross-harness-context.log"
+  LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=1 \
+    LEGION_EXECUTOR_NAME=codex LEGION_RUN_ID=parent-codex \
+    LEGION_TRACE_ID=trace-codex MOCK_CONTEXT_DETAIL_LOG="$context" \
+    run "$DELEGATE" run --executor cursor --task "do the thing" --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "ok" and .executor == "cursor" and .run_id != "parent-codex"'
+  [ ! -f "$repo/MOCK_CURSOR_CHANGE.txt" ]
+  grep -Eq '^agent active=1 executor=1 depth=2 run=.+ name=cursor$' "$context"
+  run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec \
+    'select(.executor == \"cursor\")
+     | .trace_id == \"trace-codex\" and .parent_id == \"parent-codex\"'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
+@test "delegate run: every supported worker can explicitly hand off to each other coding harness" {
+  local source target repo
+  for source in claude codex cursor opencode hermes; do
+    for target in claude codex cursor opencode; do
+      [[ "$source" == "$target" ]] && continue
+      repo="$(make_test_repo "handoff-${source}-${target}")"
+      LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=1 \
+        LEGION_EXECUTOR_NAME="$source" LEGION_RUN_ID="parent-${source}-${target}" \
+        run "$DELEGATE" run --executor "$target" --task "do the thing" --repo "$repo" --quiet
+      [ "$status" -eq 0 ]
+      echo "$output" | jq -e --arg target "$target" '.status == "ok" and .executor == $target'
+      local run_id; run_id="$(echo "$output" | jq -r .run_id)"
+      run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec --arg run '$run_id' --arg parent 'parent-${source}-${target}' \
+        'select(.run_id == \$run) | .parent_id == \$parent'"
+      [ "$status" -eq 0 ]
+      [ "$output" = "true" ]
+    done
+  done
+}
+
+@test "delegate run: cross-harness handoff rejects same executor and depth-limit bypasses" {
+  local repo; repo="$(make_test_repo handoff-guards)"
+  LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=1 \
+    LEGION_EXECUTOR_NAME=codex LEGION_RUN_ID=parent-codex \
+    run "$DELEGATE" run --executor codex --task x --repo "$repo" --quiet
+  [ "$status" -eq 2 ]
+  echo "$output" | jq -e '.reason == "nested-delegation-same-executor"'
+
+  LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=2 LEGION_MAX_DEPTH=2 \
+    LEGION_EXECUTOR_NAME=codex LEGION_RUN_ID=parent-codex \
+    run "$DELEGATE" run --executor cursor --task x --repo "$repo" --quiet
+  [ "$status" -eq 2 ]
+  echo "$output" | jq -e '.reason == "nested-delegation-depth-limit" and .depth == 2 and .max_depth == 2'
+  assert_mock_not_called codex
+  assert_mock_not_called agent
 }
 
 @test "delegate review: --archetype gives configured reviewer + structured verdict via --output-schema" {

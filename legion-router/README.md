@@ -148,8 +148,13 @@ legion-router/
   injected through Codex developer instructions and never replaces the base
   argument.
 - Every executor receives `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`,
-  `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized repository policy uses that
-  context to prevent accidental recursive delegation.
+  `LEGION_EXECUTOR_NAME`, `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized
+  repository policy uses that context to prevent accidental recursive delegation.
+  A worker can explicitly use `legion-delegate run --executor <different-harness>`
+  for one cross-harness handoff (Claude, Codex, Cursor, or opencode). The handoff
+  retains task scanning, a fresh isolated worktree, parent trace linkage, and a
+  default maximum depth of `2` (`LEGION_MAX_DEPTH`). Implicit, same-harness, and
+  direct-adapter nested calls remain blocked.
 
 ## Telemetry
 

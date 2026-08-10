@@ -9,6 +9,12 @@
 #   - System ~/.agents, ~/.codex, real crontab are NEVER touched
 
 setup_test_env() {
+    # Test processes may be launched from inside a Legion worker. Do not let the
+    # caller's runtime span/delegation context change standalone test semantics;
+    # individual tests opt back into inherited context explicitly.
+    unset LEGION_ACTIVE LEGION_EXECUTOR LEGION_DEPTH LEGION_RUN_ID
+    unset LEGION_EXECUTOR_NAME LEGION_CROSS_HARNESS_HANDOFF
+    unset LEGION_TRACE_ID LEGION_PARENT_ID
     export TEST_TMPDIR="$BATS_TEST_TMPDIR"
     export AGENTS_HOME="$TEST_TMPDIR/agents"
     export HOME="$TEST_TMPDIR/home"

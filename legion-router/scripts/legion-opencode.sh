@@ -206,7 +206,7 @@ cmd_run() {
   [[ "$sandbox" == "read-only" ]] && cmd+=(--agent plan)
   cmd+=("$task")
 
-  legion_activate_executor_context "$RUN_ID"
+  legion_activate_executor_context "$RUN_ID" opencode
   note "-> ${cmd[*]}"
   start_ms="$(date +%s000)"
   set +e

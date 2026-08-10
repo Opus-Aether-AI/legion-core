@@ -1,7 +1,7 @@
 {
   "name": "legion-observability",
   "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, `legion-report` cost/success/latency, `legion-bench` deterministic repeated gates, `legion-self-learn` evidence/proposals, review-only `legion-improve` draft PRs, `legion-trace`, `legion-otel-export`, and `legion-doctor` verification.",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "author": {
     "name": "legion-core"
   },

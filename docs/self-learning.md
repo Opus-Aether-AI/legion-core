@@ -302,10 +302,17 @@ Before working on Legion harness behavior or running workflow lanes, read active
 hints:
 
 ```bash
-legion-self-learn hints
-legion-self-learn hints --entity skill:workflow-orchestrator
-legion-self-learn hints --entity plugin:legion-router
+legion-self-learn hints --repo .
+legion-self-learn hints --repo . --entity skill:workflow-orchestrator
+legion-self-learn hints --repo . --entity plugin:legion-router
 ```
+
+Default typed project memory is keyed by the normalized repository identity,
+not the checkout path. The managed source clone, ordinary checkouts, and Legion
+worktrees therefore consume the same learned guidance. Runtime spans, run
+registries, and worktree artifacts remain checkout-local. During upgrades,
+typed hints from the older path-local learning directory are read as a bounded
+fallback while all new promotions are written to the shared project store.
 
 ## Typed executor context
 

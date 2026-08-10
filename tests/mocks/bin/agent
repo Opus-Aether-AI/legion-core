@@ -5,6 +5,9 @@ set -euo pipefail
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'agent %s\n' "$*" >> "$MOCK_CALL_LOG"
 [[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'agent active=%s executor=%s depth=%s run=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
+[[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'agent active=%s executor=%s depth=%s run=%s name=%s\n' \
+  "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" \
+  "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"
 
 force=0
 model="fixture-cursor"

@@ -2,6 +2,11 @@
 # legion-fanout — parallel multi-model fan-out across executors (mock codex on PATH).
 
 setup() {
+  # Fanout's root-span tests must be independent of whichever Legion worker
+  # launched Bats. Nested-span tests set their own context explicitly.
+  unset LEGION_ACTIVE LEGION_EXECUTOR LEGION_DEPTH LEGION_RUN_ID
+  unset LEGION_EXECUTOR_NAME LEGION_CROSS_HARNESS_HANDOFF
+  unset LEGION_TRACE_ID LEGION_PARENT_ID
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   FANOUT="$ROOT/legion-orchestrate/bin/legion-fanout"
   export PATH="$ROOT/legion-router/bin:$ROOT/legion-observability/bin:$BATS_TEST_DIRNAME/mocks/bin:$PATH"     # mock `codex`

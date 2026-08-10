@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.22.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.21.1...v0.22.0) (2026-08-10)
+
+
+### Added
+
+* **core:** enable cross-harness handoffs with shared learning ([#125](https://github.com/Opus-Aether-AI/legion-core/issues/125)) ([878890a](https://github.com/Opus-Aether-AI/legion-core/commit/878890a7213bbaa648fc9a5ed3d0be859fc752b0))
+
+
+### Fixed
+
+* **router:** handle OpenCode 1.3 error events ([#128](https://github.com/Opus-Aether-AI/legion-core/issues/128)) ([764b9aa](https://github.com/Opus-Aether-AI/legion-core/commit/764b9aae90d5526d093fa0869177c0b673af0156))
+* **setup:** authenticate the latest-release lookup for private repos ([#124](https://github.com/Opus-Aether-AI/legion-core/issues/124)) ([8c37803](https://github.com/Opus-Aether-AI/legion-core/commit/8c378036d85f1ddbc01b5cccbce153bb6b34636b))
+
 ## [0.21.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.21.0...v0.21.1) (2026-08-08)
 
 

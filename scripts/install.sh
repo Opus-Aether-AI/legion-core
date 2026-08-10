@@ -79,36 +79,41 @@ is_v_semver() {
 }
 
 # ── GitHub release lookup ────────────────────────────────────────────
-# A private MARKETPLACE_REPO answers anonymous release requests with 404, so an
-# unauthenticated lookup cannot tell "no release" apart from "not allowed to see
-# it". Prefer an explicit environment token, then whatever the gh CLI already
-# holds for the user.
-github_release_token() {
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        printf '%s' "$GITHUB_TOKEN"
-        return 0
-    fi
-    if [ -n "${GH_TOKEN:-}" ]; then
-        printf '%s' "$GH_TOKEN"
-        return 0
-    fi
-    command -v gh >/dev/null 2>&1 || return 0
-    gh auth token 2>/dev/null || true
-}
-
-# curl stays the transport for every path so a single network stub covers both
-# the authenticated and the anonymous lookup. An authenticated attempt that
-# fails falls back to anonymous, which still serves public repositories.
-github_release_json() {
-    local repo="$1" token
-    token="$(github_release_token)"
+# curl is the transport on every path, so a single network stub covers the whole
+# lookup and the installer keeps working with nothing but curl on PATH.
+github_release_fetch() {
+    local repo="$1" token="${2:-}"
     if [ -n "$token" ]; then
         curl -fsSL -H "Authorization: Bearer $token" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null && return 0
+            "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null
+        return
     fi
     curl -fsSL -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null || true
+        "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null
+}
+
+# A private MARKETPLACE_REPO answers anonymous release requests with 404, so an
+# unauthenticated lookup cannot tell "no release" apart from "not allowed to see
+# it". Escalate only as far as each repository actually needs: an environment
+# token when one is exported, then anonymous access, and the gh CLI's stored
+# credential only once anonymous access has already failed. That ordering keeps
+# the public path free of any gh invocation.
+github_release_json() {
+    local repo="$1" body env_token gh_token
+    env_token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [ -n "$env_token" ] && body="$(github_release_fetch "$repo" "$env_token")"; then
+        printf '%s' "$body"
+        return 0
+    fi
+    if body="$(github_release_fetch "$repo")"; then
+        printf '%s' "$body"
+        return 0
+    fi
+    command -v gh >/dev/null 2>&1 || return 0
+    gh_token="$(gh auth token 2>/dev/null || true)"
+    [ -n "$gh_token" ] || return 0
+    github_release_fetch "$repo" "$gh_token" || true
 }
 
 # Prints the latest stable release tag. Exit 3 means the lookup never reached a

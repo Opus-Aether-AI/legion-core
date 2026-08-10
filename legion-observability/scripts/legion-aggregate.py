@@ -76,24 +76,24 @@ def _archetype_group(span):
 
 
 def classification_summary(spans):
-    delegated = [s for s in spans if is_delegated_executor(s.get("executor"))]
-    classified = [
-        s for s in delegated
-        if isinstance(s.get("archetype"), str) and s["archetype"].strip()
-    ]
-    unclassified = [
-        s for s in delegated
-        if not (isinstance(s.get("archetype"), str) and s["archetype"].strip())
-    ]
-    total = len(delegated)
+    total = classified = unclassified = 0
+    unclassified_cost = 0.0
+    for span in spans:
+        if not is_delegated_executor(span.get("executor")):
+            continue
+        total += 1
+        archetype = span.get("archetype")
+        if isinstance(archetype, str) and archetype.strip():
+            classified += 1
+        else:
+            unclassified += 1
+            unclassified_cost += _num(span.get("cost_usd", 0))
     return {
         "delegated_runs": total,
-        "classified_runs": len(classified),
-        "unclassified_runs": len(unclassified),
-        "classification_rate": round(len(classified) / total, 4) if total else 0,
-        "unclassified_cost_usd": round(
-            sum(_num(s.get("cost_usd", 0)) for s in unclassified), 6
-        ),
+        "classified_runs": classified,
+        "unclassified_runs": unclassified,
+        "classification_rate": round(classified / total, 4) if total else 0,
+        "unclassified_cost_usd": round(unclassified_cost, 6),
     }
 
 

@@ -59,6 +59,16 @@ if [[ -f "$_state_lib" ]]; then
   source "$_state_lib"
 fi
 
+with_git_worktree_lock() {
+  local repo="$1"
+  shift
+  if declare -F legion_with_git_worktree_lock >/dev/null 2>&1; then
+    legion_with_git_worktree_lock "$repo" "$@"
+  else
+    "$@"
+  fi
+}
+
 # Preallocate a queued run-state record so a fan-out's pending slices show as
 # "queued / up-next" in the Console before they launch. The delegate adopts the id
 # (--run-id) and rewrites it running->terminal. Best-effort (never block on telemetry).
@@ -578,7 +588,7 @@ launch_slice() {
       return
     fi
   fi
-  local args
+  local args delegate_rc=0
   # NOTE: never forward --apply here. Parallel `git apply` to one worktree races/corrupts the
   # index; apply happens SEQUENTIALLY after the wait barrier (below). --keep so diffs survive.
   args=(run --repo "$repo" --quiet --keep)
@@ -587,7 +597,13 @@ launch_slice() {
   [[ -n "$arch" ]]  && args+=(--archetype "$arch")
   [[ -n "$model" ]] && args+=(--model "$model")
   args+=(--task "$task")
-  "$LEGION_DELEGATE" "${args[@]}" > "$work/slice-$i.out" 2> "$work/slice-$i.err" || true
+  "$LEGION_DELEGATE" "${args[@]}" > "$work/slice-$i.out" 2> "$work/slice-$i.err" \
+    || delegate_rc=$?
+  if [[ ! -s "$work/slice-$i.out" ]]; then
+    jq -cn --argjson exit_code "$delegate_rc" --arg error_log "$work/slice-$i.err" \
+      '{status:"error",stage:"delegate",error:"delegate produced no structured output",
+        delegate_exit:$exit_code,error_log:$error_log}' > "$work/slice-$i.out"
+  fi
   local result_status ledger_state
   result_status="$(jq -r '.status // "error"' "$work/slice-$i.out" 2>/dev/null || echo error)"
   ledger_state="failed"
@@ -610,14 +626,18 @@ setup_integration_base() {
   integration_branch="legion/fanout-${FANOUT_RUN_ID}"
   integration_wt="$work/integration"
   git -C "$repo" branch "$integration_branch" "$base_head"
-  git -C "$repo" worktree add -q "$integration_wt" "$integration_branch"
+  with_git_worktree_lock "$repo" \
+    git -C "$repo" worktree add -q "$integration_wt" "$integration_branch"
 }
 
 teardown_integration_base() {
   if [[ -n "$integration_wt" && -d "$integration_wt" ]]; then
-    git -C "$repo" worktree remove --force "$integration_wt" >/dev/null 2>&1 || rm -rf "$integration_wt"
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree remove --force "$integration_wt" >/dev/null 2>&1 \
+      || rm -rf "$integration_wt"
   fi
-  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  with_git_worktree_lock "$repo" \
+    git -C "$repo" worktree prune >/dev/null 2>&1 || true
   [[ -n "$integration_branch" ]] && git -C "$repo" branch -D "$integration_branch" >/dev/null 2>&1 || true
 }
 
@@ -637,13 +657,15 @@ cleanup_slice_worktrees() {
     swt="$repo/.legion/worktrees/$rid"
     slice_branches+=("legion/delegate-$rid")
     if [[ -d "$swt" ]]; then
-      git -C "$repo" worktree remove --force "$swt" >/dev/null 2>&1 || rm -rf "$swt"
+      with_git_worktree_lock "$repo" \
+        git -C "$repo" worktree remove --force "$swt" >/dev/null 2>&1 || rm -rf "$swt"
     fi
   done
   # A fallback rm leaves stale worktree administration behind. Prune once after
   # all removals so every branch is free before deletion without an O(n) global
   # repository scan for every slice.
-  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  with_git_worktree_lock "$repo" \
+    git -C "$repo" worktree prune >/dev/null 2>&1 || true
   for branch in "${slice_branches[@]+"${slice_branches[@]}"}"; do
     git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
   done
@@ -779,7 +801,9 @@ while [[ $i -lt $n ]]; do
       >> "$results"
   else
     jq -cn --arg id "$sid" --argjson depends_on "$deps_json" \
-      '{status:"error",id:$id,depends_on:$depends_on,error:"no output"}' >> "$results"
+      --arg error_log "$work/slice-$i.err" \
+      '{status:"error",id:$id,depends_on:$depends_on,error:"no output",
+        error_log:$error_log}' >> "$results"
   fi
   i=$((i + 1))
 done

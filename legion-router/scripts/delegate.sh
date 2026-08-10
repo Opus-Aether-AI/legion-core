@@ -59,6 +59,16 @@ if [[ -f "$_state_lib" ]]; then
   source "$_state_lib"
 fi
 
+with_git_worktree_lock() {
+  local repo="$1"
+  shift
+  if declare -F legion_with_git_worktree_lock >/dev/null 2>&1; then
+    legion_with_git_worktree_lock "$repo" "$@"
+  else
+    "$@"
+  fi
+}
+
 CODEX_BIN="${CODEX_BIN:-codex}"
 LEGION_ROUTER_URL="${LEGION_ROUTER_URL:-http://127.0.0.1:8082}"
 
@@ -92,9 +102,12 @@ LEGION_WT_PATH=""; LEGION_WT_BRANCH=""; LEGION_WT_REPO=""; LEGION_WT_KEEP=0
 cleanup_worktree_on_exit() {
   [[ "$LEGION_WT_KEEP" == "1" ]] && return 0
   [[ -n "$LEGION_WT_PATH" && -n "$LEGION_WT_REPO" ]] || return 0
-  git -C "$LEGION_WT_REPO" worktree remove --force "$LEGION_WT_PATH" >/dev/null 2>&1 || rm -rf "$LEGION_WT_PATH"
+  with_git_worktree_lock "$LEGION_WT_REPO" \
+    git -C "$LEGION_WT_REPO" worktree remove --force "$LEGION_WT_PATH" >/dev/null 2>&1 \
+    || rm -rf "$LEGION_WT_PATH"
   [[ -n "$LEGION_WT_BRANCH" ]] && git -C "$LEGION_WT_REPO" branch -D "$LEGION_WT_BRANCH" >/dev/null 2>&1 || true
-  git -C "$LEGION_WT_REPO" worktree prune >/dev/null 2>&1 || true
+  with_git_worktree_lock "$LEGION_WT_REPO" \
+    git -C "$LEGION_WT_REPO" worktree prune >/dev/null 2>&1 || true
   LEGION_WT_PATH=""
 }
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit; cleanup_sandbox_dev_on_exit; cleanup_worktree_on_exit' EXIT
@@ -849,7 +862,9 @@ cmd_run() {
     printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
     [[ "$dirty_warn" -eq 0 ]] || warn_dirty_source "$repo" "$base"
     note "→ worktree $wt (branch $branch, base $base)"
-    git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" || die "worktree add failed"
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" \
+      || die "worktree add failed"
   fi
   # Register for EXIT-trap cleanup so a crash/kill before the inline removal
   # below does not orphan the worktree + branch (WS6 worktree-leak guard).
@@ -1039,9 +1054,11 @@ cmd_run() {
   if [[ "$keep" -eq 0 ]]; then
     # Redirect stdout too — `git branch -D` prints "Deleted branch …" which would
     # otherwise corrupt the JSON result on this function's stdout.
-    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
     git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree prune >/dev/null 2>&1 || true
     wt_report="(removed; rerun with --keep to retain the worktree)"
     LEGION_WT_PATH=""   # removed here; stop the EXIT trap from retrying
   fi
@@ -1187,7 +1204,9 @@ cmd_review() {
   git -C "$repo" diff --binary "$base_sha...$head_sha" > "$patch_path" \
     || die "review: could not capture immutable review patch"
   note "→ review worktree $wt (head $head_sha, base $base_sha)"
-  git -C "$repo" worktree add -q --detach "$wt" "$head_sha" || die "review: detached worktree add failed"
+  with_git_worktree_lock "$repo" \
+    git -C "$repo" worktree add -q --detach "$wt" "$head_sha" \
+    || die "review: detached worktree add failed"
   LEGION_WT_PATH="$wt"; LEGION_WT_BRANCH=""; LEGION_WT_REPO="$repo"; LEGION_WT_KEEP=0
   write_run_state running
   write_run_artifact_status "$art" "$RUN_ID" "executing" "$wt"
@@ -1324,8 +1343,10 @@ cmd_review() {
     "$([[ "$status" == "ok" ]] && printf completed || printf failed)" \
     "$wt" "" "$status"
 
-  git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
-  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  with_git_worktree_lock "$repo" \
+    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  with_git_worktree_lock "$repo" \
+    git -C "$repo" worktree prune >/dev/null 2>&1 || true
   LEGION_WT_PATH=""
   REVIEW_RECEIPT_PATH=""
   REVIEW_ART_PATH=""
@@ -1510,7 +1531,8 @@ cmd_cleanup() {
     if [[ -d "$wtroot" ]]; then
       for wt in "$wtroot"/*; do
         [[ -d "$wt" ]] || continue
-        git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+        with_git_worktree_lock "$repo" \
+          git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
         n_wt=$((n_wt + 1))
       done
     fi
@@ -1518,7 +1540,8 @@ cmd_cleanup() {
       [[ -z "$b" ]] && continue
       git -C "$repo" branch -D "$b" >/dev/null 2>&1 && n_br=$((n_br + 1)) || true
     done < <(git -C "$repo" branch --list 'legion/delegate-*' --format '%(refname:short)')
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree prune >/dev/null 2>&1 || true
     if [[ "$purge" -eq 1 && -d "$runsroot" ]]; then
       n_runs="$(find "$runsroot" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
       rm -rf "$runsroot"
@@ -1528,11 +1551,13 @@ cmd_cleanup() {
   elif [[ -n "$run" ]]; then
     local run_wt="$wtroot/$run" run_art="$runsroot/$run"
     if [[ -d "$run_wt" ]]; then
-      git -C "$repo" worktree remove --force "$run_wt" >/dev/null 2>&1 || rm -rf "${run_wt:?}"
+      with_git_worktree_lock "$repo" \
+        git -C "$repo" worktree remove --force "$run_wt" >/dev/null 2>&1 || rm -rf "${run_wt:?}"
       n_wt=1
     fi
     git -C "$repo" branch -D "legion/delegate-$run" >/dev/null 2>&1 && n_br=1 || true
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree prune >/dev/null 2>&1 || true
     if [[ "$purge" -eq 1 && -d "$run_art" ]]; then rm -rf "${run_art:?}"; extra=" + artifacts"; fi
     note "✓ cleaned run $run ($n_wt worktree, $n_br branch)$extra"
   else

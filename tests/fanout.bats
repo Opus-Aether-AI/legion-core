@@ -71,16 +71,46 @@ SH
   echo "$output" | jq -e '.ok == 1 and .failed == 0'
 }
 
-@test "fanout: delegates codex slices in parallel + returns self slices inline" {
-  printf '%s\n' \
-    '{"archetype":"implement-feature","task":"build A"}' \
-    '{"archetype":"write-tests","task":"tests for A"}' \
-    '{"archetype":"deep-reasoning","task":"decide the design"}' > "$BATS_TEST_TMPDIR/s.jsonl"
-  run "$FANOUT" --slices "$BATS_TEST_TMPDIR/s.jsonl" --repo "$REPO" --max-concurrency 2
+@test "fanout: delegates many codex slices in parallel + returns self slices inline" {
+  local i
+  : > "$BATS_TEST_TMPDIR/s.jsonl"
+  for ((i = 0; i < 8; i++)); do
+    printf '{"archetype":"implement-feature","task":"build %s"}\n' "$i" \
+      >> "$BATS_TEST_TMPDIR/s.jsonl"
+  done
+  printf '%s\n' '{"archetype":"deep-reasoning","task":"decide the design"}' \
+    >> "$BATS_TEST_TMPDIR/s.jsonl"
+  run "$FANOUT" --slices "$BATS_TEST_TMPDIR/s.jsonl" --repo "$REPO" --max-concurrency 8
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.slices == 3 and .ok == 2 and .inline == 1 and .failed == 0'
-  echo "$output" | jq -e --arg model "$CODEX_WORKHORSE" '.by_model[$model] == 2'
+  echo "$output" | jq -e '.slices == 9 and .ok == 8 and .inline == 1 and .failed == 0'
+  echo "$output" | jq -e --arg model "$CODEX_WORKHORSE" '.by_model[$model] == 8'
   echo "$output" | jq -e '[.results[] | select(.status=="inline") | .archetype] == ["deep-reasoning"]'
+}
+
+@test "fanout: a delegate with no stdout returns a structured error and stderr artifact" {
+  local delegate="$BATS_TEST_TMPDIR/no-output-delegate"
+  cat > "$delegate" <<'SH'
+#!/usr/bin/env bash
+printf 'fixture delegate failed before producing JSON\n' >&2
+exit 2
+SH
+  chmod +x "$delegate"
+  printf '%s\n' '{"archetype":"implement-feature","task":"build A"}' \
+    > "$BATS_TEST_TMPDIR/no-output.jsonl"
+
+  LEGION_DELEGATE="$delegate" run "$FANOUT" \
+    --slices "$BATS_TEST_TMPDIR/no-output.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .failed == 1 and .results[0].status == "error"
+    and .results[0].stage == "delegate"
+    and .results[0].delegate_exit == 2
+    and (.results[0].error_log | endswith("/slice-0.err"))
+  '
+  local error_log
+  error_log="$(echo "$output" | jq -r '.results[0].error_log')"
+  grep -Fq 'fixture delegate failed before producing JSON' "$error_log"
 }
 
 @test "fanout: top-level same-family slices still launch scoped subagents" {

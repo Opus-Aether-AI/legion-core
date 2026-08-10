@@ -122,7 +122,7 @@ legion_recover_dead_run_state_lock() {
 
 legion_acquire_run_state_lock() {
   local record="$1"
-  local lock="$record.lock" deadline=$((SECONDS + 30))
+  local lock="$record.lock" deadline=$((SECONDS + 30)) owner=""
   # A coverage-instrumented or heavily contended host can spend several seconds
   # just starting the competing shells. Give every writer a realistic chance to
   # observe a release, but use a wall-clock deadline so filesystem/recovery work
@@ -150,7 +150,18 @@ legion_acquire_run_state_lock() {
       sleep 0.01
       continue
     fi
-    legion_recover_dead_run_state_lock "$lock"
+    # Do not compete with a live owner's release for the mutation claim. Under
+    # a synchronized waiter herd, that claim churn can starve release for
+    # seconds at a time and make otherwise healthy writers hit the 30-second
+    # acquisition deadline. Dead-owner recovery re-reads the PID after claiming
+    # the generation, so this unlocked liveness check is only a fast-path hint.
+    # A generation change between the check and recovery remains safe.
+    if owner="$(cat "$lock/pid" 2>/dev/null)" \
+      && [[ "$owner" =~ ^[1-9][0-9]*$ ]]; then
+      if ! kill -0 "$owner" 2>/dev/null; then
+        legion_recover_dead_run_state_lock "$lock"
+      fi
+    fi
     sleep 0.01
   done
   return 1
@@ -175,6 +186,37 @@ legion_release_run_state_lock() {
     attempt=$((attempt + 1))
     sleep 0.01
   done
+}
+
+# Git's worktree administration mutates shared files under the common .git
+# directory. Concurrent `git worktree add/remove/prune` processes can observe a
+# half-written sibling entry (for example, a temporarily unreadable commondir),
+# so serialize only those short metadata operations per repository. The model
+# worker itself still runs fully in parallel after its worktree has been created.
+legion_git_common_dir() {
+  local repo="$1" common=""
+  common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$(cd "$repo/$common" 2>/dev/null && pwd -P)" || return 1 ;;
+  esac
+  [[ -d "$common" ]] || return 1
+  printf '%s\n' "$common"
+}
+
+legion_acquire_git_worktree_lock() {
+  local repo="$1" common=""
+  common="$(legion_git_common_dir "$repo")" || return 1
+  legion_acquire_run_state_lock "$common/legion-worktree-admin"
+}
+
+legion_with_git_worktree_lock() {
+  local repo="$1" lock="" rc=0
+  shift
+  lock="$(legion_acquire_git_worktree_lock "$repo")" || return 1
+  "$@" || rc=$?
+  legion_release_run_state_lock "$lock"
+  return "$rc"
 }
 
 legion_create_run_state_temp() {

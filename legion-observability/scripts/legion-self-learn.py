@@ -2552,12 +2552,115 @@ def compile_context_command(args: argparse.Namespace) -> int:
         repository_identity=state["repository_identity"],
         entity=args.entity,
         stage=args.stage,
-        hint_directories=[state["project_learning_dir"], state["global_learning_dir"]],
+        hint_directories=learning_hint_directories(state),
         max_hints=args.max_hints,
         max_tokens=args.max_tokens,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
+
+
+def learning_hint_directories(state: dict[str, str]) -> list[str]:
+    """Return clone-independent memory plus bounded legacy compatibility.
+
+    The path-local directory is retained as a read-only fallback so an upgrade
+    can consume hints produced before repository-stable learning storage without
+    copying or deleting operator state. Duplicate IDs prefer the stable store.
+    """
+    directories = [state["project_learning_dir"]]
+    legacy = state.get("path_project_learning_dir", "")
+    if legacy and legacy not in directories:
+        directories.append(legacy)
+    global_learning = state["global_learning_dir"]
+    if global_learning not in directories:
+        directories.append(global_learning)
+    return directories
+
+
+def typed_hints_for_humans(
+    state: dict[str, str], entity: str | None, limit: int
+) -> dict[str, Any]:
+    """Render trusted typed memory through the legacy human hints surface."""
+    now = datetime.now(timezone.utc)
+    requested = _text(entity)
+    grouped: dict[str, list[str]] = {}
+    seen: set[tuple[str, str]] = set()
+    for hint in legion_learning_context.load_hints(learning_hint_directories(state)):
+        if hint.get("trusted") is not True or _text(hint.get("status")) != "active":
+            continue
+        if legion_learning_context._expired(hint, now):
+            continue
+        scope = _text(hint.get("scope"))
+        target = _text(hint.get("entity"))
+        if scope == "exact" and requested and target != requested:
+            continue
+        if scope not in {"exact", "global"}:
+            continue
+        guidance = _text(hint.get("guidance"))
+        if not guidance:
+            continue
+        display_target = requested or target or "global:*"
+        key = (display_target, " ".join(guidance.split()).casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        grouped.setdefault(display_target, []).append(guidance)
+        if sum(len(values) for values in grouped.values()) >= limit:
+            break
+    return {
+        "schema": "legion.self-learning.hints.v1",
+        "updated_at": _date_utc(),
+        "entities": {
+            key: {"severity": "info", "hints": values}
+            for key, values in sorted(grouped.items())
+        },
+    }
+
+
+def merge_human_hints(*payloads: dict[str, Any], limit: int) -> dict[str, Any]:
+    """Merge legacy and typed displays without duplicating guidance text."""
+    merged: dict[str, dict[str, Any]] = {}
+    count = 0
+    updated_at = None
+    for payload in payloads:
+        updated_at = payload.get("updated_at") or updated_at
+        for entity, raw_entry in _dict(payload.get("entities")).items():
+            if count >= limit:
+                break
+            entry = _dict(raw_entry)
+            if entity not in merged:
+                # The legacy memory surface includes provenance fields such as
+                # target_type/target_name that downstream benchmark and UI
+                # consumers still use. Preserve those fields while replacing
+                # only the hint list with the de-duplicated merged sequence.
+                target = dict(entry)
+                target["severity"] = _text(entry.get("severity")) or "info"
+                target["hints"] = []
+                merged[entity] = target
+            else:
+                target = merged[entity]
+                for key, value in entry.items():
+                    if key != "hints" and key not in target:
+                        target[key] = value
+            existing = {
+                " ".join(_text(item).split()).casefold()
+                for item in _list(target.get("hints"))
+            }
+            for guidance in _list(entry.get("hints")):
+                guidance = _text(guidance)
+                key = " ".join(guidance.split()).casefold()
+                if not guidance or key in existing:
+                    continue
+                target["hints"].append(guidance)
+                existing.add(key)
+                count += 1
+                if count >= limit:
+                    break
+    return {
+        "schema": "legion.self-learning.hints.v1",
+        "updated_at": updated_at,
+        "entities": merged,
+    }
 
 
 def reconcile_command(args: argparse.Namespace) -> int:
@@ -2591,6 +2694,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--quiet", action="store_true")
 
     hp = sub.add_parser("hints", help="print active self-learning memory")
+    hp.add_argument("--repo", default=os.getcwd())
     hp.add_argument("--logs", default=DEFAULT_LOG_ROOT)
     hp.add_argument("--entity")
     hp.add_argument("--limit", type=int, default=20)
@@ -2630,7 +2734,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "run":
         return run_command(args)
     if args.cmd == "hints":
-        payload = hints(args.logs, args.entity, args.limit)
+        state = legion_state.resolve_state(args.repo)
+        payload = merge_human_hints(
+            hints(args.logs, args.entity, args.limit),
+            typed_hints_for_humans(state, args.entity, args.limit),
+            limit=args.limit,
+        )
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:

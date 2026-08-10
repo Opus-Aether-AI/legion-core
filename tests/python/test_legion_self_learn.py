@@ -272,6 +272,117 @@ def test_default_cli_state_honors_resolved_telemetry_directory(
     assert report["spans"] == 1
 
 
+def test_hints_cli_reads_clone_independent_typed_memory(
+    tmp_path, monkeypatch, capsys
+):
+    repo = tmp_path / "checkout"
+    state_root = tmp_path / "path-state"
+    stable_learning = tmp_path / "stable-learning"
+    path_learning = state_root / "learning"
+    global_learning = tmp_path / "global-learning"
+    repo.mkdir()
+    stable_learning.mkdir()
+    path_learning.mkdir(parents=True)
+    global_learning.mkdir()
+    (stable_learning / "hints.json").write_text(
+        json.dumps(
+            {
+                "schema": "legion.learning-hints.v1",
+                "hints": [
+                    {
+                        "schema": "legion.learning-hint.v1",
+                        "id": "stable-router-hint",
+                        "scope": "exact",
+                        "status": "active",
+                        "trusted": True,
+                        "entity": "plugin:legion-router",
+                        "guidance": "Keep cross-harness handoffs bounded.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    resolved = {
+        "state_root": str(state_root),
+        "telemetry_dir": str(state_root / "spans"),
+        "repository_identity": "github.com/example/project",
+        "project_learning_dir": str(stable_learning),
+        "path_project_learning_dir": str(path_learning),
+        "global_learning_dir": str(global_learning),
+    }
+    monkeypatch.setattr(
+        self_learn.legion_state, "resolve_state", lambda _repo: resolved
+    )
+
+    result = self_learn.main(
+        [
+            "hints",
+            "--repo",
+            str(repo),
+            "--entity",
+            "plugin:legion-router",
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["entities"]["plugin:legion-router"]["hints"] == [
+        "Keep cross-harness handoffs bounded."
+    ]
+
+
+def test_learning_hint_directories_keeps_path_local_upgrade_fallback():
+    directories = self_learn.learning_hint_directories(
+        {
+            "project_learning_dir": "/stable/learning",
+            "path_project_learning_dir": "/legacy/learning",
+            "global_learning_dir": "/global/learning",
+        }
+    )
+
+    assert directories == [
+        "/stable/learning",
+        "/legacy/learning",
+        "/global/learning",
+    ]
+
+
+def test_merge_human_hints_preserves_legacy_entity_metadata():
+    payload = self_learn.merge_human_hints(
+        {
+            "updated_at": "2026-08-10",
+            "entities": {
+                "plugin:legion-observability": {
+                    "target_type": "plugin",
+                    "target_name": "legion-observability",
+                    "severity": "high",
+                    "hints": ["Keep the original contract."],
+                }
+            },
+        },
+        {
+            "entities": {
+                "plugin:legion-observability": {
+                    "severity": "info",
+                    "hints": ["Use the typed memory too."],
+                }
+            }
+        },
+        limit=20,
+    )
+
+    entry = payload["entities"]["plugin:legion-observability"]
+    assert entry["target_type"] == "plugin"
+    assert entry["target_name"] == "legion-observability"
+    assert entry["severity"] == "high"
+    assert entry["hints"] == [
+        "Keep the original contract.",
+        "Use the typed memory too.",
+    ]
+
+
 def test_build_report_turns_promoted_learning_laws_into_proposals(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     logs = tmp_path / "logs"

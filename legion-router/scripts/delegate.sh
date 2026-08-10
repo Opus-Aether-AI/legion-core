@@ -59,6 +59,16 @@ if [[ -f "$_state_lib" ]]; then
   source "$_state_lib"
 fi
 
+with_git_worktree_lock() {
+  local repo="$1"
+  shift
+  if declare -F legion_with_git_worktree_lock >/dev/null 2>&1; then
+    legion_with_git_worktree_lock "$repo" "$@"
+  else
+    "$@"
+  fi
+}
+
 CODEX_BIN="${CODEX_BIN:-codex}"
 LEGION_ROUTER_URL="${LEGION_ROUTER_URL:-http://127.0.0.1:8082}"
 
@@ -92,9 +102,12 @@ LEGION_WT_PATH=""; LEGION_WT_BRANCH=""; LEGION_WT_REPO=""; LEGION_WT_KEEP=0
 cleanup_worktree_on_exit() {
   [[ "$LEGION_WT_KEEP" == "1" ]] && return 0
   [[ -n "$LEGION_WT_PATH" && -n "$LEGION_WT_REPO" ]] || return 0
-  git -C "$LEGION_WT_REPO" worktree remove --force "$LEGION_WT_PATH" >/dev/null 2>&1 || rm -rf "$LEGION_WT_PATH"
+  with_git_worktree_lock "$LEGION_WT_REPO" \
+    git -C "$LEGION_WT_REPO" worktree remove --force "$LEGION_WT_PATH" >/dev/null 2>&1 \
+    || rm -rf "$LEGION_WT_PATH"
   [[ -n "$LEGION_WT_BRANCH" ]] && git -C "$LEGION_WT_REPO" branch -D "$LEGION_WT_BRANCH" >/dev/null 2>&1 || true
-  git -C "$LEGION_WT_REPO" worktree prune >/dev/null 2>&1 || true
+  with_git_worktree_lock "$LEGION_WT_REPO" \
+    git -C "$LEGION_WT_REPO" worktree prune >/dev/null 2>&1 || true
   LEGION_WT_PATH=""
 }
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit; cleanup_sandbox_dev_on_exit; cleanup_worktree_on_exit' EXIT
@@ -406,18 +419,40 @@ legion_delegated_context() {
   legion_executor_context_active
 }
 
-# Refuse literal self routes and nested Legion calls made from an executor that
-# was already delegated by Legion. Top-level same-harness subagents remain valid;
-# executor context, rather than harness family, is the recursion boundary.
+# Refuse literal self routes. A delegated worker can make an explicit handoff to
+# a *different* coding harness, but only through this dispatcher: it preserves
+# task scanning, sandboxing, worktree isolation, depth, and trace parentage.
+# Implicit/same-harness nesting remains blocked to avoid unbounded recursion.
 route_preflight() {
   local target_executor="${1:-codex}" target_model="${2:-}"
-  local route_archetype="${4:-}" primary reason="" art receipt payload artifacts
+  local route_archetype="${4:-}" explicit_target="${5:-0}"
+  local primary reason="" art receipt payload artifacts source depth max_depth source_run
   : "${3:-}"  # task text is intentionally never persisted for blocked routes
   primary="$(legion_primary)"
   if [[ "$target_executor" == "self" ]]; then
     reason="inline-self-route"
   elif legion_delegated_context; then
-    reason="nested-delegation"
+    source="${LEGION_EXECUTOR_NAME:-}"
+    depth="${LEGION_DEPTH:-0}"
+    max_depth="${LEGION_MAX_DEPTH:-2}"
+    source_run="${LEGION_RUN_ID:-}"
+    if [[ "$explicit_target" != "1" ]]; then
+      reason="nested-delegation-requires-explicit-executor"
+    elif [[ ! "$source" =~ ^(claude|codex|cursor|opencode|hermes)$ || -z "$source_run" ]]; then
+      reason="nested-delegation-unknown-source"
+    elif [[ "$source" == "$target_executor" ]]; then
+      reason="nested-delegation-same-executor"
+    elif [[ ! "$depth" =~ ^[0-9]+$ || ! "$max_depth" =~ ^[1-9][0-9]*$ || "$depth" -ge "$max_depth" ]]; then
+      reason="nested-delegation-depth-limit"
+    else
+      # The adapter checks this one-hop approval again before it launches its
+      # harness. Trace context makes the child span an actual child of the
+      # worker span instead of a second root.
+      export LEGION_CROSS_HARNESS_HANDOFF=1
+      export LEGION_TRACE_ID="${LEGION_TRACE_ID:-$source_run}"
+      export LEGION_PARENT_ID="$source_run"
+      return 0
+    fi
   else
     return 0
   fi
@@ -437,11 +472,15 @@ route_preflight() {
     --arg schema "legion.route-preflight.v1" --arg run "$RUN_ID" \
     --arg status "blocked" --arg reason "$reason" --arg primary "$primary" \
     --arg executor "$target_executor" --arg model "$target_model" \
-    --arg archetype "$route_archetype" --arg receipt "$receipt" '
+    --arg archetype "$route_archetype" --arg receipt "$receipt" \
+    --arg source "${source:-}" --arg depth "${depth:-}" --arg max_depth "${max_depth:-}" '
     {schema:$schema, run_id:$run, status:$status, reason:$reason,
      primary:$primary, executor:$executor,
      model:(if $model=="" then null else $model end),
      archetype:(if $archetype=="" then null else $archetype end),
+     source_executor:(if $source=="" then null else $source end),
+     depth:(if $depth=="" then null else ($depth|tonumber?) end),
+     max_depth:(if $max_depth=="" then null else ($max_depth|tonumber?) end),
      receipt:$receipt,
      message:(if $reason=="inline-self-route"
               then "executor=self is inline work for the active primary"
@@ -652,7 +691,15 @@ dispatch_adapter() {
   model_ref="$(jq -r '.model_ref // ""' <<<"$info")"
   [[ -n "$adapter" && -n "$contract" && "$contract" != "native" ]] \
     || die "executor '$ex' is primary-only — it can drive a session but cannot be delegated a coding task."
-  adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
+  # A cross-harness worker must use the sibling adapter from this Legion
+  # install. Otherwise an older globally-installed `legion-cursor`/etc. on
+  # PATH can reintroduce the old nested-delegation guard and break an approved
+  # handoff. Keep PATH precedence for top-level/custom adapter workflows.
+  if legion_delegated_context && [[ -x "$_self_dir/../bin/$adapter" ]]; then
+    adapter_bin="$_self_dir/../bin/$adapter"
+  else
+    adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
+  fi
   [[ -x "$adapter_bin" ]] || die "executor '$ex' adapter '$adapter' not found on PATH or in bin/ — build/install it first."
   # Model priority: explicit --model  >  the archetype's resolved model (ONLY when
   # the archetype routed here — not a forced --executor, whose archetype model may
@@ -746,6 +793,13 @@ cmd_run() {
   # can hand work to any other harness). Apply it BEFORE the low-credit bias and the
   # dispatch below so both see the final resolved target.
   [[ -n "$forced_executor" ]] && r_exec="$forced_executor"
+  # Non-native adapters resolve their own configured default through the
+  # executor registry. Do the same for the native Codex path so an explicit
+  # worker-to-Codex handoff needs only --executor and a bounded task.
+  if [[ "$forced_executor" == "codex" && -z "$model" ]]; then
+    model="$(legion_model_ref codex_workhorse)" \
+      || die "could not resolve codex_workhorse in models.toml"
+  fi
   # Low-credit bias — steer away from the depleted provider (self-handle low credits).
   case "${LEGION_LOW_CREDIT:-}" in
     claude)       # Claude low -> prefer GPT, even for normally-self work
@@ -776,7 +830,8 @@ cmd_run() {
     legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
   fi
-  route_preflight "${r_exec:-codex}" "$model" "$task" "$archetype" || return $?
+  route_preflight "${r_exec:-codex}" "$model" "$task" "$archetype" \
+    "$([[ -n "$forced_executor" ]] && printf 1 || printf 0)" || return $?
   # Dispatch by executor. `self` is the primary's own inline work (never delegated);
   # codex (or an unclassified task) uses the native codex path below; any other
   # registered coding executor runs through its adapter.
@@ -807,7 +862,9 @@ cmd_run() {
     printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
     [[ "$dirty_warn" -eq 0 ]] || warn_dirty_source "$repo" "$base"
     note "→ worktree $wt (branch $branch, base $base)"
-    git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" || die "worktree add failed"
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" \
+      || die "worktree add failed"
   fi
   # Register for EXIT-trap cleanup so a crash/kill before the inline removal
   # below does not orphan the worktree + branch (WS6 worktree-leak guard).
@@ -866,7 +923,7 @@ cmd_run() {
 
   # Mark only the executor process (and its direct children) as delegated.
   # Sandbox install/dev setup above must not inherit Legion role state.
-  legion_activate_executor_context "$RUN_ID"
+  legion_activate_executor_context "$RUN_ID" codex
   local start_ms end_ms dur rc=0 used_model=""
   start_ms="$(date +%s000)"
   # Try the chosen model, then the archetype's fallback chain on a quota/rate-limit error.
@@ -997,9 +1054,11 @@ cmd_run() {
   if [[ "$keep" -eq 0 ]]; then
     # Redirect stdout too — `git branch -D` prints "Deleted branch …" which would
     # otherwise corrupt the JSON result on this function's stdout.
-    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
     git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree prune >/dev/null 2>&1 || true
     wt_report="(removed; rerun with --keep to retain the worktree)"
     LEGION_WT_PATH=""   # removed here; stop the EXIT trap from retrying
   fi
@@ -1011,7 +1070,7 @@ cmd_run() {
   jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-0}" --arg run "$RUN_ID" --argjson rc "${rc:-0}" '
-    {run_id:$run, status:$status, model:$model, thread_id:$thread, codex_exit:$rc,
+    {run_id:$run, status:$status, executor:"codex", model:$model, thread_id:$thread, codex_exit:$rc,
      worktree:$wt, diff_path:$diff, last_message_path:$last, error_log:$error_log, usage:$usage, cost_usd:$cost}'
   # over_budget produced a usable diff (budget is advisory — codex can't be pre-empted),
   # so it exits 0; only a real failure/error is non-zero (M1: graceful degradation).
@@ -1135,7 +1194,7 @@ cmd_review() {
 
   RUN_ID="$(_run_id)"
   route_preflight "codex" "$model" "review --base $base_sha --head $head_sha" "$archetype" || return $?
-  legion_activate_executor_context "$RUN_ID"
+  legion_activate_executor_context "$RUN_ID" codex
   local art="$repo/.legion/runs/$RUN_ID"; mkdir -p "$art"
   local wt="$repo/.legion/worktrees/$RUN_ID"
   local branch="" sandbox="read-only"
@@ -1145,7 +1204,9 @@ cmd_review() {
   git -C "$repo" diff --binary "$base_sha...$head_sha" > "$patch_path" \
     || die "review: could not capture immutable review patch"
   note "→ review worktree $wt (head $head_sha, base $base_sha)"
-  git -C "$repo" worktree add -q --detach "$wt" "$head_sha" || die "review: detached worktree add failed"
+  with_git_worktree_lock "$repo" \
+    git -C "$repo" worktree add -q --detach "$wt" "$head_sha" \
+    || die "review: detached worktree add failed"
   LEGION_WT_PATH="$wt"; LEGION_WT_BRANCH=""; LEGION_WT_REPO="$repo"; LEGION_WT_KEEP=0
   write_run_state running
   write_run_artifact_status "$art" "$RUN_ID" "executing" "$wt"
@@ -1282,8 +1343,10 @@ cmd_review() {
     "$([[ "$status" == "ok" ]] && printf completed || printf failed)" \
     "$wt" "" "$status"
 
-  git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
-  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  with_git_worktree_lock "$repo" \
+    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  with_git_worktree_lock "$repo" \
+    git -C "$repo" worktree prune >/dev/null 2>&1 || true
   LEGION_WT_PATH=""
   REVIEW_RECEIPT_PATH=""
   REVIEW_ART_PATH=""
@@ -1335,7 +1398,7 @@ cmd_resume() {
   [[ -n "$effort" ]] || effort="xhigh"   # codex always at xhigh unless overridden
 
   RUN_ID="$run"
-  legion_activate_executor_context "$RUN_ID"
+  legion_activate_executor_context "$RUN_ID" codex
   local start_ms end_ms dur rc=0
   start_ms="$(date +%s000)"
   note "→ codex exec resume $thread_id (run $run)"
@@ -1468,7 +1531,8 @@ cmd_cleanup() {
     if [[ -d "$wtroot" ]]; then
       for wt in "$wtroot"/*; do
         [[ -d "$wt" ]] || continue
-        git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+        with_git_worktree_lock "$repo" \
+          git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
         n_wt=$((n_wt + 1))
       done
     fi
@@ -1476,7 +1540,8 @@ cmd_cleanup() {
       [[ -z "$b" ]] && continue
       git -C "$repo" branch -D "$b" >/dev/null 2>&1 && n_br=$((n_br + 1)) || true
     done < <(git -C "$repo" branch --list 'legion/delegate-*' --format '%(refname:short)')
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree prune >/dev/null 2>&1 || true
     if [[ "$purge" -eq 1 && -d "$runsroot" ]]; then
       n_runs="$(find "$runsroot" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
       rm -rf "$runsroot"
@@ -1486,11 +1551,13 @@ cmd_cleanup() {
   elif [[ -n "$run" ]]; then
     local run_wt="$wtroot/$run" run_art="$runsroot/$run"
     if [[ -d "$run_wt" ]]; then
-      git -C "$repo" worktree remove --force "$run_wt" >/dev/null 2>&1 || rm -rf "${run_wt:?}"
+      with_git_worktree_lock "$repo" \
+        git -C "$repo" worktree remove --force "$run_wt" >/dev/null 2>&1 || rm -rf "${run_wt:?}"
       n_wt=1
     fi
     git -C "$repo" branch -D "legion/delegate-$run" >/dev/null 2>&1 && n_br=1 || true
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree prune >/dev/null 2>&1 || true
     if [[ "$purge" -eq 1 && -d "$run_art" ]]; then rm -rf "${run_art:?}"; extra=" + artifacts"; fi
     note "✓ cleaned run $run ($n_wt worktree, $n_br branch)$extra"
   else

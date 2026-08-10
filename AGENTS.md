@@ -16,7 +16,7 @@ routing, delegation, observability, setup bridges, and harness guidance.
   do not add domain-specific plugins, skills, or copy here.
 
 <!-- legion:init:v1:agents:start -->
-<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=9cfef76d34f50fbc -->
+<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=bebae07a5aba4fda -->
 ## Legion workflow
 
 Legion is the mandatory default operating mode for coding tasks in this
@@ -26,8 +26,12 @@ delegated.
 
 - If `LEGION_ACTIVE=1`, `LEGION_DEPTH` is positive, or the working directory is
   under `.legion/worktrees/`, this process is already a delegated executor:
-  implement the assigned slice directly and do not start another Legion
-  workflow. Return to the parent if the slice needs re-planning.
+  implement the assigned slice directly unless it needs a bounded, explicit
+  cross-harness handoff. Use only `legion-delegate run --executor <different
+  coding harness>` for that handoff; Legion keeps task scanning, isolation,
+  telemetry, and `LEGION_MAX_DEPTH` (default `2`) intact. Do not invoke raw
+  harness CLIs or implicit/same-harness nested delegation. Return to the parent
+  if the slice needs re-planning.
 - Otherwise, before editing, invoke the applicable installed Legion skill or
   command and read relevant `legion-self-learn hints`.
 - When `.legion/legion-core.json` exists, its exact version and release commit

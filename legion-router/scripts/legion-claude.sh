@@ -313,7 +313,7 @@ cmd_run() {
   start_ms="$(date +%s000)"
   set +e
   printf '%s' "$task" | (
-    legion_activate_executor_context "$RUN_ID"
+    legion_activate_executor_context "$RUN_ID" claude
     cd "${wt:-$repo}"
     "${claude_cmd[@]}"
   ) >"$out_file" 2>"$err_file"

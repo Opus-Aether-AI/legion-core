@@ -139,9 +139,12 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
 - `run` defaults to `workspace-write` (edits the worktree); `review` is `read-only`.
 - `danger-full-access` is **hard-blocked** unless `LEGION_ALLOW_DANGER=1`.
 - Task text is scanned for dangerous/injection patterns before runs and reviews (override: `LEGION_ALLOW_UNSAFE=1`).
-- `executor=self` is returned to the primary for inline work. A process carrying
-  `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`, or positive `LEGION_DEPTH` must
-  implement its assigned slice directly; Legion refuses nested delegation.
+- `executor=self` is returned to the primary for inline work. A delegated worker
+  normally implements its assigned slice directly. It may make one explicit
+  `legion-delegate run --executor <different-harness>` handoff to Claude, Codex,
+  Cursor, or opencode; Legion preserves the parent trace, creates a fresh
+  worktree, and enforces `LEGION_MAX_DEPTH` (default `2`). Implicit routes,
+  same-harness nesting, direct adapter calls, and depth-limit bypasses fail closed.
 
 > **The sandbox is the security boundary — not the task scanner.** `scan_task_text`
 > is a best-effort tripwire and is trivially bypassable (encodings, indirection);

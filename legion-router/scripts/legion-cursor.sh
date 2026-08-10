@@ -212,7 +212,7 @@ cmd_run() {
   [[ -n "$model" ]] && cmd+=(--model "$model")
   cmd+=("$task")
 
-  legion_activate_executor_context "$RUN_ID"
+  legion_activate_executor_context "$RUN_ID" cursor
   note "-> ${cmd[*]}"
   start_ms="$(date +%s000)"
   set +e

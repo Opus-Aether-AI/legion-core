@@ -87,6 +87,19 @@ def test_state_stays_path_keyed_while_repository_id_is_stable_across_clones(
     )
     assert first_state["repository_project_id"].startswith("shared-")
     assert first_state["repository_identity"] == "github.com/example/shared"
+    shared_learning = os.path.join(
+        str(home / ".legion" / "projects"),
+        first_state["repository_project_id"],
+        "learning",
+    )
+    assert first_state["project_learning_dir"] == shared_learning
+    assert second_state["project_learning_dir"] == shared_learning
+    assert first_state["path_project_learning_dir"] == os.path.join(
+        first_state["state_root"], "learning"
+    )
+    assert second_state["path_project_learning_dir"] == os.path.join(
+        second_state["state_root"], "learning"
+    )
 
 
 def test_shell_exports_stable_repository_project_id_for_learning(tmp_path):
@@ -127,6 +140,7 @@ def test_resolve_state_honors_env_overrides(tmp_path, monkeypatch):
     assert resolved["state_root"] == str(root)
     assert resolved["telemetry_dir"] == str(telemetry)
     assert resolved["registry_dir"] == str(root / "registry")
+    assert resolved["project_learning_dir"] == str(root / "learning")
 
 
 def test_resolve_state_honors_repo_config(tmp_path, monkeypatch):
@@ -139,7 +153,13 @@ def test_resolve_state_honors_repo_config(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("HOME", str(home))
-    for key in ("LEGION_STATE_ROOT", "LEGION_REPORTS_DIR", "LEGION_CONFIG_FILE"):
+    for key in (
+        "LEGION_STATE_ROOT",
+        "LEGION_REPORTS_DIR",
+        "LEGION_PROJECT_LEARNING_DIR",
+        "LEGION_GLOBAL_LEARNING_DIR",
+        "LEGION_CONFIG_FILE",
+    ):
         monkeypatch.delenv(key, raising=False)
 
     resolved = state.resolve_state(str(repo))

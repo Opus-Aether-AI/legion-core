@@ -221,6 +221,17 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
         if env.get("LEGION_REPORTS_DIR")
         else _configured_reports(repo_abs, config) or os.path.join(state_root, "reports")
     )
+    path_project_learning_dir = os.path.join(state_root, "learning")
+    # Runtime artifacts remain checkout-local because worktrees, run registries,
+    # and spans describe one physical checkout. Learned guidance is different:
+    # it is keyed by repository identity so the installer/source clone and every
+    # user checkout of the same remote consume one shared project memory.
+    # Explicit/configured state roots retain their historical all-in-one layout.
+    default_project_learning_dir = (
+        os.path.join(legion_home, "projects", stable_repository_project_id, "learning")
+        if source == "auto"
+        else path_project_learning_dir
+    )
 
     return {
         "repo": repo_abs,
@@ -236,9 +247,12 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
         "bench_dir": _abs(env.get("LEGION_BENCH_DIR") or os.path.join(state_root, "bench"), repo_abs),
         "reports_dir": reports_root,
         "project_learning_dir": _abs(
-            env.get("LEGION_PROJECT_LEARNING_DIR") or os.path.join(state_root, "learning"),
+            env.get("LEGION_PROJECT_LEARNING_DIR") or default_project_learning_dir,
             repo_abs,
         ),
+        # Read-only compatibility source for typed hints written before project
+        # learning became clone-independent. New writes use project_learning_dir.
+        "path_project_learning_dir": _abs(path_project_learning_dir, repo_abs),
         "global_learning_dir": _abs(
             env.get("LEGION_GLOBAL_LEARNING_DIR")
             or os.path.join(legion_home, "global", "learning"),

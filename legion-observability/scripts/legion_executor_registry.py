@@ -58,6 +58,8 @@ def load_coding_executor_families(path=None):
     # legion-route accepts both `[executors.codex]` and top-level `[codex]`
     # registries; telemetry must classify the same dispatchable families.
     executors = table.get("executors", table)
+    if not isinstance(executors, dict):
+        return _FALLBACK_CODING_FAMILIES
     families = {
         name
         for name, config in executors.items()

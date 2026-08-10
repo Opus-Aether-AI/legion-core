@@ -1409,12 +1409,19 @@ cmd_resume() {
     if [[ -z "$archetype" ]]; then
       # Registry retention is shorter than kept-run artifact retention. Recover
       # the original route label from durable span history after registry pruning.
-      archetype="$(jq -Rr --arg run "$run" '
-        fromjson?
-        | select(.schema == "legion.span.v1" and .run_id == $run)
-        | (.archetype // empty)
-        | select(type == "string" and length > 0)
-      ' "$LEGION_TELEMETRY_DIR"/*.jsonl 2>/dev/null | tail -n 1 || true)"
+      archetype="$(
+        for telemetry_file in "$LEGION_TELEMETRY_DIR"/*.jsonl; do
+          [[ -f "$telemetry_file" && -r "$telemetry_file" ]] || continue
+          # Parse files independently so a disappearing or unreadable history
+          # file cannot prevent recovery from a later daily log.
+          jq -Rr --arg run "$run" '
+            fromjson?
+            | select(.schema == "legion.span.v1" and .run_id == $run)
+            | (.archetype // empty)
+            | select(type == "string" and length > 0)
+          ' "$telemetry_file" 2>/dev/null || true
+        done | tail -n 1
+      )"
     fi
     if [[ -n "$archetype" && ! -L "$art/archetype.txt" ]]; then
       printf '%s\n' "$archetype" > "$art/archetype.txt"

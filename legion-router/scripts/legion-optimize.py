@@ -28,10 +28,10 @@ sys.path.insert(
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "legion-observability", "scripts")),
 )
 import legion_state  # noqa: E402
+from legion_executor_registry import executor_family, is_delegated_executor  # noqa: E402
 
 SPAN_SCHEMA = "legion.span.v1"
 SUCCESS_STATUSES = {"ok", "over_budget"}
-DELEGATED_EXECUTORS = {"codex", "cursor", "claude"}
 DEFAULT_SPANS_DIR = legion_state.resolve_state(os.getcwd())["telemetry_dir"]
 DEFAULT_ROUTING_FILE = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "config", "routing.toml"))
@@ -178,7 +178,7 @@ def load_spans(spans_dir):
                         continue
                     if span.get("schema") != SPAN_SCHEMA:
                         continue
-                    if span.get("executor") not in DELEGATED_EXECUTORS:
+                    if not is_delegated_executor(span.get("executor")):
                         continue
                     spans.append(span)
         except OSError:
@@ -189,7 +189,7 @@ def load_spans(spans_dir):
 def classification_summary(spans):
     delegated = [
         span for span in spans
-        if isinstance(span, dict) and span.get("executor") in DELEGATED_EXECUTORS
+        if isinstance(span, dict) and is_delegated_executor(span.get("executor"))
     ]
     classified = [
         span for span in delegated
@@ -223,8 +223,8 @@ def stats_by_arch_route(spans):
     for span in spans:
         if not isinstance(span, dict):
             continue
-        executor = span.get("executor")
-        if executor not in DELEGATED_EXECUTORS:
+        executor = executor_family(span.get("executor"))
+        if executor is None:
             continue
         archetype = span.get("archetype")
         model = span.get("model")

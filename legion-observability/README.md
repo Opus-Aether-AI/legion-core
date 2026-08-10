@@ -60,7 +60,8 @@ legion-session-learn --repo . --show-evidence --query "review was interrupted"
 
 # Emit a span from any runner/executor:
 legion-trace emit --executor codex --model "$(legion-route --model-ref codex_workhorse)" --status ok \
-  --cost 0.05 --duration-ms 1800 --tokens '{"input_tokens":12000}'
+  --archetype implement-feature --cost 0.05 --duration-ms 1800 \
+  --tokens '{"input_tokens":12000}'
 ```
 
 `over_budget` delegations produced usable work and exit successfully, so reports
@@ -70,7 +71,7 @@ unclassified runs remain visible but cannot influence per-archetype proposals.
 
 ## The span contract
 
-`schema/legion.span.v1.schema.json` — required `schema, ts, run_id, executor, model, status`; plus `cost_usd`, `duration_ms`, `tokens`, `trace_id`/`parent_id` (trace trees), `target_type`/`target_name` (self-learning attribution), `artifacts`. `legion-delegate` already emits it.
+`schema/legion.span.v1.schema.json` — required `schema, ts, run_id, executor, model, status`; plus optional routing `archetype`, `cost_usd`, `duration_ms`, `tokens`, `trace_id`/`parent_id` (trace trees), `target_type`/`target_name` (self-learning attribution), `artifacts`. `legion-delegate` already emits it, while the canonical emitter accepts `--archetype` or `LEGION_ARCHETYPE`.
 
 ## Self-learning loop
 

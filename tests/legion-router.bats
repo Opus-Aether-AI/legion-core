@@ -502,7 +502,11 @@ $run_error" ]
     local repo; repo="$(make_test_repo run7)"
     # mock reports 1000+200+50+10 ~ 1060 total; budget 100 -> over
     run "$DELEGATE" run --model test-model-beta --task "x" --repo "$repo" --budget-tokens 100 --quiet
+    [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "over_budget"'
+    run bash -c "jq -s '[.[] | select(.artifacts.synthetic_primary_baseline == true)] | length' '$LEGION_TELEMETRY_DIR'/*.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
 }
 
 # ── review / cleanup ─────────────────────────────────────────────────

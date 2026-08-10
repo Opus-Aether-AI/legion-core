@@ -389,7 +389,11 @@ emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
   mkdir -p "$LEGION_TELEMETRY_DIR"
   case "$executor" in
-    codex*) [[ "$status" == "ok" ]] && emit_primary_baseline_span "$executor" "$model" "$task" ;;
+    codex*)
+      case "$status" in
+        ok|over_budget) emit_primary_baseline_span "$executor" "$model" "$task" ;;
+      esac
+      ;;
   esac
   # Trace context: a parent orchestrator (e.g. legion-fanout) exports
   # LEGION_TRACE_ID + LEGION_PARENT_ID so sibling delegate spans hang under one

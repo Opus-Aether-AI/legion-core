@@ -14,6 +14,7 @@
     "parent_id": { "type": ["string", "null"] },
     "executor": { "type": "string", "description": "codex | codex-review | claude | anthropic | minimax | ..." },
     "model": { "type": "string" },
+    "archetype": { "type": ["string", "null"], "description": "Optional routing archetype used to select the executor/model." },
     "task": { "type": "string" },
     "status": { "type": "string", "enum": ["ok", "failed", "error", "over_budget", "blocked"] },
     "target_type": { "type": ["string", "null"], "description": "Optional catalog entity type for self-learning attribution, e.g. plugin, skill, command, agent, hook, mcp." },

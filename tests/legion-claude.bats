@@ -149,6 +149,18 @@ make_test_repo() {
     assert_mock_called legion-delegate "--archetype final-review"
 }
 
+@test "legion-claude: environment archetype survives Codex fallback" {
+    local repo; repo="$(make_test_repo fb-env-archetype)"
+    LEGION_ARCHETYPE=security-review MOCK_CLAUDE_LIMIT=1 \
+      run "$LEGION_CLAUDE" run --task "review it" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.executor == "codex" and .fell_back == true'
+    assert_mock_called legion-delegate "--archetype security-review"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e \
+      'select(.executor == \"claude\" and .archetype == \"security-review\")'"
+    [ "$status" -eq 0 ]
+}
+
 @test "legion-claude: direct adapter refuses delegated executor context" {
     local repo; repo="$(make_test_repo nested)"
     LEGION_EXECUTOR=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet

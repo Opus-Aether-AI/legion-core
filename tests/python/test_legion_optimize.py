@@ -153,10 +153,42 @@ def test_load_spans_keeps_unclassified_delegations_for_coverage(tmp_path):
             "model": "test-model-alpha",
             "status": "ok",
         },
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex-review",
+            "archetype": "security-review",
+            "model": "test-model-review",
+            "status": "ok",
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "opencode",
+            "archetype": "implement-feature",
+            "model": "test-model-opencode",
+            "status": "ok",
+        },
     ]
     spans.write_text("\n".join(json.dumps(row) for row in rows) + "\nNOT JSON\n")
     got = opt.load_spans(tmp_path)
-    assert got == [rows[0], rows[1], rows[3]]
+    assert got == [rows[0], rows[1], rows[3], rows[5], rows[6]]
+
+
+def test_stats_normalize_codex_review_to_registered_codex_family():
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex-review",
+            "archetype": "security-review",
+            "model": "test-model-review",
+            "status": "ok",
+            "cost_usd": 0.5,
+            "duration_ms": 100,
+        }
+    ]
+
+    stats = opt.stats_by_arch_route(spans)
+
+    assert stats["security-review"]["codex:test-model-review"]["executor"] == "codex"
 
 
 def test_classification_summary_exposes_optimizer_blind_spot():

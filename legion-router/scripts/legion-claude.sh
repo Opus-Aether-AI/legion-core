@@ -180,7 +180,7 @@ cmd_run() {
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
   local effort="" append_sys="" skip_perms=0
-  local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="" preset_run_id=""
+  local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
   local read_only_violation=0
 

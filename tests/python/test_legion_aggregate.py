@@ -90,6 +90,29 @@ def test_aggregate_by_archetype_surfaces_unclassified_delegations():
     }
 
 
+def test_classification_covers_registered_executor_families_and_codex_modes():
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": executor,
+            "status": "ok",
+            "cost_usd": 1.0,
+        }
+        for executor in ("codex-review", "codex-resume", "opencode")
+    ]
+
+    result = agg.aggregate(spans, by="archetype")
+
+    assert result["groups"]["unclassified"]["count"] == 3
+    assert result["classification"] == {
+        "delegated_runs": 3,
+        "classified_runs": 0,
+        "unclassified_runs": 3,
+        "classification_rate": 0.0,
+        "unclassified_cost_usd": 3.0,
+    }
+
+
 def test_over_budget_usable_work_counts_as_success():
     spans = [
         {

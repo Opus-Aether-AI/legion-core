@@ -13,9 +13,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
+from legion_executor_registry import is_delegated_executor  # noqa: E402
 
 SUCCESS_STATUSES = {"ok", "over_budget"}
-DELEGATED_EXECUTORS = {"codex", "cursor", "claude", "opencode"}
 
 
 def percentile(values, p):
@@ -70,13 +70,13 @@ def _archetype_group(span):
     archetype = span.get("archetype")
     if isinstance(archetype, str) and archetype.strip():
         return archetype.strip()
-    if span.get("executor") in DELEGATED_EXECUTORS:
+    if is_delegated_executor(span.get("executor")):
         return "unclassified"
     return "not_applicable"
 
 
 def classification_summary(spans):
-    delegated = [s for s in spans if s.get("executor") in DELEGATED_EXECUTORS]
+    delegated = [s for s in spans if is_delegated_executor(s.get("executor"))]
     classified = [
         s for s in delegated
         if isinstance(s.get("archetype"), str) and s["archetype"].strip()

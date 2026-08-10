@@ -70,7 +70,7 @@ kept source experiment resolves them.
 
 ## The span contract
 
-`schema/legion.span.v1.schema.json` is the source of truth. Required: `schema, ts, run_id, executor, model, status`. Carries `cost_usd`, `duration_ms`, `tokens`, `trace_id`/`parent_id` (for trace trees), `target_type`/`target_name` (for self-learning attribution), and `artifacts`. `legion-delegate` already emits it; new executors should use `legion-trace emit` so the stream stays uniform.
+`schema/legion.span.v1.schema.json` is the source of truth. Required: `schema, ts, run_id, executor, model, status`. Carries optional routing `archetype`, `cost_usd`, `duration_ms`, `tokens`, `trace_id`/`parent_id` (for trace trees), `target_type`/`target_name` (for self-learning attribution), and `artifacts`. `legion-delegate` already emits it; new executors should use `legion-trace emit --archetype NAME` (or `LEGION_ARCHETYPE=NAME`) so the stream stays uniform and route-tunable.
 
 ## Cost
 

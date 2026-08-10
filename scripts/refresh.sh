@@ -46,10 +46,18 @@ fi
 # 1) Resolve a stable release by default. `LEGION_UPDATE_REF` is deliberately
 # the only path to mutable main (or a specific rollback tag).
 if [ -z "$UPDATE_REF" ]; then
-    release_json="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null || true)"
-    UPDATE_REF="$(printf '%s' "$release_json" \
-        | jq -r 'select(type == "object" and .draft == false and .prerelease == false) | .tag_name // empty' \
-            2>/dev/null || true)"
+    # install.sh owns the authenticated lookup: a private MARKETPLACE_REPO 404s
+    # on anonymous requests, which would otherwise look like a missing release.
+    lookup_status=0
+    UPDATE_REF="$(bash "$INSTALL_SCRIPT" --resolve-latest-release 2>/dev/null)" || lookup_status=$?
+    if [ "$lookup_status" = "3" ]; then
+        printf 'legion refresh: could not reach the latest stable release of %s\n' "$MARKETPLACE_REPO" >&2
+        printf '  a private repository answers anonymous requests with 404; authenticate with\n' >&2
+        printf '  '"'"'gh auth login'"'"' or GITHUB_TOKEN, or set LEGION_UPDATE_REF explicitly\n' >&2
+        record_refresh_failure "Daily refresh could not reach the latest stable release." \
+            "release lookup for $MARKETPLACE_REPO was unreachable or unauthorized"
+        exit 2
+    fi
 fi
 
 if [ "$UPDATE_REF" = "main" ] && [ "$UPDATE_REF_EXPLICIT" = "1" ]; then

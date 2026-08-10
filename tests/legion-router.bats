@@ -1054,6 +1054,25 @@ $run_error" ]
   [ "$output" = "true" ]
 }
 
+@test "delegate resume: recovers and backfills a legacy archetype after registry pruning" {
+  local repo; repo="$(make_test_repo res-legacy-archetype)"
+  out="$("$DELEGATE" run --archetype bulk-mechanical-edit --task initial \
+    --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+  rm -f "$repo/.legion/runs/$rid/archetype.txt"
+  rm -f "$(registry_dir_for_repo "$repo")/$rid.json"
+
+  run "$DELEGATE" resume --run "$rid" --task "follow up" --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$repo/.legion/runs/$rid/archetype.txt")" = "bulk-mechanical-edit" ]
+  run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e --arg run '$rid' \
+    'select(.executor == \"codex-resume\" and .run_id == \$run) \
+     | .archetype == \"bulk-mechanical-edit\"'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
 @test "delegate resume: fails clearly when the worktree was not kept" {
   local repo; repo="$(make_test_repo res2)"
   out="$("$DELEGATE" run --model test-model-alpha --task x --repo "$repo" --quiet)"

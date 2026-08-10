@@ -75,6 +75,16 @@ def _archetype_group(span):
     return "not_applicable"
 
 
+def _classification_payload(total, classified, unclassified, unclassified_cost):
+    return {
+        "delegated_runs": total,
+        "classified_runs": classified,
+        "unclassified_runs": unclassified,
+        "classification_rate": round(classified / total, 4) if total else 0,
+        "unclassified_cost_usd": round(unclassified_cost, 6),
+    }
+
+
 def classification_summary(spans):
     total = classified = unclassified = 0
     unclassified_cost = 0.0
@@ -88,13 +98,9 @@ def classification_summary(spans):
         else:
             unclassified += 1
             unclassified_cost += _num(span.get("cost_usd", 0))
-    return {
-        "delegated_runs": total,
-        "classified_runs": classified,
-        "unclassified_runs": unclassified,
-        "classification_rate": round(classified / total, 4) if total else 0,
-        "unclassified_cost_usd": round(unclassified_cost, 6),
-    }
+    return _classification_payload(
+        total, classified, unclassified, unclassified_cost
+    )
 
 
 def filter_trace(spans, trace=""):
@@ -115,9 +121,20 @@ def filter_trace(spans, trace=""):
 
 def aggregate(spans, by="executor", trace=""):
     spans, trace_meta = filter_trace(spans, trace)
-    spans = [s for s in spans if not _is_synthetic_opus_baseline(s)]
     groups = {}
+    delegated = classified = unclassified = 0
+    unclassified_cost = 0.0
     for s in spans:
+        if _is_synthetic_opus_baseline(s):
+            continue
+        if is_delegated_executor(s.get("executor")):
+            delegated += 1
+            archetype = s.get("archetype")
+            if isinstance(archetype, str) and archetype.strip():
+                classified += 1
+            else:
+                unclassified += 1
+                unclassified_cost += _num(s.get("cost_usd", 0))
         key = _archetype_group(s) if by == "archetype" else (s.get(by) or "unknown")
         g = groups.setdefault(key, {"count": 0, "ok": 0, "cost_usd": 0.0, "_dur": []})
         g["count"] += 1
@@ -150,7 +167,9 @@ def aggregate(spans, by="executor", trace=""):
         "trace": trace_meta,
         "groups": out,
         "total": total,
-        "classification": classification_summary(spans),
+        "classification": _classification_payload(
+            delegated, classified, unclassified, unclassified_cost
+        ),
     }
 
 

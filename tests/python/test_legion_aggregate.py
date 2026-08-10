@@ -113,6 +113,30 @@ def test_classification_covers_registered_executor_families_and_codex_modes():
     }
 
 
+def test_aggregate_folds_classification_into_grouping_pass(monkeypatch):
+    def unexpected_second_pass(_spans):
+        raise AssertionError("aggregate should not call classification_summary")
+
+    monkeypatch.setattr(agg, "classification_summary", unexpected_second_pass)
+
+    result = agg.aggregate([
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "archetype": "fix-bug",
+            "status": "ok",
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "claude",
+            "status": "failed",
+            "cost_usd": 2.0,
+        },
+    ])
+
+    assert result["classification"]["classification_rate"] == 0.5
+
+
 def test_over_budget_usable_work_counts_as_success():
     spans = [
         {

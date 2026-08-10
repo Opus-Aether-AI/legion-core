@@ -1406,6 +1406,18 @@ cmd_resume() {
     # Compatibility for kept runs created before archetype.txt was persisted.
     archetype="$(jq -r '.archetype // empty' \
       "$LEGION_REGISTRY_DIR/$run.json" 2>/dev/null || true)"
+    if [[ -z "$archetype" ]]; then
+      # Registry retention is shorter than kept-run artifact retention. Recover
+      # the original route label from durable span history after registry pruning.
+      archetype="$(jq -r --arg run "$run" '
+        select(.schema == "legion.span.v1" and .run_id == $run)
+        | (.archetype // empty)
+        | select(type == "string" and length > 0)
+      ' "$LEGION_TELEMETRY_DIR"/*.jsonl 2>/dev/null | tail -n 1)"
+    fi
+    if [[ -n "$archetype" && ! -L "$art/archetype.txt" ]]; then
+      printf '%s\n' "$archetype" > "$art/archetype.txt"
+    fi
   fi
   local wt="$repo/.legion/worktrees/$run"
   [[ -d "$wt" ]] || die "resume: worktree for '$run' is gone — the original run must use --keep to be resumable"

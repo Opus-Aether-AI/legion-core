@@ -24,7 +24,7 @@ def _fallback_table(path):
     """Read the registry fields needed here when tomllib is unavailable."""
     executors = {}
     current = None
-    section = re.compile(r"\[executors\.([A-Za-z0-9_-]+)\]")
+    section = re.compile(r"\[(?:executors\.)?([A-Za-z0-9_-]+)\]")
     with open(path, encoding="utf-8") as fh:
         for raw_line in fh:
             line = raw_line.split("#", 1)[0].strip()
@@ -55,7 +55,9 @@ def load_coding_executor_families(path=None):
     except (OSError, ValueError):
         return _FALLBACK_CODING_FAMILIES
 
-    executors = table.get("executors") or {}
+    # legion-route accepts both `[executors.codex]` and top-level `[codex]`
+    # registries; telemetry must classify the same dispatchable families.
+    executors = table.get("executors", table)
     families = {
         name
         for name, config in executors.items()

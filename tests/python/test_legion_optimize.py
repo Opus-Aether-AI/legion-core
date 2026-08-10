@@ -167,6 +167,14 @@ def test_load_spans_keeps_unclassified_delegations_for_coverage(tmp_path):
             "model": "test-model-opencode",
             "status": "ok",
         },
+        {
+            "schema": "legion.span.v1",
+            "executor": "opencode-baseline",
+            "archetype": "implement-feature",
+            "model": "opencode-baseline",
+            "status": "ok",
+            "artifacts": {"synthetic_primary_baseline": True},
+        },
     ]
     spans.write_text("\n".join(json.dumps(row) for row in rows) + "\nNOT JSON\n")
     got = opt.load_spans(tmp_path)
@@ -189,6 +197,27 @@ def test_stats_normalize_codex_review_to_registered_codex_family():
     stats = opt.stats_by_arch_route(spans)
 
     assert stats["security-review"]["codex:test-model-review"]["executor"] == "codex"
+
+
+def test_synthetic_primary_baselines_never_become_optimizer_routes():
+    baseline = {
+        "schema": "legion.span.v1",
+        "executor": "cursor-baseline",
+        "archetype": "implement-feature",
+        "model": "cursor-baseline",
+        "status": "ok",
+        "cost_usd": 0,
+        "artifacts": {"synthetic_primary_baseline": True},
+    }
+
+    assert opt.stats_by_arch_route([baseline]) == {}
+    assert opt.classification_summary([baseline]) == {
+        "delegated_runs": 0,
+        "classified_runs": 0,
+        "unclassified_runs": 0,
+        "classification_rate": 0,
+        "unclassified_cost_usd": 0,
+    }
 
 
 def test_classification_summary_exposes_optimizer_blind_spot():

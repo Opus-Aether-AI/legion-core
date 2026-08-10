@@ -160,6 +160,16 @@ def _nonnegative_num(value):
     return value if value >= 0 else None
 
 
+def _is_synthetic_primary_baseline(span):
+    artifacts = span.get("artifacts") or {}
+    if not isinstance(artifacts, dict):
+        return False
+    return (
+        artifacts.get("synthetic_opus_baseline") is True
+        or artifacts.get("synthetic_primary_baseline") is True
+    )
+
+
 def load_spans(spans_dir):
     spans = []
     pattern = os.path.join(os.path.expanduser(str(spans_dir)), "*.jsonl")
@@ -178,6 +188,8 @@ def load_spans(spans_dir):
                         continue
                     if span.get("schema") != SPAN_SCHEMA:
                         continue
+                    if _is_synthetic_primary_baseline(span):
+                        continue
                     if not is_delegated_executor(span.get("executor")):
                         continue
                     spans.append(span)
@@ -189,7 +201,9 @@ def load_spans(spans_dir):
 def classification_summary(spans):
     delegated = [
         span for span in spans
-        if isinstance(span, dict) and is_delegated_executor(span.get("executor"))
+        if isinstance(span, dict)
+        and not _is_synthetic_primary_baseline(span)
+        and is_delegated_executor(span.get("executor"))
     ]
     classified = [
         span for span in delegated
@@ -222,6 +236,8 @@ def stats_by_arch_route(spans):
     grouped = {}
     for span in spans:
         if not isinstance(span, dict):
+            continue
+        if _is_synthetic_primary_baseline(span):
             continue
         executor = executor_family(span.get("executor"))
         if executor is None:

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.22.0...v0.22.1) (2026-08-10)
+
+
+### Performance
+
+* bound learning and harden fanout runtime ([#126](https://github.com/Opus-Aether-AI/legion-core/issues/126)) ([167e9fa](https://github.com/Opus-Aether-AI/legion-core/commit/167e9fa21a78c49eb8d87f461545a49b3e631802))
+
 ## [0.22.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.21.1...v0.22.0) (2026-08-10)
 
 

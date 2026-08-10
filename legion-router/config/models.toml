@@ -35,4 +35,4 @@ cursor_default      = "cursor-grok-4.5-high"          # Grok's ceiling (no xhigh
 cursor_composer     = "composer-2.5"                  # Cursor in-house; kept available but UNROUTED (no archetype)
 
 # ── opencode (harness kept; in-family GPT default for explicit --executor opencode) ──
-opencode_default    = "github-copilot/gpt-5.4"
+opencode_default    = "github-copilot/gpt-4.1"  # OpenCode 1.3 + Copilot-compatible default

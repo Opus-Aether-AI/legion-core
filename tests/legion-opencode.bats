@@ -112,6 +112,53 @@ make_test_repo() {
     [ "$status" -eq 0 ]
 }
 
+@test "legion-opencode: parses OpenCode 1.3 top-level text and step events" {
+    local repo; repo="$(make_test_repo current-stream)"
+    MOCK_OPENCODE_CURRENT_STREAM=1 run "$LEGION_OPENCODE" run --task "inspect" \
+        --repo "$repo" --sandbox read-only --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e --arg model "$OPENCODE_DEFAULT" '
+      .status == "ok"
+      and .model == $model
+      and .result == "OPENCODE_CURRENT_OUTPUT"
+      and .cost_usd == 0.013
+      and .usage.input_tokens == 300
+      and .usage.output_tokens == 40
+      and .usage.reasoning_output_tokens == 3
+      and .usage.cache_read_input_tokens == 20
+      and .usage.cache_creation_input_tokens == 10
+    '
+}
+
+@test "legion-opencode: a JSONL error event fails even when OpenCode exits zero" {
+    local repo; repo="$(make_test_repo error-event)"
+    MOCK_OPENCODE_ERROR_EVENT=1 run "$LEGION_OPENCODE" run --task "inspect" \
+        --repo "$repo" --sandbox read-only --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed"
+      and .opencode_exit == 0
+      and .opencode_error == "The requested model is not supported."
+      and (.result | contains("opencode error: The requested model is not supported."))
+    '
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .status"
+    [ "$output" = "failed" ]
+}
+
+@test "legion-opencode: an empty event stream is never reported as success" {
+    local repo; repo="$(make_test_repo empty-stream)"
+    MOCK_OPENCODE_EMPTY_STREAM=1 run "$LEGION_OPENCODE" run --task "inspect" \
+        --repo "$repo" --sandbox read-only --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "error"
+      and (.result | contains("no recognized JSONL events"))
+    '
+}
+
 @test "legion-opencode: read-only sandbox uses the plan agent and produces no diff" {
     local repo; repo="$(make_test_repo ro1)"
     run "$LEGION_OPENCODE" run --task "inspect only" --repo "$repo" --sandbox read-only --quiet

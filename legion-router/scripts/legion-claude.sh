@@ -46,7 +46,8 @@ emit_span() {
     jq -cn \
       --arg schema "legion.span.v1" --arg ts "$(_now)" \
       --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
-      --arg executor "$executor" --arg model "$model" --arg archetype "${LEGION_ARCHETYPE:-}" \
+      --arg executor "$executor" --arg model "$model" \
+      --arg archetype "${archetype:-${LEGION_ARCHETYPE:-}}" \
       --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
       --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
       --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
@@ -119,6 +120,7 @@ emit_terminal_json() {
 run_fallback() {
   local reason="$1" task="$2" model="$3" repo="$4" sandbox="$5" base="$6"
   local delegate_bin out rc fallback_status fallback_model fallback_usage fallback_cost fallback_result last_path
+  local -a fallback_args
   local fallback_art="$repo/.legion/runs/$RUN_ID"
   local fallback_wt="$repo/.legion/worktrees/$RUN_ID"
   local fallback_branch="legion/delegate-$RUN_ID"
@@ -141,13 +143,11 @@ run_fallback() {
       "$fallback_branch" "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
   fi
   set +e
-  if [[ "${QUIET:-0}" == "1" ]]; then
-    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" \
-      --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID" --quiet)"
-  else
-    out="$("$delegate_bin" run --model "$model" --task "$task" --repo "$repo" \
-      --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID")"
-  fi
+  fallback_args=(run --executor codex --model "$model" --task "$task" --repo "$repo"
+    --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID")
+  [[ -z "${archetype:-}" ]] || fallback_args+=(--archetype "$archetype")
+  [[ "${QUIET:-0}" != "1" ]] || fallback_args+=(--quiet)
+  out="$("$delegate_bin" "${fallback_args[@]}")"
   rc=$?
   set -e
 

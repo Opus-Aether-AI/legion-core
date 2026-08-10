@@ -12,7 +12,7 @@ Every Legion executor (the configured Claude, Codex, Cursor, and other provider 
 
 | Bin | What it does |
 |---|---|
-| `legion-report [--by executor\|model\|status] [--html]` | Per-group **cost / success-rate / p50-p95 latency** table (TUI or static HTML). The dashboard. |
+| `legion-report [--by executor\|model\|archetype\|status] [--html]` | Per-group **cost / success-rate / p50-p95 latency** table (TUI or static HTML), plus routing-classification coverage and unclassified spend. The dashboard. |
 | `legion-bench run --suite core --repo . [--strict]` | Run the Legion harness benchmark: deterministic trigger eval, routing policy, doctor checks, and fixture-backed task cases for session learning / self-learning memory. Writes artifacts under `$LEGION_BENCH_DIR` (default `~/.legion/projects/<repo-id>/bench`), emits a `legion-bench` span, and can record failed required cases with `--record-failures`. |
 | `legion-bench stable --suite stable --repo . [--repeat 3] [--strict]` | Run the comprehensive deterministic suite repeatedly and report min/mean/max score, per-dimension pass rates, total case-runs, and flakes. Use this as the stable PR/release gate before broad benchmark claims. |
 | `legion-bench corpus --corpus FILE --mode A --mode B --baseline A [--require-reliable]` | Run a real A/B task corpus across harness modes such as direct Codex, direct Claude, Cursor, `legion-delegate`, or `legion-orchestrate`. Reports per-mode pass rate, duration, cost/tokens from spans, baseline-vs-candidate lift, and sample-size reliability. Use this for proper performance numbers. |

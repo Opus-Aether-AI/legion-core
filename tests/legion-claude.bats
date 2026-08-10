@@ -27,16 +27,17 @@ make_test_repo() {
 @test "legion-claude: happy path uses claude and emits a claude span" {
     local repo; repo="$(make_test_repo ok1)"
     local context="$TEST_TMPDIR/context.log"
-    MOCK_CONTEXT_LOG="$context" run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    MOCK_CONTEXT_LOG="$context" run "$LEGION_CLAUDE" run --task "do the thing" \
+      --archetype final-review --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e '.executor == "claude"'
     echo "$output" | jq -e '.result == "CLAUDE_OK_OUTPUT"'
     echo "$output" | jq -e '.fell_back == false'
 
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '[.executor, .archetype] | @tsv'"
     [ "$status" -eq 0 ]
-    [ "$output" = "claude" ]
+    [ "$output" = $'claude\tfinal-review' ]
     grep -Eq '^claude active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
@@ -128,7 +129,7 @@ make_test_repo() {
     local repo; repo="$(make_test_repo fb1)"
     local base; base="$(git -C "$repo" rev-parse HEAD)"
     MOCK_CLAUDE_LIMIT=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
-        --sandbox read-only --base "$base" --quiet
+        --sandbox read-only --base "$base" --archetype final-review --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e '.executor == "codex"'
@@ -139,8 +140,13 @@ make_test_repo() {
       '[.[] | select(.executor == \"claude\" and .status == \"blocked\")] | length'"
     [ "$status" -eq 0 ]
     [ "$output" = "1" ]
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e \
+      'select(.executor == \"claude\" and .archetype == \"final-review\")'"
+    [ "$status" -eq 0 ]
     assert_mock_called legion-delegate "--sandbox read-only"
     assert_mock_called legion-delegate "--base $base"
+    assert_mock_called legion-delegate "--executor codex"
+    assert_mock_called legion-delegate "--archetype final-review"
 }
 
 @test "legion-claude: direct adapter refuses delegated executor context" {

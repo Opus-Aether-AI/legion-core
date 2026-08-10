@@ -180,13 +180,38 @@ def load_spans(spans_dir):
                         continue
                     if span.get("executor") not in DELEGATED_EXECUTORS:
                         continue
-                    archetype = span.get("archetype")
-                    if not isinstance(archetype, str) or not archetype.strip():
-                        continue
                     spans.append(span)
         except OSError:
             continue
     return spans
+
+
+def classification_summary(spans):
+    delegated = [
+        span for span in spans
+        if isinstance(span, dict) and span.get("executor") in DELEGATED_EXECUTORS
+    ]
+    classified = [
+        span for span in delegated
+        if isinstance(span.get("archetype"), str) and span["archetype"].strip()
+    ]
+    unclassified = [
+        span for span in delegated
+        if not (
+            isinstance(span.get("archetype"), str) and span["archetype"].strip()
+        )
+    ]
+    total = len(delegated)
+    return {
+        "delegated_runs": total,
+        "classified_runs": len(classified),
+        "unclassified_runs": len(unclassified),
+        "classification_rate": round(len(classified) / total, 4) if total else 0,
+        "unclassified_cost_usd": round(
+            sum(_nonnegative_num(span.get("cost_usd")) or 0.0 for span in unclassified),
+            6,
+        ),
+    }
 
 
 def _route_key(executor, model):
@@ -458,11 +483,12 @@ def _format_stats(stats):
     )
 
 
-def _build_payload(spans_dir, routing_file, proposals, min_samples):
+def _build_payload(spans_dir, routing_file, proposals, min_samples, classification):
     return {
         "spans_dir": os.path.expanduser(str(spans_dir)),
         "routing_file": os.path.expanduser(str(routing_file)),
         "min_samples": min_samples,
+        "classification": classification,
         "proposals": proposals,
     }
 
@@ -483,14 +509,27 @@ def main(argv=None):
         return 2
 
     proposals = optimize(spans, routing, min_samples=a.min_samples)
-    payload = _build_payload(a.spans, a.routing, proposals, a.min_samples)
+    classification = classification_summary(spans)
+    payload = _build_payload(
+        a.spans, a.routing, proposals, a.min_samples, classification
+    )
     note = "Advisory only: accepted proposals do not modify routing.toml."
+    unclassified_note = (
+        f'{classification["unclassified_runs"]} of '
+        f'{classification["delegated_runs"]} delegated runs are unclassified '
+        f'(${classification["unclassified_cost_usd"]:.4f}); '
+        "they cannot inform per-archetype routing proposals."
+    )
 
     if a.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
+        if classification["unclassified_runs"]:
+            sys.stderr.write(f"legion-optimize: {unclassified_note}\n")
         sys.stderr.write(f"{note}\n")
         return 0
 
+    if classification["unclassified_runs"]:
+        print(f"classification: {unclassified_note}")
     for archetype, proposal in payload["proposals"].items():
         current_executor = proposal.get("current_executor") or "-"
         proposed_executor = proposal.get("proposed_executor") or "-"

@@ -64,6 +64,21 @@ formats; any other prose remains an invalid, fail-closed verdict. `approve` and
 Requires the CLI for each executor you use, plus `jq` and `git`. The proxy
 additionally needs `bun`.
 
+## Tune routes from measured outcomes
+
+Use `legion-report --by archetype` to inspect cost, success, latency, and the
+share of delegated runs that carry a routing archetype. Then ask the advisory
+optimizer for Pareto-safe candidates:
+
+```bash
+legion-report --by archetype
+legion-optimize --json
+```
+
+The optimizer never edits `routing.toml`. Its `classification` summary reports
+how many delegated runs were excluded from per-archetype proposals and how much
+they cost, so explicit `--model` runs cannot silently bias or blind route tuning.
+
 `legion-intake` is intentionally one level above the provider. By default it runs
 `legion-delegate` (using the configured Codex route), but `--worker cursor` or
 `--worker custom --worker-bin ./path/to/runner` can swap in any runner that

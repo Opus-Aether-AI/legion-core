@@ -8,7 +8,7 @@ See everything Legion's multi-model runs do — per-executor **cost, success rat
 
 | Bin | Script | What it does |
 |---|---|---|
-| `legion-report` | `scripts/legion-report.sh` (+ `legion-aggregate.py`, `legion-render.py`) | Cost / success-rate / p50-p95 latency, grouped by executor/model/status, as a TUI table or `--html`. |
+| `legion-report` | `scripts/legion-report.sh` (+ `legion-aggregate.py`, `legion-render.py`) | Cost / success-rate / p50-p95 latency, grouped by executor/model/archetype/status, plus routing-classification coverage and unclassified spend, as a TUI table or `--html`. |
 | `legion-bench` | `scripts/legion-bench.py` | Harness Bench-style scorecards for Legion harness changes: deterministic `core`/`stable` suites, repeated-run flake detection, A/B `corpus` runs across harness modes, eval/route/doctor/fixture task cases, compare/gate commands, `learning-lift`, spans, and optional self-learning outcomes. |
 | `legion-trace` | `scripts/legion-telemetry.sh` | `emit` a validated span; `validate` a span file/stream. |
 | `legion-otel-export` | `scripts/legion-otel-export.py` | Map `legion.span.v1` → OTLP/HTTP; POST to `$OTEL_EXPORTER_OTLP_ENDPOINT` (no-op until set; `--dry-run` to preview). |
@@ -33,6 +33,7 @@ legion-bench corpus --corpus heldout-oss-36 --repo . --require-reliable --report
 legion-bench compare --baseline runs/base/run.json --candidate runs/new/run.json
 legion-bench gate --baseline runs/base/run.json --candidate runs/new/run.json
 legion-report --by model --html > report.html
+legion-report --by archetype     # expose unclassified runs/cost before tuning routes
 legion-state --repo . --field telemetry_dir
 cat "$(legion-state --repo . --field telemetry_dir)"/*.jsonl | legion-otel-export --dry-run | jq .
 legion-learn analyze --repo . --repo-only --json
@@ -61,6 +62,11 @@ legion-session-learn --repo . --show-evidence --query "review was interrupted"
 legion-trace emit --executor codex --model "$(legion-route --model-ref codex_workhorse)" --status ok \
   --cost 0.05 --duration-ms 1800 --tokens '{"input_tokens":12000}'
 ```
+
+`over_budget` delegations produced usable work and exit successfully, so reports
+and work-share accounting count them as successful while still preserving their
+distinct status. `legion-optimize --json` includes a `classification` summary;
+unclassified runs remain visible but cannot influence per-archetype proposals.
 
 ## The span contract
 

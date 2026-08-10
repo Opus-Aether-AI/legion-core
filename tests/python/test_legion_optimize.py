@@ -115,7 +115,7 @@ def test_propose_holds_when_current_is_already_cheapest_clearing_bar():
     assert got["reason"] == "already_optimal"
 
 
-def test_load_spans_filters_wrong_schema_self_executor_and_missing_archetype(tmp_path):
+def test_load_spans_keeps_unclassified_delegations_for_coverage(tmp_path):
     spans = tmp_path / "2026-06-15.jsonl"
     rows = [
         {
@@ -156,7 +156,63 @@ def test_load_spans_filters_wrong_schema_self_executor_and_missing_archetype(tmp
     ]
     spans.write_text("\n".join(json.dumps(row) for row in rows) + "\nNOT JSON\n")
     got = opt.load_spans(tmp_path)
-    assert got == [rows[0], rows[1]]
+    assert got == [rows[0], rows[1], rows[3]]
+
+
+def test_classification_summary_exposes_optimizer_blind_spot():
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "archetype": "implement-feature",
+            "status": "ok",
+            "cost_usd": 1.25,
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "claude",
+            "archetype": "",
+            "status": "failed",
+            "cost_usd": 2.5,
+        },
+    ]
+
+    assert opt.classification_summary(spans) == {
+        "delegated_runs": 2,
+        "classified_runs": 1,
+        "unclassified_runs": 1,
+        "classification_rate": 0.5,
+        "unclassified_cost_usd": 2.5,
+    }
+
+
+def test_main_json_reports_unclassified_runs_and_cost(tmp_path, capsys):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "2026-08-10.jsonl").write_text(
+        json.dumps(
+            {
+                "schema": "legion.span.v1",
+                "executor": "claude",
+                "archetype": "",
+                "model": "fixture-claude",
+                "status": "ok",
+                "cost_usd": 3.5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert opt.main([
+        "--spans", str(spans), "--routing", str(tmp_path / "missing.toml"), "--json"
+    ]) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["classification"]["unclassified_runs"] == 1
+    assert payload["classification"]["unclassified_cost_usd"] == 3.5
+    assert "cannot inform per-archetype routing proposals" in captured.err
 
 
 def test_load_routing_without_tomllib_uses_stdlib_fallback(monkeypatch):

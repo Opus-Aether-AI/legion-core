@@ -282,7 +282,7 @@ def test_optimize_skips_self_routing_and_includes_stats_only_arch():
     assert got["stats-only"]["proposed_model"] == "test-model-alpha"
 
 
-def test_optimize_does_not_accept_cross_executor_as_model_only_change():
+def test_optimize_excludes_cross_executor_from_model_only_ranking():
     spans = []
     for _ in range(5):
         spans.append(
@@ -314,7 +314,47 @@ def test_optimize_does_not_accept_cross_executor_as_model_only_change():
 
     assert proposal["current_executor"] == "codex"
     assert proposal["current_model"] == "test-model-alpha"
-    assert proposal["proposed_executor"] == "cursor"
-    assert proposal["proposed_model"] == "test-model-composer"
+    assert proposal["proposed_executor"] == "codex"
+    assert proposal["proposed_model"] == "test-model-alpha"
     assert proposal["decision"] == "hold"
-    assert proposal["reason"] == "executor_switch_unsupported"
+    assert proposal["reason"] == "already_optimal"
+
+
+def test_cross_executor_candidate_cannot_hide_same_executor_pareto_win():
+    stats = {
+        "codex:test-model-beta": {
+            "executor": "codex",
+            "model": "test-model-beta",
+            "runs": 8,
+            "success_rate": 0.9,
+            "mean_cost": 1.0,
+            "p50_ms": 100,
+            "p95_ms": 200,
+        },
+        "codex:test-model-alpha": {
+            "executor": "codex",
+            "model": "test-model-alpha",
+            "runs": 8,
+            "success_rate": 0.9,
+            "mean_cost": 0.5,
+            "p50_ms": 90,
+            "p95_ms": 180,
+        },
+        "opencode:test-model-opencode": {
+            "executor": "opencode",
+            "model": "test-model-opencode",
+            "runs": 8,
+            "success_rate": 0.9,
+            "mean_cost": 0.1,
+            "p50_ms": 80,
+            "p95_ms": 160,
+        },
+    }
+
+    proposal = opt.propose(
+        stats, "test-model-beta", current_executor="codex"
+    )
+
+    assert proposal["decision"] == "accept"
+    assert proposal["proposed_executor"] == "codex"
+    assert proposal["proposed_model"] == "test-model-alpha"

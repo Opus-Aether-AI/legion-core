@@ -363,6 +363,15 @@ def propose(
     current = stats_for_arch.get(current_route) if current_route else None
     quality_bar = None
     eligible = _eligible_routes(stats_for_arch, min_samples)
+    if current_executor and not allow_executor_switch:
+        # A model-only proposal cannot change harnesses. Exclude unsupported
+        # executor routes before establishing the quality bar or ranking by cost,
+        # otherwise a cheaper cross-executor route can hide a valid in-family win.
+        eligible = {
+            route: stats
+            for route, stats in eligible.items()
+            if stats.get("executor") == current_executor
+        }
 
     if current is not None:
         quality_bar = round(current["success_rate"] - bar_slack, 4)

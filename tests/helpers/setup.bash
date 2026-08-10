@@ -28,6 +28,10 @@ setup_test_env() {
     # deterministic no matter which harness the suite runs under (a Codex/opencode
     # session would otherwise flip the resolved primary and its baseline label).
     export LEGION_PRIMARY=claude
+    # Drop ambient GitHub credentials. A developer shell usually exports one and
+    # CI usually does not, which silently changes which release-lookup path the
+    # installer takes; tests that need a token export their own.
+    unset GITHUB_TOKEN GH_TOKEN
     # Independent fixture for the curl/gh API mocks — survives even when tests
     # delete the source clone (e.g., "fetch_plugins falls back to raw GitHub")
     export MOCK_GH_FIXTURE="$TEST_TMPDIR/mock-gh-marketplace.json"

@@ -558,6 +558,40 @@ SH
     [[ "$output" == *"must be an exact v-prefixed semantic version tag"* ]]
 }
 
+@test "install resolves a private repository release with GITHUB_TOKEN" {
+    export MOCK_RELEASE_REQUIRE_AUTH=1
+    export MOCK_RELEASE_TAG=v9.9.9
+    export GITHUB_TOKEN=test-token
+
+    run bash "$INSTALL_SH" --resolve-latest-release
+    [ "$status" -eq 0 ]
+    [[ "$output" == "v9.9.9" ]]
+    assert_mock_called curl "Authorization: Bearer test-token"
+}
+
+@test "install falls back to the gh CLI token for a private repository" {
+    export MOCK_RELEASE_REQUIRE_AUTH=1
+    export MOCK_RELEASE_TAG=v9.9.9
+    export MOCK_GH_AUTH_TOKEN=gh-cli-token
+    unset GITHUB_TOKEN GH_TOKEN
+
+    run bash "$INSTALL_SH" --resolve-latest-release
+    [ "$status" -eq 0 ]
+    [[ "$output" == "v9.9.9" ]]
+    assert_mock_called curl "Authorization: Bearer gh-cli-token"
+}
+
+@test "install separates an unreachable lookup from an absent stable release" {
+    export MOCK_RELEASE_REQUIRE_AUTH=1
+    unset GITHUB_TOKEN GH_TOKEN
+
+    run bash "$INSTALL_SH" all --no-claude --no-cross-harness --no-cron
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Could not reach the latest stable release"* ]]
+    [[ "$output" == *"private repository"* ]]
+    [[ "$output" != *"Could not resolve latest stable GitHub release"* ]]
+}
+
 @test "install rejects invalid explicit SemVer before using it as a Git ref" {
     LEGION_REF=v01.2.3 run bash "$INSTALL_SH" all --no-claude --no-cross-harness --no-cron
     [ "$status" -eq 2 ]

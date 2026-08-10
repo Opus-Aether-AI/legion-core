@@ -9,6 +9,14 @@ echo "curl $*" >> "${MOCK_CALL_LOG:-/dev/null}"
 url="${!#}"
 case "$url" in
     *"/releases/latest")
+        # A private repository answers anonymous requests with 404, which curl
+        # -f surfaces as exit 22 and no body. MOCK_RELEASE_REQUIRE_AUTH=1
+        # reproduces that so the authenticated lookup can be tested.
+        if [ "${MOCK_RELEASE_REQUIRE_AUTH:-0}" = "1" ] \
+            && [[ "$*" != *"Authorization: Bearer "* ]]; then
+            echo "mock curl: 404 (private repository, unauthenticated)" >&2
+            exit 22
+        fi
         if [ -n "${MOCK_RELEASE_RESPONSE:-}" ]; then
             printf '%s\n' "$MOCK_RELEASE_RESPONSE"
         else

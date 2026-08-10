@@ -78,6 +78,61 @@ is_v_semver() {
     [[ "${1:-}" =~ $pattern ]]
 }
 
+# ── GitHub release lookup ────────────────────────────────────────────
+# curl is the transport on every path, so a single network stub covers the whole
+# lookup and the installer keeps working with nothing but curl on PATH.
+github_release_fetch() {
+    local repo="$1" token="${2:-}"
+    if [ -n "$token" ]; then
+        curl -fsSL -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null
+        return
+    fi
+    curl -fsSL -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null
+}
+
+# A private MARKETPLACE_REPO answers anonymous release requests with 404, so an
+# unauthenticated lookup cannot tell "no release" apart from "not allowed to see
+# it". Escalate only as far as each repository actually needs: an environment
+# token when one is exported, then anonymous access, and the gh CLI's stored
+# credential only once anonymous access has already failed. That ordering keeps
+# the public path free of any gh invocation.
+github_release_json() {
+    local repo="$1" body env_token gh_token
+    env_token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [ -n "$env_token" ] && body="$(github_release_fetch "$repo" "$env_token")"; then
+        printf '%s' "$body"
+        return 0
+    fi
+    if body="$(github_release_fetch "$repo")"; then
+        printf '%s' "$body"
+        return 0
+    fi
+    command -v gh >/dev/null 2>&1 || return 0
+    gh_token="$(gh auth token 2>/dev/null || true)"
+    [ -n "$gh_token" ] || return 0
+    github_release_fetch "$repo" "$gh_token" || true
+}
+
+# Prints the latest stable release tag. Exit 3 means the lookup never reached a
+# release (network failure, or a private repository answering 404 anonymously);
+# exit 4 means the repository answered but exposes no stable release. Keeping
+# those apart is what makes the operator-facing advice correct.
+RELEASE_LOOKUP_UNREACHABLE=3
+RELEASE_LOOKUP_NO_STABLE=4
+resolve_latest_release_tag() {
+    local repo="${1:-$MARKETPLACE_REPO}" release_json tag
+    release_json="$(github_release_json "$repo")"
+    [ -n "$release_json" ] || return "$RELEASE_LOOKUP_UNREACHABLE"
+    tag="$(printf '%s' "$release_json" \
+        | jq -r 'select(type == "object" and .draft == false and .prerelease == false) | .tag_name // empty' \
+            2>/dev/null || true)"
+    [ -n "$tag" ] || return "$RELEASE_LOOKUP_NO_STABLE"
+    printf '%s\n' "$tag"
+}
+
 # ── Flag parsing ─────────────────────────────────────────────────────
 DO_CLAUDE=1
 DO_CROSS_HARNESS=1
@@ -104,6 +159,8 @@ for arg in "$@"; do
         --validate-release-tag=*)
                              MODE="validate-release-tag"
                              VALIDATE_RELEASE_TAG="${arg#*=}" ;;
+        --resolve-latest-release)
+                             MODE="resolve-latest-release" ;;
         --refresh-symlinks)  MODE="refresh-symlinks" ;;
         -h|--help|help)      MODE="help" ;;
         --list|-l|list)      MODE="list" ;;
@@ -135,12 +192,16 @@ preflight() {
 
 resolve_marketplace_ref() {
     if [ -z "$MARKETPLACE_REF" ]; then
-        # `|| true` keeps lookup failures under our explicit fail-closed handling.
-        local release_json
-        release_json="$(curl -fsSL "https://api.github.com/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null || true)"
-        MARKETPLACE_REF="$(printf '%s' "$release_json" \
-            | jq -r 'select(type == "object" and .draft == false and .prerelease == false) | .tag_name // empty' \
-                2>/dev/null || true)"
+        # `|| lookup_status=$?` keeps the failure under our fail-closed handling
+        # instead of letting `set -e` abort with no operator-facing advice.
+        local lookup_status=0
+        MARKETPLACE_REF="$(resolve_latest_release_tag "$MARKETPLACE_REPO")" || lookup_status=$?
+        if [ "$lookup_status" = "$RELEASE_LOOKUP_UNREACHABLE" ]; then
+            red "Could not reach the latest stable release of ${MARKETPLACE_REPO}."
+            dim "  A private repository answers anonymous requests with 404. Authenticate with"
+            dim "  'gh auth login' or export GITHUB_TOKEN, or set LEGION_REF explicitly to override."
+            exit 2
+        fi
     fi
     if [ -z "$MARKETPLACE_REF" ]; then
         red "Could not resolve latest stable GitHub release; set LEGION_REF explicitly to override."
@@ -715,6 +776,15 @@ case "$MODE" in
         fi
         red "Release tag must be an exact v-prefixed semantic version."
         exit 2
+        ;;
+    resolve-latest-release)
+        # Shared with refresh.sh so the authenticated lookup lives in one place.
+        # The unreachable/no-stable exit codes are propagated verbatim.
+        resolve_status=0
+        resolved_tag="$(resolve_latest_release_tag "$MARKETPLACE_REPO")" || resolve_status=$?
+        [ "$resolve_status" = "0" ] || exit "$resolve_status"
+        printf '%s\n' "$resolved_tag"
+        exit 0
         ;;
     list)             preflight; resolve_marketplace_ref; print_list; exit 0 ;;
     refresh-symlinks) refresh_symlinks_only; exit 0 ;;

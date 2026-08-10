@@ -60,6 +60,28 @@ setup() {
     [[ "$output" == *"must be an exact v-prefixed semantic version tag"* ]]
 }
 
+@test "refresh.sh resolves a private repository release with GITHUB_TOKEN" {
+    make_source_clone marketplace-minimal.json
+    export MOCK_RELEASE_REQUIRE_AUTH=1
+    export GITHUB_TOKEN=test-token
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    assert_mock_called curl "Authorization: Bearer test-token"
+}
+
+@test "refresh.sh reports an unreachable release lookup as an auth problem" {
+    make_source_clone marketplace-minimal.json
+    export MOCK_RELEASE_REQUIRE_AUTH=1
+    unset GITHUB_TOKEN GH_TOKEN
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"could not reach the latest stable release"* ]]
+    [[ "$output" == *"gh auth login"* ]]
+    [[ "$output" != *"must be an exact v-prefixed semantic version tag"* ]]
+}
+
 @test "refresh.sh rejects invalid explicit SemVer before using it as a Git ref" {
     make_source_clone marketplace-minimal.json
 

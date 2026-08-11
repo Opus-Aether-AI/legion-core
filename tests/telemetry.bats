@@ -27,6 +27,20 @@ setup() {
   echo "$output" | jq -e '.task=="do x" and .trace_id=="T1" and .parent_id=="P1" and .artifacts.diff=="d"'
 }
 
+@test "telemetry: emit carries an explicit routing archetype" {
+  run "$TEL" emit --executor codex --model fixture-codex --status ok \
+    --archetype implement-feature
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.archetype == "implement-feature"'
+}
+
+@test "telemetry: emit inherits LEGION_ARCHETYPE when no flag is supplied" {
+  LEGION_ARCHETYPE=write-tests run "$TEL" emit \
+    --executor opencode --model fixture-opencode --status ok
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.archetype == "write-tests"'
+}
+
 @test "telemetry: emit carries harness target metadata" {
   run "$TEL" emit --executor codex --model fixture-codex --status blocked \
     --target-type command --target-name feature
@@ -80,6 +94,11 @@ setup() {
   run bash -c "printf '%s\n' '{\"schema\":\"legion.span.v1\",\"ts\":\"t\",\"run_id\":\"r\",\"executor\":\"e\",\"model\":\"m\",\"status\":\"ok\",\"duration_ms\":-1,\"cost_usd\":0}' | '$TEL' validate -"
   [ "$status" -eq 1 ]
   run bash -c "printf '%s\n' '{\"schema\":\"legion.span.v1\",\"ts\":\"t\",\"run_id\":\"r\",\"executor\":\"e\",\"model\":\"m\",\"status\":\"ok\",\"duration_ms\":1,\"cost_usd\":-0.1}' | '$TEL' validate -"
+  [ "$status" -eq 1 ]
+}
+
+@test "telemetry: validate rejects a non-string archetype" {
+  run bash -c "printf '%s\n' '{\"schema\":\"legion.span.v1\",\"ts\":\"t\",\"run_id\":\"r\",\"executor\":\"codex\",\"model\":\"m\",\"archetype\":7,\"status\":\"ok\"}' | '$TEL' validate -"
   [ "$status" -eq 1 ]
 }
 

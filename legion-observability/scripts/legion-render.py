@@ -28,22 +28,41 @@ def _fmt_pct(value):
 
 def tui(d):
     g, t, by = d.get("groups", {}), d.get("total", {}), d.get("by", "executor")
+    classification = d.get("classification", {})
     out = [f"Legion — by {by}"]
-    out.append(f'{by.upper():<22}{"RUNS":>6}{"OK":>5}{"SUCCESS":>9}{"COST$":>12}{"P50ms":>9}{"P95ms":>9}')
+    out.append(f'{by.upper():<22}{"RUNS":>6}{"USABLE":>8}{"SUCCESS":>9}{"COST$":>12}{"P50ms":>9}{"P95ms":>9}')
     for k, v in sorted(g.items()):
         out.append(
-            f'{k:<22}{v.get("count",0):>6}{v.get("ok",0):>5}{v.get("success_rate",0)*100:>8.1f}%'
+            f'{k:<22}{v.get("count",0):>6}{v.get("ok",0):>8}{v.get("success_rate",0)*100:>8.1f}%'
             f'{v.get("cost_usd",0):>12.4f}{v.get("p50_ms",0):>9.0f}{v.get("p95_ms",0):>9.0f}'
         )
     out.append(
-        f'{"TOTAL":<22}{t.get("count",0):>6}{t.get("ok",0):>5}'
+        f'{"TOTAL":<22}{t.get("count",0):>6}{t.get("ok",0):>8}'
         f'{t.get("success_rate",0)*100:>8.1f}%{t.get("cost_usd",0):>12.4f}'
     )
+    if classification.get("delegated_runs", 0):
+        out.append(
+            "Routing classification: "
+            f'{classification.get("classified_runs", 0)}/'
+            f'{classification.get("delegated_runs", 0)} '
+            f'({_fmt_pct(classification.get("classification_rate", 0))}); '
+            f'unclassified cost {_fmt_money(classification.get("unclassified_cost_usd", 0))}'
+        )
     return "\n".join(out)
 
 
 def to_html(d):
     g, t, by = d.get("groups", {}), d.get("total", {}), d.get("by", "executor")
+    classification = d.get("classification", {})
+    classification_metrics = ""
+    if classification.get("delegated_runs", 0):
+        classification_metrics = (
+            '<div class="metric"><span>Routing classification</span><strong>'
+            f'{_fmt_pct(classification.get("classification_rate", 0))}'
+            '</strong></div><div class="metric"><span>Unclassified cost</span><strong>'
+            f'{_fmt_money(classification.get("unclassified_cost_usd", 0))}'
+            "</strong></div>"
+        )
     rows = []
     for k, v in sorted(g.items()):
         rate = _num(v.get("success_rate", 0))
@@ -103,7 +122,7 @@ def to_html(d):
     .hero p:last-child {{ max-width: 720px; margin: 8px 0 0; color: var(--muted); }}
     .metric-grid {{
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
       gap: 12px;
       margin-bottom: 16px;
     }}
@@ -164,6 +183,7 @@ def to_html(d):
       <div class="metric"><span>Successful runs</span><strong>{_fmt_int(t.get("ok", 0))}</strong></div>
       <div class="metric"><span>Success rate</span><strong>{_fmt_pct(t.get("success_rate", 0))}</strong></div>
       <div class="metric"><span>Total cost</span><strong>{_fmt_money(t.get("cost_usd", 0))}</strong></div>
+      {classification_metrics}
     </section>
     <section class="panel">
       <div class="panel-header">
@@ -173,7 +193,7 @@ def to_html(d):
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>{html.escape(str(by))}</th><th>runs</th><th>ok</th><th>success</th><th>cost</th><th>p50 ms</th><th>p95 ms</th></tr>
+            <tr><th>{html.escape(str(by))}</th><th>runs</th><th>usable</th><th>success</th><th>cost</th><th>p50 ms</th><th>p95 ms</th></tr>
           </thead>
           <tbody>{''.join(rows)}</tbody>
           <tfoot>

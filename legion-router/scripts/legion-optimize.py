@@ -28,10 +28,10 @@ sys.path.insert(
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "legion-observability", "scripts")),
 )
 import legion_state  # noqa: E402
+from legion_executor_registry import executor_family, is_delegated_executor  # noqa: E402
 
 SPAN_SCHEMA = "legion.span.v1"
 SUCCESS_STATUSES = {"ok", "over_budget"}
-DELEGATED_EXECUTORS = {"codex", "cursor", "claude"}
 DEFAULT_SPANS_DIR = legion_state.resolve_state(os.getcwd())["telemetry_dir"]
 DEFAULT_ROUTING_FILE = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "config", "routing.toml"))
@@ -160,8 +160,31 @@ def _nonnegative_num(value):
     return value if value >= 0 else None
 
 
-def load_spans(spans_dir):
+def _is_synthetic_primary_baseline(span):
+    artifacts = span.get("artifacts") or {}
+    if not isinstance(artifacts, dict):
+        return False
+    return (
+        artifacts.get("synthetic_opus_baseline") is True
+        or artifacts.get("synthetic_primary_baseline") is True
+    )
+
+
+def _classification_payload(delegated, classified, unclassified, unclassified_cost):
+    return {
+        "delegated_runs": delegated,
+        "classified_runs": classified,
+        "unclassified_runs": unclassified,
+        "classification_rate": round(classified / delegated, 4) if delegated else 0,
+        "unclassified_cost_usd": round(unclassified_cost, 6),
+    }
+
+
+def load_spans(spans_dir, *, with_classification=False):
+    """Load only rankable spans while streaming unclassified coverage counters."""
     spans = []
+    delegated = classified = unclassified = 0
+    unclassified_cost = 0.0
     pattern = os.path.join(os.path.expanduser(str(spans_dir)), "*.jsonl")
     for path in sorted(glob.glob(pattern)):
         try:
@@ -178,15 +201,46 @@ def load_spans(spans_dir):
                         continue
                     if span.get("schema") != SPAN_SCHEMA:
                         continue
-                    if span.get("executor") not in DELEGATED_EXECUTORS:
+                    if _is_synthetic_primary_baseline(span):
                         continue
+                    if not is_delegated_executor(span.get("executor")):
+                        continue
+                    delegated += 1
                     archetype = span.get("archetype")
-                    if not isinstance(archetype, str) or not archetype.strip():
-                        continue
-                    spans.append(span)
+                    if isinstance(archetype, str) and archetype.strip():
+                        classified += 1
+                        spans.append(span)
+                    else:
+                        unclassified += 1
+                        unclassified_cost += _nonnegative_num(span.get("cost_usd")) or 0.0
         except OSError:
             continue
-    return spans
+    classification = _classification_payload(
+        delegated, classified, unclassified, unclassified_cost
+    )
+    return (spans, classification) if with_classification else spans
+
+
+def classification_summary(spans):
+    delegated = classified = unclassified = 0
+    unclassified_cost = 0.0
+    for span in spans:
+        if (
+            not isinstance(span, dict)
+            or _is_synthetic_primary_baseline(span)
+            or not is_delegated_executor(span.get("executor"))
+        ):
+            continue
+        delegated += 1
+        archetype = span.get("archetype")
+        if isinstance(archetype, str) and archetype.strip():
+            classified += 1
+        else:
+            unclassified += 1
+            unclassified_cost += _nonnegative_num(span.get("cost_usd")) or 0.0
+    return _classification_payload(
+        delegated, classified, unclassified, unclassified_cost
+    )
 
 
 def _route_key(executor, model):
@@ -198,8 +252,10 @@ def stats_by_arch_route(spans):
     for span in spans:
         if not isinstance(span, dict):
             continue
-        executor = span.get("executor")
-        if executor not in DELEGATED_EXECUTORS:
+        if _is_synthetic_primary_baseline(span):
+            continue
+        executor = executor_family(span.get("executor"))
+        if executor is None:
             continue
         archetype = span.get("archetype")
         model = span.get("model")
@@ -338,6 +394,15 @@ def propose(
     current = stats_for_arch.get(current_route) if current_route else None
     quality_bar = None
     eligible = _eligible_routes(stats_for_arch, min_samples)
+    if current_executor and not allow_executor_switch:
+        # A model-only proposal cannot change harnesses. Exclude unsupported
+        # executor routes before establishing the quality bar or ranking by cost,
+        # otherwise a cheaper cross-executor route can hide a valid in-family win.
+        eligible = {
+            route: stats
+            for route, stats in eligible.items()
+            if stats.get("executor") == current_executor
+        }
 
     if current is not None:
         quality_bar = round(current["success_rate"] - bar_slack, 4)
@@ -458,11 +523,12 @@ def _format_stats(stats):
     )
 
 
-def _build_payload(spans_dir, routing_file, proposals, min_samples):
+def _build_payload(spans_dir, routing_file, proposals, min_samples, classification):
     return {
         "spans_dir": os.path.expanduser(str(spans_dir)),
         "routing_file": os.path.expanduser(str(routing_file)),
         "min_samples": min_samples,
+        "classification": classification,
         "proposals": proposals,
     }
 
@@ -476,21 +542,33 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     try:
-        spans = load_spans(a.spans)
+        spans, classification = load_spans(a.spans, with_classification=True)
         routing = load_routing(a.routing)
     except (OSError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"legion-optimize: {e}\n")
         return 2
 
     proposals = optimize(spans, routing, min_samples=a.min_samples)
-    payload = _build_payload(a.spans, a.routing, proposals, a.min_samples)
+    payload = _build_payload(
+        a.spans, a.routing, proposals, a.min_samples, classification
+    )
     note = "Advisory only: accepted proposals do not modify routing.toml."
+    unclassified_note = (
+        f'{classification["unclassified_runs"]} of '
+        f'{classification["delegated_runs"]} delegated runs are unclassified '
+        f'(${classification["unclassified_cost_usd"]:.4f}); '
+        "they cannot inform per-archetype routing proposals."
+    )
 
     if a.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
+        if classification["unclassified_runs"]:
+            sys.stderr.write(f"legion-optimize: {unclassified_note}\n")
         sys.stderr.write(f"{note}\n")
         return 0
 
+    if classification["unclassified_runs"]:
+        print(f"classification: {unclassified_note}")
     for archetype, proposal in payload["proposals"].items():
         current_executor = proposal.get("current_executor") or "-"
         proposed_executor = proposal.get("proposed_executor") or "-"

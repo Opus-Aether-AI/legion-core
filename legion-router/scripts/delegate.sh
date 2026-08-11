@@ -389,7 +389,11 @@ emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
   mkdir -p "$LEGION_TELEMETRY_DIR"
   case "$executor" in
-    codex*) [[ "$status" == "ok" ]] && emit_primary_baseline_span "$executor" "$model" "$task" ;;
+    codex*)
+      case "$status" in
+        ok|over_budget) emit_primary_baseline_span "$executor" "$model" "$task" ;;
+      esac
+      ;;
   esac
   # Trace context: a parent orchestrator (e.g. legion-fanout) exports
   # LEGION_TRACE_ID + LEGION_PARENT_ID so sibling delegate spans hang under one
@@ -958,6 +962,7 @@ cmd_run() {
   done
   model="$used_model"
   printf '%s\n' "$used_model" > "$art/model.txt"   # persisted so `resume` inherits it (M2)
+  printf '%s\n' "$archetype" > "$art/archetype.txt"
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 
   local thread_id usage cost filtered_err error_log
@@ -1376,7 +1381,7 @@ cmd_review() {
 
 # ── resume (continue a kept codex session for iterative refinement) ──
 cmd_resume() {
-  local run="" task="" model="" repo="$PWD" effort=""
+  local run="" task="" model="" repo="$PWD" effort="" archetype=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --run) run="$2"; shift 2 ;;
@@ -1395,6 +1400,33 @@ cmd_resume() {
   scan_task_text "$task"
   local art="$repo/.legion/runs/$run"
   [[ -d "$art" ]] || die "resume: no run '$run' under $repo/.legion/runs"
+  if [[ -f "$art/archetype.txt" ]]; then
+    archetype="$(cat "$art/archetype.txt")"
+  else
+    # Compatibility for kept runs created before archetype.txt was persisted.
+    archetype="$(jq -r '.archetype // empty' \
+      "$LEGION_REGISTRY_DIR/$run.json" 2>/dev/null || true)"
+    if [[ -z "$archetype" ]]; then
+      # Registry retention is shorter than kept-run artifact retention. Recover
+      # the original route label from durable span history after registry pruning.
+      archetype="$(
+        for telemetry_file in "$LEGION_TELEMETRY_DIR"/*.jsonl; do
+          [[ -f "$telemetry_file" && -r "$telemetry_file" ]] || continue
+          # Parse files independently so a disappearing or unreadable history
+          # file cannot prevent recovery from a later daily log.
+          jq -Rr --arg run "$run" '
+            fromjson?
+            | select(.schema == "legion.span.v1" and .run_id == $run)
+            | (.archetype // empty)
+            | select(type == "string" and length > 0)
+          ' "$telemetry_file" 2>/dev/null || true
+        done | tail -n 1
+      )"
+    fi
+    if [[ -n "$archetype" && ! -L "$art/archetype.txt" ]]; then
+      printf '%s\n' "$archetype" > "$art/archetype.txt"
+    fi
+  fi
   local wt="$repo/.legion/worktrees/$run"
   [[ -d "$wt" ]] || die "resume: worktree for '$run' is gone — the original run must use --keep to be resumable"
   local thread_id; thread_id="$(codex_thread_id "$art/stream.jsonl")"
@@ -1441,10 +1473,13 @@ cmd_resume() {
     "$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" '{worktree:$wt, diff:$diff}')"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
 
-  jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \
+  jq -cn --arg status "$status" --arg model "$model" --arg archetype "$archetype" \
+    --arg thread "$thread_id" \
     --arg wt "$wt" --arg diff "$art/diff.patch" --arg run "$run" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" '
-    {run_id:$run, status:$status, model:$model, thread_id:$thread, worktree:$wt, diff_path:$diff, usage:$usage, cost_usd:$cost}'
+    {run_id:$run, status:$status, model:$model,
+     archetype:(if $archetype=="" then null else $archetype end),
+     thread_id:$thread, worktree:$wt, diff_path:$diff, usage:$usage, cost_usd:$cost}'
   [[ "$status" == "ok" ]] || exit 1
 }
 

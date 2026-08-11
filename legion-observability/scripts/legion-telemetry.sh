@@ -5,7 +5,7 @@
 #   legion-trace emit --executor codex --model "$(legion-route --model-ref codex_workhorse)" --status ok \
 #       [--run-id ID] [--trace-id ID] [--parent-id ID] [--cost 0.01] \
 #       [--duration-ms 1200] [--task "..."] [--tokens '{...}'] [--artifacts '{...}']
-#       [--target-type command --target-name feature]
+#       [--archetype implement-feature] [--target-type command --target-name feature]
 #   legion-trace validate <file|->     # exit 1 if any line isn't a valid span
 #
 # Spans append to $LEGION_TELEMETRY_DIR/<date>.jsonl.
@@ -22,6 +22,7 @@ _today() { date -u +%Y-%m-%d; }
 
 emit() {
   local executor="" model="" status="" run_id="" task="" trace_id="" parent_id=""
+  local archetype="${LEGION_ARCHETYPE:-}"
   local target_type="${LEGION_TARGET_TYPE:-}" target_name="${LEGION_TARGET_NAME:-}"
   local cost=0 dur=0 tokens="{}" artifacts="{}"
   while [[ $# -gt 0 ]]; do
@@ -33,6 +34,7 @@ emit() {
       --task)        task="$2"; shift 2 ;;
       --trace-id)    trace_id="$2"; shift 2 ;;
       --parent-id)   parent_id="$2"; shift 2 ;;
+      --archetype)   archetype="$2"; shift 2 ;;
       --cost)        cost="$2"; shift 2 ;;
       --duration-ms) dur="$2"; shift 2 ;;
       --tokens)      tokens="$2"; shift 2 ;;
@@ -50,13 +52,16 @@ emit() {
   local span
   span="$(jq -cn \
     --arg ts "$(_now)" --arg run "$run_id" --arg trace "$trace_id" --arg parent "$parent_id" \
-    --arg ex "$executor" --arg model "$model" --arg task "$task" --arg status "$status" \
+    --arg ex "$executor" --arg model "$model" --arg archetype "$archetype" \
+    --arg task "$task" --arg status "$status" \
     --arg target_type "$target_type" --arg target_name "$target_name" \
     --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
     --argjson tokens "$tokens" --argjson artifacts "$artifacts" '
     {schema:"legion.span.v1", ts:$ts, run_id:$run, trace_id:$trace,
      parent_id:(if $parent=="" then null else $parent end),
-     executor:$ex, model:$model, task:$task, status:$status,
+     executor:$ex, model:$model,
+     archetype:(if $archetype=="" then null else $archetype end),
+     task:$task, status:$status,
      target_type:(if $target_type=="" then null else $target_type end),
      target_name:(if $target_name=="" then null else $target_name end),
      duration_ms:$dur, cost_usd:$cost, tokens:$tokens, artifacts:$artifacts}')"
@@ -80,6 +85,7 @@ validate() {
 	        and (.run_id | type == "string")
 	        and (.executor | type == "string")
 	        and (.model | type == "string")
+	        and ((.archetype == null) or (.archetype | type == "string"))
 	        and (.status | IN("ok", "failed", "error", "over_budget", "blocked"))
 	        and ((.duration_ms // 0) | type == "number" and . >= 0)
 	        and ((.cost_usd // 0) | type == "number" and . >= 0)

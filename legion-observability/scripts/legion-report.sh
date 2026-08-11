@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # legion-report — per-executor cost / success / latency from telemetry spans.
-#   legion-report [--by executor|model|status] [--html] [--json] [--trace latest|TRACE_ID]
+#   legion-report [--by executor|model|archetype|status] [--html] [--json] [--trace latest|TRACE_ID]
 set -euo pipefail
 
 _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
     --html) do_html=1; shift ;;
     --json) do_json=1; shift ;;
     --trace) trace="$2"; shift 2 ;;
-    -h|--help) echo "usage: legion-report [open|path latest] [--by executor|model|status] [--html] [--json] [--trace latest|TRACE_ID]"; exit 0 ;;
+    -h|--help) echo "usage: legion-report [open|path latest] [--by executor|model|archetype|status] [--html] [--json] [--trace latest|TRACE_ID]"; exit 0 ;;
     *) echo "legion-report: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done

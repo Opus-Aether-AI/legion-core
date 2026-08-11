@@ -54,6 +54,106 @@ def test_aggregate_by_model_and_status():
     assert "ok" in agg.aggregate(spans, by="status")["groups"]
 
 
+def test_aggregate_by_archetype_surfaces_unclassified_delegations():
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "archetype": "implement-feature",
+            "status": "ok",
+            "cost_usd": 1.0,
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "claude",
+            "status": "ok",
+            "cost_usd": 2.0,
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "legion-bench",
+            "status": "ok",
+            "cost_usd": 0.0,
+        },
+    ]
+
+    result = agg.aggregate(spans, by="archetype")
+
+    assert set(result["groups"]) == {"implement-feature", "unclassified", "not_applicable"}
+    assert result["groups"]["unclassified"]["cost_usd"] == 2.0
+    assert result["classification"] == {
+        "delegated_runs": 2,
+        "classified_runs": 1,
+        "unclassified_runs": 1,
+        "classification_rate": 0.5,
+        "unclassified_cost_usd": 2.0,
+    }
+
+
+def test_classification_covers_registered_executor_families_and_codex_modes():
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": executor,
+            "status": "ok",
+            "cost_usd": 1.0,
+        }
+        for executor in ("codex-review", "codex-resume", "opencode")
+    ]
+
+    result = agg.aggregate(spans, by="archetype")
+
+    assert result["groups"]["unclassified"]["count"] == 3
+    assert result["classification"] == {
+        "delegated_runs": 3,
+        "classified_runs": 0,
+        "unclassified_runs": 3,
+        "classification_rate": 0.0,
+        "unclassified_cost_usd": 3.0,
+    }
+
+
+def test_aggregate_folds_classification_into_grouping_pass(monkeypatch):
+    def unexpected_second_pass(_spans):
+        raise AssertionError("aggregate should not call classification_summary")
+
+    monkeypatch.setattr(agg, "classification_summary", unexpected_second_pass)
+
+    result = agg.aggregate([
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "archetype": "fix-bug",
+            "status": "ok",
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "claude",
+            "status": "failed",
+            "cost_usd": 2.0,
+        },
+    ])
+
+    assert result["classification"]["classification_rate"] == 0.5
+
+
+def test_over_budget_usable_work_counts_as_success():
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "status": "over_budget",
+            "cost_usd": 0.5,
+        }
+    ]
+
+    result = agg.aggregate(spans)
+
+    assert result["groups"]["codex"]["ok"] == 1
+    assert result["groups"]["codex"]["success_rate"] == 1.0
+    assert result["total"]["success_rate"] == 1.0
+
+
 def test_aggregate_ignores_synthetic_opus_baselines():
     spans = [
         {"schema": "legion.span.v1", "executor": "codex", "model": "test-model-alpha", "status": "ok"},
@@ -82,3 +182,10 @@ def test_num_rejects_bool_nan_and_strings():
 def test_empty_input_is_safe():
     r = agg.aggregate([])
     assert r["total"] == {"count": 0, "ok": 0, "cost_usd": 0, "success_rate": 0}
+    assert r["classification"] == {
+        "delegated_runs": 0,
+        "classified_runs": 0,
+        "unclassified_runs": 0,
+        "classification_rate": 0,
+        "unclassified_cost_usd": 0,
+    }

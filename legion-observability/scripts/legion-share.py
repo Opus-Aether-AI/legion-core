@@ -49,6 +49,7 @@ def _num(x):
 
 
 _WINDOW_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+SUCCESS_STATUSES = {"ok", "over_budget"}
 
 
 def parse_window(value):
@@ -142,8 +143,10 @@ def is_synthetic_opus_baseline(s):
 
 
 def compute(spans):
-    failed = sum(1 for s in spans if s.get("status") != "ok")
-    ok = [s for s in spans if s.get("status") == "ok"]   # share = successful work only (failures don't count)
+    failed = sum(1 for s in spans if s.get("status") not in SUCCESS_STATUSES)
+    ok = [
+        s for s in spans if s.get("status") in SUCCESS_STATUSES
+    ]  # share = usable work only (failed runs do not count)
     if any((not is_codex(s.get("executor"))) and not is_synthetic_opus_baseline(s) for s in ok):
         ok = [s for s in ok if not is_synthetic_opus_baseline(s)]
     runs = len(ok)

@@ -502,7 +502,11 @@ $run_error" ]
     local repo; repo="$(make_test_repo run7)"
     # mock reports 1000+200+50+10 ~ 1060 total; budget 100 -> over
     run "$DELEGATE" run --model test-model-beta --task "x" --repo "$repo" --budget-tokens 100 --quiet
+    [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "over_budget"'
+    run bash -c "jq -s '[.[] | select(.artifacts.synthetic_primary_baseline == true)] | length' '$LEGION_TELEMETRY_DIR'/*.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
 }
 
 # ── review / cleanup ─────────────────────────────────────────────────
@@ -1032,6 +1036,79 @@ $run_error" ]
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.status == "ok" and .thread_id == "mock-thread-0001"'
   assert_mock_called codex "exec resume mock-thread-0001"
+}
+
+@test "delegate resume: restores the original routing archetype in telemetry" {
+  local repo; repo="$(make_test_repo res-archetype)"
+  out="$("$DELEGATE" run --archetype bulk-mechanical-edit --task initial \
+    --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+
+  run "$DELEGATE" resume --run "$rid" --task "follow up" --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e --arg run '$rid' \
+    'select(.executor == \"codex-resume\" and .run_id == \$run) \
+     | .archetype == \"bulk-mechanical-edit\"'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
+@test "delegate resume: recovers and backfills a legacy archetype after registry pruning" {
+  local repo; repo="$(make_test_repo res-legacy-archetype)"
+  out="$("$DELEGATE" run --archetype bulk-mechanical-edit --task initial \
+    --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+  rm -f "$repo/.legion/runs/$rid/archetype.txt"
+  rm -f "$(registry_dir_for_repo "$repo")/$rid.json"
+
+  run "$DELEGATE" resume --run "$rid" --task "follow up" --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$repo/.legion/runs/$rid/archetype.txt")" = "bulk-mechanical-edit" ]
+  run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e --arg run '$rid' \
+    'select(.executor == \"codex-resume\" and .run_id == \$run) \
+     | .archetype == \"bulk-mechanical-edit\"'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
+@test "delegate resume: tolerates malformed telemetry when a legacy archetype is unavailable" {
+  local repo; repo="$(make_test_repo res-legacy-corrupt-telemetry)"
+  out="$("$DELEGATE" run --archetype bulk-mechanical-edit --task initial \
+    --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+  rm -f "$repo/.legion/runs/$rid/archetype.txt"
+  rm -f "$(registry_dir_for_repo "$repo")/$rid.json"
+  rm -f "$LEGION_TELEMETRY_DIR"/*.jsonl
+  printf 'not-json\n' > "$LEGION_TELEMETRY_DIR/corrupt.jsonl"
+
+  run "$DELEGATE" resume --run "$rid" --task "follow up" --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "ok" and .archetype == null'
+  [ ! -e "$repo/.legion/runs/$rid/archetype.txt" ]
+}
+
+@test "delegate resume: skips an unreadable telemetry file before valid legacy history" {
+  local repo; repo="$(make_test_repo res-legacy-unreadable-telemetry)"
+  out="$("$DELEGATE" run --archetype bulk-mechanical-edit --task initial \
+    --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+  rm -f "$repo/.legion/runs/$rid/archetype.txt"
+  rm -f "$(registry_dir_for_repo "$repo")/$rid.json"
+  rm -f "$LEGION_TELEMETRY_DIR"/*.jsonl
+  ln -s "$TEST_TMPDIR/missing-telemetry-target" \
+    "$LEGION_TELEMETRY_DIR/000-unreadable.jsonl"
+  jq -cn --arg run "$rid" \
+    '{schema:"legion.span.v1", run_id:$run, archetype:"bulk-mechanical-edit"}' \
+    > "$LEGION_TELEMETRY_DIR/999-valid.jsonl"
+
+  run "$DELEGATE" resume --run "$rid" --task "follow up" --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$repo/.legion/runs/$rid/archetype.txt")" = "bulk-mechanical-edit" ]
+  echo "$output" | jq -e '.status == "ok" and .archetype == "bulk-mechanical-edit"'
 }
 
 @test "delegate resume: fails clearly when the worktree was not kept" {

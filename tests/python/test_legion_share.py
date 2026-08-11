@@ -100,6 +100,17 @@ def test_failed_runs_excluded_from_share():
     assert c["codex_share_runs"] == 0.5
 
 
+def test_over_budget_usable_work_counts_toward_share():
+    over_budget = _span("codex", "fixture-codex", 100)
+    over_budget["status"] = "over_budget"
+
+    c = ls.compute([over_budget, _span("opus", "fixture-claude", 100)])
+
+    assert c["total_runs"] == 2
+    assert c["failed_runs"] == 0
+    assert c["codex_share_runs"] == 0.5
+
+
 def test_reasoning_tokens_count_toward_codex():
     spans = [
         {"schema": "legion.span.v1", "executor": "codex", "model": "fixture-codex", "status": "ok",

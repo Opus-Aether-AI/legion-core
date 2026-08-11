@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""legion-aggregate — roll up legion.span.v1 JSONL into per-executor metrics.
+"""legion-aggregate — roll up legion.span.v1 JSONL into grouped metrics.
 
 Reads span files (positional paths, or all *.jsonl under --dir / $LEGION_TELEMETRY_DIR)
 and prints JSON: per-group count, success_rate, p50/p95 latency, and total cost.
@@ -13,6 +13,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
+from legion_executor_registry import is_delegated_executor  # noqa: E402
+
+SUCCESS_STATUSES = {"ok", "over_budget"}
 
 
 def percentile(values, p):
@@ -63,6 +66,43 @@ def _valid_spans(spans):
     return [s for s in spans if isinstance(s, dict) and s.get("schema") == "legion.span.v1"]
 
 
+def _archetype_group(span):
+    archetype = span.get("archetype")
+    if isinstance(archetype, str) and archetype.strip():
+        return archetype.strip()
+    if is_delegated_executor(span.get("executor")):
+        return "unclassified"
+    return "not_applicable"
+
+
+def _classification_payload(total, classified, unclassified, unclassified_cost):
+    return {
+        "delegated_runs": total,
+        "classified_runs": classified,
+        "unclassified_runs": unclassified,
+        "classification_rate": round(classified / total, 4) if total else 0,
+        "unclassified_cost_usd": round(unclassified_cost, 6),
+    }
+
+
+def classification_summary(spans):
+    total = classified = unclassified = 0
+    unclassified_cost = 0.0
+    for span in spans:
+        if not is_delegated_executor(span.get("executor")):
+            continue
+        total += 1
+        archetype = span.get("archetype")
+        if isinstance(archetype, str) and archetype.strip():
+            classified += 1
+        else:
+            unclassified += 1
+            unclassified_cost += _num(span.get("cost_usd", 0))
+    return _classification_payload(
+        total, classified, unclassified, unclassified_cost
+    )
+
+
 def filter_trace(spans, trace=""):
     valid = _valid_spans(spans)
     available = sorted({s.get("trace_id") for s in valid if s.get("trace_id")})
@@ -82,13 +122,23 @@ def filter_trace(spans, trace=""):
 def aggregate(spans, by="executor", trace=""):
     spans, trace_meta = filter_trace(spans, trace)
     groups = {}
+    delegated = classified = unclassified = 0
+    unclassified_cost = 0.0
     for s in spans:
         if _is_synthetic_opus_baseline(s):
             continue
-        key = s.get(by) or "unknown"
+        if is_delegated_executor(s.get("executor")):
+            delegated += 1
+            archetype = s.get("archetype")
+            if isinstance(archetype, str) and archetype.strip():
+                classified += 1
+            else:
+                unclassified += 1
+                unclassified_cost += _num(s.get("cost_usd", 0))
+        key = _archetype_group(s) if by == "archetype" else (s.get(by) or "unknown")
         g = groups.setdefault(key, {"count": 0, "ok": 0, "cost_usd": 0.0, "_dur": []})
         g["count"] += 1
-        if s.get("status") == "ok":
+        if s.get("status") in SUCCESS_STATUSES:
             g["ok"] += 1
         g["cost_usd"] += _num(s.get("cost_usd", 0))
         d = _num(s.get("duration_ms", 0))
@@ -112,13 +162,23 @@ def aggregate(spans, by="executor", trace=""):
         total["cost_usd"] += g["cost_usd"]
     total["success_rate"] = round(total["ok"] / total["count"], 4) if total["count"] else 0
     total["cost_usd"] = round(total["cost_usd"], 6)
-    return {"by": by, "trace": trace_meta, "groups": out, "total": total}
+    return {
+        "by": by,
+        "trace": trace_meta,
+        "groups": out,
+        "total": total,
+        "classification": _classification_payload(
+            delegated, classified, unclassified, unclassified_cost
+        ),
+    }
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Aggregate legion.span.v1 telemetry.")
     ap.add_argument("paths", nargs="*", help="span JSONL files (default: all under --dir)")
-    ap.add_argument("--by", default="executor", choices=["executor", "model", "status"])
+    ap.add_argument(
+        "--by", default="executor", choices=["executor", "model", "archetype", "status"]
+    )
     ap.add_argument("--trace", default="", help="trace id to include, or latest")
     ap.add_argument("--dir", default=os.environ.get(
         "LEGION_TELEMETRY_DIR", os.path.join(legion_state.default_log_root(), "spans")))

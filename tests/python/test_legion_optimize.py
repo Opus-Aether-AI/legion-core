@@ -115,7 +115,7 @@ def test_propose_holds_when_current_is_already_cheapest_clearing_bar():
     assert got["reason"] == "already_optimal"
 
 
-def test_load_spans_filters_wrong_schema_self_executor_and_missing_archetype(tmp_path):
+def test_load_spans_streams_unclassified_coverage_without_retaining_it(tmp_path):
     spans = tmp_path / "2026-06-15.jsonl"
     rows = [
         {
@@ -153,10 +153,135 @@ def test_load_spans_filters_wrong_schema_self_executor_and_missing_archetype(tmp
             "model": "test-model-alpha",
             "status": "ok",
         },
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex-review",
+            "archetype": "security-review",
+            "model": "test-model-review",
+            "status": "ok",
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "opencode",
+            "archetype": "implement-feature",
+            "model": "test-model-opencode",
+            "status": "ok",
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "opencode-baseline",
+            "archetype": "implement-feature",
+            "model": "opencode-baseline",
+            "status": "ok",
+            "artifacts": {"synthetic_primary_baseline": True},
+        },
     ]
     spans.write_text("\n".join(json.dumps(row) for row in rows) + "\nNOT JSON\n")
-    got = opt.load_spans(tmp_path)
-    assert got == [rows[0], rows[1]]
+    got, classification = opt.load_spans(tmp_path, with_classification=True)
+
+    assert got == [rows[0], rows[1], rows[5], rows[6]]
+    assert classification == {
+        "delegated_runs": 5,
+        "classified_runs": 4,
+        "unclassified_runs": 1,
+        "classification_rate": 0.8,
+        "unclassified_cost_usd": 0.0,
+    }
+
+
+def test_stats_normalize_codex_review_to_registered_codex_family():
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex-review",
+            "archetype": "security-review",
+            "model": "test-model-review",
+            "status": "ok",
+            "cost_usd": 0.5,
+            "duration_ms": 100,
+        }
+    ]
+
+    stats = opt.stats_by_arch_route(spans)
+
+    assert stats["security-review"]["codex:test-model-review"]["executor"] == "codex"
+
+
+def test_synthetic_primary_baselines_never_become_optimizer_routes():
+    baseline = {
+        "schema": "legion.span.v1",
+        "executor": "cursor-baseline",
+        "archetype": "implement-feature",
+        "model": "cursor-baseline",
+        "status": "ok",
+        "cost_usd": 0,
+        "artifacts": {"synthetic_primary_baseline": True},
+    }
+
+    assert opt.stats_by_arch_route([baseline]) == {}
+    assert opt.classification_summary([baseline]) == {
+        "delegated_runs": 0,
+        "classified_runs": 0,
+        "unclassified_runs": 0,
+        "classification_rate": 0,
+        "unclassified_cost_usd": 0,
+    }
+
+
+def test_classification_summary_exposes_optimizer_blind_spot():
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "archetype": "implement-feature",
+            "status": "ok",
+            "cost_usd": 1.25,
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "claude",
+            "archetype": "",
+            "status": "failed",
+            "cost_usd": 2.5,
+        },
+    ]
+
+    assert opt.classification_summary(spans) == {
+        "delegated_runs": 2,
+        "classified_runs": 1,
+        "unclassified_runs": 1,
+        "classification_rate": 0.5,
+        "unclassified_cost_usd": 2.5,
+    }
+
+
+def test_main_json_reports_unclassified_runs_and_cost(tmp_path, capsys):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "2026-08-10.jsonl").write_text(
+        json.dumps(
+            {
+                "schema": "legion.span.v1",
+                "executor": "claude",
+                "archetype": "",
+                "model": "fixture-claude",
+                "status": "ok",
+                "cost_usd": 3.5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert opt.main([
+        "--spans", str(spans), "--routing", str(tmp_path / "missing.toml"), "--json"
+    ]) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["classification"]["unclassified_runs"] == 1
+    assert payload["classification"]["unclassified_cost_usd"] == 3.5
+    assert "cannot inform per-archetype routing proposals" in captured.err
 
 
 def test_load_routing_without_tomllib_uses_stdlib_fallback(monkeypatch):
@@ -194,7 +319,7 @@ def test_optimize_skips_self_routing_and_includes_stats_only_arch():
     assert got["stats-only"]["proposed_model"] == "test-model-alpha"
 
 
-def test_optimize_does_not_accept_cross_executor_as_model_only_change():
+def test_optimize_excludes_cross_executor_from_model_only_ranking():
     spans = []
     for _ in range(5):
         spans.append(
@@ -226,7 +351,47 @@ def test_optimize_does_not_accept_cross_executor_as_model_only_change():
 
     assert proposal["current_executor"] == "codex"
     assert proposal["current_model"] == "test-model-alpha"
-    assert proposal["proposed_executor"] == "cursor"
-    assert proposal["proposed_model"] == "test-model-composer"
+    assert proposal["proposed_executor"] == "codex"
+    assert proposal["proposed_model"] == "test-model-alpha"
     assert proposal["decision"] == "hold"
-    assert proposal["reason"] == "executor_switch_unsupported"
+    assert proposal["reason"] == "already_optimal"
+
+
+def test_cross_executor_candidate_cannot_hide_same_executor_pareto_win():
+    stats = {
+        "codex:test-model-beta": {
+            "executor": "codex",
+            "model": "test-model-beta",
+            "runs": 8,
+            "success_rate": 0.9,
+            "mean_cost": 1.0,
+            "p50_ms": 100,
+            "p95_ms": 200,
+        },
+        "codex:test-model-alpha": {
+            "executor": "codex",
+            "model": "test-model-alpha",
+            "runs": 8,
+            "success_rate": 0.9,
+            "mean_cost": 0.5,
+            "p50_ms": 90,
+            "p95_ms": 180,
+        },
+        "opencode:test-model-opencode": {
+            "executor": "opencode",
+            "model": "test-model-opencode",
+            "runs": 8,
+            "success_rate": 0.9,
+            "mean_cost": 0.1,
+            "p50_ms": 80,
+            "p95_ms": 160,
+        },
+    }
+
+    proposal = opt.propose(
+        stats, "test-model-beta", current_executor="codex"
+    )
+
+    assert proposal["decision"] == "accept"
+    assert proposal["proposed_executor"] == "codex"
+    assert proposal["proposed_model"] == "test-model-alpha"

@@ -261,48 +261,8 @@ def _host_control_directories(home: Path) -> list[Path]:
     return result
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes], grace: float = 2.0) -> None:
-    process_group = process.pid
-
-    def group_exists() -> bool:
-        try:
-            os.killpg(process_group, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-
-    def signal_group(signum: int) -> None:
-        try:
-            os.killpg(process_group, signum)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            pass
-
-    signal_group(signal.SIGTERM)
-    if process.poll() is None:
-        try:
-            process.wait(timeout=grace)
-        except subprocess.TimeoutExpired:
-            signal_group(signal.SIGKILL)
-            try:
-                process.wait(timeout=grace)
-            except subprocess.TimeoutExpired:
-                pass
-    deadline = time.monotonic() + grace
-    while time.monotonic() < deadline and group_exists():
-        time.sleep(0.05)
-    if group_exists():
-        signal_group(signal.SIGKILL)
-        deadline = time.monotonic() + grace
-        while time.monotonic() < deadline and group_exists():
-            time.sleep(0.05)
-
-
 def _terminate_supervisor(process: subprocess.Popen[bytes], grace: float = 6.0) -> None:
-    """Let the descendant-aware supervisor drain before a group-kill fallback."""
+    """Let the descendant-aware supervisor drain or fail the broker closed."""
 
     try:
         process.send_signal(signal.SIGTERM)
@@ -311,8 +271,16 @@ def _terminate_supervisor(process: subprocess.Popen[bytes], grace: float = 6.0) 
     try:
         process.wait(timeout=grace)
         return
-    except subprocess.TimeoutExpired:
-        _terminate_process_group(process)
+    except subprocess.TimeoutExpired as error:
+        # This PID is still our unreaped direct child, so it cannot be reused
+        # before Popen.kill() checks and signals it. Re-signalling the original
+        # process group would not have that guarantee after its leader exits.
+        process.kill()
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+        raise ValueError("descendant supervisor exceeded its cleanup deadline") from error
 
 
 class Broker:
@@ -484,7 +452,9 @@ class Broker:
                         "(allow default)",
                         "(deny file-write*)",
                         "(deny signal)",
+                        "(allow signal (target same-sandbox))",
                         "(deny process-info*)",
+                        "(allow process-info* (target same-sandbox))",
                         f'(deny file-read* (literal "{escaped_supervisor_deny}"))',
                         "(deny network-outbound (remote unix-socket))",
                         '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',

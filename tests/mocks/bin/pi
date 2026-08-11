@@ -61,7 +61,11 @@ if [[ -n "${MOCK_PROVIDER_HANDOFF_EXECUTOR:-}" ]]; then
   handoff_args=(run --executor "$MOCK_PROVIDER_HANDOFF_EXECUTOR" \
     --task "perform the bounded child-harness check" --repo . --base HEAD --quiet)
   [[ -z "${MOCK_PROVIDER_HANDOFF_BUDGET:-}" ]] || handoff_args+=(--budget-tokens "$MOCK_PROVIDER_HANDOFF_BUDGET")
-  legion-delegate "${handoff_args[@]}" >/dev/null
+  if [[ -n "${MOCK_PROVIDER_CAPTURE_HANDOFF:-}" ]]; then
+    legion-delegate "${handoff_args[@]}" > "$MOCK_PROVIDER_CAPTURE_HANDOFF"
+  else
+    legion-delegate "${handoff_args[@]}" >/dev/null
+  fi
   if [[ "${MOCK_PROVIDER_HANDOFF_TWICE:-0}" == 1 ]]; then
     legion-delegate run --executor "$MOCK_PROVIDER_HANDOFF_EXECUTOR" \
       --task "attempt a forbidden second child-harness check" --quiet >/dev/null

@@ -617,6 +617,37 @@ PY
     ! kill -0 "$child" 2>/dev/null
 }
 
+@test "Pi real macOS broker reaps a rapid detached Cursor daemon" {
+    [ -x /usr/bin/sandbox-exec ] || skip "macOS sandbox-exec is unavailable"
+    local repo worktree handoff child unrelated temp_root i
+    repo="$(make_test_repo pi-fast-cursor-daemon)"
+    temp_root="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+
+    /usr/bin/sandbox-exec -p \
+      "(version 1)(allow default)(deny file-read* (subpath \"$temp_root\"))" \
+      /bin/sleep 20 &
+    unrelated=$!
+
+    MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec \
+      MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_PROVIDER_CAPTURE_HANDOFF=HANDOFF.json \
+      MOCK_CURSOR_FAST_DAEMON=1 PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit and ask Cursor to verify it" --repo "$repo" --keep --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+    worktree="$(echo "$output" | jq -r .worktree)"
+    handoff="$worktree/HANDOFF.json"
+    [ -s "$handoff" ]
+    child="$(jq -r '.result | select(startswith("CURSOR_FAST_DAEMON_PID:")) | split(":")[1]' "$handoff")"
+    [[ "$child" =~ ^[0-9]+$ ]]
+    i=0
+    while kill -0 "$child" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+    ! kill -0 "$child" 2>/dev/null
+    kill -0 "$unrelated"
+    kill -TERM "$unrelated"
+    wait "$unrelated" || true
+}
+
 @test "cancelling Pi reaps an active broker handoff and its descendants" {
     local repo adapter_pid child_pid pid_file stdout_file stderr_file i
     repo="$(make_test_repo broker-cancel)"

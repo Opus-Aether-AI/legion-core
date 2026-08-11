@@ -75,6 +75,29 @@ PY
   wait "$delay_pid"
 fi
 
+cursor_result=CURSOR_OK_OUTPUT
+if [[ "${MOCK_CURSOR_FAST_DAEMON:-0}" == 1 ]]; then
+  daemon_pid="$(python3 <<'PY'
+import os
+import sys
+
+if os.fork() != 0:
+    os._exit(0)
+os.setsid()
+if os.fork() != 0:
+    os._exit(0)
+print(os.getpid(), flush=True)
+null = os.open("/dev/null", os.O_RDWR)
+for descriptor in (0, 1, 2):
+    os.dup2(null, descriptor)
+if null > 2:
+    os.close(null)
+os.execve("/bin/sleep", ["sleep", "60"], {})
+PY
+)"
+  cursor_result="CURSOR_FAST_DAEMON_PID:$daemon_pid"
+fi
+
 if [[ -n "${MOCK_CHILD_ESCAPE_PATH:-}" ]]; then
   printf 'child escape\n' > "$MOCK_CHILD_ESCAPE_PATH"
 fi
@@ -83,4 +106,5 @@ if [[ "$force" -eq 1 || "${MOCK_CURSOR_WRITE_IN_PLAN:-0}" == "1" ]]; then
   printf 'mock-cursor-change by %s\n' "$model" >> MOCK_CURSOR_CHANGE.txt
 fi
 
-printf '{"result":"CURSOR_OK_OUTPUT","model":"%s","total_cost_usd":0.03,"usage":{"input_tokens":500,"output_tokens":25}}\n' "$model"
+printf '{"result":"%s","model":"%s","total_cost_usd":0.03,"usage":{"input_tokens":500,"output_tokens":25}}\n' \
+  "$cursor_result" "$model"

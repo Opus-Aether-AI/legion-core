@@ -93,3 +93,28 @@ def test_child_output_is_terminated_while_streaming_past_the_cap(tmp_path: Path)
     with pytest.raises(ValueError, match="nested handoff output exceeds 16 MiB"):
         broker._capture_process(process, b"")
     assert process.poll() is not None
+
+
+def test_unresponsive_descendant_supervisor_fails_closed(tmp_path: Path) -> None:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import signal,time;"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+                "print('ready', flush=True);"
+                "time.sleep(30)"
+            ),
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "ready"
+
+    with pytest.raises(ValueError, match="cleanup deadline"):
+        BROKER._terminate_supervisor(process, grace=0.01)
+    assert process.poll() is not None

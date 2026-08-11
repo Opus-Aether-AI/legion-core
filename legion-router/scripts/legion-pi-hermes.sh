@@ -532,7 +532,7 @@ capture_trusted_diff() {
 }
 
 start_handoff_broker() {
-  local helper="$_self_dir/legion-handoff-broker.py" delegate="$_self_dir/../bin/legion-delegate" supervisor="$_self_dir/legion-process-supervisor.py" i
+  local helper="$_self_dir/legion-handoff-broker.py" delegate="$_self_dir/../bin/legion-delegate" supervisor="$_self_dir/legion-process-supervisor.py" i supervisor_nonce
   [[ -x "$helper" && -x "$delegate" && -x "$supervisor" ]] || die 'trusted Legion handoff broker is unavailable'
   BROKER_SOCKET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/legion-broker.XXXXXX")" || die 'unable to allocate handoff broker socket directory'
   BROKER_SOCKET_DIR="$(cd "$BROKER_SOCKET_DIR" && pwd -P)" || die 'unable to canonicalize handoff broker socket directory'
@@ -540,10 +540,11 @@ start_handoff_broker() {
   BROKER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   BROKER_ROOT="$BROKER_SOCKET_DIR/runtime-root"
   CONTROL_EMPTY_DIR="$BROKER_SOCKET_DIR/control-empty"
-  SUPERVISOR_DENY_CANARY="$BROKER_SOCKET_DIR/provider-supervisor-deny"
-  SUPERVISOR_ALLOW_CANARY="$BROKER_SOCKET_DIR/provider-supervisor-allow"
-  TARGET_SUPERVISOR_DENY_CANARY="$BROKER_SOCKET_DIR/target-supervisor-deny"
-  TARGET_SUPERVISOR_ALLOW_CANARY="$BROKER_SOCKET_DIR/target-supervisor-allow"
+  supervisor_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(64))')"
+  SUPERVISOR_DENY_CANARY="$BROKER_SOCKET_DIR/${supervisor_nonce:0:32}"
+  SUPERVISOR_ALLOW_CANARY="$BROKER_SOCKET_DIR/${supervisor_nonce:32:32}"
+  TARGET_SUPERVISOR_DENY_CANARY="$BROKER_SOCKET_DIR/${supervisor_nonce:64:32}"
+  TARGET_SUPERVISOR_ALLOW_CANARY="$BROKER_SOCKET_DIR/${supervisor_nonce:96:32}"
   : > "$SUPERVISOR_DENY_CANARY"
   : > "$SUPERVISOR_ALLOW_CANARY"
   : > "$TARGET_SUPERVISOR_DENY_CANARY"

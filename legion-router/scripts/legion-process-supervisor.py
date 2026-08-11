@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Run one command and terminate its complete descendant tree on exit.
 
-Process groups alone are insufficient because a child may call ``setsid()``.
-The supervisor therefore samples descendants for the lifetime of the command,
-keeps every observed PID in the termination set, and combines per-PID signals
-with the original process-group signal. Linux's PID namespace remains the
-outer containment boundary. Production macOS callers additionally provide a
-run-unique inherited Seatbelt-policy fingerprint, which remains observable
-after a rapid child reparenting sheds every user-space identity channel.
+Process groups and bare PIDs are insufficient: a child may call ``setsid()``,
+and either identifier can be reused after exit. The supervisor therefore keeps
+kernel-bound process identities (Darwin unique IDs plus renewable audit tokens,
+or Linux pidfds). Production macOS callers additionally provide a random inherited
+Seatbelt-policy fingerprint, which remains observable after a rapid child
+reparenting sheds every user-space identity channel.
 """
 
 from __future__ import annotations
@@ -29,36 +28,11 @@ from typing import Optional
 GRACE_SECONDS = 2.0
 POLL_SECONDS = 0.02
 QUIET_SECONDS = 0.2
+DARWIN_ZOMBIE_STATUS = 5
 
 
-def _group_exists(process_group: int) -> bool:
-    try:
-        os.killpg(process_group, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
-def _signal_group(process_group: int, signum: int) -> None:
-    try:
-        os.killpg(process_group, signum)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        # Darwin can report EPERM for a now-empty/reused process group. The
-        # per-PID descendant set remains authoritative in that case.
-        pass
-
-
-def _signal_pid(pid: int, signum: int) -> None:
-    try:
-        os.kill(pid, signum)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        pass
+class ProcessInspectionError(RuntimeError):
+    """A containment identity or policy could not be inspected safely."""
 
 
 def _darwin_child_pids(parent: int) -> set[int]:
@@ -68,7 +42,9 @@ def _darwin_child_pids(parent: int) -> set[int]:
         function.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
         function.restype = ctypes.c_int
         required = function(parent, None, 0)
-        if required <= 0:
+        if required < 0:
+            raise ProcessInspectionError(f"proc_listchildpids sizing failed for {parent}")
+        if required == 0:
             return set()
         # libproc variants disagree on whether the sizing probe is expressed
         # as bytes or entries; allocating that many pid_t slots is safe for
@@ -76,11 +52,13 @@ def _darwin_child_pids(parent: int) -> set[int]:
         count = max(1, required)
         values = (ctypes.c_int * count)()
         found = function(parent, values, ctypes.sizeof(values))
-        if found <= 0:
+        if found < 0:
+            raise ProcessInspectionError(f"proc_listchildpids failed for {parent}")
+        if found == 0:
             return set()
         return {int(values[index]) for index in range(min(found, count)) if values[index] > 0}
-    except (AttributeError, OSError):
-        return set()
+    except (AttributeError, OSError) as error:
+        raise ProcessInspectionError("Darwin child enumeration is unavailable") from error
 
 
 def _proc_child_pids(parent: int) -> set[int]:
@@ -109,7 +87,6 @@ def _child_pids(parent: int) -> set[int]:
 
 
 def _darwin_all_pids() -> set[int]:
-    result: set[int] = set()
     try:
         libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
         function = libproc.proc_listallpids
@@ -117,16 +94,67 @@ def _darwin_all_pids() -> set[int]:
         function.restype = ctypes.c_int
         required = function(None, 0)
         if required <= 0:
-            return result
-        count = max(1, required)
-        values = (ctypes.c_int * count)()
-        found = function(values, ctypes.sizeof(values))
-        for index in range(min(max(found, 0), count)):
-            if values[index] > 0:
-                result.add(int(values[index]))
-    except (AttributeError, OSError):
-        pass
-    return result
+            raise ProcessInspectionError("proc_listallpids sizing failed")
+        count = max(512, required + 256)
+        for _attempt in range(4):
+            values = (ctypes.c_int * count)()
+            found = function(values, ctypes.sizeof(values))
+            if found < 0:
+                raise ProcessInspectionError("proc_listallpids failed")
+            if found < count:
+                return {int(values[index]) for index in range(found) if values[index] > 0}
+            count *= 2
+        raise ProcessInspectionError("proc_listallpids remained truncated")
+    except (AttributeError, OSError) as error:
+        raise ProcessInspectionError("Darwin process enumeration is unavailable") from error
+
+
+def _darwin_sandbox_api() -> tuple[object, int]:
+    try:
+        sandbox = ctypes.CDLL("/usr/lib/libsandbox.1.dylib", use_errno=True)
+        check = sandbox.sandbox_check
+        check.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int)
+        check.restype = ctypes.c_int
+        no_report = ctypes.c_int.in_dll(sandbox, "SANDBOX_CHECK_NO_REPORT").value
+        return check, 1 | no_report  # SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT
+    except (AttributeError, OSError, ValueError) as error:
+        raise ProcessInspectionError("Darwin sandbox inspection is unavailable") from error
+
+
+def _darwin_bsd_info(pid: int) -> Optional[_DarwinBSDInfo]:
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        function = libproc.proc_pidinfo
+        function.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
+        function.restype = ctypes.c_int
+        info = _DarwinBSDInfo()
+        found = function(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))  # PROC_PIDTBSDINFO
+        if found == 0:
+            return None
+        if found != ctypes.sizeof(info) or info.pbi_pid != pid:
+            raise ProcessInspectionError(f"proc_pidinfo returned an invalid record for {pid}")
+        return info
+    except (AttributeError, OSError) as error:
+        raise ProcessInspectionError("Darwin process identity inspection is unavailable") from error
+
+
+def _darwin_sandbox_decision(
+    pid: int,
+    deny: bytes,
+    allow: bytes,
+    api: Optional[tuple[object, int]] = None,
+) -> Optional[bool]:
+    check, flags = api or _darwin_sandbox_api()
+    denied = check(pid, b"file-read-data", flags, ctypes.c_char_p(deny))
+    permitted = check(pid, b"file-read-data", flags, ctypes.c_char_p(allow))
+    if denied < 0 or permitted < 0:
+        info = _darwin_bsd_info(pid)
+        if info is None or info.pbi_status == DARWIN_ZOMBIE_STATUS:
+            return None
+        if info.pbi_uid == os.geteuid():
+            raise ProcessInspectionError(f"sandbox_check failed for live same-user process {pid}")
+        return False
+    return denied > 0 and permitted == 0
 
 
 def _darwin_sandbox_pids(deny_canary: str, allow_canary: str) -> set[int]:
@@ -140,24 +168,12 @@ def _darwin_sandbox_pids(deny_canary: str, allow_canary: str) -> set[int]:
     """
 
     result: set[int] = set()
-    try:
-        sandbox = ctypes.CDLL("/usr/lib/libsandbox.1.dylib", use_errno=True)
-        check = sandbox.sandbox_check
-        check.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int)
-        check.restype = ctypes.c_int
-        no_report = ctypes.c_int.in_dll(sandbox, "SANDBOX_CHECK_NO_REPORT").value
-        flags = 1 | no_report  # SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT
-        deny = deny_canary.encode()
-        allow = allow_canary.encode()
-        for pid in _darwin_all_pids():
-            if pid == os.getpid():
-                continue
-            denied = check(pid, b"file-read-data", flags, ctypes.c_char_p(deny))
-            permitted = check(pid, b"file-read-data", flags, ctypes.c_char_p(allow))
-            if denied > 0 and permitted == 0:
-                result.add(pid)
-    except (AttributeError, OSError, ValueError):
-        pass
+    deny = deny_canary.encode()
+    allow = allow_canary.encode()
+    api = _darwin_sandbox_api()
+    for pid in _darwin_all_pids():
+        if pid != os.getpid() and _darwin_sandbox_decision(pid, deny, allow, api):
+            result.add(pid)
     return result
 
 
@@ -165,17 +181,12 @@ def _darwin_sandbox_probe(deny_canary: str, allow_canary: str) -> bool:
     """Fail closed when the host cannot query Seatbelt decisions."""
 
     try:
-        sandbox = ctypes.CDLL("/usr/lib/libsandbox.1.dylib", use_errno=True)
-        check = sandbox.sandbox_check
-        check.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int)
-        check.restype = ctypes.c_int
-        no_report = ctypes.c_int.in_dll(sandbox, "SANDBOX_CHECK_NO_REPORT").value
-        flags = 1 | no_report
+        check, flags = _darwin_sandbox_api()
         return (
             check(os.getpid(), b"file-read-data", flags, ctypes.c_char_p(deny_canary.encode())) == 0
             and check(os.getpid(), b"file-read-data", flags, ctypes.c_char_p(allow_canary.encode())) == 0
         )
-    except (AttributeError, OSError, ValueError):
+    except ProcessInspectionError:
         return False
 
 
@@ -228,30 +239,195 @@ class _DarwinBSDInfo(ctypes.Structure):
     )
 
 
-def _pid_identity(pid: int) -> Optional[tuple[int, int]]:
-    """Return a kernel process-birth identity that survives exec."""
+class _AuditToken(ctypes.Structure):
+    _fields_ = (("value", ctypes.c_uint32 * 8),)
 
-    if sys.platform == "darwin":
-        try:
-            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
-            function = libproc.proc_pidinfo
-            function.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
-            function.restype = ctypes.c_int
-            info = _DarwinBSDInfo()
-            found = function(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))  # PROC_PIDTBSDINFO
-            if found != ctypes.sizeof(info) or info.pbi_pid != pid:
-                return None
-            return int(info.pbi_start_tvsec), int(info.pbi_start_tvusec)
-        except (AttributeError, OSError):
-            return None
+
+class _DarwinUniqueInfo(ctypes.Structure):
+    _fields_ = (
+        ("p_uuid", ctypes.c_uint8 * 16),
+        ("p_uniqueid", ctypes.c_uint64),
+        ("p_puniqueid", ctypes.c_uint64),
+        ("p_idversion", ctypes.c_int32),
+        ("p_orig_ppidversion", ctypes.c_int32),
+        ("p_reserve2", ctypes.c_uint64),
+        ("p_reserve3", ctypes.c_uint64),
+    )
+
+
+def _darwin_unique_info(pid: int) -> Optional[_DarwinUniqueInfo]:
+    """Return the kernel unique ID that remains stable across exec."""
 
     try:
-        # starttime is field 22. Split after the final ')' because comm can
-        # contain spaces and parentheses; the remaining list begins at field 3.
-        fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
-        return int(fields[19]), 0
-    except (FileNotFoundError, IndexError, PermissionError, ValueError):
-        return None
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        function = libproc.proc_pidinfo
+        function.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
+        function.restype = ctypes.c_int
+        info = _DarwinUniqueInfo()
+        found = function(pid, 17, 0, ctypes.byref(info), ctypes.sizeof(info))  # PROC_PIDUNIQIDENTIFIERINFO
+        if found == 0:
+            return None
+        if found != ctypes.sizeof(info) or info.p_uniqueid == 0:
+            raise ProcessInspectionError(f"proc_pidinfo returned an invalid unique record for {pid}")
+        return info
+    except (AttributeError, OSError) as error:
+        raise ProcessInspectionError("Darwin unique process identity inspection is unavailable") from error
+
+
+def _darwin_audit_token_for_pid(pid: int) -> Optional[_AuditToken]:
+    """Capture a PID-versioned audit token, retrying across an exec race."""
+
+    try:
+        system = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        self_port = ctypes.c_uint.in_dll(system, "mach_task_self_").value
+        task_name_for_pid = system.task_name_for_pid
+        task_name_for_pid.argtypes = (ctypes.c_uint, ctypes.c_int, ctypes.POINTER(ctypes.c_uint))
+        task_name_for_pid.restype = ctypes.c_int
+        task_info = system.task_info
+        task_info.argtypes = (ctypes.c_uint, ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
+        task_info.restype = ctypes.c_int
+        deallocate = system.mach_port_deallocate
+        deallocate.argtypes = (ctypes.c_uint, ctypes.c_uint)
+        deallocate.restype = ctypes.c_int
+    except (AttributeError, OSError) as error:
+        raise ProcessInspectionError("Darwin task identity APIs are unavailable") from error
+
+    for _attempt in range(3):
+        port = ctypes.c_uint(0)
+        if task_name_for_pid(self_port, pid, ctypes.byref(port)) == 0:
+            try:
+                token = _AuditToken()
+                count = ctypes.c_uint32(8)
+                result = task_info(port.value, 15, ctypes.byref(token), ctypes.byref(count))  # TASK_AUDIT_TOKEN
+                if result == 0 and count.value == 8 and int(token.value[5]) == pid:
+                    return token
+            finally:
+                deallocate(self_port, port.value)
+
+        info = _darwin_bsd_info(pid)
+        if info is None or info.pbi_status == DARWIN_ZOMBIE_STATUS:
+            return None
+        time.sleep(0)
+
+    if info.pbi_uid == os.geteuid():
+        raise ProcessInspectionError(f"cannot capture an audit token for process {pid}")
+    return None
+
+
+class ProcessHandle:
+    """Kernel-bound process identity safe against PID reuse and exec."""
+
+    def __init__(
+        self,
+        pid: int,
+        *,
+        audit_token: Optional[_AuditToken] = None,
+        unique_id: int = 0,
+        pidfd: int = -1,
+    ) -> None:
+        self.pid = pid
+        self.audit_token = audit_token
+        self.unique_id = unique_id
+        self.pidfd = pidfd
+        self.closed = False
+
+    @classmethod
+    def open(cls, pid: int) -> Optional[ProcessHandle]:
+        if sys.platform == "darwin":
+            for _attempt in range(3):
+                token = _darwin_audit_token_for_pid(pid)
+                if token is None:
+                    return None
+                info = _darwin_unique_info(pid)
+                if info is None:
+                    return None
+                if int(token.value[7]) == info.p_idversion:
+                    return cls(pid, audit_token=token, unique_id=int(info.p_uniqueid))
+                time.sleep(0)
+            raise ProcessInspectionError(f"process {pid} continued execing during identity capture")
+
+        if sys.platform.startswith("linux"):
+            if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+                raise ProcessInspectionError("Linux pidfd APIs are unavailable")
+            try:
+                return cls(pid, pidfd=os.pidfd_open(pid, 0))
+            except ProcessLookupError:
+                return None
+            except OSError as error:
+                raise ProcessInspectionError(f"cannot acquire pidfd for process {pid}: {error}") from error
+        raise ProcessInspectionError(f"unsupported supervisor platform: {sys.platform}")
+
+    def _refresh_darwin_identity(self) -> bool:
+        if self.audit_token is None:
+            raise ProcessInspectionError(f"process {self.pid} has no Darwin audit token")
+        for _attempt in range(3):
+            before = _darwin_unique_info(self.pid)
+            if before is None or int(before.p_uniqueid) != self.unique_id:
+                return False
+            if int(self.audit_token.value[7]) == before.p_idversion:
+                return True
+
+            token = _darwin_audit_token_for_pid(self.pid)
+            if token is None:
+                return False
+            after = _darwin_unique_info(self.pid)
+            if after is None or int(after.p_uniqueid) != self.unique_id:
+                return False
+            if int(token.value[7]) == after.p_idversion:
+                self.audit_token = token
+                return True
+            time.sleep(0)
+        raise ProcessInspectionError(f"process {self.pid} continued execing during identity refresh")
+
+    def is_live(self) -> bool:
+        if self.closed:
+            return False
+        if sys.platform == "darwin":
+            return self._refresh_darwin_identity()
+        try:
+            signal.pidfd_send_signal(self.pidfd, 0, None, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError as error:
+            raise ProcessInspectionError(f"cannot inspect pidfd for process {self.pid}: {error}") from error
+
+    def send_signal(self, signum: int) -> bool:
+        if self.closed:
+            return False
+        if sys.platform == "darwin":
+            if self.audit_token is None:
+                raise ProcessInspectionError(f"process {self.pid} has no Darwin audit token")
+            for _attempt in range(3):
+                if not self._refresh_darwin_identity():
+                    return False
+                try:
+                    libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+                    function = libproc.proc_signal_with_audittoken
+                    function.argtypes = (ctypes.POINTER(_AuditToken), ctypes.c_int)
+                    function.restype = ctypes.c_int
+                    result = function(ctypes.byref(self.audit_token), signum)
+                except (AttributeError, OSError) as error:
+                    raise ProcessInspectionError("Darwin audit-token signaling is unavailable") from error
+                if result == 0:
+                    return True
+                if result != errno.ESRCH:
+                    raise ProcessInspectionError(f"audit-token signal {signum} failed for {self.pid}: errno {result}")
+            return False
+        try:
+            signal.pidfd_send_signal(self.pidfd, signum, None, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError as error:
+            raise ProcessInspectionError(f"pidfd signal {signum} failed for {self.pid}: {error}") from error
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if self.pidfd >= 0:
+            os.close(self.pidfd)
 
 
 class DescendantTracker:
@@ -262,24 +438,116 @@ class DescendantTracker:
         self.token = token
         self.deny_canary = deny_canary
         self.allow_canary = allow_canary
-        self._tracked: set[int] = set()
-        self._identities: dict[int, tuple[int, int]] = {}
+        self._handles: dict[int, ProcessHandle] = {}
+        self._error: Optional[ProcessInspectionError] = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._monitor, name="legion-descendants", daemon=True)
 
     def start(self) -> None:
+        root = ProcessHandle.open(self.root_pid)
+        if root is not None:
+            self._handles[self.root_pid] = root
         self.snapshot()
         self._thread.start()
 
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=1.0)
+        with self._lock:
+            handles = list(self._handles.values())
+            self._handles.clear()
+        for handle in handles:
+            handle.close()
+
+    def raise_if_error(self) -> None:
+        with self._lock:
+            error = self._error
+        if error is not None:
+            raise error
+
+    def _record(self, handle: ProcessHandle) -> bool:
+        with self._lock:
+            existing = self._handles.get(handle.pid)
+            if existing is not None:
+                handle.close()
+                return existing.is_live()
+            self._handles[handle.pid] = handle
+            return True
+
+    def _live_parent_pids(self) -> set[int]:
+        dead: list[ProcessHandle] = []
+        with self._lock:
+            for pid, handle in list(self._handles.items()):
+                if not handle.is_live():
+                    dead.append(self._handles.pop(pid))
+            result = set(self._handles)
+        for handle in dead:
+            handle.close()
+        return result
+
+    @staticmethod
+    def _current_parent(pid: int) -> Optional[int]:
+        if sys.platform == "darwin":
+            info = _darwin_bsd_info(pid)
+            return None if info is None else int(info.pbi_ppid)
+        try:
+            fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            return int(fields[1])
+        except (FileNotFoundError, IndexError, PermissionError, ValueError):
+            return None
+
+    def _capture_child(self, pid: int, parents: set[int]) -> bool:
+        with self._lock:
+            if pid in self._handles:
+                return True
+        handle = ProcessHandle.open(pid)
+        if handle is None:
+            return False
+        parent = self._current_parent(pid)
+        if parent not in parents or not handle.is_live():
+            handle.close()
+            return False
+        return self._record(handle)
+
+    def _capture_fingerprinted(self) -> None:
+        deny = self.deny_canary.encode()
+        allow = self.allow_canary.encode()
+        for pid in _darwin_sandbox_pids(self.deny_canary, self.allow_canary) - {os.getpid()}:
+            with self._lock:
+                existing = self._handles.get(pid)
+            if existing is not None and existing.is_live():
+                continue
+            handle = ProcessHandle.open(pid)
+            if handle is None:
+                continue
+            # Re-check after capturing the kernel unique ID and audit token. If
+            # PID reuse happens on either side, handle.is_live() rejects the
+            # mismatch and signaling remains bound to the captured PID version.
+            matches = _darwin_sandbox_decision(pid, deny, allow)
+            if not matches or not handle.is_live():
+                handle.close()
+                continue
+            self._record(handle)
+
+    def _capture_token_pids(self) -> None:
+        marker = f"LEGION_SUPERVISOR_TOKEN={self.token}".encode()
+        for pid in _token_pids(self.token) - {os.getpid()}:
+            handle = ProcessHandle.open(pid)
+            if handle is None:
+                continue
+            try:
+                still_owned = marker in (Path("/proc") / str(pid) / "environ").read_bytes().split(b"\0")
+            except (FileNotFoundError, PermissionError):
+                still_owned = False
+            if not still_owned or not handle.is_live():
+                handle.close()
+                continue
+            self._record(handle)
 
     def snapshot(self, *, include_token: bool = False) -> None:
-        with self._lock:
-            parents = {self.root_pid, *self._tracked}
-        discovered: set[int] = set()
+        self.raise_if_error()
+        parents = self._live_parent_pids()
         pending = list(parents)
         visited: set[int] = set()
         while pending:
@@ -289,78 +557,63 @@ class DescendantTracker:
             visited.add(parent)
             children = _child_pids(parent)
             for child in children:
-                if child not in discovered:
-                    discovered.add(child)
+                if child not in visited and self._capture_child(child, parents | visited):
                     pending.append(child)
-        if discovered:
-            identities = {pid: identity for pid in discovered if (identity := _pid_identity(pid)) is not None}
-            with self._lock:
-                for pid, identity in identities.items():
-                    if pid not in self._tracked:
-                        self._tracked.add(pid)
-                        self._identities[pid] = identity
-        if include_token:
-            token_identities = {
-                pid: identity
-                for pid in _token_pids(self.token) - {os.getpid()}
-                if (identity := _pid_identity(pid)) is not None
-            }
-            with self._lock:
-                for pid, identity in token_identities.items():
-                    if pid not in self._tracked:
-                        self._tracked.add(pid)
-                        self._identities[pid] = identity
-
-    def _live_tracked(self) -> set[int]:
-        with self._lock:
-            identities = dict(self._identities)
-        return {pid for pid, identity in identities.items() if _pid_identity(pid) == identity}
-
-    def live_pids(self) -> list[int]:
-        use_sandbox_fingerprint = sys.platform == "darwin" and self.deny_canary and self.allow_canary
-        self.snapshot(include_token=not use_sandbox_fingerprint)
-        if use_sandbox_fingerprint:
-            # Re-evaluate the kernel policy immediately before every signal.
-            # Returning stale tracked PIDs here could target an unrelated
-            # process after PID reuse.
-            fingerprinted = _darwin_sandbox_pids(self.deny_canary, self.allow_canary) - {os.getpid()}
-            fingerprint_identities = {
-                pid: identity
-                for pid in fingerprinted
-                if (identity := _pid_identity(pid)) is not None
-            }
-            with self._lock:
-                for pid, identity in fingerprint_identities.items():
-                    if pid not in self._tracked:
-                        self._tracked.add(pid)
-                        self._identities[pid] = identity
-            return sorted(fingerprinted | self._live_tracked())
-        return sorted(self._live_tracked())
+        if sys.platform == "darwin" and self.deny_canary and self.allow_canary:
+            self._capture_fingerprinted()
+        elif include_token:
+            self._capture_token_pids()
 
     def signal(self, signum: int) -> list[int]:
         # Signal deepest/newest children first so parents cannot immediately
         # replace them while shutdown proceeds.
-        live = self.live_pids()
-        for pid in sorted(live, reverse=True):
-            _signal_pid(pid, signum)
-        return live
+        use_fingerprint = sys.platform == "darwin" and self.deny_canary and self.allow_canary
+        self.snapshot(include_token=not use_fingerprint)
+        return self.signal_known(signum)
+
+    def signal_known(self, signum: int) -> list[int]:
+        """Signal only already captured kernel handles after discovery fails."""
+
+        dead: list[ProcessHandle] = []
+        signalled: list[int] = []
+        with self._lock:
+            for pid, handle in sorted(self._handles.items(), reverse=True):
+                if handle.send_signal(signum):
+                    signalled.append(pid)
+                else:
+                    dead.append(handle)
+            for handle in dead:
+                self._handles.pop(handle.pid, None)
+        for handle in dead:
+            handle.close()
+        return signalled
 
     def _monitor(self) -> None:
         while not self._stop.wait(POLL_SECONDS):
-            self.snapshot()
+            try:
+                self.snapshot()
+            except ProcessInspectionError as error:
+                with self._lock:
+                    self._error = error
+                self._stop.set()
+                return
 
 
-def _terminate_tree(process: subprocess.Popen[bytes], tracker: DescendantTracker) -> None:
-    process_group = process.pid
-
+def _terminate_tree(process: subprocess.Popen[bytes], tracker: DescendantTracker) -> bool:
     def drain(signum: int) -> bool:
         deadline = time.monotonic() + GRACE_SECONDS
         quiet_since: Optional[float] = None
         while time.monotonic() < deadline:
-            _signal_group(process_group, signum)
-            live = tracker.signal(signum)
-            group_live = _group_exists(process_group)
-            if process.poll() is not None and not group_live and not live:
+            try:
+                live = tracker.signal(signum)
+            except ProcessInspectionError as error:
+                try:
+                    tracker.signal_known(signum)
+                except ProcessInspectionError:
+                    pass
+                print(f"legion-process-supervisor: descendant inspection failed: {error}", file=sys.stderr)
+                return False
+            if process.poll() is not None and not live:
                 if quiet_since is None:
                     quiet_since = time.monotonic()
                 elif time.monotonic() - quiet_since >= QUIET_SECONDS:
@@ -371,8 +624,8 @@ def _terminate_tree(process: subprocess.Popen[bytes], tracker: DescendantTracker
         return False
 
     if drain(signal.SIGTERM):
-        return
-    drain(signal.SIGKILL)
+        return True
+    return drain(signal.SIGKILL)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -426,6 +679,7 @@ def main() -> int:
     interrupted = 0
     cancel_requested = threading.Event()
     returncode = 1
+    cleanup_ok = True
     supervisor_token = secrets.token_hex(24)
 
     def stop(signum: int, _frame: object) -> None:
@@ -452,17 +706,22 @@ def main() -> int:
         tracker = DescendantTracker(process.pid, supervisor_token, deny_canary, allow_canary)
         tracker.start()
         while process.poll() is None and not cancel_requested.wait(POLL_SECONDS):
-            pass
+            tracker.raise_if_error()
         if cancel_requested.is_set():
-            _terminate_tree(process, tracker)
+            cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
         try:
             returncode = process.wait(timeout=GRACE_SECONDS)
         except subprocess.TimeoutExpired:
-            _terminate_tree(process, tracker)
+            cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
             try:
                 returncode = process.wait(timeout=GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 returncode = -signal.SIGKILL
+                cleanup_ok = False
+    except ProcessInspectionError as error:
+        print(f"legion-process-supervisor: descendant inspection failed: {error}", file=sys.stderr)
+        returncode = 70
+        cleanup_ok = False
     except OSError as error:
         if error.errno == errno.ENOENT:
             print(f"legion-process-supervisor: command not found: {command[0]}", file=sys.stderr)
@@ -470,9 +729,12 @@ def main() -> int:
         raise
     finally:
         if process is not None and tracker is not None:
-            _terminate_tree(process, tracker)
+            cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
             tracker.close()
 
+    if not cleanup_ok:
+        print("legion-process-supervisor: descendant cleanup was incomplete", file=sys.stderr)
+        return 70
     if interrupted:
         return 128 + interrupted
     return returncode if returncode >= 0 else 128 - returncode

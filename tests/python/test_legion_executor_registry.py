@@ -34,6 +34,42 @@ def test_fallback_parser_accepts_top_level_registry(tmp_path, monkeypatch):
     assert registry.load_coding_executor_families(path) == {"aider"}
 
 
+def test_fallback_parser_preserves_nested_executor_kind(tmp_path, monkeypatch):
+    path = tmp_path / "executors.toml"
+    path.write_text(
+        '[executors.codex]\nkind = "coding"\n\n'
+        '[executors.codex.capabilities]\nkind = "review"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(registry, "tomllib", None)
+
+    assert registry.load_coding_executor_families(path) == {"codex"}
+
+
+def test_fallback_parser_does_not_promote_nested_capability_kind(tmp_path, monkeypatch):
+    path = tmp_path / "executors.toml"
+    path.write_text(
+        '[executors.aider]\nkind = "primary"\n\n'
+        '[executors.aider.capabilities]\nkind = "coding"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(registry, "tomllib", None)
+
+    assert registry.load_coding_executor_families(path) == set()
+
+
+def test_fallback_parser_ignores_root_metadata_in_nested_registry(tmp_path, monkeypatch):
+    path = tmp_path / "executors.toml"
+    path.write_text(
+        '[executors.codex]\nkind = "coding"\n\n'
+        '[metadata]\nkind = "coding"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(registry, "tomllib", None)
+
+    assert registry.load_coding_executor_families(path) == {"codex"}
+
+
 def test_valid_primary_only_registry_stays_empty(tmp_path, monkeypatch):
     path = tmp_path / "executors.toml"
     path.write_text('[hermes]\nkind = "primary"\n', encoding="utf-8")

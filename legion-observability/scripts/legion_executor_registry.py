@@ -22,29 +22,36 @@ DEFAULT_EXECUTORS_FILE = os.path.abspath(
 
 def _fallback_table(path):
     """Read the registry fields needed here when tomllib is unavailable."""
-    executors = {}
-    current = None
-    section = re.compile(r"\[(?:executors\.)?([A-Za-z0-9_-]+)\]")
+    table = {}
+    current = table
+    section = re.compile(r"\[([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\]")
     with open(path, encoding="utf-8") as fh:
         for raw_line in fh:
             line = raw_line.split("#", 1)[0].strip()
-            match = section.fullmatch(line)
-            if match:
-                current = match.group(1)
-                executors.setdefault(current, {})
+            if line.startswith("[") and line.endswith("]"):
+                match = section.fullmatch(line)
+                if not match:
+                    current = None
+                    continue
+                current = table
+                for part in match.group(1).split("."):
+                    child = current.setdefault(part, {})
+                    if not isinstance(child, dict):
+                        raise ValueError(f"table path conflicts with scalar: {part}")
+                    current = child
                 continue
-            if "=" not in line:
+            if current is None or "=" not in line:
                 continue
             key, value = (part.strip() for part in line.split("=", 1))
-            if current is None:
+            if current is table:
                 # A root assignment named `executors` is not an executor table.
                 # Preserve that invalid shape for the caller's fallback guard.
                 if key == "executors":
-                    return {"executors": None}
+                    table["executors"] = None
                 continue
             if key == "kind" and len(value) >= 2 and value[0] == value[-1] == '"':
-                executors[current][key] = value[1:-1]
-    return {"executors": executors}
+                current[key] = value[1:-1]
+    return table
 
 
 def load_coding_executor_families(path=None):

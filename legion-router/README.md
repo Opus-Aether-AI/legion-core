@@ -125,10 +125,15 @@ exposed. The private credential view is deleted after the run. Parent outputs
 such as `diff.patch`, `last-message.txt`, and telemetry errors are never
 provider-writable. A descendant-aware supervisor terminates children even when
 they create a new session/process group, and brokered target output is bounded
-while it is streamed. Linux runs also receive a private PID namespace; macOS
-blocks host process inspection/signalling. Pi's `read-only` run
-also disables every writing tool (`--tools read,grep,find,ls`) and rejects any
-resulting patch. Hermes runs with `--ignore-user-config --toolsets terminal,file`
+while it is streamed. Linux runs also receive a private PID namespace. On
+macOS, each provider and broker target receives a distinct, run-unique Seatbelt
+deny/allow fingerprint; the supervisor drains every process that inherited that
+policy after a quiet window, including rapid double-forks that shed ancestry,
+environment, descriptors, and process groups, without selecting unrelated
+sandboxes. macOS also blocks host process inspection/signalling. Pi's
+`read-only` run also disables every writing tool (`--tools read,grep,find,ls`)
+and rejects any resulting patch. Hermes runs with
+`--ignore-user-config --toolsets terminal,file`
 so repository rules remain available without auto-approved user plugins, hooks,
 MCP servers, browser, or cron tools. Hermes does not expose an enforceable
 read-only/no-tools one-shot mode, so `legion-hermes --sandbox read-only` fails

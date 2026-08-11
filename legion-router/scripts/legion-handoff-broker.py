@@ -328,6 +328,8 @@ class Broker:
         sandbox_bin: Path,
         sandbox_kind: str,
         supervisor: Path,
+        supervisor_deny_canary: Path,
+        supervisor_allow_canary: Path,
         telemetry_dir: Optional[Path],
         expected_parent: str,
     ) -> None:
@@ -341,6 +343,8 @@ class Broker:
         self.sandbox_bin = sandbox_bin
         self.sandbox_kind = sandbox_kind
         self.supervisor = supervisor
+        self.supervisor_deny_canary = supervisor_deny_canary
+        self.supervisor_allow_canary = supervisor_allow_canary
         self.telemetry_dir = telemetry_dir
         self.expected_parent = expected_parent
         self.stop = threading.Event()
@@ -472,6 +476,7 @@ class Broker:
         if self.sandbox_kind == "sandbox-exec":
             profile = self.broker_root / "target.sb"
             escaped_root = _scheme_escape(str(self.broker_root))
+            escaped_supervisor_deny = _scheme_escape(str(self.supervisor_deny_canary))
             profile.write_text(
                 "\n".join(
                     (
@@ -480,6 +485,7 @@ class Broker:
                         "(deny file-write*)",
                         "(deny signal)",
                         "(deny process-info*)",
+                        f'(deny file-read* (literal "{escaped_supervisor_deny}"))',
                         "(deny network-outbound (remote unix-socket))",
                         '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
                         f'(allow file-write* (literal "/dev/null") (literal "/dev/tty") (subpath "{escaped_root}"))',
@@ -733,9 +739,17 @@ class Broker:
                 str(self.supervisor),
                 "--cwd",
                 str(self.broker_repo),
-                "--",
-                *sandboxed,
             ]
+            if self.sandbox_kind == "sandbox-exec":
+                supervised.extend(
+                    (
+                        "--darwin-sandbox-deny-canary",
+                        str(self.supervisor_deny_canary),
+                        "--darwin-sandbox-allow-canary",
+                        str(self.supervisor_allow_canary),
+                    )
+                )
+            supervised.extend(("--", *sandboxed))
             process = subprocess.Popen(
                 supervised,
                 cwd=self.broker_repo,
@@ -791,6 +805,19 @@ class Broker:
 
 def _server(arguments: argparse.Namespace) -> int:
     telemetry = Path(arguments.telemetry_dir).resolve() if arguments.telemetry_dir else None
+    deny_argument = Path(arguments.supervisor_deny_canary)
+    allow_argument = Path(arguments.supervisor_allow_canary)
+    if deny_argument.is_symlink() or allow_argument.is_symlink():
+        raise ValueError("supervisor canary leaf must not be a symbolic link")
+    supervisor_deny_canary = deny_argument.resolve(strict=True)
+    supervisor_allow_canary = allow_argument.resolve(strict=True)
+    if (
+        supervisor_deny_canary == supervisor_allow_canary
+        or supervisor_deny_canary.parent != supervisor_allow_canary.parent
+        or not stat.S_ISREG(supervisor_deny_canary.stat().st_mode)
+        or not stat.S_ISREG(supervisor_allow_canary.stat().st_mode)
+    ):
+        raise ValueError("supervisor canaries must be adjacent regular files")
     broker = Broker(
         socket_path=Path(arguments.socket),
         token=arguments.token,
@@ -801,6 +828,8 @@ def _server(arguments: argparse.Namespace) -> int:
         sandbox_bin=Path(arguments.sandbox_bin).resolve(strict=True),
         sandbox_kind=arguments.sandbox_kind,
         supervisor=Path(arguments.supervisor).resolve(strict=True),
+        supervisor_deny_canary=supervisor_deny_canary,
+        supervisor_allow_canary=supervisor_allow_canary,
         telemetry_dir=telemetry,
         expected_parent=arguments.expected_parent,
     )
@@ -827,6 +856,8 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--sandbox-bin", required=True)
     serve.add_argument("--sandbox-kind", choices=("sandbox-exec", "bwrap"), required=True)
     serve.add_argument("--supervisor", required=True)
+    serve.add_argument("--supervisor-deny-canary", required=True)
+    serve.add_argument("--supervisor-allow-canary", required=True)
     serve.add_argument("--telemetry-dir", default="")
     serve.add_argument("--expected-parent", required=True)
     return parser

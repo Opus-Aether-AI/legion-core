@@ -37,6 +37,26 @@ while [[ $# -gt 0 ]]; do case "$1" in --tools) tools="$2"; shift 2;; --model) mo
 if [[ "${MOCK_PI_FAIL:-0}" == 1 ]]; then printf 'mock Pi failure\n' >&2; exit 4; fi
 if [[ -n "${MOCK_PROVIDER_SIGNAL_PID:-}" ]]; then kill -TERM "$MOCK_PROVIDER_SIGNAL_PID"; fi
 if [[ -n "${MOCK_PROVIDER_ESCAPE_PATH:-}" ]]; then printf 'escape\n' > "$MOCK_PROVIDER_ESCAPE_PATH"; fi
+if [[ -n "${MOCK_PROVIDER_FAST_DAEMON_PID_FILE:-}" ]]; then
+  python3 - "$MOCK_PROVIDER_FAST_DAEMON_PID_FILE" <<'PY'
+import os
+import sys
+
+if os.fork() != 0:
+    os._exit(0)
+os.setsid()
+if os.fork() != 0:
+    os._exit(0)
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    stream.write(str(os.getpid()))
+null = os.open("/dev/null", os.O_RDWR)
+for descriptor in (0, 1, 2):
+    os.dup2(null, descriptor)
+if null > 2:
+    os.close(null)
+os.execve("/bin/sleep", ["sleep", "60"], {})
+PY
+fi
 if [[ -n "${MOCK_PROVIDER_HANDOFF_EXECUTOR:-}" ]]; then
   handoff_args=(run --executor "$MOCK_PROVIDER_HANDOFF_EXECUTOR" \
     --task "perform the bounded child-harness check" --repo . --base HEAD --quiet)

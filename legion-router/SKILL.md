@@ -67,8 +67,11 @@ private credential/temp/cache paths, and exact provider stdout/stderr/usage
 files. Host control sockets and installed delegate entrypoints are unavailable;
 the authenticated broker shim is the sole child-harness path. Parent-owned
 patches, results, telemetry, and an isolated Git index stay outside that
-writable set, and a descendant-aware supervisor reaps session/process-group
-escapes. Hermes currently has no
+writable set. A descendant-aware supervisor reaps session/process-group
+escapes; on macOS a distinct run-unique Seatbelt deny/allow fingerprint for the
+provider and broker target also catches rapid double-forks after they shed
+ancestry, environment, and descriptors, while excluding unrelated sandboxes.
+Hermes currently has no
 documented enforceable read-only one-shot mode, so that request fails before
 launching the provider rather than weakening the sandbox.
 

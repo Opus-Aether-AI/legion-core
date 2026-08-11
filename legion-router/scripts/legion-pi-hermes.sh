@@ -24,6 +24,8 @@ RUN_ID="" CHILD_PID="" KEEP=0 WT="" WT_RECORD="" BRANCH="" REPO="" ART=""
 WT_CREATED=0 BRANCH_CREATED=0
 BROKER_PID="" BROKER_SOCKET_DIR="" BROKER_SOCKET="" BROKER_TOKEN="" BROKER_ROOT=""
 CONTROL_EMPTY_DIR="" SANITIZED_PROVIDER_PATH=""
+SUPERVISOR_DENY_CANARY="" SUPERVISOR_ALLOW_CANARY=""
+TARGET_SUPERVISOR_DENY_CANARY="" TARGET_SUPERVISOR_ALLOW_CANARY=""
 WT_GIT_FILE_ID="" BASE_SHA="" SAFE_GIT_DIR="" COMMON_GIT_OBJECTS=""
 PROVIDER_OUT="" PROVIDER_ERR="" PROVIDER_USAGE=""
 PROVIDER_OUT_ID="" PROVIDER_ERR_ID="" PROVIDER_USAGE_ID=""
@@ -321,7 +323,7 @@ scheme_escape() {
 build_fs_sandbox_command() {
   FS_SANDBOX_COMMAND=()
   if [[ "$FS_SANDBOX_KIND" == sandbox-exec ]]; then
-    local profile="$ART/filesystem.sb" escaped_wt escaped_tmp escaped_cache escaped_private escaped_out escaped_err escaped_usage escaped_broker blocked escaped_blocked
+    local profile="$ART/filesystem.sb" escaped_wt escaped_tmp escaped_cache escaped_private escaped_out escaped_err escaped_usage escaped_broker escaped_supervisor_deny blocked escaped_blocked
     escaped_wt="$(scheme_escape "$WT")"
     escaped_tmp="$(scheme_escape "$ART/tmp")"
     escaped_cache="$(scheme_escape "$ART/cache")"
@@ -330,12 +332,14 @@ build_fs_sandbox_command() {
     escaped_err="$(scheme_escape "$PROVIDER_ERR")"
     escaped_usage="$(scheme_escape "$PROVIDER_USAGE")"
     escaped_broker="$(scheme_escape "$BROKER_SOCKET")"
+    escaped_supervisor_deny="$(scheme_escape "$SUPERVISOR_DENY_CANARY")"
     printf '%s\n' \
       '(version 1)' \
       '(allow default)' \
       '(deny file-write*)' \
       '(deny signal)' \
       '(deny process-info*)' \
+      "(deny file-read* (literal \"$escaped_supervisor_deny\"))" \
       '(deny network-outbound (remote unix-socket))' \
       '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))' \
       "(allow network-outbound (remote unix-socket (path-literal \"$escaped_broker\")))" \
@@ -531,10 +535,21 @@ start_handoff_broker() {
   local helper="$_self_dir/legion-handoff-broker.py" delegate="$_self_dir/../bin/legion-delegate" supervisor="$_self_dir/legion-process-supervisor.py" i
   [[ -x "$helper" && -x "$delegate" && -x "$supervisor" ]] || die 'trusted Legion handoff broker is unavailable'
   BROKER_SOCKET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/legion-broker.XXXXXX")" || die 'unable to allocate handoff broker socket directory'
+  BROKER_SOCKET_DIR="$(cd "$BROKER_SOCKET_DIR" && pwd -P)" || die 'unable to canonicalize handoff broker socket directory'
   BROKER_SOCKET="$BROKER_SOCKET_DIR/broker.sock"
   BROKER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   BROKER_ROOT="$BROKER_SOCKET_DIR/runtime-root"
   CONTROL_EMPTY_DIR="$BROKER_SOCKET_DIR/control-empty"
+  SUPERVISOR_DENY_CANARY="$BROKER_SOCKET_DIR/provider-supervisor-deny"
+  SUPERVISOR_ALLOW_CANARY="$BROKER_SOCKET_DIR/provider-supervisor-allow"
+  TARGET_SUPERVISOR_DENY_CANARY="$BROKER_SOCKET_DIR/target-supervisor-deny"
+  TARGET_SUPERVISOR_ALLOW_CANARY="$BROKER_SOCKET_DIR/target-supervisor-allow"
+  : > "$SUPERVISOR_DENY_CANARY"
+  : > "$SUPERVISOR_ALLOW_CANARY"
+  : > "$TARGET_SUPERVISOR_DENY_CANARY"
+  : > "$TARGET_SUPERVISOR_ALLOW_CANARY"
+  chmod 400 "$SUPERVISOR_DENY_CANARY" "$SUPERVISOR_ALLOW_CANARY" \
+    "$TARGET_SUPERVISOR_DENY_CANARY" "$TARGET_SUPERVISOR_ALLOW_CANARY"
   mkdir -m 555 "$CONTROL_EMPTY_DIR"
   mkdir -p "$ART/broker-bin"
   cp "$helper" "$ART/broker-bin/legion-delegate"
@@ -544,6 +559,8 @@ start_handoff_broker() {
     --delegate "$delegate" --source-repo "$REPO" --broker-root "$BROKER_ROOT" --base-sha "$BASE_SHA" \
     --sandbox-bin "$FS_SANDBOX_BIN" --sandbox-kind "$FS_SANDBOX_KIND" \
     --supervisor "$supervisor" \
+    --supervisor-deny-canary "$TARGET_SUPERVISOR_DENY_CANARY" \
+    --supervisor-allow-canary "$TARGET_SUPERVISOR_ALLOW_CANARY" \
     --telemetry-dir "${LEGION_TELEMETRY_DIR:-}" --expected-parent "$RUN_ID" \
     > "$ART/broker.out" 2> "$ART/broker.err" &
   BROKER_PID=$!
@@ -604,7 +621,13 @@ run_provider() {
     invocation+=("HERMES_HOME=$HERMES_PRIVATE_HOME")
   fi
   invocation+=("${FS_SANDBOX_COMMAND[@]}" "$@")
-  python3 "$supervisor" --cwd "$WT" -- "${invocation[@]}" >"$out" 2>"$err" &
+  local -a supervisor_args=(python3 "$supervisor" --cwd "$WT")
+  if [[ "$FS_SANDBOX_KIND" == sandbox-exec ]]; then
+    supervisor_args+=(--darwin-sandbox-deny-canary "$SUPERVISOR_DENY_CANARY" \
+      --darwin-sandbox-allow-canary "$SUPERVISOR_ALLOW_CANARY")
+  fi
+  supervisor_args+=(-- "${invocation[@]}")
+  "${supervisor_args[@]}" >"$out" 2>"$err" &
   CHILD_PID=$!
   set +e; wait "$CHILD_PID"; PROVIDER_RC=$?; set -e
   CHILD_PID=""

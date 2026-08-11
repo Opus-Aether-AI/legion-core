@@ -542,6 +542,81 @@ wait' _ "$pid_file" &
     ! kill -0 "$child" 2>/dev/null
 }
 
+@test "macOS supervisor reaps a rapid double-fork after ancestry and environment are shed" {
+    [ -x /usr/bin/sandbox-exec ] || skip "macOS sandbox-exec is unavailable"
+    local canary_dir deny_canary allow_canary profile pid_file supervisor child unrelated i
+    canary_dir="$TEST_TMPDIR/supervisor-canaries"
+    mkdir "$canary_dir"
+    canary_dir="$(cd "$canary_dir" && pwd -P)"
+    deny_canary="$canary_dir/deny"
+    allow_canary="$canary_dir/allow"
+    profile="$TEST_TMPDIR/supervisor-fingerprint.sb"
+    pid_file="$TEST_TMPDIR/provider-double-fork.pid"
+    : > "$deny_canary"
+    : > "$allow_canary"
+    chmod 400 "$deny_canary" "$allow_canary"
+    printf '%s\n' '(version 1)' '(allow default)' \
+      "(deny file-read* (literal \"$deny_canary\"))" > "$profile"
+
+    /usr/bin/sandbox-exec -p "(version 1)(allow default)(deny file-read* (subpath \"$canary_dir\"))" \
+      /bin/sleep 30 &
+    unrelated=$!
+
+    python3 "$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" \
+      --cwd "$TEST_TMPDIR" \
+      --darwin-sandbox-deny-canary "$deny_canary" \
+      --darwin-sandbox-allow-canary "$allow_canary" -- \
+      /usr/bin/sandbox-exec -f "$profile" python3 - "$pid_file" <<'PY' &
+import os
+import sys
+
+if os.fork() != 0:
+    os._exit(0)
+os.setsid()
+if os.fork() != 0:
+    os._exit(0)
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    stream.write(str(os.getpid()))
+null = os.open("/dev/null", os.O_RDWR)
+for descriptor in (0, 1, 2):
+    os.dup2(null, descriptor)
+if null > 2:
+    os.close(null)
+os.execve("/bin/sleep", ["sleep", "60"], {})
+PY
+    supervisor=$!
+    wait "$supervisor"
+    i=0
+    while [ ! -s "$pid_file" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+    [ -s "$pid_file" ]
+    child="$(cat "$pid_file")"
+    i=0
+    while kill -0 "$child" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+    ! kill -0 "$child" 2>/dev/null
+    kill -0 "$unrelated"
+    kill -TERM "$unrelated"
+    wait "$unrelated" || true
+}
+
+@test "Pi real macOS sandbox reaps a rapid detached provider daemon" {
+    [ -x /usr/bin/sandbox-exec ] || skip "macOS sandbox-exec is unavailable"
+    local repo worktree pid_file child i
+    repo="$(make_test_repo pi-fast-daemon)"
+    MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec \
+      MOCK_PROVIDER_FAST_DAEMON_PID_FILE=FAST_DAEMON.pid PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --keep --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+    worktree="$(echo "$output" | jq -r .worktree)"
+    pid_file="$worktree/FAST_DAEMON.pid"
+    [ -s "$pid_file" ]
+    child="$(cat "$pid_file")"
+    i=0
+    while kill -0 "$child" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+    ! kill -0 "$child" 2>/dev/null
+}
+
 @test "cancelling Pi reaps an active broker handoff and its descendants" {
     local repo adapter_pid child_pid pid_file stdout_file stderr_file i
     repo="$(make_test_repo broker-cancel)"

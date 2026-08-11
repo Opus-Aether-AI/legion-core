@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'hermes %s\n' "$*" >> "$MOCK_CALL_LOG"
+[[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'hermes active=%s executor=%s depth=%s run=%s name=%s\n' \
+  "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"
+[[ -n "${MOCK_PROVIDER_ENV_LOG:-}" ]] && printf 'hermes_home=%s\n' "${HERMES_HOME:-}" >> "$MOCK_PROVIDER_ENV_LOG"
+if [[ "$#" == 0 ]]; then : "${MOCK_HERMES_FIXTURE:?MOCK_HERMES_FIXTURE must point to a checked-in terminal-result fixture}"; cat "$MOCK_HERMES_FIXTURE"; exit 0; fi
+usage_file=""; model="fixture-hermes"
+while [[ $# -gt 0 ]]; do case "$1" in --usage-file) usage_file="$2"; shift 2;; --model) model="$2"; shift 2;; *) shift;; esac; done
+if [[ "${MOCK_HERMES_FAIL:-0}" == 1 ]]; then printf 'mock Hermes failure\n' >&2; exit 4; fi
+if [[ -n "${MOCK_PROVIDER_ESCAPE_PATH:-}" ]]; then printf 'escape\n' > "$MOCK_PROVIDER_ESCAPE_PATH"; fi
+if [[ -n "${MOCK_PROVIDER_HANDOFF_EXECUTOR:-}" ]]; then
+  legion-delegate run --executor "$MOCK_PROVIDER_HANDOFF_EXECUTOR" \
+    --task "perform the bounded child-harness check" --repo . --base HEAD --quiet >/dev/null
+  if [[ "${MOCK_PROVIDER_HANDOFF_TWICE:-0}" == 1 ]]; then
+    legion-delegate run --executor "$MOCK_PROVIDER_HANDOFF_EXECUTOR" \
+      --task "attempt a forbidden second child-harness check" --quiet >/dev/null
+  fi
+fi
+printf 'mock-hermes-change %s\n' "$model" >> MOCK_HERMES_CHANGE.txt
+if [[ -n "$usage_file" && "${MOCK_HERMES_NO_USAGE:-0}" != 1 ]]; then
+  if [[ "${MOCK_HERMES_USAGE_FAILED:-0}" == 1 ]]; then
+    printf '%s\n' '{"estimated_cost_usd":0.002,"cost_status":"estimated","cost_source":"official_docs_snapshot","input_tokens":256,"cache_read_tokens":24,"cache_write_tokens":0,"output_tokens":48,"reasoning_tokens":12,"total_tokens":328,"api_calls":2,"model":"openai/fixture-hermes","provider":"openai","session_id":"mock-hermes","completed":false,"failed":true,"service_tier":null}' > "$usage_file"
+  elif [[ "${MOCK_HERMES_USAGE_MALFORMED:-0}" == 1 ]]; then
+    printf '%s\n' '{"estimated_cost_usd":0.002,"input_tokens":256,"output_tokens":48,"completed":true,"failed":false}' > "$usage_file"
+  else
+    cost="${MOCK_HERMES_COST:-0.002}"
+    printf '%s\n' \
+      '{' \
+      "  \"estimated_cost_usd\": $cost," \
+      '  "cost_status": "estimated",' \
+      '  "cost_source": "official_docs_snapshot",' \
+      '  "input_tokens": 256,' \
+      '  "output_tokens": 48,' \
+      '  "cache_read_tokens": 24,' \
+      '  "cache_write_tokens": 0,' \
+      '  "reasoning_tokens": 12,' \
+      '  "total_tokens": 328,' \
+      '  "api_calls": 2,' \
+      '  "model": "openai/fixture-hermes",' \
+      '  "provider": "openai",' \
+      '  "session_id": "mock-hermes",' \
+      '  "completed": true,' \
+      '  "failed": false,' \
+      '  "service_tier": null' \
+      '}' > "$usage_file"
+  fi
+fi
+if [[ "${MOCK_HERMES_JSON_STDOUT:-0}" == 1 ]]; then
+  printf '%s\n' '{"findings":[]}'
+else
+  printf '%s\n' 'HERMES_OK_OUTPUT'
+fi

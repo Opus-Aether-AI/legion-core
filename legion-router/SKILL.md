@@ -1,7 +1,7 @@
 ---
 name: legion-router
 kind: ability
-description: Use when a primary harness should hand a scoped task to a configured Codex, Claude, Cursor, or opencode executor — implementation, independent code generation, cross-model review, second opinions, or tie-breaks. Drives Legion executor adapters in isolated worktrees with metered telemetry. For a whole multi-step goal, use legion-orchestrate.
+description: Use when a primary harness should hand a scoped task to a configured Codex, Claude, Cursor, opencode, Pi, or Hermes executor — implementation, independent code generation, cross-model review, second opinions, or tie-breaks. Drives Legion executor adapters in isolated worktrees with metered telemetry. For a whole multi-step goal, use legion-orchestrate.
 ---
 
 # Legion Router — delegate to a legion of models
@@ -47,6 +47,27 @@ judgement inline.
 You then **verify the diff** before applying it. Delegation never auto-applies unless you pass `--apply` and the verify gate is clean.
 
 Cursor Agent uses the same sidecar pattern through `legion-cursor`: it runs Cursor's headless `agent -p --trust` in an isolated worktree, maps `--sandbox read-only` to Cursor plan mode, captures the diff/result, emits `executor:"cursor"` telemetry with the actual returned model when Cursor reports one, and leaves applying the patch to the orchestrator unless `--apply` is passed.
+
+Pi uses its official JSON event stream: `legion-pi` runs `pi -p --mode json
+--no-session`, requires a valid successful final settled `agent_end`, aggregates
+usage and cost once from every assistant `message_end` and successful
+`compaction_end`, and maps `model:thinking` or
+`--thinking` onto Pi's explicit thinking flag. Its read-only adapter allowlists
+only `read`, `grep`, `find`, and `ls` and refuses any patch.
+
+Hermes uses `hermes --oneshot` with a Legion-owned `--usage-file`. Its
+workspace-write runs strictly validate the whole JSON usage document and treat
+stdout as opaque final text. Legion ignores the user's Hermes configuration and
+pins the one-shot toolsets to `terminal,file`, while still loading repository
+rules such as `AGENTS.md`; user plugins, hooks, MCPs, and cron/browser tools are
+not part of the auto-approved run. Both providers run behind a host filesystem
+and process boundary (`sandbox-exec` on macOS or Bubblewrap with a private PID
+namespace on Linux) that permits writes only to the generated worktree, scrubbed
+private credential/temp/cache paths, and exact provider stdout/stderr/usage
+files. Parent-owned patches, results, telemetry, and an isolated Git index stay
+outside that writable set. Hermes currently has no
+documented enforceable read-only one-shot mode, so that request fails before
+launching the provider rather than weakening the sandbox.
 
 ## When to delegate (decision guide)
 
@@ -142,14 +163,22 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
 - `executor=self` is returned to the primary for inline work. A delegated worker
   normally implements its assigned slice directly. It may make one explicit
   `legion-delegate run --executor <different-harness>` handoff to Claude, Codex,
-  Cursor, or opencode; Legion preserves the parent trace, creates a fresh
+  Cursor, opencode, Pi, or Hermes; Legion preserves the parent trace, creates a fresh
   worktree, and enforces `LEGION_MAX_DEPTH` (default `2`). Implicit routes,
   same-harness nesting, direct adapter calls, and depth-limit bypasses fail closed.
+  Pi and Hermes cross the filesystem boundary through an authenticated,
+  single-use parent broker. It accepts only one typed explicit-run request,
+  rejects opaque/internal/apply/keep controls, and runs the target in a
+  standalone disposable repository under its own equivalent OS boundary. The
+  source cannot write the target repository, and the target cannot write source
+  artifacts or parent Git administration.
 
 > **The sandbox is the security boundary — not the task scanner.** `scan_task_text`
 > is a best-effort tripwire and is trivially bypassable (encodings, indirection);
-> never treat a passed scan as proof a task is safe. Real containment is the codex
-> `--sandbox` plus the isolated git worktree: a `workspace-write` run can still
+> never treat a passed scan as proof a task is safe. Codex uses its native
+> `--sandbox`; Pi and Hermes add an OS filesystem boundary around the worktree.
+> Other adapters use their documented provider sandbox plus the isolated git
+> worktree. A `workspace-write` run can still
 > modify any file *inside that worktree* (including repo dotfiles like `.zshenv`
 > if they exist there). For anything touching secrets or untrusted input, use a
 > `read-only` sandbox or refuse — do not rely on the scanner.

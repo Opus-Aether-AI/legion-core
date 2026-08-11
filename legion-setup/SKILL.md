@@ -2,7 +2,7 @@
 name: legion-setup
 kind: procedure
 disable-model-invocation: true
-description: Install or update the Legion multi-model marketplace. Use when the user pastes the Legion GitHub repo link, says "install legion", "set up legion", "add legion", "update legion", "upgrade legion", or "refresh legion", or wants Legion on Codex, Cursor, or opencode. First run installs marketplace plugins, shared skills and CLIs, plus the selected harness bridges; daily refresh is opt-in. The harness subcommands wire supported MCP, skill, agent, and delegation surfaces.
+description: Install or update the Legion multi-model marketplace. Use when the user pastes the Legion GitHub repo link, says "install legion", "set up legion", "add legion", "update legion", "upgrade legion", or "refresh legion", or wants Legion on Codex, Cursor, opencode, Pi, or Hermes. First run installs marketplace plugins, shared skills and CLIs, plus the selected harness bridges; daily refresh is opt-in. The harness subcommands wire supported MCP, skill, agent, and delegation surfaces.
 ---
 
 # Legion Setup — install & update in one skill
@@ -17,7 +17,7 @@ If `legion-setup` is already on `$PATH` (Legion partly installed), just run it �
 legion-setup install            # all plugins (default); or: minimal | <plugin-name>
 ```
 
-If it's a brand-new machine (nothing installed yet), bootstrap with one paste — this installs the marketplace, plugins, cross-harness skills for Codex/Cursor/opencode, shared CLIs, and this skill (so updates are one word afterwards). Add `--cron` only when you want daily refresh/self-learning:
+If it's a brand-new machine (nothing installed yet), bootstrap with one paste — this installs the marketplace, plugins, shared skills for every supported harness, shared CLIs, and this skill (so updates are one word afterwards). Add `--cron` only when you want daily refresh/self-learning:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Opus-Aether-AI/legion-core/main/scripts/install.sh | bash -s all
@@ -86,6 +86,24 @@ legion-setup opencode verify    # read-only readiness check
 opencode reads the shared Legion skills from `~/.agents/skills`; restart it after
 MCP registration.
 
+## Run Legion on Pi or Hermes
+
+Pi consumes its primary-mode guidance directly from the shared skill catalog.
+Hermes does not scan that catalog by default, so setup creates one narrowly
+managed `~/.hermes/skills/legion-hermes-mode` link to the shared source. It does
+not rewrite `config.yaml` or replace operator-owned files:
+
+```bash
+legion-setup pi
+legion-setup pi verify
+legion-setup hermes
+legion-setup hermes verify
+```
+
+The installer manages only Legion-owned symlinks in `~/.agents/skills` plus that
+single Hermes discovery link; it never replaces a real user skill directory.
+Use `legion-route --list-executors` to see all registered coding families.
+
 ## Make Legion the repository default
 
 Use the idempotent repository initializer to add a precise Legion-first policy
@@ -120,4 +138,6 @@ legion-setup uninstall          # remove (add --all to also drop the marketplace
 - User wants Legion **on Codex** ("legion on codex", "codex setup", "use legion in codex") → run `legion-setup codex`, then `legion-setup codex verify`.
 - User wants Legion **on Cursor** ("legion on cursor", "cursor setup", "use legion in cursor") → run `legion-setup cursor`, then `legion-setup cursor verify`.
 - User wants Legion **on opencode** ("legion on opencode", "opencode setup") → run `legion-setup opencode`, then `legion-setup opencode verify`.
+- User wants Legion **on Pi** ("legion on pi", "pi setup") → run `legion-setup pi`, then `legion-setup pi verify`.
+- User wants Legion **on Hermes** ("legion on hermes", "hermes setup") → run `legion-setup hermes`, then `legion-setup hermes verify`.
 - `legion-setup` with no args auto-picks: update if installed, install if not. It's safe to re-run anytime.

@@ -14,6 +14,8 @@ Anthropic-compatible sidecar keeps proxied and out-of-band spend in one stream.
 | `legion-claude` | `scripts/legion-claude.sh` | Delegate to Claude headless in an isolated worktree, capture a patch, and optionally fall back through the configured Codex route. |
 | `legion-cursor` | `scripts/legion-cursor.sh` | Delegate a task to Cursor Agent headless (`agent -p`) in an isolated worktree; capture diff + result + usage; emit a telemetry span with `executor=cursor`. |
 | `legion-opencode` | `scripts/legion-opencode.sh` | Delegate to opencode headless in an isolated worktree and normalize its event stream into the Legion result/span contract. |
+| `legion-pi` | `scripts/legion-pi.sh` | Delegate through Pi's official `-p --mode json --no-session` stream inside a filesystem write sandbox; validate the final settled `agent_end`, meter every `message_end` plus compaction call exactly once, and return a patch captured with parent-owned Git metadata. |
+| `legion-hermes` | `scripts/legion-hermes.sh` | Delegate through Hermes `--oneshot` inside a filesystem write sandbox; parse its complete `--usage-file` JSON document while preserving stdout as opaque final text. |
 | `legion-intake` | `scripts/legion-intake.sh` | GitHub issue intake wrapper. Runs a compatible Legion worker (`delegate`, `cursor`, or `custom`) in explore or implement mode, comments assessment results, and opens review PRs for implementation diffs. |
 | `legion-router` | `scripts/router.sh` | Manage the loopback `:8082` Anthropic-compatible metering proxy as a launchd service: `install`/`uninstall`/`start`/`stop`/`restart`/`status`/`logs`/`errors`/`dev`. Endpoints: `/health`, `/stats`, `POST /ingest`. Keys optional (runs as a pure meter). |
 
@@ -51,6 +53,12 @@ legion-delegate apply --run <RUN_ID> --repo .
 # Delegate a scoped task to Cursor Agent headless
 legion-cursor run --task "try the same fix with Cursor Agent; minimal edit" --repo .
 
+# Pi accepts an explicit model/thinking mapping (or --thinking high separately)
+legion-pi run --model "$(legion-route --model-ref pi_default)" --thinking high --task "make the minimal fix" --repo .
+
+# Hermes's documented one-shot runner writes a durable usage artifact
+legion-hermes run --model "your-configured-hermes-model" --task "make the minimal fix" --repo .
+
 # Structured Codex review of an immutable base/head pair, with optional bounded instructions
 legion-delegate review --archetype security-review --base main --head HEAD --repo . \
   --task "Verify the selected security and learning guardrails."
@@ -61,8 +69,10 @@ narrowly normalizes Codex's built-in `[P0]`–`[P3]` or explicit `No findings`
 formats; any other prose remains an invalid, fail-closed verdict. `approve` and
 `comment` cannot carry medium-or-higher findings.
 
-Requires the CLI for each executor you use, plus `jq` and `git`. The proxy
-additionally needs `bun`.
+Requires the CLI for each executor you use, plus `jq` and `git`. Pi and Hermes
+children also require `sandbox-exec` (included with macOS) or Bubblewrap
+(`bwrap`, install the `bubblewrap` package on Linux); their adapters fail closed
+when neither boundary exists. The proxy additionally needs `bun`.
 
 ## Tune routes from measured outcomes
 
@@ -103,6 +113,24 @@ legion-delegate run --model "$(legion-route --model-ref codex_workhorse)" --sand
 `docker`, `podman`, and `vercel` are opt-in blast-radius protection only. If
 Sandcastle is absent, those modes fail with an install hint instead of falling
 back to the default worktree path.
+
+Pi and Hermes provider processes run with the host filesystem read-only except
+for their generated worktree, scrubbed private credential/temp/cache
+directories, and the exact stdout, stderr, and provider-usage files opened by
+Legion. The private credential view is deleted after the run. Parent outputs
+such as `diff.patch`, `last-message.txt`, and telemetry errors are never
+provider-writable, and provider descendants are terminated before any output is
+parsed. Linux runs also receive a private PID namespace; macOS blocks host
+process inspection/signalling. Pi's `read-only` run
+also disables every writing tool (`--tools read,grep,find,ls`) and rejects any
+resulting patch. Hermes runs with `--ignore-user-config --toolsets terminal,file`
+so repository rules remain available without auto-approved user plugins, hooks,
+MCP servers, browser, or cron tools. Hermes does not expose an enforceable
+read-only/no-tools one-shot mode, so `legion-hermes --sandbox read-only` fails
+before launching Hermes; it never silently becomes a writable run. Neither
+adapter accepts container or danger modes. Isolated diff capture preserves
+allowlisted Git format and line-ending settings and fails closed when clean
+filters (for example LFS) would require executing repository-configured code.
 
 ## Sandbox lifecycle
 
@@ -171,10 +199,18 @@ legion-router/
   `LEGION_EXECUTOR_NAME`, `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized
   repository policy uses that context to prevent accidental recursive delegation.
   A worker can explicitly use `legion-delegate run --executor <different-harness>`
-  for one cross-harness handoff (Claude, Codex, Cursor, or opencode). The handoff
+  for one cross-harness handoff (Claude, Codex, Cursor, opencode, Pi, or Hermes). The handoff
   retains task scanning, a fresh isolated worktree, parent trace linkage, and a
   default maximum depth of `2` (`LEGION_MAX_DEPTH`). Implicit, same-harness, and
-  direct-adapter nested calls remain blocked.
+  direct-adapter nested calls remain blocked. A sandboxed Pi or Hermes worker's
+  command crosses an authenticated, single-use parent broker. The broker accepts
+  only a typed subset of `run` (`--executor`, bounded task/stdin, sandbox,
+  reasoning effort, integer token budget, and quiet); it rejects apply/keep,
+  run IDs, internal flags, arbitrary repos/bases, and every unknown token. The
+  target runs from a standalone disposable repository under an equivalent OS
+  boundary: it cannot write source artifacts or the parent repository, and the
+  source provider cannot write the target repository. Only validated child
+  telemetry is copied back to the canonical span store.
 
 ## Telemetry
 

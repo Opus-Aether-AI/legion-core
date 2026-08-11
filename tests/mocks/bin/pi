@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'pi %s\n' "$*" >> "$MOCK_CALL_LOG"
+[[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'pi active=%s executor=%s depth=%s run=%s name=%s\n' \
+  "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"
+[[ -n "${MOCK_PROVIDER_ENV_LOG:-}" ]] && printf 'pi_dir=%s\n' "${PI_CODING_AGENT_DIR:-}" >> "$MOCK_PROVIDER_ENV_LOG"
+
+# The no-argument shape remains a fixture reader for registry tests. Adapter
+# tests exercise Pi's official JSON event stream, never a live provider.
+if [[ "$#" == 0 ]]; then : "${MOCK_PI_FIXTURE:?MOCK_PI_FIXTURE must point to a checked-in terminal-result fixture}"; cat "$MOCK_PI_FIXTURE"; exit 0; fi
+tools=""; model="fixture-pi"; thinking=""
+while [[ $# -gt 0 ]]; do case "$1" in --tools) tools="$2"; shift 2;; --model) model="$2"; shift 2;; --thinking) thinking="$2"; shift 2;; *) shift;; esac; done
+if [[ "${MOCK_PI_FAIL:-0}" == 1 ]]; then printf 'mock Pi failure\n' >&2; exit 4; fi
+if [[ -n "${MOCK_PROVIDER_SIGNAL_PID:-}" ]]; then kill -TERM "$MOCK_PROVIDER_SIGNAL_PID"; fi
+if [[ -n "${MOCK_PROVIDER_ESCAPE_PATH:-}" ]]; then printf 'escape\n' > "$MOCK_PROVIDER_ESCAPE_PATH"; fi
+if [[ -n "${MOCK_PROVIDER_HANDOFF_EXECUTOR:-}" ]]; then
+  handoff_args=(run --executor "$MOCK_PROVIDER_HANDOFF_EXECUTOR" \
+    --task "perform the bounded child-harness check" --repo . --base HEAD --quiet)
+  [[ -z "${MOCK_PROVIDER_HANDOFF_BUDGET:-}" ]] || handoff_args+=(--budget-tokens "$MOCK_PROVIDER_HANDOFF_BUDGET")
+  legion-delegate "${handoff_args[@]}" >/dev/null
+  if [[ "${MOCK_PROVIDER_HANDOFF_TWICE:-0}" == 1 ]]; then
+    legion-delegate run --executor "$MOCK_PROVIDER_HANDOFF_EXECUTOR" \
+      --task "attempt a forbidden second child-harness check" --quiet >/dev/null
+  fi
+fi
+if [[ "${MOCK_PROVIDER_REPLACE_GIT:-0}" == 1 ]]; then
+  rm -f .git
+  mkdir .git
+  printf '[core]\n\trepositoryformatversion = 0\n[filter "escape"]\n\tclean = sh -c "printf escaped > %s; cat"\n' \
+    "${MOCK_FILTER_ESCAPE_PATH:?MOCK_FILTER_ESCAPE_PATH is required}" > .git/config
+  printf '*.txt filter=escape\n' > .gitattributes
+fi
+if [[ "$tools" != "read,grep,find,ls" || "${MOCK_PI_WRITE_IN_READONLY:-0}" == 1 ]]; then printf 'mock-pi-change %s %s\n' "$model" "$thinking" >> MOCK_PI_CHANGE.txt; fi
+printf '%s\n' '{"type":"session","version":3,"id":"mock-pi"}'
+if [[ "${MOCK_PI_RETRY_COMPACTION:-0}" == 1 ]]; then
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"retrying"}],"provider":"openai","model":"fixture-pi-alias","usage":{"input":10,"output":4,"cacheRead":0,"cacheWrite":0,"reasoning":1,"totalTokens":14,"cost":{"input":0.0004,"output":0.0004,"cacheRead":0,"cacheWrite":0,"total":0.001}},"stopReason":"error"}}'
+  printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"retrying"}],"provider":"openai","model":"fixture-pi-alias","usage":{"input":10,"output":4,"cacheRead":0,"cacheWrite":0,"reasoning":1,"totalTokens":14,"cost":{"input":0.0004,"output":0.0004,"cacheRead":0,"cacheWrite":0,"total":0.001}},"stopReason":"error"}],"willRetry":true}'
+  printf '%s\n' '{"type":"compaction_end","reason":"overflow","result":{"summary":"compact","firstKeptEntryId":"entry-1","tokensBefore":999,"estimatedTokensAfter":100,"usage":{"input":50,"output":10,"cacheRead":5,"cacheWrite":1,"reasoning":2,"totalTokens":66,"cost":{"input":0.001,"output":0.0005,"cacheRead":0.0002,"cacheWrite":0.0003,"total":0.002}}},"aborted":false,"willRetry":false}'
+fi
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"edit","arguments":{}}],"provider":"openai","model":"fixture-pi-alias","usage":{"input":100,"output":20,"cacheRead":10,"cacheWrite":2,"reasoning":5,"totalTokens":132,"cost":{"input":0.001,"output":0.001,"cacheRead":0.0005,"cacheWrite":0.0005,"total":0.003}},"stopReason":"toolUse"}}'
+[[ "${MOCK_PI_MALFORMED:-0}" != 1 ]] || printf '%s\n' 'not-json'
+if [[ "${MOCK_PI_NO_AGENT_END:-0}" != 1 ]]; then
+  stop_reason=stop
+  [[ "${MOCK_PI_ERROR_EVENT:-0}" != 1 ]] || stop_reason=error
+  if [[ "${MOCK_PI_MISSING_USAGE:-0}" == 1 ]]; then
+    printf '%s\n' "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"PI_OK_OUTPUT\"}],\"provider\":\"openai\",\"model\":\"fixture-pi-alias\",\"responseModel\":\"fixture-pi\",\"stopReason\":\"$stop_reason\"}}"
+    printf '%s\n' "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"PI_OK_OUTPUT\"}],\"provider\":\"openai\",\"model\":\"fixture-pi-alias\",\"responseModel\":\"fixture-pi\",\"stopReason\":\"$stop_reason\"}],\"willRetry\":false}"
+  else
+    printf '%s\n' "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"PI_OK_OUTPUT\"}],\"provider\":\"openai\",\"model\":\"fixture-pi-alias\",\"responseModel\":\"fixture-pi\",\"usage\":{\"input\":120,\"output\":30,\"cacheRead\":20,\"cacheWrite\":3,\"reasoning\":7,\"totalTokens\":173,\"cost\":{\"input\":0.001,\"output\":0.002,\"cacheRead\":0.0005,\"cacheWrite\":0.0005,\"total\":0.004}},\"stopReason\":\"$stop_reason\"}}"
+    printf '%s\n' "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call-1\",\"name\":\"edit\",\"arguments\":{}}],\"provider\":\"openai\",\"model\":\"fixture-pi-alias\",\"usage\":{\"input\":100,\"output\":20,\"cacheRead\":10,\"cacheWrite\":2,\"reasoning\":5,\"totalTokens\":132,\"cost\":{\"input\":0.001,\"output\":0.001,\"cacheRead\":0.0005,\"cacheWrite\":0.0005,\"total\":0.003}},\"stopReason\":\"toolUse\"},{\"role\":\"toolResult\",\"toolCallId\":\"call-1\",\"toolName\":\"edit\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"isError\":false},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"PI_OK_OUTPUT\"}],\"provider\":\"openai\",\"model\":\"fixture-pi-alias\",\"responseModel\":\"fixture-pi\",\"usage\":{\"input\":120,\"output\":30,\"cacheRead\":20,\"cacheWrite\":3,\"reasoning\":7,\"totalTokens\":173,\"cost\":{\"input\":0.001,\"output\":0.002,\"cacheRead\":0.0005,\"cacheWrite\":0.0005,\"total\":0.004}},\"stopReason\":\"$stop_reason\"}],\"willRetry\":false}"
+  fi
+fi
+if [[ "${MOCK_PROVIDER_POISON_PARENT_ARTIFACT:-0}" == 1 ]]; then
+  artifact_root="${TMPDIR%/tmp}"
+  rm -f "$artifact_root/last-message.txt"
+  ln -s "${MOCK_PARENT_ARTIFACT_ESCAPE_PATH:?MOCK_PARENT_ARTIFACT_ESCAPE_PATH is required}" "$artifact_root/last-message.txt"
+fi

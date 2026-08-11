@@ -349,9 +349,12 @@ emit_primary_baseline_span() {
   [[ -z "${LEGION_PARENT_ID:-}" ]] || return 0
   [[ -n "${RUN_ID:-}" ]] || return 0
   local primary; primary="$(legion_primary 2>/dev/null || echo claude)"
-  # No counterfactual when the primary IS the executor we delegated to. Match the
-  # executor FAMILY so a codex primary also skips codex-review / codex-resume.
-  [[ "${delegated_executor%%-*}" == "$primary" ]] && return 0
+  # No counterfactual when the primary IS the executor we delegated to. Family
+  # normalization comes from the registry so future coding harnesses do not
+  # need another prefix allowlist here.
+  local delegated_family
+  delegated_family="$(legion_executor_family "$delegated_executor" 2>/dev/null || true)"
+  [[ "$delegated_family" == "$primary" ]] && return 0
 
   LEGION_PRIMARY_BASELINE_EMITTED=1
   # Historical label for a Claude primary is "opus-baseline"; keep it so existing
@@ -430,7 +433,7 @@ legion_delegated_context() {
 route_preflight() {
   local target_executor="${1:-codex}" target_model="${2:-}"
   local route_archetype="${4:-}" explicit_target="${5:-0}"
-  local primary reason="" art receipt payload artifacts source depth max_depth source_run
+  local primary reason="" art receipt payload artifacts source depth max_depth source_run source_family target_family
   : "${3:-}"  # task text is intentionally never persisted for blocked routes
   primary="$(legion_primary)"
   if [[ "$target_executor" == "self" ]]; then
@@ -442,9 +445,12 @@ route_preflight() {
     source_run="${LEGION_RUN_ID:-}"
     if [[ "$explicit_target" != "1" ]]; then
       reason="nested-delegation-requires-explicit-executor"
-    elif [[ ! "$source" =~ ^(claude|codex|cursor|opencode|hermes)$ || -z "$source_run" ]]; then
+    elif [[ -z "$source_run" ]]; then
       reason="nested-delegation-unknown-source"
-    elif [[ "$source" == "$target_executor" ]]; then
+    elif ! source_family="$(legion_executor_family "$source" 2>/dev/null)" || \
+         ! target_family="$(legion_executor_family "$target_executor" 2>/dev/null)"; then
+      reason="nested-delegation-unknown-source"
+    elif [[ "$source_family" == "$target_family" ]]; then
       reason="nested-delegation-same-executor"
     elif [[ ! "$depth" =~ ^[0-9]+$ || ! "$max_depth" =~ ^[1-9][0-9]*$ || "$depth" -ge "$max_depth" ]]; then
       reason="nested-delegation-depth-limit"
@@ -1620,7 +1626,7 @@ main() {
 legion-delegate — delegate a scoped task to an external model agent (Codex by
 default; any registered executor via --executor)
 
-  run      [--archetype A | --model M] [--executor codex|cursor|claude|opencode]
+  run      [--archetype A | --model M] [--executor claude|codex|cursor|opencode|pi|hermes]
            [--sandbox read-only|workspace-write|docker|podman|vercel]
            [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
            [--base REF] [--budget-tokens N] [--scope PATHSPEC ...] [--detach] [--apply] [--keep]

@@ -2,6 +2,15 @@
 # Shared delegated-executor context. Repository policies use these variables to
 # distinguish a primary/orchestrator from a child that must implement directly.
 
+_legion_context_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_legion_executor_registry="$_legion_context_dir/../../../legion-observability/scripts/legion_executor_registry.py"
+
+legion_executor_family() {
+  local executor="${1:-}"
+  [[ -n "$executor" && -r "$_legion_executor_registry" ]] || return 1
+  python3 "$_legion_executor_registry" --family "$executor" 2>/dev/null
+}
+
 legion_executor_worktree_cwd() {
   local physical_cwd
   physical_cwd="$(builtin pwd -P 2>/dev/null)" || return 1
@@ -37,12 +46,17 @@ legion_require_top_level_executor() {
 }
 
 legion_cross_harness_handoff_allowed() {
+  [[ "${LEGION_CROSS_HARNESS_HANDOFF:-0}" == "1" ]] || return 1
+  legion_cross_harness_pair_allowed "$1"
+}
+
+legion_cross_harness_pair_allowed() {
   local target="${1:-}" source="${LEGION_EXECUTOR_NAME:-}"
   local depth="${LEGION_DEPTH:-0}" max_depth="${LEGION_MAX_DEPTH:-2}"
-  [[ "${LEGION_CROSS_HARNESS_HANDOFF:-0}" == "1" ]] || return 1
-  [[ "$source" =~ ^(claude|codex|cursor|opencode|hermes)$ ]] || return 1
-  [[ "$target" =~ ^(claude|codex|cursor|opencode)$ ]] || return 1
-  [[ "$source" != "$target" ]] || return 1
+  local source_family target_family
+  source_family="$(legion_executor_family "$source")" || return 1
+  target_family="$(legion_executor_family "$target")" || return 1
+  [[ "$source_family" != "$target_family" ]] || return 1
   [[ "$depth" =~ ^[0-9]+$ && "$max_depth" =~ ^[1-9][0-9]*$ ]] || return 1
   (( depth < max_depth ))
 }

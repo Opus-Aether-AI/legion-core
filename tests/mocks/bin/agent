@@ -27,6 +27,17 @@ if [[ "${MOCK_CURSOR_FAIL:-0}" == "1" ]]; then
   exit 4
 fi
 
+if [[ -n "${MOCK_CURSOR_DELAY:-}" ]]; then
+  sleep "$MOCK_CURSOR_DELAY" &
+  delay_pid=$!
+  [[ -z "${MOCK_CURSOR_DELAY_PID_FILE:-}" ]] || printf '%s\n' "$delay_pid" > "$MOCK_CURSOR_DELAY_PID_FILE"
+  wait "$delay_pid"
+fi
+
+if [[ -n "${MOCK_CHILD_ESCAPE_PATH:-}" ]]; then
+  printf 'child escape\n' > "$MOCK_CHILD_ESCAPE_PATH"
+fi
+
 if [[ "$force" -eq 1 || "${MOCK_CURSOR_WRITE_IN_PLAN:-0}" == "1" ]]; then
   printf 'mock-cursor-change by %s\n' "$model" >> MOCK_CURSOR_CHANGE.txt
 fi

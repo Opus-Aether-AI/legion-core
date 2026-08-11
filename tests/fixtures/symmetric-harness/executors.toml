@@ -1,0 +1,35 @@
+[executors.claude]
+kind = "primary coding"
+adapter = "legion-claude"
+contract = "diff"
+model_ref = "claude_default"
+
+[executors.codex]
+kind = "primary coding"
+adapter = "legion-delegate"
+contract = "native"
+model_ref = "codex_workhorse"
+
+[executors.cursor]
+kind = "primary coding"
+adapter = "legion-cursor"
+contract = "diff"
+model_ref = "cursor_default"
+
+[executors.opencode]
+kind = "primary coding"
+adapter = "legion-opencode"
+contract = "diff"
+model_ref = "opencode_default"
+
+[executors.hermes]
+kind = "primary coding"
+adapter = "legion-hermes"
+contract = "diff"
+model_ref = "hermes_default"
+
+[executors.pi]
+kind = "primary coding"
+adapter = "legion-pi"
+contract = "diff"
+model_ref = "pi_default"

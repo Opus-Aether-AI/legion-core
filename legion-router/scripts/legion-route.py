@@ -20,6 +20,19 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(
+    0,
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "legion-observability", "scripts")
+    ),
+)
+from legion_executor_registry import (  # noqa: E402
+    ExecutorRegistryError,
+    executor_family as registry_executor_family,
+    load_coding_executor_families,
+    load_executor_registry,
+)
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - py<3.11
@@ -54,6 +67,8 @@ def resolve_primary(env=None):
         return "hermes"
     if env.get("CURSOR_AGENT") or env.get("CURSOR_TRACE_ID"):
         return "cursor"
+    if str(env.get("AI_AGENT") or "").strip().lower() == "pi" or env.get("PI_CODING_AGENT"):
+        return "pi"
     return "claude"
 
 
@@ -62,10 +77,10 @@ def executor_family(name):
     normalized = str(name or "").strip().lower()
     if normalized == "self":
         return "self"
-    for family in ("codex", "claude", "cursor", "opencode", "hermes"):
-        if normalized.startswith(family):
-            return family
-    return normalized
+    # Routing may be imported by an embedding process that changes
+    # LEGION_EXECUTORS_FILE between calls.  Resolve this lightweight identity
+    # lookup from the active registry rather than freezing an allowlist here.
+    return registry_executor_family(normalized, load_coding_executor_families()) or normalized
 
 
 def delegated_worktree_cwd(cwd=None):
@@ -119,11 +134,10 @@ def preflight(route, primary, env=None):
 
 def load_executors(path=None):
     execs_path = path or os.environ.get("LEGION_EXECUTORS_FILE", _DEFAULT_EXECUTORS_FILE)
-    table = load_table(execs_path)
-    execs = table.get("executors", table)
-    if not isinstance(execs, dict):
-        raise RouteConfigError("executors.toml must contain an [executors] table")
-    return execs
+    try:
+        return load_executor_registry(execs_path)
+    except ExecutorRegistryError as exc:
+        raise RouteConfigError(str(exc)) from exc
 
 
 def executor_info(execs, name):

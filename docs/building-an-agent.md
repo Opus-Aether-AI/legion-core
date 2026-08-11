@@ -10,7 +10,7 @@ add the domain knowledge, surfaces, and policy on top.
 
 | legion-core owns | your agent owns |
 |---|---|
-| Delegation (`legion-delegate`, `legion-cursor`, `legion-claude`) | Domain skills, agents, slash commands |
+| Delegation (`legion-delegate`, `legion-claude`, `legion-cursor`, `legion-opencode`, `legion-pi`, `legion-hermes`) | Domain skills, agents, slash commands |
 | Orchestration (`legion-orchestrate`) | The product surface (CLI, app, MCP) |
 | Telemetry, doctor, self-learn, heal | Domain validators / evals |
 | Routing + cost tables | Which models/archetypes your work prefers |

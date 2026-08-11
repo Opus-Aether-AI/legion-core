@@ -37,7 +37,7 @@ contract = "native"
 model_ref = "codex_workhorse"
 
 [executors.cursor]
-kind = "coding"
+kind = "primary coding"
 adapter = "legion-cursor"
 contract = "diff"
 model_ref = "cursor_default"
@@ -48,11 +48,16 @@ adapter = "legion-opencode"
 contract = "diff"
 model_ref = "opencode_default"
 
-# hermes is a persona/orchestrator (long-running assistant), not a headless
-# coding CLI: it can be PRIMARY and delegate to the coding executors above, but
-# it is never a delegation *target* — there is no scoped task→diff contract.
+# Hermes and Pi use first-class diff adapters. Both create Legion-owned
+# worktrees and terminal artifacts; unsupported sandbox modes fail closed.
 [executors.hermes]
-kind = "primary"
-adapter = ""
-contract = ""
-model_ref = ""
+kind = "primary coding"
+adapter = "legion-hermes"
+contract = "diff"
+model_ref = "hermes_default"
+
+[executors.pi]
+kind = "primary coding"
+adapter = "legion-pi"
+contract = "diff"
+model_ref = "pi_default"

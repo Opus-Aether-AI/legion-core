@@ -148,6 +148,433 @@ repos_file_for_repo() {
     done
 }
 
+@test "Pi adapter: uses official JSON mode, maps model thinking, and meters a terminal result" {
+    local repo; repo="$(make_test_repo pi-contract)"
+    PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi:high --task "make a scoped edit" --repo "$3" --keep --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok" and .executor == "pi" and .model == "openai/fixture-pi" and .result == "PI_OK_OUTPUT"'
+    echo "$output" | jq -e '.usage == {"input_tokens":220,"cached_input_tokens":30,"output_tokens":38,"reasoning_output_tokens":12,"cache_creation_input_tokens":5} and .cost_usd == 0.007'
+    assert_mock_called pi '-p --mode json --no-session --no-approve --no-extensions --no-skills --no-prompt-templates --model openai/fixture-pi --thinking high'
+    assert_mock_called sandbox-exec '-f '
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    [ -s "$diff" ]
+    local run_id profile artifact_root
+    run_id="$(echo "$output" | jq -r .run_id)"
+    artifact_root="$(dirname "$(echo "$output" | jq -r .diff_path)")"
+    profile="$artifact_root/filesystem.sb"
+    [ -f "$profile" ]
+    grep -Fq "(literal \"$artifact_root/pi.out.jsonl\")" "$profile"
+    grep -Fq "(literal \"$artifact_root/pi.err\")" "$profile"
+    grep -Fq "(literal \"$artifact_root/pi.usage.json\")" "$profile"
+    ! grep -Fq "(subpath \"$artifact_root\")" "$profile"
+    ! grep -Fq 'last-message.txt' "$profile"
+
+    MOCK_PI_ERROR_EVENT=1 PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+
+    MOCK_PI_MALFORMED=1 PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+
+    MOCK_PI_MISSING_USAGE=1 PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+
+    MOCK_PI_NO_AGENT_END=1 PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+}
+
+@test "Pi adapter: meters retry and compaction calls exactly once" {
+    local repo; repo="$(make_test_repo pi-retry-compaction)"
+    MOCK_PI_RETRY_COMPACTION=1 PI_BIN=pi run "$REPO_ROOT/legion-router/bin/legion-pi" \
+      run --model openai/fixture-pi --task "make a scoped edit" --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok" and .result == "PI_OK_OUTPUT"'
+    echo "$output" | jq -e '.usage == {"input_tokens":280,"cached_input_tokens":35,"output_tokens":49,"reasoning_output_tokens":15,"cache_creation_input_tokens":6}'
+    echo "$output" | jq -e '.cost_usd == 0.01'
+}
+
+@test "Pi and Hermes adapters broker one real cross-harness handoff outside the provider sandbox" {
+    local source repo context run_id
+    context="$TEST_TMPDIR/handoff-context.log"
+    for source in pi hermes; do
+      repo="$(make_test_repo "broker-$source")"
+      : > "$context"
+      MOCK_CONTEXT_DETAIL_LOG="$context" MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor \
+        PI_BIN=pi HERMES_BIN=hermes run "$REPO_ROOT/legion-router/bin/legion-$source" \
+          run --model openai/fixture-model --task "make a scoped edit" --repo "$repo" --quiet
+
+      [ "$status" -eq 0 ]
+      echo "$output" | jq -e --arg source "$source" '.status == "ok" and .executor == $source'
+      run_id="$(echo "$output" | jq -r .run_id)"
+      grep -Eq '^agent active=1 executor=1 depth=2 run=.+ name=cursor$' "$context"
+      jq -e --arg parent "$run_id" 'select(.executor == "cursor") | .parent_id == $parent' "$LEGION_TELEMETRY_DIR"/*.jsonl
+      ! git -C "$repo" worktree list --porcelain | grep -Fq '/broker/repo'
+    done
+}
+
+@test "Pi and Hermes handoff broker is single-use" {
+    local repo; repo="$(make_test_repo broker-single-use)"
+    MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_PROVIDER_HANDOFF_TWICE=1 PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "failed" and .provider_exit != 0'
+    [ "$(grep -c '^agent ' "$MOCK_CALL_LOG")" -eq 1 ]
+}
+
+@test "Pi handoff broker rejects arithmetic-injection and opaque arguments" {
+    local repo escape payload
+    repo="$(make_test_repo broker-typed-args)"
+    escape="$repo/BROKER_ARGUMENT_ESCAPED.txt"
+    payload="BASH_VERSINFO[\$(printf exploited > $escape; printf 0)]"
+
+    MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_PROVIDER_HANDOFF_BUDGET="$payload" PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+
+    [ "$status" -ne 0 ]
+    [ ! -e "$escape" ]
+    echo "$output" | jq -e '.status == "failed" and .provider_exit != 0'
+    assert_mock_not_called agent
+}
+
+@test "Pi and Hermes use scrubbed private credential homes" {
+    local executor repo env_log private_path
+    mkdir -p "$HOME/.pi/agent" "$HOME/.hermes"
+    printf '{}\n' > "$HOME/.pi/agent/auth.json"
+    printf '{}\n' > "$HOME/.hermes/auth.json"
+    env_log="$TEST_TMPDIR/provider-env.log"
+    for executor in pi hermes; do
+      repo="$(make_test_repo "private-home-$executor")"
+      : > "$env_log"
+      MOCK_PROVIDER_ENV_LOG="$env_log" PI_BIN=pi HERMES_BIN=hermes \
+        run "$REPO_ROOT/legion-router/bin/legion-$executor" run --model openai/fixture-model \
+          --task "make a scoped edit" --repo "$repo" --quiet
+      [ "$status" -eq 0 ]
+      private_path="$(cut -d= -f2- "$env_log")"
+      [ -n "$private_path" ]
+      [[ "$private_path" != "$HOME"/* ]]
+      [ ! -e "$private_path" ]
+    done
+}
+
+@test "Pi adapter rejects child-replaced Git metadata without running its filter" {
+    local repo escape
+    repo="$(make_test_repo pi-git-metadata)"
+    escape="$repo/FILTER_ESCAPED.txt"
+    MOCK_PROVIDER_REPLACE_GIT=1 MOCK_FILTER_ESCAPE_PATH="$escape" PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+
+    [ "$status" -ne 0 ]
+    [ ! -e "$escape" ]
+    echo "$output" | jq -e '.status == "error" and (.result | contains("trusted worktree metadata"))'
+}
+
+@test "Pi adapter: read-only restricts tools and rejects a changed worktree" {
+    local repo; repo="$(make_test_repo pi-read-only)"
+    PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi --sandbox read-only --task "review this" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok" and (.diff_path | type == "string")'
+    assert_mock_called pi '--tools read,grep,find,ls'
+
+    MOCK_PI_WRITE_IN_READONLY=1 PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi --sandbox read-only --task "review this" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "error" and (.result | contains("read-only"))'
+}
+
+@test "Hermes adapter: uses one-shot usage artifact and rejects unsupported read-only mode" {
+    local repo; repo="$(make_test_repo hermes-contract)"
+    HERMES_BIN=hermes run bash -c 'cd "$1" && "$2" run --model openai/fixture-hermes --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-hermes" "$repo"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok" and .executor == "hermes" and .result == "HERMES_OK_OUTPUT" and .usage.input_tokens == 256 and .cost_usd == 0.002'
+    echo "$output" | jq -e '.model == "openai/fixture-hermes" and .usage.cached_input_tokens == 24 and .usage.output_tokens == 36 and .usage.reasoning_output_tokens == 12'
+    assert_mock_called hermes '--oneshot make a scoped edit --usage-file'
+    assert_mock_called hermes '--ignore-user-config --toolsets terminal,file'
+    assert_mock_called sandbox-exec '-f '
+
+    MOCK_HERMES_JSON_STDOUT=1 HERMES_BIN=hermes run bash -c 'cd "$1" && "$2" run --model openai/fixture-hermes --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-hermes" "$repo"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.result == "{\"findings\":[]}"'
+
+    MOCK_HERMES_COST=1e-8 HERMES_BIN=hermes run bash -c 'cd "$1" && "$2" run --model openai/fixture-hermes --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-hermes" "$repo"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.cost_usd == 1e-8'
+
+    MOCK_HERMES_USAGE_FAILED=1 HERMES_BIN=hermes run bash -c 'cd "$1" && "$2" run --model openai/fixture-hermes --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-hermes" "$repo"
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+
+    MOCK_HERMES_USAGE_MALFORMED=1 HERMES_BIN=hermes run bash -c 'cd "$1" && "$2" run --model openai/fixture-hermes --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-hermes" "$repo"
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+
+    MOCK_HERMES_NO_USAGE=1 HERMES_BIN=hermes run bash -c 'cd "$1" && "$2" run --model openai/fixture-hermes --task "make a scoped edit" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-hermes" "$repo"
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+
+    : > "$MOCK_CALL_LOG"
+    HERMES_BIN=hermes run bash -c 'cd "$1" && "$2" run --model openai/fixture-hermes --sandbox read-only --task "review this" --repo "$3" --quiet' \
+      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-hermes" "$repo"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"read-only is unsupported"* ]]
+    assert_mock_not_called hermes
+}
+
+@test "Pi and Hermes adapters: preserve dispatcher run identity and trace context" {
+    local executor repo run_id
+    for executor in pi hermes; do
+      repo="$(make_test_repo "${executor}-adopted")"
+      run_id="queued-${executor}-slice"
+      LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=1 LEGION_EXECUTOR_NAME=codex \
+        LEGION_RUN_ID=parent-codex LEGION_TRACE_ID=trace-pi-hermes \
+        LEGION_TARGET_TYPE=harness LEGION_TARGET_NAME="$executor" \
+        PI_BIN=pi HERMES_BIN=hermes PATH="$REPO_ROOT/legion-router/bin:$PATH" \
+        run bash -c 'cd "$1" && "$2" run --executor "$3" --model openai/fixture-model --run-id "$4" --task "make a scoped edit" --repo "$5" --quiet' \
+          _ "$TEST_TMPDIR" "$DELEGATE" "$executor" "$run_id" "$repo"
+      [ "$status" -eq 0 ]
+      echo "$output" | jq -e --arg run "$run_id" --arg executor "$executor" '.status == "ok" and .run_id == $run and .executor == $executor'
+      jq -e --arg run "$run_id" --arg executor "$executor" 'select(.run_id == $run) | .trace_id == "trace-pi-hermes" and .parent_id == "parent-codex" and .target_type == "harness" and .target_name == $executor' "$LEGION_TELEMETRY_DIR"/*.jsonl
+      jq -e --arg run "$run_id" '.run_id == $run and .lifecycle.phase == "ok"' "$LEGION_REGISTRY_DIR/$run_id.json"
+      local recorded_wt
+      recorded_wt="$(jq -r '.worktree_dir' "$LEGION_REGISTRY_DIR/$run_id.json")"
+      local repo_physical
+      repo_physical="$(cd "$repo" && pwd -P)"
+      [ "$recorded_wt" = "$repo_physical/.legion/worktrees/$run_id" ] || {
+        echo "recorded worktree mismatch: got '$recorded_wt'" >&2
+        return 1
+      }
+    done
+}
+
+@test "Pi and Hermes adapters fail closed without a filesystem write sandbox" {
+    local executor repo
+    for executor in pi hermes; do
+      repo="$(make_test_repo "${executor}-no-fs-sandbox")"
+      : > "$MOCK_CALL_LOG"
+      LEGION_FS_SANDBOX_BIN="$TEST_TMPDIR/missing-sandbox" PI_BIN=pi HERMES_BIN=hermes \
+        run "$REPO_ROOT/legion-router/bin/legion-$executor" run --model openai/fixture-model \
+          --task "make a scoped edit" --repo "$repo" --quiet
+      [ "$status" -eq 2 ]
+      [[ "$output" == *"filesystem sandbox is unavailable"* ]]
+      assert_mock_not_called "$executor"
+      [ ! -d "$repo/.legion/worktrees" ]
+    done
+}
+
+@test "Pi adapter supports the Linux Bubblewrap boundary" {
+    local repo; repo="$(make_test_repo pi-bwrap)"
+    LEGION_FS_SANDBOX_BIN=bwrap PI_BIN=pi run "$REPO_ROOT/legion-router/bin/legion-pi" \
+      run --model openai/fixture-pi --task "make a scoped edit" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+    assert_mock_called bwrap '--ro-bind / / --bind '
+    assert_mock_called bwrap '--unshare-pid'
+    assert_mock_called bwrap '--proc /proc'
+    assert_mock_called bwrap '--chdir '
+}
+
+@test "Pi and Hermes never clean a colliding worktree or branch they did not create" {
+    local executor repo run_id wt branch
+    for executor in pi hermes; do
+      repo="$(make_test_repo "owned-cleanup-$executor")"
+      run_id="collision-$executor"
+      wt="$repo/.legion/worktrees/$run_id"
+      branch="legion/$executor-$run_id"
+      mkdir -p "$repo/.legion/worktrees"
+      git -C "$repo" worktree add -q -b "$branch" "$wt" HEAD
+      printf 'operator-owned\n' > "$wt/OWNER.txt"
+
+      PI_BIN=pi HERMES_BIN=hermes run "$REPO_ROOT/legion-router/bin/legion-$executor" \
+        run --run-id "$run_id" --model openai/fixture-model \
+        --task "make a scoped edit" --repo "$repo" --quiet
+
+      [ "$status" -eq 2 ]
+      [ -f "$wt/OWNER.txt" ]
+      git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"
+      git -C "$repo" worktree remove --force "$wt"
+      git -C "$repo" branch -D "$branch" >/dev/null
+    done
+}
+
+@test "Pi and Hermes fail closed for repositories with clean filters" {
+    local executor repo
+    for executor in pi hermes; do
+      repo="$(make_test_repo "filter-semantics-$executor")"
+      printf '*.ts filter=lfs\n' > "$repo/.gitattributes"
+      git -C "$repo" add .gitattributes
+      git -C "$repo" -c user.email=t@t.c -c user.name=t commit -qm attributes
+      : > "$MOCK_CALL_LOG"
+
+      PI_BIN=pi HERMES_BIN=hermes run "$REPO_ROOT/legion-router/bin/legion-$executor" \
+        run --model openai/fixture-model --task "make a scoped edit" --repo "$repo" --quiet
+
+      [ "$status" -eq 2 ]
+      [[ "$output" == *"clean-filter attributes are unsupported"* ]]
+      assert_mock_not_called "$executor"
+    done
+}
+
+@test "Pi isolated diff capture preserves safe Git normalization settings" {
+    local repo artifact
+    repo="$(make_test_repo safe-git-semantics)"
+    git -C "$repo" config core.autocrlf input
+    git -C "$repo" config core.safecrlf warn
+
+    PI_BIN=pi run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+      --task "make a scoped edit" --repo "$repo" --keep --quiet
+
+    [ "$status" -eq 0 ]
+    artifact="$(dirname "$(echo "$output" | jq -r .diff_path)")"
+    [ "$(git config --file "$artifact/safe-git/config" core.autocrlf)" = input ]
+    [ "$(git config --file "$artifact/safe-git/config" core.safecrlf)" = warn ]
+}
+
+@test "portable process supervisor terminates provider descendants" {
+    local pid_file supervisor child i
+    pid_file="$TEST_TMPDIR/provider-child.pid"
+    python3 "$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" --cwd "$TEST_TMPDIR" -- \
+      bash -c 'sleep 300 & printf "%s\n" "$!" > "$1"; wait' _ "$pid_file" &
+    supervisor=$!
+    i=0
+    while [ ! -s "$pid_file" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+    [ -s "$pid_file" ]
+    child="$(cat "$pid_file")"
+    kill -TERM "$supervisor"
+    wait "$supervisor" || true
+    ! kill -0 "$child" 2>/dev/null
+}
+
+@test "cancelling Pi reaps an active broker handoff and its descendants" {
+    local repo adapter_pid child_pid pid_file stdout_file stderr_file i
+    repo="$(make_test_repo broker-cancel)"
+    pid_file="$TEST_TMPDIR/broker-child.pid"
+    stdout_file="$TEST_TMPDIR/broker-cancel.out"
+    stderr_file="$TEST_TMPDIR/broker-cancel.err"
+
+    MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_CURSOR_DELAY=300 \
+      MOCK_CURSOR_DELAY_PID_FILE="$pid_file" PI_BIN=pi \
+      "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet \
+        >"$stdout_file" 2>"$stderr_file" &
+    adapter_pid=$!
+    i=0
+    while [ ! -s "$pid_file" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+    [ -s "$pid_file" ]
+    child_pid="$(cat "$pid_file")"
+
+    kill -TERM "$adapter_pid"
+    wait "$adapter_pid" || true
+
+    ! kill -0 "$child_pid" 2>/dev/null
+    [ "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]
+}
+
+@test "Pi and Hermes adapters reject symlinked runtime roots" {
+    local executor repo outside
+    for executor in pi hermes; do
+      repo="$(make_test_repo "${executor}-runtime-symlink")"
+      outside="$TEST_TMPDIR/${executor}-outside-runtime"
+      mkdir -p "$outside"
+      ln -s "$outside" "$repo/.legion"
+      : > "$MOCK_CALL_LOG"
+
+      PI_BIN=pi HERMES_BIN=hermes run "$REPO_ROOT/legion-router/bin/legion-$executor" \
+        run --model openai/fixture-model --task "make a scoped edit" --repo "$repo" --quiet
+      [ "$status" -eq 2 ]
+      [[ "$output" == *"refusing symlinked Legion runtime path"* ]]
+      assert_mock_not_called "$executor"
+      [ -z "$(find "$outside" -mindepth 1 -print -quit)" ]
+    done
+}
+
+@test "Pi and Hermes adapters reject pre-populated artifact directories" {
+    local executor repo run_id artifact escape
+    for executor in pi hermes; do
+      repo="$(make_test_repo "${executor}-artifact-poison")"
+      run_id="poisoned-${executor}-run"
+      artifact="$repo/.legion/runs/$run_id"
+      escape="$repo/${executor}-ESCAPED.txt"
+      mkdir -p "$artifact"
+      ln -s "$escape" "$artifact/last-message.txt"
+      : > "$MOCK_CALL_LOG"
+
+      PI_BIN=pi HERMES_BIN=hermes run "$REPO_ROOT/legion-router/bin/legion-$executor" \
+        run --run-id "$run_id" --model openai/fixture-model \
+        --task "make a scoped edit" --repo "$repo" --quiet
+      [ "$status" -eq 2 ]
+      [[ "$output" == *"refusing non-empty Legion artifact directory"* ]]
+      [ ! -e "$escape" ]
+      assert_mock_not_called "$executor"
+    done
+}
+
+@test "Pi provider cannot write outside its worktree under the real macOS sandbox" {
+    [ -x /usr/bin/sandbox-exec ] || skip "macOS sandbox-exec is unavailable"
+    local repo escape
+    repo="$(make_test_repo pi-real-sandbox)"
+    escape="$repo/ESCAPED.txt"
+    MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+
+    MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec MOCK_PROVIDER_ESCAPE_PATH="$escape" PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+    [ "$status" -ne 0 ]
+    [ ! -e "$escape" ]
+    echo "$output" | jq -e '.status == "failed" and .provider_exit != 0'
+
+    escape="$repo/PARENT_ARTIFACT_ESCAPED.txt"
+    MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec \
+      MOCK_PROVIDER_POISON_PARENT_ARTIFACT=1 MOCK_PARENT_ARTIFACT_ESCAPE_PATH="$escape" PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+    [ "$status" -ne 0 ]
+    [ ! -e "$escape" ]
+    echo "$output" | jq -e '.status == "failed" and .provider_exit != 0'
+
+    escape="$repo/BROKER_CHILD_ESCAPED.txt"
+    MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec \
+      MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_CHILD_ESCAPE_PATH="$escape" PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+    [ "$status" -ne 0 ]
+    [ ! -e "$escape" ]
+    echo "$output" | jq -e '.status == "failed" and .provider_exit != 0'
+
+    sleep 30 &
+    local victim=$!
+    MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec MOCK_PROVIDER_SIGNAL_PID="$victim" PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+    [ "$status" -ne 0 ]
+    kill -0 "$victim"
+    kill -TERM "$victim"
+    wait "$victim" || true
+}
+
 @test "delegate run: fails closed when an adapter cannot honor run identity" {
     local repo; repo="$(make_test_repo legacy-adapter)"
     local adapter_bin="$TEST_TMPDIR/legacy-adapter-bin"

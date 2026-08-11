@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'sandbox-exec %s\n' "$*" >> "$MOCK_CALL_LOG"
+[[ "${1:-}" == -f && -f "${2:-}" ]] || { printf 'mock sandbox-exec: expected -f PROFILE\n' >&2; exit 2; }
+shift 2
+exec "$@"

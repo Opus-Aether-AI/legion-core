@@ -595,7 +595,7 @@
         {
           "type": "file_contains",
           "path": "{workspace}/router-plugin.txt",
-          "text": "Codex, Cursor, Claude, and opencode executors"
+          "text": "Claude, Codex, Cursor, OpenCode, Hermes, and Pi"
         }
       ],
       "required": true
@@ -621,7 +621,7 @@
         {
           "type": "file_contains",
           "path": "{workspace}/marketplace-router.txt",
-          "text": "Codex, Cursor, Claude, and opencode executors"
+          "text": "Claude, Codex, Cursor, OpenCode, Hermes, and Pi"
         }
       ],
       "required": true

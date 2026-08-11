@@ -389,8 +389,36 @@ repos_file_for_repo() {
     echo "$output" | jq -e '.status == "ok"'
     assert_mock_called bwrap '--ro-bind / / --bind '
     assert_mock_called bwrap '--unshare-pid'
+    assert_mock_called bwrap '--tmpfs /run'
     assert_mock_called bwrap '--proc /proc'
     assert_mock_called bwrap '--chdir '
+}
+
+@test "Pi sandbox exposes only the broker delegate and scrubs host control channels" {
+    local repo fake_bin fake_delegate env_log profile artifact
+    repo="$(make_test_repo pi-delegate-boundary)"
+    fake_bin="$TEST_TMPDIR/installed-legion-bin"
+    fake_delegate="$fake_bin/legion-delegate"
+    env_log="$TEST_TMPDIR/provider-security-env.log"
+    mkdir -p "$fake_bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_delegate"
+    chmod +x "$fake_delegate"
+
+    PATH="$fake_bin:$PATH" DOCKER_HOST='unix:///var/run/docker.sock' \
+      CONTAINER_HOST='unix:///run/podman/podman.sock' SSH_AUTH_SOCK='/tmp/agent.sock' \
+      MOCK_PROVIDER_SECURITY_ENV_LOG="$env_log" PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --keep --quiet
+
+    [ "$status" -eq 0 ]
+    artifact="$(dirname "$(echo "$output" | jq -r .diff_path)")"
+    profile="$artifact/filesystem.sb"
+    grep -Fq '(deny network-outbound (remote unix-socket))' "$profile"
+    grep -Fq "(deny process-exec (literal \"$fake_delegate\"))" "$profile"
+    ! grep -Fq "$fake_bin" < <(sed -n 's/^path=//p' "$env_log")
+    grep -qx 'docker_host=' "$env_log"
+    grep -qx 'container_host=' "$env_log"
+    grep -qx 'ssh_auth_sock=' "$env_log"
 }
 
 @test "Pi and Hermes never clean a colliding worktree or branch they did not create" {
@@ -434,6 +462,32 @@ repos_file_for_repo() {
     done
 }
 
+@test "Pi and Hermes fail closed for external Git attribute sources" {
+    local executor repo git_dir
+    for executor in pi hermes; do
+      repo="$(make_test_repo "external-attributes-$executor")"
+      git_dir="$(git -C "$repo" rev-parse --absolute-git-dir)"
+      mkdir -p "$git_dir/info"
+      printf '*.ts text eol=crlf\n' > "$git_dir/info/attributes"
+      : > "$MOCK_CALL_LOG"
+
+      PI_BIN=pi HERMES_BIN=hermes run "$REPO_ROOT/legion-router/bin/legion-$executor" \
+        run --model openai/fixture-model --task "make a scoped edit" --repo "$repo" --quiet
+
+      [ "$status" -eq 2 ]
+      [[ "$output" == *"Git info/attributes is unsupported"* ]]
+      assert_mock_not_called "$executor"
+    done
+
+    repo="$(make_test_repo core-attributes-file)"
+    printf '*.ts text eol=crlf\n' > "$repo/local.attributes"
+    git -C "$repo" config core.attributesFile "$repo/local.attributes"
+    PI_BIN=pi run "$REPO_ROOT/legion-router/bin/legion-pi" run \
+      --model openai/fixture-pi --task "make a scoped edit" --repo "$repo" --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"core.attributesFile is unsupported"* ]]
+}
+
 @test "Pi isolated diff capture preserves safe Git normalization settings" {
     local repo artifact
     repo="$(make_test_repo safe-git-semantics)"
@@ -454,6 +508,30 @@ repos_file_for_repo() {
     pid_file="$TEST_TMPDIR/provider-child.pid"
     python3 "$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" --cwd "$TEST_TMPDIR" -- \
       bash -c 'sleep 300 & printf "%s\n" "$!" > "$1"; wait' _ "$pid_file" &
+    supervisor=$!
+    i=0
+    while [ ! -s "$pid_file" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+    [ -s "$pid_file" ]
+    child="$(cat "$pid_file")"
+    kill -TERM "$supervisor"
+    wait "$supervisor" || true
+    ! kill -0 "$child" 2>/dev/null
+}
+
+@test "portable process supervisor terminates a setsid descendant that ignores TERM" {
+    local pid_file supervisor child i
+    pid_file="$TEST_TMPDIR/provider-setsid-child.pid"
+    python3 "$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" --cwd "$TEST_TMPDIR" -- \
+      bash -c 'python3 - "$1" <<'"'PY'"' &
+import os, signal, sys, time
+os.setsid()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    stream.write(str(os.getpid()))
+while True:
+    time.sleep(1)
+PY
+wait' _ "$pid_file" &
     supervisor=$!
     i=0
     while [ ! -s "$pid_file" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
@@ -487,6 +565,63 @@ repos_file_for_repo() {
 
     ! kill -0 "$child_pid" 2>/dev/null
     [ "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]
+}
+
+@test "cancelling Pi reaps a broker target that starts a new session and ignores TERM" {
+    local repo adapter_pid child_pid pid_file i
+    repo="$(make_test_repo broker-detached-cancel)"
+    pid_file="$TEST_TMPDIR/broker-detached-child.pid"
+    MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_CURSOR_DELAY=300 MOCK_CURSOR_DETACH_DELAY=1 \
+      MOCK_CURSOR_DELAY_PID_FILE="$pid_file" PI_BIN=pi \
+      "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet \
+        >"$TEST_TMPDIR/broker-detached.out" 2>"$TEST_TMPDIR/broker-detached.err" &
+    adapter_pid=$!
+    i=0
+    while [ ! -s "$pid_file" ] && [ "$i" -lt 240 ]; do sleep 0.05; i=$((i + 1)); done
+    [ -s "$pid_file" ]
+    child_pid="$(cat "$pid_file")"
+    kill -TERM "$adapter_pid"
+    wait "$adapter_pid" || true
+    ! kill -0 "$child_pid" 2>/dev/null
+}
+
+@test "broker provisions scrubbed private Cursor credential and data stores" {
+    local repo env_log config data
+    repo="$(make_test_repo cursor-private-runtime)"
+    env_log="$TEST_TMPDIR/cursor-private-env.log"
+    mkdir -p "$HOME/.config/cursor" "$HOME/.cursor"
+    printf '{"token":"config-secret"}\n' > "$HOME/.config/cursor/auth.json"
+    printf '{"token":"data-secret"}\n' > "$HOME/.cursor/auth.json"
+
+    MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_CURSOR_ENV_LOG="$env_log" PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    config="$(sed -n 's/^config=//p' "$env_log")"
+    data="$(sed -n 's/^data=//p' "$env_log")"
+    [[ "$config" != "$HOME"/* && "$data" != "$HOME"/* ]]
+    grep -qx 'config_auth=present' "$env_log"
+    grep -qx 'data_auth=present' "$env_log"
+    [ ! -e "$config" ]
+    [ ! -e "$data" ]
+}
+
+@test "broker rejects incomplete oversized and symlink-redirected telemetry" {
+    local mode repo escape
+    for mode in missing-fields oversized symlink-ancestor; do
+      repo="$(make_test_repo "broker-telemetry-$mode")"
+      escape="$TEST_TMPDIR/telemetry-escape-$mode"
+      MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_CHILD_TELEMETRY_MODE="$mode" \
+        MOCK_CHILD_TELEMETRY_ESCAPE_DIR="$escape" PI_BIN=pi \
+        run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+          --task "make a scoped edit" --repo "$repo" --quiet
+
+      [ "$status" -ne 0 ]
+      echo "$output" | jq -e '.status == "failed" and .provider_exit != 0'
+      ! grep -R -q '"executor":"cursor"' "$LEGION_TELEMETRY_DIR" 2>/dev/null
+    done
 }
 
 @test "Pi and Hermes adapters reject symlinked runtime roots" {
@@ -536,6 +671,28 @@ repos_file_for_repo() {
     MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec PI_BIN=pi \
       run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
         --task "make a scoped edit" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+
+    local control_socket="$TEST_TMPDIR/host-control.sock" socket_server i
+    python3 - "$control_socket" <<'PY' &
+import socket, sys, time
+server = socket.socket(socket.AF_UNIX)
+server.bind(sys.argv[1])
+server.listen(1)
+time.sleep(30)
+PY
+    socket_server=$!
+    i=0
+    while [ ! -S "$control_socket" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+    [ -S "$control_socket" ]
+    MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec \
+      MOCK_PROVIDER_UNIX_SOCKET="$control_socket" \
+      MOCK_REAL_DELEGATE_PATH="$REPO_ROOT/legion-router/bin/legion-delegate" PI_BIN=pi \
+      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+        --task "make a scoped edit" --repo "$repo" --quiet
+    kill -TERM "$socket_server" 2>/dev/null || true
+    wait "$socket_server" 2>/dev/null || true
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
 
@@ -1191,6 +1348,26 @@ $run_error" ]
     run "$DELEGATE" cleanup --run "$rid" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     [ ! -d "$repo/.legion/worktrees/$rid" ]
+}
+
+@test "delegate cleanup removes retained Pi and Hermes worktrees from ownership receipts" {
+    local executor repo result run_id branch
+    for executor in pi hermes; do
+      repo="$(make_test_repo "cleanup-retained-$executor")"
+      result="$(PI_BIN=pi HERMES_BIN=hermes "$REPO_ROOT/legion-router/bin/legion-$executor" \
+        run --model openai/fixture-model --task "make a scoped edit" --repo "$repo" --keep --quiet)"
+      run_id="$(echo "$result" | jq -r .run_id)"
+      branch="legion/$executor-$run_id"
+      [ -d "$repo/.legion/worktrees/$run_id" ]
+      jq -e --arg run "$run_id" --arg branch "$branch" \
+        '.schema == "legion.worktree-owner.v1" and .run_id == $run and .branch == $branch' \
+        "$repo/.legion/runs/$run_id/worktree-owner.json"
+
+      run "$DELEGATE" cleanup --run "$run_id" --repo "$repo" --quiet
+      [ "$status" -eq 0 ]
+      [ ! -d "$repo/.legion/worktrees/$run_id" ]
+      [ -z "$(git -C "$repo" branch --list "$branch")" ]
+    done
 }
 
 @test "delegate run: --detach preserves the worktree for its worker and status tracks completion" {

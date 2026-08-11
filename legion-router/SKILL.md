@@ -64,8 +64,11 @@ not part of the auto-approved run. Both providers run behind a host filesystem
 and process boundary (`sandbox-exec` on macOS or Bubblewrap with a private PID
 namespace on Linux) that permits writes only to the generated worktree, scrubbed
 private credential/temp/cache paths, and exact provider stdout/stderr/usage
-files. Parent-owned patches, results, telemetry, and an isolated Git index stay
-outside that writable set. Hermes currently has no
+files. Host control sockets and installed delegate entrypoints are unavailable;
+the authenticated broker shim is the sole child-harness path. Parent-owned
+patches, results, telemetry, and an isolated Git index stay outside that
+writable set, and a descendant-aware supervisor reaps session/process-group
+escapes. Hermes currently has no
 documented enforceable read-only one-shot mode, so that request fails before
 launching the provider rather than weakening the sandbox.
 
@@ -150,6 +153,9 @@ to Fable for independent simplification judgement.
 
 - `run` **auto-deletes** its worktree + branch on completion (artifacts under `runs/` are preserved). Pass `--keep` to retain it (required to `resume`).
 - Bulk cleanup when you need it: `legion-delegate cleanup --all` (all worktrees + branches), add `--purge` to also drop `runs/` artifacts; or `cleanup --run <RUN_ID> [--purge]` for one.
+- Cleanup removes only worktrees whose branch and parent-written ownership
+  receipt agree. Retained Pi and Hermes worktrees use the same safe cleanup
+  path; an unowned or mismatched directory is preserved.
 
 ## Verify the returned diff (always)
 
@@ -171,7 +177,9 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
   rejects opaque/internal/apply/keep controls, and runs the target in a
   standalone disposable repository under its own equivalent OS boundary. The
   source cannot write the target repository, and the target cannot write source
-  artifacts or parent Git administration.
+  artifacts or parent Git administration. Target output is streamed under a
+  fixed cap, and only fully validated, size-bounded `legion.span.v1` records
+  from a no-symlink source chain can reach the parent telemetry store.
 
 > **The sandbox is the security boundary — not the task scanner.** `scan_task_text`
 > is a best-effort tripwire and is trivially bypassable (encodings, indirection);

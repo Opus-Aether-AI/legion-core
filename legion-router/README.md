@@ -117,11 +117,16 @@ back to the default worktree path.
 Pi and Hermes provider processes run with the host filesystem read-only except
 for their generated worktree, scrubbed private credential/temp/cache
 directories, and the exact stdout, stderr, and provider-usage files opened by
-Legion. The private credential view is deleted after the run. Parent outputs
+Legion. This includes private Cursor config/data roots for a brokered Cursor
+child. Container-daemon and other host control sockets are masked or denied,
+their environment variables are removed, and installed `legion-delegate`
+entrypoints are unavailable to the provider; only the single-use broker shim is
+exposed. The private credential view is deleted after the run. Parent outputs
 such as `diff.patch`, `last-message.txt`, and telemetry errors are never
-provider-writable, and provider descendants are terminated before any output is
-parsed. Linux runs also receive a private PID namespace; macOS blocks host
-process inspection/signalling. Pi's `read-only` run
+provider-writable. A descendant-aware supervisor terminates children even when
+they create a new session/process group, and brokered target output is bounded
+while it is streamed. Linux runs also receive a private PID namespace; macOS
+blocks host process inspection/signalling. Pi's `read-only` run
 also disables every writing tool (`--tools read,grep,find,ls`) and rejects any
 resulting patch. Hermes runs with `--ignore-user-config --toolsets terminal,file`
 so repository rules remain available without auto-approved user plugins, hooks,
@@ -210,7 +215,8 @@ legion-router/
   target runs from a standalone disposable repository under an equivalent OS
   boundary: it cannot write source artifacts or the parent repository, and the
   source provider cannot write the target repository. Only validated child
-  telemetry is copied back to the canonical span store.
+  `legion.span.v1` records from a no-symlink, size-bounded source are appended
+  to the canonical span store.
 
 ## Telemetry
 

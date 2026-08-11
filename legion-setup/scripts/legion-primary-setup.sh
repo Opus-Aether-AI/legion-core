@@ -12,6 +12,7 @@ SKILLS_DIR="${LEGION_SKILLS_DIR:-$AGENTS_HOME/skills}"
 MODE_SKILL="legion-${KIND}-mode"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_SKILLS_DIR="${HERMES_SKILLS_DIR:-$HERMES_HOME/skills}"
+HERMES_LINK_MANIFEST="$AGENTS_HOME/.managed-by-legion-core/hermes-skill-link.json"
 
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
@@ -36,6 +37,7 @@ install_hermes_skill_link() {
   mkdir -p "$HERMES_SKILLS_DIR"
   if [[ -L "$destination" ]]; then
     if [[ "$(readlink "$destination")" == "$source" ]]; then
+      record_hermes_skill_link "$source" "$destination"
       return 0
     fi
     red "$destination is already a different symlink; refusing to replace it"
@@ -46,7 +48,22 @@ install_hermes_skill_link() {
     return 1
   fi
   ln -s "$source" "$destination"
+  record_hermes_skill_link "$source" "$destination"
   green "Linked $destination -> $source"
+}
+
+record_hermes_skill_link() {
+  local source="$1" destination="$2" directory temp
+  directory="${HERMES_LINK_MANIFEST%/*}"
+  mkdir -p "$directory"
+  temp="$(umask 077; mktemp "$directory/.hermes-skill-link.tmp.XXXXXX")" || return 1
+  if ! jq -cn --arg schema 'legion.hermes-skill-link.v1' --arg source "$source" \
+      --arg destination "$destination" '{schema:$schema,source:$source,destination:$destination}' > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  chmod 600 "$temp" || { rm -f "$temp"; return 1; }
+  mv -f "$temp" "$HERMES_LINK_MANIFEST"
 }
 
 cmd_verify() {

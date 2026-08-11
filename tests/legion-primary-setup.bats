@@ -38,16 +38,20 @@ setup() {
 @test "Pi and Hermes setup all is idempotent and leaves the shared catalog untouched" {
   local before after
   rm "$HERMES_HOME/skills/legion-hermes-mode"
-  before="$(find "$AGENTS_HOME" -type f -print | sort | xargs shasum)"
+  before="$(find "$AGENTS_HOME/skills" -type f -print | sort | xargs shasum)"
   run "$SETUP_SH" pi
   [ "$status" -eq 0 ]
   run "$SETUP_SH" hermes
   [ "$status" -eq 0 ]
   run "$SETUP_SH" hermes
   [ "$status" -eq 0 ]
-  after="$(find "$AGENTS_HOME" -type f -print | sort | xargs shasum)"
+  after="$(find "$AGENTS_HOME/skills" -type f -print | sort | xargs shasum)"
   [ "$before" = "$after" ]
   [ "$(readlink "$HERMES_HOME/skills/legion-hermes-mode")" = "$AGENTS_HOME/skills/legion-hermes-mode" ]
+  jq -e --arg source "$AGENTS_HOME/skills/legion-hermes-mode" \
+    --arg destination "$HERMES_HOME/skills/legion-hermes-mode" \
+    '.schema == "legion.hermes-skill-link.v1" and .source == $source and .destination == $destination' \
+    "$AGENTS_HOME/.managed-by-legion-core/hermes-skill-link.json"
 }
 
 @test "Pi setup verify fails closed when its discoverable mode skill is absent" {

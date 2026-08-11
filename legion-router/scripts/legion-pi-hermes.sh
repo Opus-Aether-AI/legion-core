@@ -23,12 +23,14 @@ PROVIDER_BIN="${PI_BIN:-pi}"
 RUN_ID="" CHILD_PID="" KEEP=0 WT="" WT_RECORD="" BRANCH="" REPO="" ART=""
 WT_CREATED=0 BRANCH_CREATED=0
 BROKER_PID="" BROKER_SOCKET_DIR="" BROKER_SOCKET="" BROKER_TOKEN="" BROKER_ROOT=""
+CONTROL_EMPTY_DIR="" SANITIZED_PROVIDER_PATH=""
 WT_GIT_FILE_ID="" BASE_SHA="" SAFE_GIT_DIR="" COMMON_GIT_OBJECTS=""
 PROVIDER_OUT="" PROVIDER_ERR="" PROVIDER_USAGE=""
 PROVIDER_OUT_ID="" PROVIDER_ERR_ID="" PROVIDER_USAGE_ID=""
 FS_SANDBOX_BIN="" FS_SANDBOX_KIND=""
 PRIVATE_RUNTIME_DIR="" PI_PRIVATE_AGENT_DIR="" HERMES_PRIVATE_HOME=""
 FS_SANDBOX_COMMAND=()
+DELEGATE_BLOCK_PATHS=()
 
 die() { printf '%s: %s\n' "$ADAPTER" "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == 1 ]] || printf '%s\n' "$*" >&2; }
@@ -71,7 +73,7 @@ stop_child() {
   [[ -n "$CHILD_PID" ]] || return 0
   kill -TERM "$CHILD_PID" 2>/dev/null || true
   local i=0
-  while kill -0 "$CHILD_PID" 2>/dev/null && (( i < 40 )); do sleep 0.05; i=$((i + 1)); done
+  while kill -0 "$CHILD_PID" 2>/dev/null && (( i < 140 )); do sleep 0.05; i=$((i + 1)); done
   kill -KILL "$CHILD_PID" 2>/dev/null || true
   wait "$CHILD_PID" 2>/dev/null || true
   CHILD_PID=""
@@ -80,7 +82,7 @@ stop_handoff_broker() {
   [[ -n "$BROKER_PID" ]] || return 0
   kill -TERM "$BROKER_PID" 2>/dev/null || true
   local i=0
-  while kill -0 "$BROKER_PID" 2>/dev/null && (( i < 80 )); do sleep 0.05; i=$((i + 1)); done
+  while kill -0 "$BROKER_PID" 2>/dev/null && (( i < 200 )); do sleep 0.05; i=$((i + 1)); done
   kill -KILL "$BROKER_PID" 2>/dev/null || true
   wait "$BROKER_PID" 2>/dev/null || true
   BROKER_PID=""
@@ -256,8 +258,31 @@ hermes_actual_model() { jq -r '.model // empty' "$1" 2>/dev/null || true; }
 provider_ready() {
   local env_prefix
   env_prefix="$(printf '%s' "$ADAPTER_KIND" | tr '[:lower:]' '[:upper:]')"
-  command -v "$PROVIDER_BIN" >/dev/null 2>&1 || die "$ADAPTER_KIND CLI not found. Install it or set ${env_prefix}_BIN to its executable."
+  PROVIDER_BIN="$(command -v "$PROVIDER_BIN" 2>/dev/null || true)"
+  [[ -n "$PROVIDER_BIN" ]] || die "$ADAPTER_KIND CLI not found. Install it or set ${env_prefix}_BIN to its executable."
   [[ "$MODEL" != "$ADAPTER_KIND-default" ]] || die "no concrete model configured: set ${env_prefix}_MODEL or update ${ADAPTER_KIND}_default in models.toml."
+}
+
+prepare_delegate_boundary() {
+  local candidate resolved dir path_tail=""
+  DELEGATE_BLOCK_PATHS=()
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" && "$candidate" != "$ART/broker-bin/legion-delegate" ]] || continue
+    DELEGATE_BLOCK_PATHS+=("$candidate")
+    resolved="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$candidate" 2>/dev/null || true)"
+    [[ -z "$resolved" || "$resolved" == "$candidate" ]] || DELEGATE_BLOCK_PATHS+=("$resolved")
+  done < <(
+    type -a -p legion-delegate 2>/dev/null || true
+    printf '%s\n' "$_self_dir/../bin/legion-delegate" "$WT/legion-router/bin/legion-delegate" "$WT/legion-router/scripts/delegate.sh"
+  )
+
+  IFS=: read -r -a path_entries <<<"$PATH"
+  for dir in "${path_entries[@]}"; do
+    [[ -n "$dir" ]] || dir=.
+    [[ ! -e "$dir/legion-delegate" ]] || continue
+    path_tail="${path_tail:+$path_tail:}$dir"
+  done
+  SANITIZED_PROVIDER_PATH="$ART/broker-bin${path_tail:+:$path_tail}"
 }
 valid_thinking() { case "$1" in off|minimal|low|medium|high|xhigh|max) return 0;; *) return 1;; esac; }
 
@@ -296,7 +321,7 @@ scheme_escape() {
 build_fs_sandbox_command() {
   FS_SANDBOX_COMMAND=()
   if [[ "$FS_SANDBOX_KIND" == sandbox-exec ]]; then
-    local profile="$ART/filesystem.sb" escaped_wt escaped_tmp escaped_cache escaped_private escaped_out escaped_err escaped_usage
+    local profile="$ART/filesystem.sb" escaped_wt escaped_tmp escaped_cache escaped_private escaped_out escaped_err escaped_usage escaped_broker blocked escaped_blocked
     escaped_wt="$(scheme_escape "$WT")"
     escaped_tmp="$(scheme_escape "$ART/tmp")"
     escaped_cache="$(scheme_escape "$ART/cache")"
@@ -304,14 +329,29 @@ build_fs_sandbox_command() {
     escaped_out="$(scheme_escape "$PROVIDER_OUT")"
     escaped_err="$(scheme_escape "$PROVIDER_ERR")"
     escaped_usage="$(scheme_escape "$PROVIDER_USAGE")"
+    escaped_broker="$(scheme_escape "$BROKER_SOCKET")"
     printf '%s\n' \
       '(version 1)' \
       '(allow default)' \
       '(deny file-write*)' \
       '(deny signal)' \
       '(deny process-info*)' \
+      '(deny network-outbound (remote unix-socket))' \
+      '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))' \
+      "(allow network-outbound (remote unix-socket (path-literal \"$escaped_broker\")))" \
       "(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\") (subpath \"$escaped_wt\") (subpath \"$escaped_tmp\") (subpath \"$escaped_cache\") (subpath \"$escaped_private\") (literal \"$escaped_out\") (literal \"$escaped_err\") (literal \"$escaped_usage\"))" \
       > "$profile"
+    for blocked in "${DELEGATE_BLOCK_PATHS[@]}"; do
+      [[ "$blocked" != "$ART/broker-bin/legion-delegate" ]] || continue
+      escaped_blocked="$(scheme_escape "$blocked")"
+      printf '(deny process-exec (literal "%s"))\n' "$escaped_blocked" >> "$profile"
+      # An absolute script can otherwise bypass process-exec by being handed to
+      # an interpreter. Hide installed copies outside the generated worktree;
+      # worktree files remain readable so a Legion source task can edit them.
+      if [[ "$blocked" != "$WT"/* ]]; then
+        printf '(deny file-read* (literal "%s"))\n' "$escaped_blocked" >> "$profile"
+      fi
+    done
     FS_SANDBOX_COMMAND=("$FS_SANDBOX_BIN" -f "$profile")
   else
     FS_SANDBOX_COMMAND=("$FS_SANDBOX_BIN" --die-with-parent --new-session --unshare-pid \
@@ -319,7 +359,22 @@ build_fs_sandbox_command() {
       --bind "$ART/tmp" "$ART/tmp" --bind "$ART/cache" "$ART/cache" \
       --bind "$PRIVATE_RUNTIME_DIR" "$PRIVATE_RUNTIME_DIR" \
       --bind "$PROVIDER_OUT" "$PROVIDER_OUT" --bind "$PROVIDER_ERR" "$PROVIDER_ERR" \
-      --bind "$PROVIDER_USAGE" "$PROVIDER_USAGE" --proc /proc --chdir "$WT" --)
+      --bind "$PROVIDER_USAGE" "$PROVIDER_USAGE")
+    FS_SANDBOX_COMMAND+=(--tmpfs /run)
+    local control_dir
+    for control_dir in \
+      /var/run "$HOME/.docker/run" "$HOME/.docker/desktop" "$HOME/.local/share/containers" \
+      "$HOME/.colima" "$HOME/.orbstack" "$HOME/Library/Containers/com.docker.docker" \
+      "$HOME/Library/Group Containers/group.com.docker"; do
+      [[ -d "$control_dir" && ! -L "$control_dir" ]] || continue
+      FS_SANDBOX_COMMAND+=(--ro-bind "$CONTROL_EMPTY_DIR" "$control_dir")
+    done
+    local blocked
+    for blocked in "${DELEGATE_BLOCK_PATHS[@]}"; do
+      [[ -e "$blocked" && "$blocked" != "$ART/broker-bin/legion-delegate" ]] || continue
+      FS_SANDBOX_COMMAND+=(--ro-bind "$ART/broker-bin/legion-delegate" "$blocked")
+    done
+    FS_SANDBOX_COMMAND+=(--proc /proc --chdir "$WT" --)
   fi
 }
 
@@ -402,6 +457,21 @@ if len(parts) % 3: raise SystemExit(2)
 raise SystemExit(any(parts[i + 2] not in (b"unspecified", b"unset") for i in range(0, len(parts), 3)))'
 }
 
+reject_unrepresented_attribute_sources() {
+  local common_git_dir="$1" worktree_git_dir attributes_file
+  worktree_git_dir="$(git -C "$WT" rev-parse --absolute-git-dir 2>/dev/null)" \
+    || die 'unable to resolve worktree Git directory for attributes'
+  attributes_file="$(git -C "$WT" config --path --get core.attributesFile 2>/dev/null || true)"
+  [[ -z "$attributes_file" ]] \
+    || die 'Git core.attributesFile is unsupported by isolated diff capture; refusing to change repository semantics'
+  for attributes_file in "$worktree_git_dir/info/attributes" "$common_git_dir/info/attributes"; do
+    [[ ! -L "$attributes_file" ]] \
+      || die 'symlinked Git info/attributes is unsupported by isolated diff capture'
+    [[ ! -s "$attributes_file" ]] \
+      || die 'Git info/attributes is unsupported by isolated diff capture; refusing to change repository semantics'
+  done
+}
+
 prepare_trusted_git_metadata() {
   local common_git_dir object_format repository_format=0
   git -C "$WT" rev-parse --absolute-git-dir >/dev/null || die 'unable to resolve trusted worktree Git metadata'
@@ -418,6 +488,7 @@ prepare_trusted_git_metadata() {
   [[ "$COMMON_GIT_OBJECTS" != *:* && "$COMMON_GIT_OBJECTS" != *$'\n'* ]] \
     || die 'common Git object path is unsafe for isolated diff capture'
   [[ -f "$WT/.git" && ! -L "$WT/.git" ]] || die 'worktree .git pointer is not a regular file'
+  reject_unrepresented_attribute_sources "$common_git_dir"
   WT_GIT_FILE_ID="$(file_identity "$WT/.git")"
   cp "$WT/.git" "$ART/worktree.git-pointer"
   SAFE_GIT_DIR="$ART/safe-git"
@@ -457,17 +528,22 @@ capture_trusted_diff() {
 }
 
 start_handoff_broker() {
-  local helper="$_self_dir/legion-handoff-broker.py" delegate="$_self_dir/../bin/legion-delegate" i
-  [[ -x "$helper" && -x "$delegate" ]] || die 'trusted Legion handoff broker is unavailable'
+  local helper="$_self_dir/legion-handoff-broker.py" delegate="$_self_dir/../bin/legion-delegate" supervisor="$_self_dir/legion-process-supervisor.py" i
+  [[ -x "$helper" && -x "$delegate" && -x "$supervisor" ]] || die 'trusted Legion handoff broker is unavailable'
   BROKER_SOCKET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/legion-broker.XXXXXX")" || die 'unable to allocate handoff broker socket directory'
   BROKER_SOCKET="$BROKER_SOCKET_DIR/broker.sock"
   BROKER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   BROKER_ROOT="$BROKER_SOCKET_DIR/runtime-root"
+  CONTROL_EMPTY_DIR="$BROKER_SOCKET_DIR/control-empty"
+  mkdir -m 555 "$CONTROL_EMPTY_DIR"
   mkdir -p "$ART/broker-bin"
-  ln -s "$helper" "$ART/broker-bin/legion-delegate"
+  cp "$helper" "$ART/broker-bin/legion-delegate"
+  chmod 755 "$ART/broker-bin/legion-delegate"
+  prepare_delegate_boundary
   python3 "$helper" serve --socket "$BROKER_SOCKET" --token "$BROKER_TOKEN" \
     --delegate "$delegate" --source-repo "$REPO" --broker-root "$BROKER_ROOT" --base-sha "$BASE_SHA" \
     --sandbox-bin "$FS_SANDBOX_BIN" --sandbox-kind "$FS_SANDBOX_KIND" \
+    --supervisor "$supervisor" \
     --telemetry-dir "${LEGION_TELEMETRY_DIR:-}" --expected-parent "$RUN_ID" \
     > "$ART/broker.out" 2> "$ART/broker.err" &
   BROKER_PID=$!
@@ -499,15 +575,27 @@ prepare_runtime_roots() {
   fi
 }
 
+write_worktree_ownership() {
+  local record="$ART/worktree-owner.json" temp="$ART/.worktree-owner.tmp.$$"
+  jq -cn --arg schema 'legion.worktree-owner.v1' --arg run "$RUN_ID" \
+    --arg executor "$ADAPTER_KIND" --arg repo "$REPO" --arg worktree "$WT" \
+    --arg branch "$BRANCH" --arg base "$BASE_SHA" \
+    '{schema:$schema,run_id:$run,executor:$executor,repo:$repo,worktree:$worktree,branch:$branch,base_sha:$base}' \
+    > "$temp" || return 1
+  chmod 600 "$temp" || return 1
+  mv -f "$temp" "$record"
+}
+
 run_provider() {
   local out="$1" err="$2"; shift 2
   build_fs_sandbox_command
   local supervisor="$_self_dir/legion-process-supervisor.py"
   [[ -x "$supervisor" ]] || die 'portable Legion process supervisor is unavailable'
   local -a invocation=(env \
+    -u DOCKER_HOST -u CONTAINER_HOST -u BUILDKIT_HOST -u SSH_AUTH_SOCK -u KUBECONFIG -u CONTAINERD_ADDRESS \
     "TMPDIR=$ART/tmp" "TMP=$ART/tmp" "TEMP=$ART/tmp" \
     "XDG_CACHE_HOME=$ART/cache" "PYTHONDONTWRITEBYTECODE=1" \
-    "PATH=$ART/broker-bin:$PATH" \
+    "PATH=$SANITIZED_PROVIDER_PATH" \
     "LEGION_HANDOFF_BROKER_SOCKET=$BROKER_SOCKET" "LEGION_HANDOFF_BROKER_TOKEN=$BROKER_TOKEN" \
     "HERMES_ENABLE_PROJECT_PLUGINS=0" "HERMES_ACCEPT_HOOKS=0")
   if [[ "$ADAPTER_KIND" == pi ]]; then
@@ -556,6 +644,7 @@ cmd_run() {
     || { write_state failed; die 'worktree add failed'; }
   WT_CREATED=1 BRANCH_CREATED=1
   prepare_trusted_git_metadata
+  write_worktree_ownership || { write_state failed; die 'unable to persist worktree ownership receipt'; }
   prepare_provider_files
   prepare_private_provider_runtime
   write_state running; legion_activate_executor_context "$RUN_ID" "$ADAPTER_KIND"

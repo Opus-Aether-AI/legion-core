@@ -24,6 +24,7 @@ LEGION_BIN_DIR="$AGENTS_HOME/bin"
 BIN_MANIFEST="$AGENTS_HOME/.managed-by-legion-core/bins.txt"
 MANIFEST="$AGENTS_HOME/.managed-by-legion-core/skills.txt"
 CODEX_SKILLS_MANIFEST="$AGENTS_HOME/.managed-by-legion-core/codex-skills.txt"
+HERMES_LINK_MANIFEST="$AGENTS_HOME/.managed-by-legion-core/hermes-skill-link.json"
 CODEX_SKILLS_DIR="$HOME/.codex/skills"
 # Legacy: the previous version generated wrapper files in ~/.codex/commands/ — clean those up too
 CODEX_COMMANDS_MANIFEST="$AGENTS_HOME/.managed-by-legion-core/codex-commands.txt"
@@ -54,8 +55,26 @@ for arg in "$@"; do
     esac
 done
 
+remove_managed_hermes_link() {
+    [ "$DO_SYMLINKS" = "1" ] || return 0
+    [ -f "$HERMES_LINK_MANIFEST" ] && [ ! -L "$HERMES_LINK_MANIFEST" ] || return 0
+    local source destination
+    source="$(jq -er 'select(.schema == "legion.hermes-skill-link.v1") | .source | strings' "$HERMES_LINK_MANIFEST" 2>/dev/null || true)"
+    destination="$(jq -er 'select(.schema == "legion.hermes-skill-link.v1") | .destination | strings' "$HERMES_LINK_MANIFEST" 2>/dev/null || true)"
+    if [ -n "$source" ] && [ -n "$destination" ] \
+        && [ "${destination##*/}" = "legion-hermes-mode" ] \
+        && [ -L "$destination" ] && [ "$(readlink "$destination")" = "$source" ]; then
+        rm "$destination"
+        green "  ✔ removed managed Hermes skill link"
+    elif [ -n "$destination" ] && [ -e "$destination" ]; then
+        yellow "  · preserved changed Hermes skill path at $destination"
+    fi
+    rm -f "$HERMES_LINK_MANIFEST"
+}
+
 remove_symlinks() {
     [ "$DO_SYMLINKS" = "1" ] || return 0
+    remove_managed_hermes_link
     bold "Removing ~/.agents/skills/ symlinks managed by legion-core..."
     if [ ! -f "$MANIFEST" ]; then
         yellow "  · no manifest found at $MANIFEST — nothing to remove"

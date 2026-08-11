@@ -8,6 +8,38 @@ set -euo pipefail
 [[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'agent active=%s executor=%s depth=%s run=%s name=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" \
   "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"
+if [[ -n "${MOCK_CURSOR_ENV_LOG:-}" ]]; then
+  printf 'config=%s\ndata=%s\nconfig_auth=%s\ndata_auth=%s\n' \
+    "${XDG_CONFIG_HOME:-}" "${CURSOR_DATA_DIR:-}" \
+    "$([[ -f "${XDG_CONFIG_HOME:-}/cursor/auth.json" ]] && printf present || printf missing)" \
+    "$([[ -f "${CURSOR_DATA_DIR:-}/auth.json" ]] && printf present || printf missing)" \
+    >> "$MOCK_CURSOR_ENV_LOG"
+fi
+
+case "${MOCK_CHILD_TELEMETRY_MODE:-}" in
+  missing-fields)
+    mkdir -p "$LEGION_TELEMETRY_DIR"
+    printf '{"schema":"legion.span.v1","parent_id":"%s"}\n' "${LEGION_PARENT_ID:-}" \
+      > "$LEGION_TELEMETRY_DIR/2026-08-11.jsonl"
+    ;;
+  oversized)
+    mkdir -p "$LEGION_TELEMETRY_DIR"
+    python3 - "$LEGION_TELEMETRY_DIR/2026-08-11.jsonl" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(b"{" + b"x" * (4 * 1024 * 1024 + 1))
+PY
+    ;;
+  symlink-ancestor)
+    escape="${MOCK_CHILD_TELEMETRY_ESCAPE_DIR:?escape directory required}"
+    mkdir -p "$escape"
+    if [[ -d "$LEGION_STATE_ROOT" && ! -L "$LEGION_STATE_ROOT" ]]; then
+      mv "$LEGION_STATE_ROOT" "$LEGION_STATE_ROOT.real"
+      ln -s "$escape" "$LEGION_STATE_ROOT"
+      export LEGION_TELEMETRY_DIR="$LEGION_STATE_ROOT/spans"
+    fi
+    ;;
+esac
 
 force=0
 model="fixture-cursor"
@@ -28,7 +60,16 @@ if [[ "${MOCK_CURSOR_FAIL:-0}" == "1" ]]; then
 fi
 
 if [[ -n "${MOCK_CURSOR_DELAY:-}" ]]; then
-  sleep "$MOCK_CURSOR_DELAY" &
+  if [[ "${MOCK_CURSOR_DETACH_DELAY:-0}" == 1 ]]; then
+    python3 - "$MOCK_CURSOR_DELAY" <<'PY' &
+import os, signal, sys, time
+os.setsid()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+time.sleep(float(sys.argv[1]))
+PY
+  else
+    sleep "$MOCK_CURSOR_DELAY" &
+  fi
   delay_pid=$!
   [[ -z "${MOCK_CURSOR_DELAY_PID_FILE:-}" ]] || printf '%s\n' "$delay_pid" > "$MOCK_CURSOR_DELAY_PID_FILE"
   wait "$delay_pid"

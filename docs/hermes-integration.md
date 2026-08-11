@@ -119,4 +119,6 @@ legion-setup hermes verify
 The managed path is
 `~/.hermes/skills/legion-hermes-mode -> ~/.agents/skills/legion-hermes-mode`.
 Hermes then discovers the guidance when it needs to build, fix, review, or
-delegate code.
+delegate code. Setup records the exact managed source separately; uninstall
+removes the link only while it still points there, preserving any link an
+operator has replaced.

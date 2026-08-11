@@ -4,6 +4,30 @@ set -euo pipefail
 [[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'pi active=%s executor=%s depth=%s run=%s name=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"
 [[ -n "${MOCK_PROVIDER_ENV_LOG:-}" ]] && printf 'pi_dir=%s\n' "${PI_CODING_AGENT_DIR:-}" >> "$MOCK_PROVIDER_ENV_LOG"
+if [[ -n "${MOCK_PROVIDER_SECURITY_ENV_LOG:-}" ]]; then
+  printf 'path=%s\ndocker_host=%s\ncontainer_host=%s\nssh_auth_sock=%s\n' \
+    "$PATH" "${DOCKER_HOST:-}" "${CONTAINER_HOST:-}" "${SSH_AUTH_SOCK:-}" \
+    >> "$MOCK_PROVIDER_SECURITY_ENV_LOG"
+fi
+if [[ -n "${MOCK_PROVIDER_UNIX_SOCKET:-}" ]]; then
+  python3 - "${MOCK_PROVIDER_UNIX_SOCKET}" <<'PY'
+import socket, sys
+client = socket.socket(socket.AF_UNIX)
+try:
+    client.connect(sys.argv[1])
+except OSError:
+    raise SystemExit(0)
+raise SystemExit(81)
+PY
+fi
+if [[ -n "${MOCK_REAL_DELEGATE_PATH:-}" ]]; then
+  # Use an interpreter explicitly: this verifies that a macOS process-exec
+  # denial cannot be bypassed by reading an installed shell entrypoint.
+  if bash "$MOCK_REAL_DELEGATE_PATH" --help >/dev/null 2>&1; then
+    printf 'real delegate bypass succeeded\n' >&2
+    exit 82
+  fi
+fi
 
 # The no-argument shape remains a fixture reader for registry tests. Adapter
 # tests exercise Pi's official JSON event stream, never a live provider.

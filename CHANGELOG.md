@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.22.1...v0.22.2) (2026-08-11)
+
+
+### Fixed
+
+* **observability:** expose routing classification gaps ([#133](https://github.com/Opus-Aether-AI/legion-core/issues/133)) ([deb7f33](https://github.com/Opus-Aether-AI/legion-core/commit/deb7f33fcff62dc78e5160e80fd96470ac590130))
+
 ## [0.22.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.22.0...v0.22.1) (2026-08-10)
 
 

@@ -29,9 +29,7 @@ delegated.
   implement the assigned slice directly unless it needs a bounded, explicit
   cross-harness handoff. Use only `legion-delegate run --executor <different
   coding harness>` for that handoff; Legion keeps task scanning, isolation,
-  telemetry, and `LEGION_MAX_DEPTH` (default `2`) intact. Sandboxed Pi and
-  Hermes workers reach that dispatcher through Legion's parent-side handoff
-  broker, never by widening their host filesystem access. Do not invoke raw
+  telemetry, and `LEGION_MAX_DEPTH` (default `2`) intact. Do not invoke raw
   harness CLIs or implicit/same-harness nested delegation. Return to the parent
   if the slice needs re-planning.
 - Otherwise, before editing, invoke the applicable installed Legion skill or

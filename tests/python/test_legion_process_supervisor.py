@@ -99,13 +99,14 @@ def test_child_capture_revalidates_the_kernel_bound_parent(monkeypatch: pytest.M
             self.closed = True
 
     tracker = SUPERVISOR.DescendantTracker(10, "token")
-    original_parent = FakeHandle(10, False)
+    original_parent = FakeHandle(10, True)
+    replacement_parent = FakeHandle(10, True)
     child = FakeHandle(20, True)
-    tracker._handles[10] = original_parent
+    tracker._handles[10] = replacement_parent
     monkeypatch.setattr(SUPERVISOR.ProcessHandle, "open", lambda pid: child if pid == 20 else None)
     monkeypatch.setattr(tracker, "_current_parent", lambda pid: 10 if pid == 20 else None)
 
-    assert tracker._capture_child(20, {10}) is False
+    assert tracker._capture_child(20, {10: original_parent}) is False
     assert child.closed is True
     assert 20 not in tracker._handles
 

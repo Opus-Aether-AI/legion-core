@@ -222,6 +222,29 @@ repos_file_for_repo() {
     done
 }
 
+@test "Pi and Hermes fail when an abandoned handoff supervisor reports incomplete cleanup" {
+    local fixture_root executor repo
+    fixture_root="$TEST_TMPDIR/exit70-fixture"
+    mkdir "$fixture_root"
+    cp -R "$REPO_ROOT/legion-router" "$fixture_root/legion-router"
+    ln -s "$REPO_ROOT/legion-observability" "$fixture_root/legion-observability"
+    cp "$BATS_TEST_DIRNAME/mocks/bin/supervisor-exit70" \
+      "$fixture_root/legion-router/scripts/legion-process-supervisor.py"
+    chmod 755 "$fixture_root/legion-router/scripts/legion-process-supervisor.py"
+
+    for executor in pi hermes; do
+      repo="$(make_test_repo "broker-exit70-$executor")"
+      MOCK_REAL_SUPERVISOR="$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" \
+        MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor PI_BIN=pi HERMES_BIN=hermes \
+        run "$fixture_root/legion-router/bin/legion-$executor" run --model openai/fixture-model \
+          --task "make a scoped edit" --repo "$repo" --quiet
+
+      [ "$status" -ne 0 ]
+      echo "$output" | jq -e '.status == "failed"'
+      [[ "$output" == *"handoff broker failed closed with exit 70"* ]]
+    done
+}
+
 @test "Pi and Hermes handoff broker is single-use" {
     local repo; repo="$(make_test_repo broker-single-use)"
     MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_PROVIDER_HANDOFF_TWICE=1 PI_BIN=pi \
@@ -561,14 +584,13 @@ wait' _ "$pid_file" &
 
 @test "macOS supervisor reaps a rapid double-fork after ancestry and environment are shed" {
     [ -x /usr/bin/sandbox-exec ] || skip "macOS sandbox-exec is unavailable"
-    local canary_dir deny_canary allow_canary profile pid_file supervisor child unrelated i
+    local canary_dir deny_canary allow_canary profile pid_file supervisor child unrelated i attempt
     canary_dir="$TEST_TMPDIR/supervisor-canaries"
     mkdir "$canary_dir"
     canary_dir="$(cd "$canary_dir" && pwd -P)"
     deny_canary="$canary_dir/deny"
     allow_canary="$canary_dir/allow"
     profile="$TEST_TMPDIR/supervisor-fingerprint.sb"
-    pid_file="$TEST_TMPDIR/provider-double-fork.pid"
     : > "$deny_canary"
     : > "$allow_canary"
     chmod 400 "$deny_canary" "$allow_canary"
@@ -579,11 +601,13 @@ wait' _ "$pid_file" &
       /bin/sleep 30 &
     unrelated=$!
 
-    python3 "$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" \
-      --cwd "$TEST_TMPDIR" \
-      --darwin-sandbox-deny-canary "$deny_canary" \
-      --darwin-sandbox-allow-canary "$allow_canary" -- \
-      /usr/bin/sandbox-exec -f "$profile" python3 - "$pid_file" <<'PY' &
+    for attempt in 1 2 3 4 5; do
+      pid_file="$TEST_TMPDIR/provider-double-fork-$attempt.pid"
+      python3 "$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" \
+        --cwd "$TEST_TMPDIR" \
+        --darwin-sandbox-deny-canary "$deny_canary" \
+        --darwin-sandbox-allow-canary "$allow_canary" -- \
+        /usr/bin/sandbox-exec -f "$profile" python3 - "$pid_file" <<'PY' &
 import os
 import sys
 
@@ -601,15 +625,16 @@ if null > 2:
     os.close(null)
 os.execve("/bin/sleep", ["sleep", "60"], {})
 PY
-    supervisor=$!
-    wait "$supervisor"
-    i=0
-    while [ ! -s "$pid_file" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
-    [ -s "$pid_file" ]
-    child="$(cat "$pid_file")"
-    i=0
-    while kill -0 "$child" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
-    ! kill -0 "$child" 2>/dev/null
+      supervisor=$!
+      wait "$supervisor"
+      i=0
+      while [ ! -s "$pid_file" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+      [ -s "$pid_file" ]
+      child="$(cat "$pid_file")"
+      i=0
+      while kill -0 "$child" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+      ! kill -0 "$child" 2>/dev/null
+    done
     kill -0 "$unrelated"
     kill -TERM "$unrelated"
     wait "$unrelated" || true
@@ -636,8 +661,7 @@ PY
 
 @test "Pi real macOS broker reaps a rapid detached Cursor daemon" {
     [ -x /usr/bin/sandbox-exec ] || skip "macOS sandbox-exec is unavailable"
-    local repo worktree handoff child unrelated temp_root i
-    repo="$(make_test_repo pi-fast-cursor-daemon)"
+    local repo worktree handoff child unrelated temp_root i attempt
     temp_root="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
 
     /usr/bin/sandbox-exec -p \
@@ -645,68 +669,75 @@ PY
       /bin/sleep 20 &
     unrelated=$!
 
-    MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec \
-      MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_PROVIDER_CAPTURE_HANDOFF=HANDOFF.json \
-      MOCK_CURSOR_FAST_DAEMON=1 PI_BIN=pi \
-      run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
-        --task "make a scoped edit and ask Cursor to verify it" --repo "$repo" --keep --quiet
-    [ "$status" -eq 0 ]
-    echo "$output" | jq -e '.status == "ok"'
-    worktree="$(echo "$output" | jq -r .worktree)"
-    handoff="$worktree/HANDOFF.json"
-    [ -s "$handoff" ]
-    child="$(jq -r '.result | select(startswith("CURSOR_FAST_DAEMON_PID:")) | split(":")[1]' "$handoff")"
-    [[ "$child" =~ ^[0-9]+$ ]]
-    i=0
-    while kill -0 "$child" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
-    ! kill -0 "$child" 2>/dev/null
+    for attempt in 1 2 3 4 5; do
+      repo="$(make_test_repo "pi-fast-cursor-daemon-$attempt")"
+      MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec \
+        MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_PROVIDER_CAPTURE_HANDOFF=HANDOFF.json \
+        MOCK_CURSOR_FAST_DAEMON=1 PI_BIN=pi \
+        run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+          --task "make a scoped edit and ask Cursor to verify it" --repo "$repo" --keep --quiet
+      [ "$status" -eq 0 ]
+      echo "$output" | jq -e '.status == "ok"'
+      worktree="$(echo "$output" | jq -r .worktree)"
+      handoff="$worktree/HANDOFF.json"
+      [ -s "$handoff" ]
+      child="$(jq -r '.result | select(startswith("CURSOR_FAST_DAEMON_PID:")) | split(":")[1]' "$handoff")"
+      [[ "$child" =~ ^[0-9]+$ ]]
+      i=0
+      while kill -0 "$child" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+      ! kill -0 "$child" 2>/dev/null
+    done
     kill -0 "$unrelated"
     kill -TERM "$unrelated"
     wait "$unrelated" || true
 }
 
 @test "cancelling Pi reaps an active broker handoff and its descendants" {
-    local repo adapter_pid child_pid pid_file stdout_file stderr_file i
-    repo="$(make_test_repo broker-cancel)"
-    pid_file="$TEST_TMPDIR/broker-child.pid"
-    stdout_file="$TEST_TMPDIR/broker-cancel.out"
-    stderr_file="$TEST_TMPDIR/broker-cancel.err"
+    local repo adapter_pid child_pid pid_file stdout_file stderr_file i attempt
+    for attempt in 1 2 3 4 5; do
+      repo="$(make_test_repo "broker-cancel-$attempt")"
+      pid_file="$TEST_TMPDIR/broker-child-$attempt.pid"
+      stdout_file="$TEST_TMPDIR/broker-cancel-$attempt.out"
+      stderr_file="$TEST_TMPDIR/broker-cancel-$attempt.err"
 
-    MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_CURSOR_DELAY=300 \
-      MOCK_CURSOR_DELAY_PID_FILE="$pid_file" PI_BIN=pi \
-      "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
-        --task "make a scoped edit" --repo "$repo" --quiet \
-        >"$stdout_file" 2>"$stderr_file" &
-    adapter_pid=$!
-    i=0
-    while [ ! -s "$pid_file" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
-    [ -s "$pid_file" ]
-    child_pid="$(cat "$pid_file")"
+      MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_CURSOR_DELAY=300 \
+        MOCK_CURSOR_DELAY_PID_FILE="$pid_file" PI_BIN=pi \
+        "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+          --task "make a scoped edit" --repo "$repo" --quiet \
+          >"$stdout_file" 2>"$stderr_file" &
+      adapter_pid=$!
+      i=0
+      while [ ! -s "$pid_file" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+      [ -s "$pid_file" ]
+      child_pid="$(cat "$pid_file")"
 
-    kill -TERM "$adapter_pid"
-    wait "$adapter_pid" || true
+      kill -TERM "$adapter_pid"
+      wait "$adapter_pid" || true
 
-    ! kill -0 "$child_pid" 2>/dev/null
-    [ "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]
+      ! kill -0 "$child_pid" 2>/dev/null
+      [ "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]
+    done
 }
 
 @test "cancelling Pi reaps a broker target that starts a new session and ignores TERM" {
-    local repo adapter_pid child_pid pid_file i
-    repo="$(make_test_repo broker-detached-cancel)"
-    pid_file="$TEST_TMPDIR/broker-detached-child.pid"
-    MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_CURSOR_DELAY=300 MOCK_CURSOR_DETACH_DELAY=1 \
-      MOCK_CURSOR_DELAY_PID_FILE="$pid_file" PI_BIN=pi \
-      "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
-        --task "make a scoped edit" --repo "$repo" --quiet \
-        >"$TEST_TMPDIR/broker-detached.out" 2>"$TEST_TMPDIR/broker-detached.err" &
-    adapter_pid=$!
-    i=0
-    while [ ! -s "$pid_file" ] && [ "$i" -lt 240 ]; do sleep 0.05; i=$((i + 1)); done
-    [ -s "$pid_file" ]
-    child_pid="$(cat "$pid_file")"
-    kill -TERM "$adapter_pid"
-    wait "$adapter_pid" || true
-    ! kill -0 "$child_pid" 2>/dev/null
+    local repo adapter_pid child_pid pid_file i attempt
+    for attempt in 1 2 3 4 5; do
+      repo="$(make_test_repo "broker-detached-cancel-$attempt")"
+      pid_file="$TEST_TMPDIR/broker-detached-child-$attempt.pid"
+      MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_CURSOR_DELAY=300 MOCK_CURSOR_DETACH_DELAY=1 \
+        MOCK_CURSOR_DELAY_PID_FILE="$pid_file" PI_BIN=pi \
+        "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
+          --task "make a scoped edit" --repo "$repo" --quiet \
+          >"$TEST_TMPDIR/broker-detached-$attempt.out" 2>"$TEST_TMPDIR/broker-detached-$attempt.err" &
+      adapter_pid=$!
+      i=0
+      while [ ! -s "$pid_file" ] && [ "$i" -lt 240 ]; do sleep 0.05; i=$((i + 1)); done
+      [ -s "$pid_file" ]
+      child_pid="$(cat "$pid_file")"
+      kill -TERM "$adapter_pid"
+      wait "$adapter_pid" || true
+      ! kill -0 "$child_pid" 2>/dev/null
+    done
 }
 
 @test "broker provisions scrubbed private Cursor credential and data stores" {

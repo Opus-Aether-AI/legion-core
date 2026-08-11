@@ -404,6 +404,7 @@ class DescendantTracker:
         self._handles: dict[int, ProcessHandle] = {}
         self._error: Optional[ProcessInspectionError] = None
         self._lock = threading.Lock()
+        self._operation_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._monitor, name="legion-descendants", daemon=True)
         self._thread_started = False
@@ -420,11 +421,12 @@ class DescendantTracker:
         self._stop.set()
         if self._thread_started:
             self._thread.join(timeout=1.0)
-        with self._lock:
-            handles = list(self._handles.values())
-            self._handles.clear()
-        for handle in handles:
-            handle.close()
+        with self._operation_lock:
+            with self._lock:
+                handles = list(self._handles.values())
+                self._handles.clear()
+            for handle in handles:
+                handle.close()
 
     def raise_if_error(self) -> None:
         with self._lock:
@@ -441,13 +443,13 @@ class DescendantTracker:
             self._handles[handle.pid] = handle
             return True
 
-    def _live_parent_pids(self) -> set[int]:
+    def _live_parent_handles(self) -> dict[int, ProcessHandle]:
         dead: list[ProcessHandle] = []
         with self._lock:
             for pid, handle in list(self._handles.items()):
                 if not handle.is_live():
                     dead.append(self._handles.pop(pid))
-            result = set(self._handles)
+            result = dict(self._handles)
         for handle in dead:
             handle.close()
         return result
@@ -463,7 +465,7 @@ class DescendantTracker:
         except (FileNotFoundError, IndexError, PermissionError, ValueError):
             return None
 
-    def _capture_child(self, pid: int, parents: set[int]) -> bool:
+    def _capture_child(self, pid: int, parents: dict[int, ProcessHandle]) -> bool:
         with self._lock:
             if pid in self._handles:
                 return True
@@ -471,14 +473,15 @@ class DescendantTracker:
         if handle is None:
             return False
         parent = self._current_parent(pid)
-        with self._lock:
-            parent_handle = self._handles.get(parent) if parent is not None else None
+        parent_handle = parents.get(parent) if parent is not None else None
         # The integer parent PID may have been reused since ``parents`` was
         # collected. Revalidate the original kernel handle after capturing the
-        # child before accepting the relationship.
+        # child before accepting the relationship. ``_operation_lock`` keeps
+        # this exact object owned and its pidfd open throughout the check.
+        with self._lock:
+            still_owned = parent_handle is not None and self._handles.get(parent) is parent_handle
         if (
-            parent not in parents
-            or parent_handle is None
+            not still_owned
             or not parent_handle.is_live()
             or not handle.is_live()
         ):
@@ -521,9 +524,9 @@ class DescendantTracker:
                 continue
             self._record(handle)
 
-    def snapshot(self, *, include_token: bool = False) -> None:
+    def _snapshot(self, *, include_token: bool = False) -> None:
         self.raise_if_error()
-        parents = self._live_parent_pids()
+        parents = self._live_parent_handles()
         pending = list(parents)
         visited: set[int] = set()
         while pending:
@@ -533,22 +536,36 @@ class DescendantTracker:
             visited.add(parent)
             children = _child_pids(parent)
             for child in children:
-                if child not in visited and self._capture_child(child, parents | visited):
-                    pending.append(child)
+                if child not in visited and self._capture_child(child, parents):
+                    with self._lock:
+                        child_handle = self._handles.get(child)
+                    if child_handle is not None:
+                        parents[child] = child_handle
+                        pending.append(child)
         if sys.platform == "darwin" and self.deny_canary and self.allow_canary:
             self._capture_fingerprinted()
         elif include_token:
             self._capture_token_pids()
 
+    def snapshot(self, *, include_token: bool = False) -> None:
+        with self._operation_lock:
+            self._snapshot(include_token=include_token)
+
     def signal(self, signum: int) -> list[int]:
         # Signal deepest/newest children first so parents cannot immediately
         # replace them while shutdown proceeds.
         use_fingerprint = sys.platform == "darwin" and self.deny_canary and self.allow_canary
-        self.snapshot(include_token=not use_fingerprint)
-        return self.signal_known(signum)
+        with self._operation_lock:
+            self._snapshot(include_token=not use_fingerprint)
+            return self._signal_known(signum)
 
     def signal_known(self, signum: int) -> list[int]:
         """Signal only already captured kernel handles after discovery fails."""
+
+        with self._operation_lock:
+            return self._signal_known(signum)
+
+    def _signal_known(self, signum: int) -> list[int]:
 
         dead: list[ProcessHandle] = []
         signalled: list[int] = []

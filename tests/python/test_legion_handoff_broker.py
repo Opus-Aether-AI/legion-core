@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -128,16 +130,65 @@ def test_incomplete_descendant_supervisor_exit_fails_closed(tmp_path: Path) -> N
         BROKER._terminate_supervisor(process)
 
 
-def test_persisted_cleanup_failure_makes_broker_exit_nonzero() -> None:
-    broker = object.__new__(BROKER.Broker)
-    broker.socket_path = Path("/tmp") / f"legion-broker-test-{os.getpid()}-{id(broker)}.sock"
-    broker.stop = threading.Event()
-    broker.stop.set()
-    broker.cleanup_failure = "incomplete cleanup"
-    broker.process_lock = threading.Lock()
-    broker.active_process = None
+def test_abandoned_client_preserves_supervisor_exit_70(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    supervisor = tmp_path / "supervisor-exit70"
+    supervisor.write_text("#!/bin/sh\nexit 70\n", encoding="utf-8")
+    supervisor.chmod(0o700)
+    socket_path = Path("/tmp") / f"legion-broker-test-{os.getpid()}-{id(supervisor)}.sock"
+    broker = BROKER.Broker(
+        socket_path=socket_path,
+        token="test-token",
+        delegate=Path("/usr/bin/true"),
+        source_repo=tmp_path,
+        broker_root=tmp_path / "broker-root",
+        base_sha="deadbeef",
+        sandbox_bin=Path("/usr/bin/true"),
+        sandbox_kind="bwrap",
+        supervisor=supervisor,
+        supervisor_deny_canary=tmp_path / "deny",
+        supervisor_allow_canary=tmp_path / "allow",
+        telemetry_dir=None,
+        expected_parent="parent",
+    )
+    broker.broker_repo = tmp_path
+    monkeypatch.setattr(broker, "_prepare_repository", lambda: None)
+    monkeypatch.setattr(broker, "_sandbox_command", lambda command: ["/usr/bin/true"])
+    monkeypatch.setattr(broker, "_target_environment", os.environ.copy)
 
+    results: list[int] = []
+    errors: list[BaseException] = []
+
+    def serve() -> None:
+        try:
+            results.append(broker.serve())
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=serve)
+    thread.start()
     try:
-        assert broker.serve() == 70
+        deadline = time.monotonic() + 2.0
+        while not socket_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert socket_path.exists()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(str(socket_path))
+            BROKER._send_json(
+                connection,
+                {
+                    "token": "test-token",
+                    "argv": ["run", "--executor", "cursor", "--task", "noop"],
+                    "stdin": "",
+                },
+                BROKER.MAX_REQUEST_BYTES,
+            )
+            # Deliberately abandon the request before the broker can respond.
+        thread.join(timeout=4.0)
+        assert not thread.is_alive()
+        assert errors == []
+        assert results == [70]
+        assert broker.cleanup_failure == "descendant supervisor reported incomplete cleanup"
     finally:
-        broker.socket_path.unlink(missing_ok=True)
+        broker.request_stop()
+        thread.join(timeout=1.0)
+        socket_path.unlink(missing_ok=True)

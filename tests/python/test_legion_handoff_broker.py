@@ -118,3 +118,26 @@ def test_unresponsive_descendant_supervisor_fails_closed(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="cleanup deadline"):
         BROKER._terminate_supervisor(process, grace=0.01)
     assert process.poll() is not None
+
+
+def test_incomplete_descendant_supervisor_exit_fails_closed(tmp_path: Path) -> None:
+    process = subprocess.Popen([sys.executable, "-c", "raise SystemExit(70)"], cwd=tmp_path)
+    assert process.wait(timeout=2.0) == 70
+
+    with pytest.raises(ValueError, match="incomplete cleanup"):
+        BROKER._terminate_supervisor(process)
+
+
+def test_persisted_cleanup_failure_makes_broker_exit_nonzero() -> None:
+    broker = object.__new__(BROKER.Broker)
+    broker.socket_path = Path("/tmp") / f"legion-broker-test-{os.getpid()}-{id(broker)}.sock"
+    broker.stop = threading.Event()
+    broker.stop.set()
+    broker.cleanup_failure = "incomplete cleanup"
+    broker.process_lock = threading.Lock()
+    broker.active_process = None
+
+    try:
+        assert broker.serve() == 70
+    finally:
+        broker.socket_path.unlink(missing_ok=True)

@@ -46,6 +46,10 @@ SPAN_REQUIRED = {"schema", "ts", "run_id", "executor", "model", "status"}
 SPAN_STATUSES = {"ok", "failed", "error", "over_budget", "blocked"}
 
 
+class SupervisorCleanupError(ValueError):
+    """A nested supervisor could not prove complete descendant cleanup."""
+
+
 def _read_exact(connection: socket.socket, size: int) -> bytes:
     chunks: list[bytes] = []
     remaining = size
@@ -267,20 +271,21 @@ def _terminate_supervisor(process: subprocess.Popen[bytes], grace: float = 6.0) 
     try:
         process.send_signal(signal.SIGTERM)
     except ProcessLookupError:
-        return
+        pass
     try:
-        process.wait(timeout=grace)
-        return
+        returncode = process.wait(timeout=grace)
     except subprocess.TimeoutExpired as error:
         # This PID is still our unreaped direct child, so it cannot be reused
         # before Popen.kill() checks and signals it. Re-signalling the original
         # process group would not have that guarantee after its leader exits.
         process.kill()
         try:
-            process.wait(timeout=2.0)
+            returncode = process.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
-            pass
-        raise ValueError("descendant supervisor exceeded its cleanup deadline") from error
+            returncode = None
+        raise SupervisorCleanupError("descendant supervisor exceeded its cleanup deadline") from error
+    if returncode == 70:
+        raise SupervisorCleanupError("descendant supervisor reported incomplete cleanup")
 
 
 class Broker:
@@ -322,6 +327,7 @@ class Broker:
         self.repository_ready = False
         self.process_lock = threading.Lock()
         self.active_process: Optional[subprocess.Popen[bytes]] = None
+        self.cleanup_failure: Optional[str] = None
         self.control_empty = broker_root.parent / "control-empty"
 
     def _git(self, *args: str, cwd: Optional[Path] = None) -> bytes:
@@ -734,11 +740,23 @@ class Broker:
             try:
                 stdout, stderr = self._capture_process(process, stdin)
             finally:
-                _terminate_supervisor(process)
-                with self.process_lock:
-                    self.active_process = None
+                try:
+                    _terminate_supervisor(process)
+                finally:
+                    with self.process_lock:
+                        self.active_process = None
             self._copy_telemetry()
             _send_json(connection, self._response(process.returncode, stdout, stderr), MAX_RESPONSE_BYTES)
+        except SupervisorCleanupError as error:
+            # A provider may abandon its client before reading this response.
+            # Persist the fatal status so serve() and the outer adapter also
+            # fail closed when the broker is stopped.
+            self.cleanup_failure = str(error)
+            self.stop.set()
+            try:
+                _send_json(connection, self._response(2, stderr=f"legion-delegate: {error}\n".encode()), MAX_RESPONSE_BYTES)
+            except (OSError, ValueError):
+                pass
         except (OSError, UnicodeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as error:
             try:
                 _send_json(connection, self._response(2, stderr=f"legion-delegate: {error}\n".encode()), MAX_RESPONSE_BYTES)
@@ -763,7 +781,7 @@ class Broker:
                 except (TimeoutError, socket.timeout):
                     continue
                 self._handle(connection)
-            return 0
+            return 70 if self.cleanup_failure is not None else 0
         finally:
             self.terminate_active()
             server.close()

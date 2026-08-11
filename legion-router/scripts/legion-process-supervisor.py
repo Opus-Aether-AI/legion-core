@@ -3,8 +3,8 @@
 
 Process groups and bare PIDs are insufficient: a child may call ``setsid()``,
 and either identifier can be reused after exit. The supervisor therefore keeps
-kernel-bound process identities (Darwin unique IDs plus renewable audit tokens,
-or Linux pidfds). Production macOS callers additionally provide a random inherited
+kernel-bound process identities (Darwin unique IDs plus PID-version tokens, or
+Linux pidfds). Production macOS callers additionally provide a random inherited
 Seatbelt-policy fingerprint, which remains observable after a rapid child
 reparenting sheds every user-space identity channel.
 """
@@ -274,44 +274,20 @@ def _darwin_unique_info(pid: int) -> Optional[_DarwinUniqueInfo]:
         raise ProcessInspectionError("Darwin unique process identity inspection is unavailable") from error
 
 
-def _darwin_audit_token_for_pid(pid: int) -> Optional[_AuditToken]:
-    """Capture a PID-versioned audit token, retrying across an exec race."""
+def _darwin_pidversion_token(pid: int, pidversion: int) -> _AuditToken:
+    """Build the exact identity fields consumed by XNU's audit-token lookup.
 
-    try:
-        system = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
-        self_port = ctypes.c_uint.in_dll(system, "mach_task_self_").value
-        task_name_for_pid = system.task_name_for_pid
-        task_name_for_pid.argtypes = (ctypes.c_uint, ctypes.c_int, ctypes.POINTER(ctypes.c_uint))
-        task_name_for_pid.restype = ctypes.c_int
-        task_info = system.task_info
-        task_info.argtypes = (ctypes.c_uint, ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
-        task_info.restype = ctypes.c_int
-        deallocate = system.mach_port_deallocate
-        deallocate.argtypes = (ctypes.c_uint, ctypes.c_uint)
-        deallocate.restype = ctypes.c_int
-    except (AttributeError, OSError) as error:
-        raise ProcessInspectionError("Darwin task identity APIs are unavailable") from error
+    ``proc_signal_with_audittoken`` resolves only token fields 5 (PID) and 7
+    (PID version), then derives credentials from the kernel process record.
+    Constructing those fields from one ``PROC_PIDUNIQIDENTIFIERINFO`` record
+    avoids ``task_name_for_pid``, which is unavailable inside common harness
+    Seatbelt profiles, without falling back to a reusable bare PID.
+    """
 
-    for _attempt in range(3):
-        port = ctypes.c_uint(0)
-        if task_name_for_pid(self_port, pid, ctypes.byref(port)) == 0:
-            try:
-                token = _AuditToken()
-                count = ctypes.c_uint32(8)
-                result = task_info(port.value, 15, ctypes.byref(token), ctypes.byref(count))  # TASK_AUDIT_TOKEN
-                if result == 0 and count.value == 8 and int(token.value[5]) == pid:
-                    return token
-            finally:
-                deallocate(self_port, port.value)
-
-        info = _darwin_bsd_info(pid)
-        if info is None or info.pbi_status == DARWIN_ZOMBIE_STATUS:
-            return None
-        time.sleep(0)
-
-    if info.pbi_uid == os.geteuid():
-        raise ProcessInspectionError(f"cannot capture an audit token for process {pid}")
-    return None
+    token = _AuditToken()
+    token.value[5] = pid
+    token.value[7] = pidversion & 0xFFFFFFFF
+    return token
 
 
 class ProcessHandle:
@@ -334,17 +310,14 @@ class ProcessHandle:
     @classmethod
     def open(cls, pid: int) -> Optional[ProcessHandle]:
         if sys.platform == "darwin":
-            for _attempt in range(3):
-                token = _darwin_audit_token_for_pid(pid)
-                if token is None:
-                    return None
-                info = _darwin_unique_info(pid)
-                if info is None:
-                    return None
-                if int(token.value[7]) == info.p_idversion:
-                    return cls(pid, audit_token=token, unique_id=int(info.p_uniqueid))
-                time.sleep(0)
-            raise ProcessInspectionError(f"process {pid} continued execing during identity capture")
+            info = _darwin_unique_info(pid)
+            if info is None:
+                return None
+            return cls(
+                pid,
+                audit_token=_darwin_pidversion_token(pid, int(info.p_idversion)),
+                unique_id=int(info.p_uniqueid),
+            )
 
         if sys.platform.startswith("linux"):
             if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
@@ -360,24 +333,14 @@ class ProcessHandle:
     def _refresh_darwin_identity(self) -> bool:
         if self.audit_token is None:
             raise ProcessInspectionError(f"process {self.pid} has no Darwin audit token")
-        for _attempt in range(3):
-            before = _darwin_unique_info(self.pid)
-            if before is None or int(before.p_uniqueid) != self.unique_id:
-                return False
-            if int(self.audit_token.value[7]) == before.p_idversion:
-                return True
-
-            token = _darwin_audit_token_for_pid(self.pid)
-            if token is None:
-                return False
-            after = _darwin_unique_info(self.pid)
-            if after is None or int(after.p_uniqueid) != self.unique_id:
-                return False
-            if int(token.value[7]) == after.p_idversion:
-                self.audit_token = token
-                return True
-            time.sleep(0)
-        raise ProcessInspectionError(f"process {self.pid} continued execing during identity refresh")
+        info = _darwin_unique_info(self.pid)
+        if info is None or int(info.p_uniqueid) != self.unique_id:
+            return False
+        pidversion = int(info.p_idversion) & 0xFFFFFFFF
+        if int(self.audit_token.value[7]) == pidversion:
+            return True
+        self.audit_token = _darwin_pidversion_token(self.pid, pidversion)
+        return True
 
     def is_live(self) -> bool:
         if self.closed:
@@ -443,6 +406,7 @@ class DescendantTracker:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._monitor, name="legion-descendants", daemon=True)
+        self._thread_started = False
 
     def start(self) -> None:
         root = ProcessHandle.open(self.root_pid)
@@ -450,10 +414,12 @@ class DescendantTracker:
             self._handles[self.root_pid] = root
         self.snapshot()
         self._thread.start()
+        self._thread_started = True
 
     def close(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=1.0)
+        if self._thread_started:
+            self._thread.join(timeout=1.0)
         with self._lock:
             handles = list(self._handles.values())
             self._handles.clear()
@@ -505,7 +471,17 @@ class DescendantTracker:
         if handle is None:
             return False
         parent = self._current_parent(pid)
-        if parent not in parents or not handle.is_live():
+        with self._lock:
+            parent_handle = self._handles.get(parent) if parent is not None else None
+        # The integer parent PID may have been reused since ``parents`` was
+        # collected. Revalidate the original kernel handle after capturing the
+        # child before accepting the relationship.
+        if (
+            parent not in parents
+            or parent_handle is None
+            or not parent_handle.is_live()
+            or not handle.is_live()
+        ):
             handle.close()
             return False
         return self._record(handle)
@@ -600,6 +576,18 @@ class DescendantTracker:
 
 
 def _terminate_tree(process: subprocess.Popen[bytes], tracker: DescendantTracker) -> bool:
+    def signal_unreaped_root(signum: int) -> bool:
+        # A direct child cannot have its PID reused until this parent reaps it,
+        # so signalling its Popen handle remains safe even when tracker setup or
+        # descendant discovery failed before a kernel handle was captured.
+        if process.poll() is not None:
+            return False
+        try:
+            process.send_signal(signum)
+            return True
+        except ProcessLookupError:
+            return False
+
     def drain(signum: int) -> bool:
         deadline = time.monotonic() + GRACE_SECONDS
         quiet_since: Optional[float] = None
@@ -611,8 +599,10 @@ def _terminate_tree(process: subprocess.Popen[bytes], tracker: DescendantTracker
                     tracker.signal_known(signum)
                 except ProcessInspectionError:
                     pass
+                signal_unreaped_root(signum)
                 print(f"legion-process-supervisor: descendant inspection failed: {error}", file=sys.stderr)
                 return False
+            signal_unreaped_root(signum)
             if process.poll() is not None and not live:
                 if quiet_since is None:
                     quiet_since = time.monotonic()

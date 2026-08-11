@@ -542,6 +542,23 @@ wait' _ "$pid_file" &
     ! kill -0 "$child" 2>/dev/null
 }
 
+@test "macOS supervisor works when its harness sandbox denies Mach task names" {
+    [ -x /usr/bin/sandbox-exec ] || skip "macOS sandbox-exec is unavailable"
+    local pid_file supervisor child i
+    pid_file="$TEST_TMPDIR/provider-mach-denied-child.pid"
+    /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny mach-task-name)' \
+      python3 "$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" --cwd "$TEST_TMPDIR" -- \
+      bash -c 'sleep 300 & printf "%s\n" "$!" > "$1"; wait' _ "$pid_file" &
+    supervisor=$!
+    i=0
+    while [ ! -s "$pid_file" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+    [ -s "$pid_file" ]
+    child="$(cat "$pid_file")"
+    kill -TERM "$supervisor"
+    wait "$supervisor" || true
+    ! kill -0 "$child" 2>/dev/null
+}
+
 @test "macOS supervisor reaps a rapid double-fork after ancestry and environment are shed" {
     [ -x /usr/bin/sandbox-exec ] || skip "macOS sandbox-exec is unavailable"
     local canary_dir deny_canary allow_canary profile pid_file supervisor child unrelated i

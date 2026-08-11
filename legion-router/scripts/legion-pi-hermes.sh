@@ -22,7 +22,7 @@ PROVIDER_BIN="${PI_BIN:-pi}"
 [[ "$ADAPTER_KIND" == hermes ]] && PROVIDER_BIN="${HERMES_BIN:-hermes}"
 RUN_ID="" CHILD_PID="" KEEP=0 WT="" WT_RECORD="" BRANCH="" REPO="" ART=""
 WT_CREATED=0 BRANCH_CREATED=0
-BROKER_PID="" BROKER_SOCKET_DIR="" BROKER_SOCKET="" BROKER_TOKEN="" BROKER_ROOT=""
+BROKER_PID="" BROKER_SOCKET_DIR="" BROKER_SOCKET="" BROKER_TOKEN="" BROKER_ROOT="" BROKER_RC=0
 CONTROL_EMPTY_DIR="" SANITIZED_PROVIDER_PATH=""
 SUPERVISOR_DENY_CANARY="" SUPERVISOR_ALLOW_CANARY=""
 TARGET_SUPERVISOR_DENY_CANARY="" TARGET_SUPERVISOR_ALLOW_CANARY=""
@@ -86,7 +86,10 @@ stop_handoff_broker() {
   local i=0
   while kill -0 "$BROKER_PID" 2>/dev/null && (( i < 200 )); do sleep 0.05; i=$((i + 1)); done
   kill -KILL "$BROKER_PID" 2>/dev/null || true
-  wait "$BROKER_PID" 2>/dev/null || true
+  set +e
+  wait "$BROKER_PID" 2>/dev/null
+  BROKER_RC=$?
+  set -e
   BROKER_PID=""
 }
 on_signal() {
@@ -534,6 +537,7 @@ capture_trusted_diff() {
 start_handoff_broker() {
   local helper="$_self_dir/legion-handoff-broker.py" delegate="$_self_dir/../bin/legion-delegate" supervisor="$_self_dir/legion-process-supervisor.py" i supervisor_nonce
   [[ -x "$helper" && -x "$delegate" && -x "$supervisor" ]] || die 'trusted Legion handoff broker is unavailable'
+  BROKER_RC=0
   BROKER_SOCKET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/legion-broker.XXXXXX")" || die 'unable to allocate handoff broker socket directory'
   BROKER_SOCKET_DIR="$(cd "$BROKER_SOCKET_DIR" && pwd -P)" || die 'unable to canonicalize handoff broker socket directory'
   BROKER_SOCKET="$BROKER_SOCKET_DIR/broker.sock"
@@ -708,6 +712,10 @@ cmd_run() {
   fi
   MODEL="$actual_model"
   [[ -n "$usage" ]] || usage='{}'
+  if [[ "$BROKER_RC" -ne 0 ]]; then
+    status=failed
+    result="${result:+$result$'\n'}handoff broker failed closed with exit $BROKER_RC; inspect $ART/broker.err"
+  fi
   if ! jq -en --argjson value "$cost" '$value | type == "number" and . >= 0' >/dev/null 2>&1; then cost=0; terminal_ok=0; fi
   if ! capture_trusted_diff "$diff"; then
     status=error

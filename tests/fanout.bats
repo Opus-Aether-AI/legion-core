@@ -71,6 +71,23 @@ SH
   echo "$output" | jq -e '.ok == 1 and .failed == 0'
 }
 
+@test "fanout: installed delegate symlink resolves its packaged run-id helper" {
+  local isolated="$BATS_TEST_TMPDIR/standalone/legion-fanout.sh"
+  local bin="$BATS_TEST_TMPDIR/installed-bin"
+  mkdir -p "$(dirname "$isolated")" "$bin"
+  cp "$ROOT/legion-orchestrate/scripts/legion-fanout.sh" "$isolated"
+  chmod +x "$isolated"
+  ln -s "$ROOT/legion-router/bin/legion-delegate" "$bin/legion-delegate"
+
+  printf '%s\n' '{"archetype":"implement-feature","task":"build A"}' \
+    > "$BATS_TEST_TMPDIR/installed-symlink.jsonl"
+  LEGION_DELEGATE="$bin/legion-delegate" LEGION_TELEMETRY= \
+    run "$isolated" --slices "$BATS_TEST_TMPDIR/installed-symlink.jsonl" --repo "$REPO"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 1 and .failed == 0'
+}
+
 @test "fanout: delegates many codex slices in parallel + returns self slices inline" {
   local i
   : > "$BATS_TEST_TMPDIR/s.jsonl"

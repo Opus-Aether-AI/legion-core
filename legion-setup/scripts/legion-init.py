@@ -60,6 +60,15 @@ delegated.
   and review contracts remain active.
 - Inline work is allowed only when the active Legion harness-mode guidance
   selects it. It still follows this repository's tests and health gates.
+- Primary sessions stop on semantic convergence, not an elapsed-time or retry
+  deadline. At each material checkpoint, use `legion-converge` to classify the
+  workflow as `actionable`, `complete`, `waiting_external`, or `blocked`.
+  Continue only from `actionable` with new source or failure evidence. Yield on
+  `complete` or `waiting_external`; external checks can resume the work when
+  their state changes. Yield and report `blocked`.
+  Treat repeated same source and evidence fingerprints as no progress. Do not
+  rerun the same validation on an unchanged tree, repeat review on the same
+  immutable head, or reopen work solely for non-blocking suggestions.
 - If Legion is unavailable or blocked, stop and report the blocker instead of
   silently bypassing it."""
 

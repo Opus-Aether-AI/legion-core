@@ -43,6 +43,9 @@ source "$_self_dir/lib/model-config.sh"
 # shellcheck source=lib/executor-context.sh
 source "$_self_dir/lib/executor-context.sh"
 # shellcheck disable=SC1091
+# shellcheck source=lib/run-id.sh
+source "$_self_dir/lib/run-id.sh"
+# shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
 
@@ -308,7 +311,7 @@ run_sandcastle() {
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
-_run_id() { printf '%s-%s' "$(date -u +%Y%m%d-%H%M%S)" "${RANDOM}${RANDOM}"; }
+_run_id() { legion_new_run_id; }
 
 # ── Safety ───────────────────────────────────────────────────────────
 validate_sandbox() {

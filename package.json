@@ -41,6 +41,7 @@
     "legion-console-index": "legion-observability/bin/legion-console-index",
     "legion-context-profile": "legion-observability/bin/legion-context-profile",
     "legion-context-tune": "legion-observability/bin/legion-context-tune",
+    "legion-converge": "legion-observability/bin/legion-converge",
     "legion-doctor": "legion-observability/bin/legion-doctor",
     "legion-eval": "legion-observability/bin/legion-eval",
     "legion-heal": "legion-observability/bin/legion-heal",

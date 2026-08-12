@@ -17,6 +17,11 @@ Prefer this over manually composing `legion-fanout`, `legion-delegate`,
 `legion-report`, and `legion-self-learn` when the task needs proof and a durable
 run directory.
 
+Do not manually replay the lifecycle after `legion-run` returns a terminal
+receipt. Hand the result back to the primary session, which records a semantic
+checkpoint with `legion-converge`; only new source or failure evidence can
+start another lifecycle.
+
 ## Mode selection
 
 Use **direct mode** for one-off tasks where the current repo can provide the

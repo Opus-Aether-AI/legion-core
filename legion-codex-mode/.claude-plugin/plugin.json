@@ -1,7 +1,7 @@
 {
   "name": "legion-codex-mode",
   "description": "The Codex-CLI-primary routing brain for Legion: the codex_workhorse ref does most of the work, and this skill tells you when to hand a task up to the configured Claude role via `legion-claude` (deep architecture, polished/complex frontend with the impeccable skill, final cross-model review, tie-breaks, or when you're stuck) versus doing it inline — with automatic configured-Codex fallback if the Claude limit is hit. The mirror image of legion-router (the Claude-primary brain). Also maps what runs natively on Codex (MCPs, mirrored skills, bridged commands/agents) so you don't reach for Claude needlessly.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": {
     "name": "legion-core"
   },

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""legion-share — measure the codex-vs-primary work split and drive it toward target.
+"""legion-share — measure the codex-vs-primary split against a configurable target.
 
 Reads legion.span.v1 telemetry (both codex delegations AND the primary's self-work,
 logged via `legion-trace emit` / the synthetic primary baseline), computes codex's
@@ -12,8 +12,8 @@ N-executor share controller (per-executor targets) is a follow-up.
 
   legion-share            # JSON report: share by runs + tokens, per-model, status
   legion-share --window 7d --json
-  legion-share next       # -> "codex" or "opus": who should do the NEXT task to converge
-  legion-share gate       # -> one-line directive; exit 1 when under target (for hooks/CI)
+  legion-share next       # advisory recommendation for the next eligible task
+  legion-share gate       # explicit opt-in enforcement; exit 1 when under target
 
 Pure stdlib (tomllib, 3.11+). Importable for tests.
 """
@@ -174,12 +174,11 @@ def recommend_next(share_runs, total_runs, target):
 
 
 def gate(c, tgt):
-    """Enforcement surface for the harness hook / CI: turn the measured share into
+    """Opt-in enforcement surface: turn the measured share into
     a one-line directive + exit code. Exit code 1 means "under target — delegate
     the next eligible slice to codex"; 0 means no action (on balance, no data yet,
-    or unmeasurable). The opus-core balance hook prints the directive into context
-    when this returns 1, so an off-target session is nudged instead of silently
-    hand-cranking everything inline.
+    or unmeasurable). Normal reports and `next` remain advisory; a repository or
+    CI job must explicitly invoke this command to enforce its configured target.
     """
     runs, share = c["total_runs"], c["codex_share_runs"]
     pct, tpct = round(share * 100), round(tgt * 100)

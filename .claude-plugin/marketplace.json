@@ -13,7 +13,7 @@
       "name": "legion-router",
       "source": "./legion-router",
       "description": "Legion's multi-model brain: registry-driven routing and scoped delegation across Claude, Codex, Cursor, OpenCode, Hermes, and Pi. Implemented adapters return a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
-      "version": "0.5.18",
+      "version": "0.5.19",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",
@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic repeated gates, legion-self-learn evidence/proposals, review-only legion-improve draft PRs, legion-trace, legion-otel-export, and legion-doctor verification.",
-      "version": "0.2.18",
+      "version": "0.2.19",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -64,7 +64,7 @@
       "name": "legion-orchestrate",
       "source": "./legion-orchestrate",
       "description": "Legion's dynamic multi-model orchestrator: the active primary decomposes work, configured executor roles fan out scoped slices, independent roles cross-verify, and the primary synthesizes and gates. Ships `legion-fanout` plus the LEGION_ULTRACODE max-exhaustive workflow.",
-      "version": "0.1.11",
+      "version": "0.1.12",
       "category": "agent-orchestration",
       "keywords": [
         "orchestration",
@@ -87,7 +87,7 @@
       "name": "legion-run",
       "source": "./legion-run",
       "description": "First-class Legion heavy-task runner skill. Invokes `legion-run` direct mode or domain-plugin mode to execute sizeable coding work through doctor, prior hints, planning, route/fan-out/apply, final review, validation/evaluation, HTML evidence, share accounting, validation-led self-learning, and heal planning.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "category": "agent-orchestration",
       "keywords": [
         "legion-run",
@@ -109,7 +109,7 @@
       "name": "legion-setup",
       "source": "./legion-setup",
       "description": "Install and update Legion, wire Codex/Cursor/opencode bridges, verify Pi readiness, manage Hermes's native skill-discovery link, and make Legion the repository-default workflow without replacing existing instructions. Ships `legion-setup`, `legion-init`, and native harness setup commands; daily refresh/self-learning is opt-in.",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "category": "productivity",
       "keywords": [
         "install",
@@ -132,7 +132,7 @@
       "name": "legion-codex-mode",
       "source": "./legion-codex-mode",
       "description": "The Codex-CLI-primary routing brain for Legion — the mirror of legion-router. When you run Legion under Codex, the codex_workhorse ref does most of the work; this skill tells you when to hand a task up to the configured Claude role via `legion-claude` (deep architecture, polished/complex frontend with the impeccable skill, final cross-model review, tie-breaks, when stuck) versus inline — with automatic configured-Codex fallback if the Claude limit is hit. Also maps what runs natively on Codex (MCPs, mirrored skills, bridged commands/agents) so you don't reach for Claude needlessly. Triggers on running Legion under Codex, deep-design/frontend-polish/final-review smells, or 'ask claude' / 'second opinion from claude'.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "category": "agent-orchestration",
       "keywords": [
         "codex",
@@ -154,7 +154,7 @@
       "name": "legion-opencode-mode",
       "source": "./legion-opencode-mode",
       "description": "The decision guide for an opencode-primary Legion session — the opencode counterpart of legion-codex-mode. When you drive Legion under opencode you do most of the work yourself; this skill tells you WHICH kind of task is worth handing to another model and to WHOM — Claude for deep architecture and polished frontend (with the impeccable skill), a workhorse model for bulk implementation, a different model for a second opinion — versus keeping it inline. Triggers on running Legion under opencode, on deep-design / frontend-polish / final-review judgement calls, or on 'ask claude' / 'get a second opinion' while working in opencode.",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "category": "agent-orchestration",
       "keywords": [
         "opencode",
@@ -176,7 +176,7 @@
       "name": "legion-hermes-mode",
       "source": "./legion-hermes-mode",
       "description": "The routing guide for a Hermes-primary Legion session. Hermes can work inline as a registered coding family and use a metered, isolated `legion-delegate run --executor <different-harness>` handoff for independent implementation, review, and tie-breaks. Triggers when Hermes or one of its cron jobs / skills needs to build, fix, test, review, or delegate code work.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "category": "agent-orchestration",
       "keywords": [
         "hermes",
@@ -198,7 +198,7 @@
       "name": "legion-pi-mode",
       "source": "./legion-pi-mode",
       "description": "The Pi-primary Legion routing guide for when Pi is driving a coding task: decide what stays inline and when to ask another harness for a second opinion, implementation, or review through a metered, isolated Legion handoff.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "category": "agent-orchestration",
       "keywords": [
         "pi",

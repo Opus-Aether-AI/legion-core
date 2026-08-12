@@ -6,6 +6,15 @@ description: The routing guide for a Pi-primary Legion session. Use when Pi is d
 
 # Legion — Pi mode
 
+## Convergence
+
+For a substantial inline workflow, record each material checkpoint with
+`legion-converge --checkpoint <file> --repo . --json`. Continue only when it
+returns `actionable` with changed source or failure evidence. Yield on
+`complete`, `waiting_external`, or `blocked`; an external state change can
+resume `waiting_external`. Never rerun validation on an unchanged tree or
+review the same immutable head merely to keep the primary turn alive.
+
 You are **Pi**, the active Legion primary. Keep bounded work inline when you have
 enough context; use a different registered coding family when independent
 implementation, review, or a second perspective materially improves confidence.

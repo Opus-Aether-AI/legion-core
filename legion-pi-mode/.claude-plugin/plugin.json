@@ -1,7 +1,7 @@
 {
   "name": "legion-pi-mode",
   "description": "The Pi-primary Legion routing guide for when Pi is driving a coding task: decide what stays inline and when to ask another harness for a second opinion, implementation, or review through a metered, isolated Legion handoff.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "legion-core"
   },

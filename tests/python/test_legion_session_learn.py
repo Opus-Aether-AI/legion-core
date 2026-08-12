@@ -126,6 +126,80 @@ def test_scan_codex_user_correction_feedback(tmp_path):
     assert "svineet/harness-bench" in correction["evidence"][0]["snippet"]
 
 
+def test_scan_attributes_long_primary_turn_from_structural_events(tmp_path, monkeypatch):
+    session = tmp_path / ".codex" / "sessions" / "2026" / "08" / "11" / "session.jsonl"
+    session.parent.mkdir(parents=True)
+    records = [
+        {
+            "timestamp": "2026-08-11T08:49:45.997Z",
+            "type": "session_meta",
+            "payload": {
+                "session_id": "session-a",
+                "legion_run_id": "private-run-correlation-id",
+            },
+        },
+        {
+            "timestamp": "2026-08-11T08:49:46.000Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-a"},
+        },
+        {
+            "timestamp": "2026-08-11T08:49:47.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "Why did this task keep running for the whole day?",
+            },
+        },
+        {
+            "timestamp": "2026-08-11T08:50:00.000Z",
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "exec", "call_id": "call-a"},
+        },
+        {
+            "timestamp": "2026-08-11T21:19:50.000Z",
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "wait", "call_id": "call-b"},
+        },
+        {
+            "timestamp": "2026-08-11T21:20:06.783Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-a",
+                "duration_ms": 45_020_786,
+            },
+        },
+    ]
+    session.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    scans = 0
+    original_iter = lsl.legion_session_io.iter_jsonl_objects
+
+    def counted_iter(*args, **kwargs):
+        nonlocal scans
+        scans += 1
+        yield from original_iter(*args, **kwargs)
+
+    monkeypatch.setattr(lsl.legion_session_io, "iter_jsonl_objects", counted_iter)
+
+    result = lsl.scan(tmp_path, days=0, roles={"user"})
+    candidates = {item["category"]: item for item in result["candidates"]}
+    convergence = candidates["primary-turn-convergence"]
+    metrics = convergence["evidence"][0]["session_metrics"]
+
+    assert metrics["longest_turn_duration_ms"] == 45_020_786
+    assert metrics["tool_call_count"] == 2
+    assert len(metrics["legion_run_ids"]) == 1
+    assert metrics["legion_run_ids"][0] != "private-run-correlation-id"
+    assert "private-run-correlation-id" not in json.dumps(result)
+    assert scans == 2  # bounded metadata inspection + the primary record pass
+    assert convergence["entity"] == "skill:legion-orchestrate"
+
+
 def test_assistant_correction_words_do_not_trigger_user_feedback(tmp_path):
     session = tmp_path / ".codex" / "sessions" / "2026" / "06" / "26" / "assistant.jsonl"
     session.parent.mkdir(parents=True)

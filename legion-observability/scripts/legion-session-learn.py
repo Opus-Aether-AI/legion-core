@@ -78,6 +78,7 @@ class SourceInfo:
     cwd: str = ""
     repository_urls: set[str] = field(default_factory=set)
     session_ids: set[str] = field(default_factory=set)
+    legion_run_ids: set[str] = field(default_factory=set)
     subagent: bool = False
     benchmark: bool = False
 
@@ -280,6 +281,24 @@ RULES = [
         ],
     },
     {
+        "category": "primary-turn-convergence",
+        "entity": "skill:legion-orchestrate",
+        "severity": "high",
+        "roles": ["user"],
+        "summary": (
+            "Primary harness turns must stop on semantic convergence: continue only for "
+            "new source or failure evidence, yield for external-only waiting, and never "
+            "replay an unchanged validation or review lifecycle."
+        ),
+        "patterns": [
+            r"\b(?:task|session|turn) (?:is|was|has been|kept) (?:not ending|running)\b",
+            r"\b(?:running|ran|kept running) for (?:the )?(?:whole|entire) day\b",
+            r"\bwhy did (?:this|the) (?:task|session|turn) keep running\b",
+            r"\bwhy (?:is|was|has) (?:this|the) (?:task|session|turn) (?:still )?running\b",
+            r"\b(?:task|session|turn) r(?:a|u)n for \d+\s*h(?:ours?)?\b",
+        ],
+    },
+    {
         "category": "user-correction-feedback",
         "entity": "plugin:legion-observability",
         "severity": "medium",
@@ -476,6 +495,9 @@ def _inspect_jsonl_metadata(info: SourceInfo, max_lines: int = 200) -> None:
                     "thread_id",
                     "threadId",
                 )
+            )
+            info.legion_run_ids.update(
+                _metadata_strings(obj, "legion_run_id", "LEGION_RUN_ID")
             )
             if str(obj.get("type") or "").lower() == "session_meta":
                 info.session_ids.update(_metadata_strings(obj, "id"))
@@ -675,10 +697,15 @@ def _record_is_message(obj: dict[str, Any], *, include_tool_results: bool) -> bo
 
 
 def _extract_records(
-    path: Path, *, include_tool_results: bool = False
+    path: Path,
+    *,
+    include_tool_results: bool = False,
+    session_metrics: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, str]]:
     if path.suffix == ".jsonl":
         for _index, payload in legion_session_io.iter_jsonl_objects(path):
+            if session_metrics is not None:
+                _accumulate_codex_session_metrics(session_metrics, payload)
             if not _record_is_message(
                 payload, include_tool_results=include_tool_results
             ):
@@ -727,6 +754,70 @@ def _extract_blocks(path: Path) -> list[str]:
     return [record["text"] for record in _extract_records(path) if record["text"]]
 
 
+def _timestamp_ms(value: Any) -> int | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
+def _new_codex_session_metrics(info: SourceInfo) -> dict[str, Any]:
+    return {
+        "starts": {},
+        "durations": [],
+        "tool_call_count": 0,
+        "legion_run_ids": {
+            _stable_id(["legion-run", value]) for value in info.legion_run_ids
+        },
+    }
+
+
+def _accumulate_codex_session_metrics(
+    metrics: dict[str, Any], obj: dict[str, Any]
+) -> None:
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+    record_type = str(obj.get("type") or "").casefold()
+    payload_type = str(payload.get("type") or "").casefold()
+    metrics["legion_run_ids"].update(
+        _stable_id(["legion-run", value])
+        for value in _metadata_strings(obj, "legion_run_id", "LEGION_RUN_ID")
+    )
+    if record_type == "response_item" and payload_type in {
+        "custom_tool_call",
+        "function_call",
+    }:
+        metrics["tool_call_count"] += 1
+    if record_type != "event_msg":
+        return
+    turn_id = str(payload.get("turn_id") or "").strip()
+    timestamp = _timestamp_ms(obj.get("timestamp"))
+    if payload_type == "task_started" and turn_id and timestamp is not None:
+        metrics["starts"][turn_id] = timestamp
+        return
+    if payload_type not in {"task_complete", "turn_aborted"}:
+        return
+    duration = payload.get("duration_ms")
+    if isinstance(duration, (int, float)) and duration >= 0:
+        metrics["durations"].append(int(duration))
+    elif turn_id in metrics["starts"] and timestamp is not None:
+        metrics["durations"].append(
+            max(0, timestamp - metrics["starts"][turn_id])
+        )
+
+
+def _finalize_codex_session_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "longest_turn_duration_ms": max(metrics["durations"], default=0),
+        "tool_call_count": metrics["tool_call_count"],
+        "legion_run_ids": sorted(metrics["legion_run_ids"]),
+    }
+
+
 def _matches_query(block: str, queries: list[str]) -> bool:
     if not queries:
         return True
@@ -764,6 +855,7 @@ def _evidence_item(
     block: str,
     home: Path,
     show_evidence: bool,
+    session_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "evidence_id": _stable_id(["evidence", info.source_id, record_id]),
@@ -779,6 +871,8 @@ def _evidence_item(
     if show_evidence:
         item["source_path"] = _relative_source_path(info.path, home)
         item["snippet"] = _short(_redact_text(block, home), 700)
+    if session_metrics is not None:
+        item["session_metrics"] = session_metrics
     return item
 
 
@@ -845,9 +939,17 @@ def scan(
     seen_records: set[str] = set()
     record_limit_reached = False
     for info in sources:
-        records = _extract_records(
-            info.path, include_tool_results=include_tool_results
+        metrics_accumulator = (
+            _new_codex_session_metrics(info)
+            if info.source_kind == "codex-session"
+            else None
         )
+        records = _extract_records(
+            info.path,
+            include_tool_results=include_tool_results,
+            session_metrics=metrics_accumulator,
+        )
+        metric_evidence: list[dict[str, Any]] = []
         while record_limit <= 0 or records_scanned < record_limit:
             try:
                 record = next(records)
@@ -909,6 +1011,15 @@ def scan(
                 )
                 if len(group["evidence"]) < limit:
                     group["evidence"].append(evidence)
+                    if (
+                        category == "primary-turn-convergence"
+                        and metrics_accumulator is not None
+                    ):
+                        metric_evidence.append(evidence)
+        if metrics_accumulator is not None and metric_evidence:
+            metrics = _finalize_codex_session_metrics(metrics_accumulator)
+            for evidence in metric_evidence:
+                evidence["session_metrics"] = metrics
         if record_limit > 0 and records_scanned >= record_limit:
             record_limit_reached = True
             break
@@ -994,6 +1105,11 @@ def _outcome(candidate: dict[str, Any]) -> dict[str, Any]:
             f"{item.get('role', 'unknown')})"
         )
     evidence_count = int(candidate.get("evidence_count") or len(evidence_ids))
+    session_metrics = [
+        item["session_metrics"]
+        for item in candidate.get("evidence", [])
+        if isinstance(item.get("session_metrics"), dict)
+    ]
     evidence = (
         f"{evidence_count} deduplicated evidence record(s)"
         + (f"; sampled ids: {', '.join(descriptors)}" if descriptors else "")
@@ -1018,6 +1134,7 @@ def _outcome(candidate: dict[str, Any]) -> dict[str, Any]:
             "role_counts": candidate.get("role_counts", {}),
             "source_ids": candidate.get("source_ids", []),
             "source_kinds": candidate.get("source_kinds", []),
+            "session_metrics": session_metrics,
         },
     }
 

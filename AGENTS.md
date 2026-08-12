@@ -16,7 +16,7 @@ routing, delegation, observability, setup bridges, and harness guidance.
   do not add domain-specific plugins, skills, or copy here.
 
 <!-- legion:init:v1:agents:start -->
-<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=bebae07a5aba4fda -->
+<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=4a1ef5458c3b1ca4 -->
 ## Legion workflow
 
 Legion is the mandatory default operating mode for coding tasks in this
@@ -46,6 +46,15 @@ delegated.
   and review contracts remain active.
 - Inline work is allowed only when the active Legion harness-mode guidance
   selects it. It still follows this repository's tests and health gates.
+- Primary sessions stop on semantic convergence, not an elapsed-time or retry
+  deadline. At each material checkpoint, use `legion-converge` to classify the
+  workflow as `actionable`, `complete`, `waiting_external`, or `blocked`.
+  Continue only from `actionable` with new source or failure evidence. Yield on
+  `complete` or `waiting_external`; external checks can resume the work when
+  their state changes. Yield and report `blocked`.
+  Treat repeated same source and evidence fingerprints as no progress. Do not
+  rerun the same validation on an unchanged tree, repeat review on the same
+  immutable head, or reopen work solely for non-blocking suggestions.
 - If Legion is unavailable or blocked, stop and report the blocker instead of
   silently bypassing it.
 <!-- legion:init:v1:agents:end -->

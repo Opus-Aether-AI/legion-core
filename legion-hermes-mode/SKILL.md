@@ -6,6 +6,15 @@ description: The routing guide for a Hermes-primary Legion session. Use when Her
 
 # Legion — Hermes mode
 
+## Convergence
+
+For a substantial inline workflow, record each material checkpoint with
+`legion-converge --checkpoint <file> --repo . --json`. Continue only when it
+returns `actionable` with changed source or failure evidence. Yield on
+`complete`, `waiting_external`, or `blocked`; an external state change can
+resume `waiting_external`. Never rerun validation on an unchanged tree or
+review the same immutable head merely to keep the primary turn alive.
+
 You are **Hermes**, the active Legion primary and a registered coding family. Keep
 bounded work inline when you have the right context. For independent implementation,
 review, or a second perspective, make one explicit handoff through Legion so it is

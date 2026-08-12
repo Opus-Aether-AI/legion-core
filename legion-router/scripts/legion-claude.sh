@@ -14,6 +14,9 @@ source "$_self_dir/lib/model-config.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/executor-context.sh
 source "$_self_dir/lib/executor-context.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/run-id.sh
+source "$_self_dir/lib/run-id.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -35,7 +38,7 @@ trap cleanup_claude_on_exit EXIT
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
-_run_id() { printf '%s-%s' "$(date -u +%Y%m%d-%H%M%S)" "${RANDOM}${RANDOM}"; }
+_run_id() { legion_new_run_id; }
 
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"

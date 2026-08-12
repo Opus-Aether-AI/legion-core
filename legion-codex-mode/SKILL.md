@@ -104,3 +104,12 @@ judgement / design / polish / final-review calls where Opus genuinely changes th
 legion-setup codex          # register MCPs + mirror skills + bridge commands/agents + verify
 legion-setup codex verify   # read-only readiness check
 ```
+
+## Convergence
+
+For a substantial inline workflow, record each material checkpoint with
+`legion-converge --checkpoint <file> --repo . --json`. Continue only when it
+returns `actionable` with changed source or failure evidence. Yield on
+`complete`, `waiting_external`, or `blocked`; an external state change can
+resume `waiting_external`. Never rerun validation on an unchanged tree or
+review the same immutable head merely to keep the primary turn alive.

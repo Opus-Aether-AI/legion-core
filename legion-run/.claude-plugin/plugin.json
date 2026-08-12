@@ -1,7 +1,7 @@
 {
   "name": "legion-run",
   "description": "First-class Legion heavy-task runner skill. Invokes `legion-run` direct mode or domain-plugin mode to execute sizeable coding work through doctor, prior hints, planning, route/fan-out/apply, final review, validation/evaluation, HTML evidence, share accounting, validation-led self-learning, and heal planning.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "legion-core"
   },

@@ -24,6 +24,29 @@ setup() {
     MINIMAX_MATCH="$(jq -r '.models[] | select(.match == "minimax") | .match' "$LEGION_COSTS_FILE")"
 }
 
+@test "run ids stay unique across simultaneous fresh harness shells" {
+    ids="$TEST_TMPDIR/run-ids"
+    for _index in $(seq 1 32); do
+        bash -c 'source "$1"; RANDOM=1234; printf "%s\n" "$(legion_new_run_id)"' _ \
+            "$LIB/run-id.sh" >> "$ids" &
+    done
+    wait
+
+    [ "$(wc -l < "$ids" | tr -d ' ')" -eq 32 ]
+    [ "$(sort -u "$ids" | wc -l | tr -d ' ')" -eq 32 ]
+    while IFS= read -r run_id; do
+        [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{24}$ ]]
+    done < "$ids"
+}
+
+@test "run ids work when PATH omits date and utility commands" {
+    run env PATH="$TEST_TMPDIR/empty-path" /bin/bash -c \
+        'source "$1"; legion_new_run_id' _ "$LIB/run-id.sh"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{24}$ ]]
+}
+
 # Make a throwaway git repo with one source file; echoes its path.
 make_test_repo() {
     local d="$TEST_TMPDIR/repo-${1:-a}"

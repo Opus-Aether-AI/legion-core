@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.23.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.22.2...v0.23.0) (2026-08-12)
+
+
+### Added
+
+* **router:** make every harness primary or child ([#136](https://github.com/Opus-Aether-AI/legion-core/issues/136)) ([9570b11](https://github.com/Opus-Aether-AI/legion-core/commit/9570b116fb89e86bd366f601c7c9493599386c07))
+
+
+### Fixed
+
+* **workflow:** stop primary sessions on convergence ([#137](https://github.com/Opus-Aether-AI/legion-core/issues/137)) ([e8dbc49](https://github.com/Opus-Aether-AI/legion-core/commit/e8dbc49ebdc9920781c11a601c0f2cee169ed7dd))
+
 ## [0.22.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.22.1...v0.22.2) (2026-08-11)
 
 

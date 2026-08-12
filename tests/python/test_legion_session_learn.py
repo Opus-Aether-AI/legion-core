@@ -126,14 +126,17 @@ def test_scan_codex_user_correction_feedback(tmp_path):
     assert "svineet/harness-bench" in correction["evidence"][0]["snippet"]
 
 
-def test_scan_attributes_long_primary_turn_from_structural_events(tmp_path):
+def test_scan_attributes_long_primary_turn_from_structural_events(tmp_path, monkeypatch):
     session = tmp_path / ".codex" / "sessions" / "2026" / "08" / "11" / "session.jsonl"
     session.parent.mkdir(parents=True)
     records = [
         {
             "timestamp": "2026-08-11T08:49:45.997Z",
             "type": "session_meta",
-            "payload": {"session_id": "session-a"},
+            "payload": {
+                "session_id": "session-a",
+                "legion_run_id": "private-run-correlation-id",
+            },
         },
         {
             "timestamp": "2026-08-11T08:49:46.000Z",
@@ -173,6 +176,16 @@ def test_scan_attributes_long_primary_turn_from_structural_events(tmp_path):
         encoding="utf-8",
     )
 
+    scans = 0
+    original_iter = lsl.legion_session_io.iter_jsonl_objects
+
+    def counted_iter(*args, **kwargs):
+        nonlocal scans
+        scans += 1
+        yield from original_iter(*args, **kwargs)
+
+    monkeypatch.setattr(lsl.legion_session_io, "iter_jsonl_objects", counted_iter)
+
     result = lsl.scan(tmp_path, days=0, roles={"user"})
     candidates = {item["category"]: item for item in result["candidates"]}
     convergence = candidates["primary-turn-convergence"]
@@ -180,7 +193,10 @@ def test_scan_attributes_long_primary_turn_from_structural_events(tmp_path):
 
     assert metrics["longest_turn_duration_ms"] == 45_020_786
     assert metrics["tool_call_count"] == 2
-    assert metrics["legion_run_ids"] == []
+    assert len(metrics["legion_run_ids"]) == 1
+    assert metrics["legion_run_ids"][0] != "private-run-correlation-id"
+    assert "private-run-correlation-id" not in json.dumps(result)
+    assert scans == 2  # bounded metadata inspection + the primary record pass
     assert convergence["entity"] == "skill:legion-orchestrate"
 
 

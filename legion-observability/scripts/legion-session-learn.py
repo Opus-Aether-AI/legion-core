@@ -697,10 +697,15 @@ def _record_is_message(obj: dict[str, Any], *, include_tool_results: bool) -> bo
 
 
 def _extract_records(
-    path: Path, *, include_tool_results: bool = False
+    path: Path,
+    *,
+    include_tool_results: bool = False,
+    session_metrics: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, str]]:
     if path.suffix == ".jsonl":
         for _index, payload in legion_session_io.iter_jsonl_objects(path):
+            if session_metrics is not None:
+                _accumulate_codex_session_metrics(session_metrics, payload)
             if not _record_is_message(
                 payload, include_tool_results=include_tool_results
             ):
@@ -761,46 +766,55 @@ def _timestamp_ms(value: Any) -> int | None:
     return int(parsed.timestamp() * 1000)
 
 
-def _codex_session_metrics(info: SourceInfo) -> dict[str, Any]:
-    """Extract bounded structural facts without inferring a Legion run from prose."""
-
-    starts: dict[str, int] = {}
-    durations: list[int] = []
-    tool_calls = 0
-    legion_run_ids = set(info.legion_run_ids)
-    try:
-        for _index, obj in legion_session_io.iter_jsonl_objects(info.path):
-            payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
-            record_type = str(obj.get("type") or "").casefold()
-            payload_type = str(payload.get("type") or "").casefold()
-            legion_run_ids.update(
-                _metadata_strings(obj, "legion_run_id", "LEGION_RUN_ID")
-            )
-            if record_type == "response_item" and payload_type in {
-                "custom_tool_call",
-                "function_call",
-            }:
-                tool_calls += 1
-            if record_type != "event_msg":
-                continue
-            turn_id = str(payload.get("turn_id") or "").strip()
-            timestamp = _timestamp_ms(obj.get("timestamp"))
-            if payload_type == "task_started" and turn_id and timestamp is not None:
-                starts[turn_id] = timestamp
-                continue
-            if payload_type not in {"task_complete", "turn_aborted"}:
-                continue
-            duration = payload.get("duration_ms")
-            if isinstance(duration, (int, float)) and duration >= 0:
-                durations.append(int(duration))
-            elif turn_id in starts and timestamp is not None:
-                durations.append(max(0, timestamp - starts[turn_id]))
-    except OSError:
-        pass
+def _new_codex_session_metrics(info: SourceInfo) -> dict[str, Any]:
     return {
-        "longest_turn_duration_ms": max(durations, default=0),
-        "tool_call_count": tool_calls,
-        "legion_run_ids": sorted(legion_run_ids),
+        "starts": {},
+        "durations": [],
+        "tool_call_count": 0,
+        "legion_run_ids": set(info.legion_run_ids),
+    }
+
+
+def _accumulate_codex_session_metrics(
+    metrics: dict[str, Any], obj: dict[str, Any]
+) -> None:
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+    record_type = str(obj.get("type") or "").casefold()
+    payload_type = str(payload.get("type") or "").casefold()
+    metrics["legion_run_ids"].update(
+        _metadata_strings(obj, "legion_run_id", "LEGION_RUN_ID")
+    )
+    if record_type == "response_item" and payload_type in {
+        "custom_tool_call",
+        "function_call",
+    }:
+        metrics["tool_call_count"] += 1
+    if record_type != "event_msg":
+        return
+    turn_id = str(payload.get("turn_id") or "").strip()
+    timestamp = _timestamp_ms(obj.get("timestamp"))
+    if payload_type == "task_started" and turn_id and timestamp is not None:
+        metrics["starts"][turn_id] = timestamp
+        return
+    if payload_type not in {"task_complete", "turn_aborted"}:
+        return
+    duration = payload.get("duration_ms")
+    if isinstance(duration, (int, float)) and duration >= 0:
+        metrics["durations"].append(int(duration))
+    elif turn_id in metrics["starts"] and timestamp is not None:
+        metrics["durations"].append(
+            max(0, timestamp - metrics["starts"][turn_id])
+        )
+
+
+def _finalize_codex_session_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "longest_turn_duration_ms": max(metrics["durations"], default=0),
+        "tool_call_count": metrics["tool_call_count"],
+        "legion_run_ids": sorted(
+            _stable_id(["legion-run", value])
+            for value in metrics["legion_run_ids"]
+        ),
     }
 
 
@@ -924,10 +938,16 @@ def scan(
     records_deduplicated = 0
     seen_records: set[str] = set()
     record_limit_reached = False
-    session_metrics: dict[Path, dict[str, Any]] = {}
     for info in sources:
+        metrics_accumulator = (
+            _new_codex_session_metrics(info)
+            if info.source_kind == "codex-session"
+            else None
+        )
         records = _extract_records(
-            info.path, include_tool_results=include_tool_results
+            info.path,
+            include_tool_results=include_tool_results,
+            session_metrics=metrics_accumulator,
         )
         while record_limit <= 0 or records_scanned < record_limit:
             try:
@@ -956,11 +976,9 @@ def scan(
                 metrics = None
                 if (
                     category == "primary-turn-convergence"
-                    and info.source_kind == "codex-session"
+                    and metrics_accumulator is not None
                 ):
-                    if info.path not in session_metrics:
-                        session_metrics[info.path] = _codex_session_metrics(info)
-                    metrics = session_metrics[info.path]
+                    metrics = _finalize_codex_session_metrics(metrics_accumulator)
                 group = grouped.setdefault(
                     category,
                     {

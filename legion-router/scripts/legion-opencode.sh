@@ -20,6 +20,9 @@ source "$_self_dir/lib/model-config.sh"
 # shellcheck source=lib/executor-context.sh
 source "$_self_dir/lib/executor-context.sh"
 # shellcheck disable=SC1091
+# shellcheck source=lib/run-id.sh
+source "$_self_dir/lib/run-id.sh"
+# shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
@@ -37,7 +40,7 @@ trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legio
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
-_run_id() { printf '%s-%s' "$(date -u +%Y%m%d-%H%M%S)" "${RANDOM}${RANDOM}"; }
+_run_id() { legion_new_run_id; }
 
 # Resolve the opencode binary. PIN $HOME/.opencode/bin first: a stray `opencode`
 # on PATH (e.g. OpenWork's bundled build) is a different, incompatible binary.

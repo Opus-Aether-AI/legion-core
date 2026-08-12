@@ -168,6 +168,22 @@ def test_blocking_review_finding_requires_immutable_head():
         raise AssertionError("checkpoint unexpectedly accepted an unpinned review")
 
 
+def test_checkpoint_rejects_missing_review_evidence():
+    converge = load_module()
+    missing_review = checkpoint()
+    del missing_review["review"]
+    missing_findings = checkpoint()
+    del missing_findings["review"]["blocking_findings"]
+
+    for payload in (missing_review, missing_findings):
+        try:
+            converge.evaluate_checkpoint(payload)
+        except converge.ConvergenceError as error:
+            assert "review" in str(error)
+        else:
+            raise AssertionError("checkpoint accepted missing review evidence")
+
+
 def test_recorded_history_is_privacy_safe(tmp_path):
     converge = load_module()
     payload = checkpoint()
@@ -182,3 +198,23 @@ def test_recorded_history_is_privacy_safe(tmp_path):
     assert "customer secret project" not in rendered
     assert json.loads(rendered)["schema"] == "legion.convergence-decision.v1"
     assert oct(os.stat(history[0]).st_mode & 0o777) == "0o600"
+
+
+def test_checkpoint_refuses_a_symlinked_history_file(tmp_path):
+    converge = load_module()
+    state_root = tmp_path / "state"
+    convergence = state_root / "convergence"
+    convergence.mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("sentinel\n", encoding="utf-8")
+    history = convergence / f"{converge._digest('session-runtime-guard')}.jsonl"
+    history.symlink_to(outside)
+
+    try:
+        converge.checkpoint(checkpoint(), state_root=state_root)
+    except converge.ConvergenceError as error:
+        assert "journal" in str(error)
+    else:
+        raise AssertionError("checkpoint followed a symlinked journal")
+
+    assert outside.read_text(encoding="utf-8") == "sentinel\n"

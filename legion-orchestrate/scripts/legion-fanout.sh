@@ -18,6 +18,9 @@
 set -euo pipefail
 
 _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+# shellcheck source=../../legion-router/scripts/lib/run-id.sh
+source "$_self/../../legion-router/scripts/lib/run-id.sh"
 
 resolve_legion_cmd() {
   local cmd="$1" fallback="$2"
@@ -556,7 +559,7 @@ for ((i = 0; i < n; i++)); do
   s_arch="$(jq -r '.archetype // ""' <<<"$line" 2>/dev/null || echo "")"
   s_model="$(jq -r '.model // ""' <<<"$line" 2>/dev/null || echo "")"
   s_task="$(jq -r '.task // ""' <<<"$line" 2>/dev/null || echo "")"
-  rid="$(date -u +%Y%m%d-%H%M%S)-${RANDOM}${RANDOM}-s$i"
+  rid="$(legion_new_run_id)-s$i"
   printf '%s\n' "$rid" > "$work/slice-$i.runid"
   [[ -n "$s_task" ]] && write_queued_record "$rid" "$s_arch" "$s_model" "$s_task"
 done

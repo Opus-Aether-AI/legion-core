@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 from typing import Any
 
@@ -46,7 +47,9 @@ def _required_string(container: dict[str, Any], key: str, context: str) -> str:
 
 
 def _finding_fingerprints(review: dict[str, Any], key: str) -> list[str]:
-    findings = review.get(key, [])
+    if key not in review:
+        raise ConvergenceError(f"review.{key} is required")
+    findings = review[key]
     if not isinstance(findings, list):
         raise ConvergenceError(f"review.{key} must be a list")
     fingerprints: list[str] = []
@@ -99,12 +102,16 @@ def _normalize_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    review = payload.get("review", {})
+    if "review" not in payload:
+        raise ConvergenceError("checkpoint.review is required")
+    review = payload["review"]
     if not isinstance(review, dict):
         raise ConvergenceError("checkpoint.review must be an object")
     blocking = _finding_fingerprints(review, "blocking_findings")
     suggestions = _finding_fingerprints(review, "suggestions")
-    head_sha = str(review.get("head_sha") or "").strip()
+    if "head_sha" not in review or not isinstance(review["head_sha"], str):
+        raise ConvergenceError("review.head_sha must be a string")
+    head_sha = review["head_sha"].strip()
     if blocking and not re.fullmatch(r"[0-9a-fA-F]{7,64}", head_sha):
         raise ConvergenceError(
             "review.head_sha must be an immutable commit SHA when blocking findings are present"
@@ -215,16 +222,19 @@ def evaluate_checkpoint(
     }
 
 
-def _history_path(state_root: Path, task_id: str) -> Path:
-    task_hash = _digest(task_id)
-    return state_root / "convergence" / f"{task_hash}.jsonl"
-
-
-def _latest_record(path: Path) -> dict[str, Any] | None:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
+def _latest_record(descriptor: int) -> dict[str, Any] | None:
+    end = os.lseek(descriptor, 0, os.SEEK_END)
+    start = max(0, end - 1024 * 1024)
+    os.lseek(descriptor, start, os.SEEK_SET)
+    raw = bytearray()
+    while len(raw) < end - start:
+        chunk = os.read(descriptor, min(65536, end - start - len(raw)))
+        if not chunk:
+            break
+        raw.extend(chunk)
+    lines = raw.decode("utf-8", errors="ignore").splitlines()
+    if start and lines:
+        lines = lines[1:]
     for line in reversed(lines):
         try:
             record = json.loads(line)
@@ -236,10 +246,8 @@ def _latest_record(path: Path) -> dict[str, Any] | None:
 
 
 def _record_decision(
-    path: Path, task_id: str, decision: dict[str, Any]
+    descriptor: int, task_id: str, decision: dict[str, Any]
 ) -> dict[str, Any]:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
     record = {
         "schema": DECISION_SCHEMA,
         "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -249,29 +257,81 @@ def _record_decision(
     encoded = (json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n").encode(
         "utf-8"
     )
-    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-    try:
-        os.fchmod(descriptor, 0o600)
-        os.write(descriptor, encoded)
-    finally:
-        os.close(descriptor)
+    remaining = memoryview(encoded)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("could not append convergence decision")
+        remaining = remaining[written:]
     return record
+
+
+def _open_history(state_root: Path, task_id: str) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        raise ConvergenceError("secure convergence journals require O_NOFOLLOW")
+
+    state_root.mkdir(parents=True, exist_ok=True)
+    state_descriptor = os.open(state_root, os.O_RDONLY | directory)
+    convergence_descriptor = -1
+    try:
+        try:
+            os.mkdir("convergence", mode=0o700, dir_fd=state_descriptor)
+        except FileExistsError:
+            pass
+        try:
+            convergence_descriptor = os.open(
+                "convergence",
+                os.O_RDONLY | directory | nofollow,
+                dir_fd=state_descriptor,
+            )
+        except OSError as error:
+            raise ConvergenceError(
+                "convergence journal directory must be a real directory"
+            ) from error
+    finally:
+        os.close(state_descriptor)
+
+    try:
+        os.fchmod(convergence_descriptor, 0o700)
+        journal_name = f"{_digest(task_id)}.jsonl"
+        try:
+            descriptor = os.open(
+                journal_name,
+                os.O_RDWR | os.O_APPEND | os.O_CREAT | nofollow,
+                0o600,
+                dir_fd=convergence_descriptor,
+            )
+        except OSError as error:
+            raise ConvergenceError(
+                "convergence journal must be a non-symlink regular file"
+            ) from error
+    finally:
+        os.close(convergence_descriptor)
+
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ConvergenceError("convergence journal must be a regular file")
+    os.fchmod(descriptor, 0o600)
+    return descriptor
 
 
 def checkpoint(payload: dict[str, Any], *, state_root: Path) -> dict[str, Any]:
     normalized = _normalize_checkpoint(payload)
-    path = _history_path(Path(state_root).expanduser(), normalized["task_id"])
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
-    lock_descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    lock_descriptor = _open_history(
+        Path(state_root).expanduser(), normalized["task_id"]
+    )
+    locked = False
     try:
-        os.fchmod(lock_descriptor, 0o600)
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
-        previous = _latest_record(path)
+        locked = True
+        previous = _latest_record(lock_descriptor)
         decision = evaluate_checkpoint(payload, previous=previous)
-        _record_decision(path, normalized["task_id"], decision)
+        _record_decision(lock_descriptor, normalized["task_id"], decision)
     finally:
-        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        if locked:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
         os.close(lock_descriptor)
     return decision
 

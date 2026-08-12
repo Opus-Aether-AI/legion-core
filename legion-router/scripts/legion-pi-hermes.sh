@@ -10,6 +10,9 @@ source "$_self_dir/lib/model-config.sh"
 # shellcheck disable=SC1091
 source "$_self_dir/lib/executor-context.sh"
 # shellcheck disable=SC1091
+# shellcheck source=lib/run-id.sh
+source "$_self_dir/lib/run-id.sh"
+# shellcheck disable=SC1091
 source "$_self_dir/lib/task-scan.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 # shellcheck disable=SC1090
@@ -36,7 +39,7 @@ DELEGATE_BLOCK_PATHS=()
 
 die() { printf '%s: %s\n' "$ADAPTER" "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == 1 ]] || printf '%s\n' "$*" >&2; }
-_run_id() { printf '%s-%s' "$(date -u +%Y%m%d-%H%M%S)" "${RANDOM}${RANDOM}"; }
+_run_id() { legion_new_run_id; }
 
 with_git_worktree_lock() {
   local repo="$1"

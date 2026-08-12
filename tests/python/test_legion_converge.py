@@ -328,6 +328,8 @@ def test_checkpoint_rejects_schema_invalid_or_wrong_task_history(tmp_path):
             "action": "continue",
             "reason": "all_required_evidence_passed",
         },
+        {**valid, "state": []},
+        {**valid, "failure_evidence_fingerprint": "f" * 64},
     ):
         history.write_text(json.dumps(corrupted) + "\n", encoding="utf-8")
         try:

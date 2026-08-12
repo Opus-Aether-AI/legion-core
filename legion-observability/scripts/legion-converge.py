@@ -351,7 +351,12 @@ def _validate_durable_record(
     state = record.get("state")
     action = record.get("action")
     reason = record.get("reason")
-    if state not in {"actionable", "complete", "waiting_external", "blocked"}:
+    if not isinstance(state, str) or state not in {
+        "actionable",
+        "complete",
+        "waiting_external",
+        "blocked",
+    }:
         raise ConvergenceError("persisted convergence decision has invalid state")
     if action != ("continue" if state == "actionable" else "yield"):
         raise ConvergenceError("persisted convergence decision has invalid action")
@@ -406,6 +411,12 @@ def _validate_durable_record(
     if state == "complete" and record["pending_external"]:
         raise ConvergenceError(
             "persisted convergence decision has contradictory external evidence"
+        )
+    if state in {"complete", "waiting_external"} and record[
+        "failure_evidence_fingerprint"
+    ] != _digest({"blocking_review": [], "checks": []}):
+        raise ConvergenceError(
+            "persisted convergence decision has invalid non-actionable failure evidence"
         )
     return record
 

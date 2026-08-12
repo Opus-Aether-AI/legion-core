@@ -53,7 +53,9 @@ legion-delegate run --executor claude --task "Design the module boundary for X: 
 legion-delegate run --executor codex --archetype implement-feature --task "Build the export API route per <spec>" --repo . --apply
 
 # Get an independent review of your diff:
-legion-delegate run --executor codex --archetype final-review --base HEAD --repo .
+legion-delegate run --executor codex --archetype final-review \
+  --task "Review the committed diff origin/main...HEAD; report only actionable findings and do not edit files." \
+  --base HEAD --repo .
 
 # Frontend polish with Opus + impeccable (describe the surface + the bar):
 legion-delegate run --executor claude --task "Polish the settings page: spacing, a11y, responsive, motion — impeccable pass" --repo .

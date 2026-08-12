@@ -34,6 +34,9 @@ legion_primary() {
   if [[ -n "${CURSOR_AGENT:-}" || -n "${CURSOR_TRACE_ID:-}" ]]; then
     printf 'cursor\n'; return 0
   fi
+  if [[ "${AI_AGENT:-}" == [Pp][Ii] || -n "${PI_CODING_AGENT:-}" ]]; then
+    printf 'pi\n'; return 0
+  fi
   printf 'claude\n'
 }
 

@@ -1,0 +1,8 @@
+{
+  "claude": {"capabilities": ["primary", "coding"], "adapter": "legion-claude", "contract": "diff", "model_ref": "claude_default"},
+  "codex": {"capabilities": ["primary", "coding"], "adapter": "legion-delegate", "contract": "native", "model_ref": "codex_workhorse"},
+  "cursor": {"capabilities": ["primary", "coding"], "adapter": "legion-cursor", "contract": "diff", "model_ref": "cursor_default"},
+  "opencode": {"capabilities": ["primary", "coding"], "adapter": "legion-opencode", "contract": "diff", "model_ref": "opencode_default"},
+  "hermes": {"capabilities": ["primary", "coding"], "adapter": "legion-hermes", "contract": "diff", "model_ref": "hermes_default"},
+  "pi": {"capabilities": ["primary", "coding"], "adapter": "legion-pi", "contract": "diff", "model_ref": "pi_default"}
+}

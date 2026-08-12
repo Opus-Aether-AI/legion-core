@@ -42,7 +42,7 @@ that plugin.
 
 ## Harness support
 
-Legion supports Claude Code, Codex CLI, Cursor Agent, opencode, Hermes, and
+Legion supports Claude Code, Codex CLI, Cursor Agent, opencode, Pi, Hermes, and
 generic `AGENTS.md`-aware harnesses. The installer sets up shared skills under
 `~/.agents/skills` and CLI links under `~/.agents/bin`; then wire the native
 harness bridges you use:
@@ -51,13 +51,16 @@ harness bridges you use:
 legion-setup codex
 legion-setup cursor
 legion-setup opencode
+legion-setup pi verify
+legion-setup hermes
 ```
 
 Each command has a read-only `verify` form. Codex gets MCP registration and a
 skill mirror; Cursor gets MCP and command/agent bridges; opencode gets its MCP
-bridge. Restart the relevant harness after setup. Claude Code uses the
-marketplace directly; Hermes consumes `legion-hermes-mode` from its skills
-directory.
+bridge. Pi reads the shared `~/.agents/skills` catalog directly. Hermes setup
+adds one Legion-owned link under `~/.hermes/skills` because Hermes does not scan
+the shared catalog by default; it does not rewrite Hermes configuration. Restart
+the relevant harness after setup.
 
 Make Legion the default in an existing repository without replacing its
 instructions:
@@ -73,7 +76,7 @@ unmanaged byte. Its policy also tells delegated children to implement directly,
 preventing recursive Legion calls. `--check` and `--dry-run` remain read-only;
 use `--remove` for an exact rollback. `legion-setup init` is the same entrypoint.
 
-## The nine plugins
+## The ten plugins
 
 | Plugin | Purpose |
 |---|---|
@@ -84,7 +87,8 @@ use `--remove` for an exact rollback. `legion-setup init` is the same entrypoint
 | `legion-setup` | Marketplace installation, updates, and harness bridges. |
 | `legion-codex-mode` | Codex-primary routing guidance, including when to ask Claude. |
 | `legion-opencode-mode` | opencode-primary routing and delegation guidance. |
-| `legion-hermes-mode` | Metered delegation guidance for Hermes-driven coding work. |
+| `legion-hermes-mode` | Hermes-primary symmetric routing and metered delegation guidance. |
+| `legion-pi-mode` | Pi-primary routing and symmetric delegation guidance. |
 | `legion-code-intel` | Optional TypeScript and Pyright diagnostic artifacts. |
 
 ## Use the smallest useful surface

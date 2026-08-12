@@ -1,0 +1,1 @@
+{"run_id":"fixture-pi-run","status":"ok","executor":"pi","model":"pi-default","result":"Pi completed the scoped fixture task.","usage":{"input_tokens":128,"cached_input_tokens":16,"output_tokens":32,"reasoning_output_tokens":8},"cost_usd":0.001}

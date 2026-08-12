@@ -5,15 +5,15 @@
   },
   "version": "0.22.2",
   "metadata": {
-    "description": "Legion Core — the model-agnostic orchestration engine under the hood of an AI agent: models, harnesses, loops, self-improving agents. The stack, not another wrapper. Ships scoped delegation, multi-model fan-out, telemetry/cost reporting, doctor/self-learn/heal loops, and cross-harness setup for Claude Code, Codex, Cursor, and opencode. One orchestrator, a legion of models.",
+    "description": "Legion Core — the model-agnostic orchestration engine under the hood of an AI agent: models, harnesses, loops, self-improving agents. The stack, not another wrapper. Ships scoped delegation, multi-model fan-out, telemetry/cost reporting, doctor/self-learn/heal loops, and cross-harness setup for Claude Code, Codex, Cursor, opencode, Hermes, and Pi. One orchestrator, a legion of models.",
     "repository": "https://github.com/Opus-Aether-AI/legion-core"
   },
   "plugins": [
     {
       "name": "legion-router",
       "source": "./legion-router",
-      "description": "Legion's multi-model brain: delegate scoped tasks to configured Codex, Cursor, Claude, and opencode executors, then bring back a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
-      "version": "0.5.15",
+      "description": "Legion's multi-model brain: registry-driven routing and scoped delegation across Claude, Codex, Cursor, OpenCode, Hermes, and Pi. Implemented adapters return a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
+      "version": "0.5.18",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",
@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic repeated gates, legion-self-learn evidence/proposals, review-only legion-improve draft PRs, legion-trace, legion-otel-export, and legion-doctor verification.",
-      "version": "0.2.17",
+      "version": "0.2.18",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -108,8 +108,8 @@
     {
       "name": "legion-setup",
       "source": "./legion-setup",
-      "description": "Install and update Legion, wire Codex/Cursor/opencode bridges, and make Legion the repository-default workflow without replacing existing instructions. Ships `legion-setup`, `legion-init`, and the native harness setup commands; daily refresh/self-learning is opt-in.",
-      "version": "0.2.5",
+      "description": "Install and update Legion, wire Codex/Cursor/opencode bridges, verify Pi readiness, manage Hermes's native skill-discovery link, and make Legion the repository-default workflow without replacing existing instructions. Ships `legion-setup`, `legion-init`, and native harness setup commands; daily refresh/self-learning is opt-in.",
+      "version": "0.2.6",
       "category": "productivity",
       "keywords": [
         "install",
@@ -154,7 +154,7 @@
       "name": "legion-opencode-mode",
       "source": "./legion-opencode-mode",
       "description": "The decision guide for an opencode-primary Legion session — the opencode counterpart of legion-codex-mode. When you drive Legion under opencode you do most of the work yourself; this skill tells you WHICH kind of task is worth handing to another model and to WHOM — Claude for deep architecture and polished frontend (with the impeccable skill), a workhorse model for bulk implementation, a different model for a second opinion — versus keeping it inline. Triggers on running Legion under opencode, on deep-design / frontend-polish / final-review judgement calls, or on 'ask claude' / 'get a second opinion' while working in opencode.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "category": "agent-orchestration",
       "keywords": [
         "opencode",
@@ -175,8 +175,8 @@
     {
       "name": "legion-hermes-mode",
       "source": "./legion-hermes-mode",
-      "description": "The metered-delegation guide for a hermes-primary Legion session. hermes is a long-running persona / messaging assistant / orchestrator — NOT a coding CLI — so when it needs code implemented, edited, tested, or reviewed it hands that work to a headless coding harness through METERED Legion CLIs (`legion-delegate run --executor …`, `legion-fanout`, `legion-run`) from its terminal tool, instead of a raw shell-out that leaves no telemetry. Triggers when hermes or one of its cron jobs / skills needs to build, fix, test, or review code, or on 'have hermes build/fix X'.",
-      "version": "0.1.0",
+      "description": "The routing guide for a Hermes-primary Legion session. Hermes can work inline as a registered coding family and use a metered, isolated `legion-delegate run --executor <different-harness>` handoff for independent implementation, review, and tie-breaks. Triggers when Hermes or one of its cron jobs / skills needs to build, fix, test, review, or delegate code work.",
+      "version": "0.1.1",
       "category": "agent-orchestration",
       "keywords": [
         "hermes",
@@ -186,6 +186,27 @@
         "routing",
         "primary-harness",
         "metering",
+        "legion"
+      ],
+      "author": {
+        "name": "legion-core"
+      },
+      "repository": "https://github.com/Opus-Aether-AI/legion-core",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "legion-pi-mode",
+      "source": "./legion-pi-mode",
+      "description": "The Pi-primary Legion routing guide for when Pi is driving a coding task: decide what stays inline and when to ask another harness for a second opinion, implementation, or review through a metered, isolated Legion handoff.",
+      "version": "0.1.0",
+      "category": "agent-orchestration",
+      "keywords": [
+        "pi",
+        "multi-model",
+        "delegation",
+        "legion-delegate",
+        "routing",
+        "primary-harness",
         "legion"
       ],
       "author": {

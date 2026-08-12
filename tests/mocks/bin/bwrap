@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'bwrap %s\n' "$*" >> "$MOCK_CALL_LOG"
+cwd=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --die-with-parent|--new-session|--unshare-pid) shift ;;
+    --ro-bind|--bind) shift 3 ;;
+    --proc|--tmpfs) shift 2 ;;
+    --chdir) cwd="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) printf 'mock bwrap: unexpected argument %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+[[ -z "$cwd" ]] || cd "$cwd"
+exec "$@"

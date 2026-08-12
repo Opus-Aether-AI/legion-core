@@ -1,15 +1,16 @@
-# Hermes as a metered Legion primary
+# Hermes as a symmetric Legion primary
 
-Hermes is a long-running persona / messaging assistant / orchestrator — **not** a
-headless coding CLI like Codex or opencode. So it integrates with Legion as a
-**primary that delegates**, and the goal is to make those delegations **metered**
-(emit `legion.span.v1` telemetry) instead of shelling out raw and off-book.
+Hermes is a registered Legion coding family as well as a primary. It can work
+inline when it has the needed context, and can make a single explicit handoff to
+any **different** registered coding family for independent implementation or
+review. Every delegated run remains metered (`legion.span.v1`) instead of
+shelling out raw and off-book.
 
 Two pieces make this work:
 
-1. **`legion-hermes-mode`** (this repo) — the brain skill that tells a hermes
-   session to delegate coding through the Legion CLIs from its `terminal` tool, and
-   when to reach for which harness.
+1. **`legion-hermes-mode`** (this repo) — the primary-mode skill that tells a
+   Hermes session when to work inline and when to use the symmetric Legion
+   handoff from its `terminal` tool.
 2. **The operational rewire (below)** — point hermes's existing coding cron/scripts
    at `legion-claude run` / `legion-delegate run` instead of a raw `claude --print`
    / `codex exec`.
@@ -103,13 +104,21 @@ apply it only **after** the Legion install is repointed at this branch:
 Do **not** apply before step 1 — an older installed `legion-claude` rejects
 `--append-system-prompt`, which would break the lane.
 
-## Making the skill discoverable to hermes
+## Making the skill discoverable to Hermes
 
-Hermes reads its skills from `~/.hermes/skills/`. Symlink the brain skill so a hermes
-session picks it up:
+The Legion installer exposes the mode skill through the shared catalog, then
+`legion-setup hermes` creates one managed link in the directory Hermes actually
+scans. It does not rewrite Hermes configuration or replace an existing real
+skill directory:
 
 ```bash
-ln -s <install>/legion-hermes-mode ~/.hermes/skills/<category>/legion-hermes-mode
+legion-setup hermes
+legion-setup hermes verify
 ```
 
-(or copy it there). It then triggers when hermes needs to build, fix, or review code.
+The managed path is
+`~/.hermes/skills/legion-hermes-mode -> ~/.agents/skills/legion-hermes-mode`.
+Hermes then discovers the guidance when it needs to build, fix, review, or
+delegate code. Setup records the exact managed source separately; uninstall
+removes the link only while it still points there, preserving any link an
+operator has replaced.

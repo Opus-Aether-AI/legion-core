@@ -1,7 +1,7 @@
 {
   "name": "legion-hermes-mode",
-  "description": "The metered-delegation guide for a hermes-primary Legion session: hermes is a long-running persona / messaging assistant / orchestrator (not a coding CLI), and this skill tells it to hand real coding work to a headless coding harness through METERED Legion CLIs (`legion-delegate run --executor …`, `legion-fanout`, `legion-run`) from its terminal tool, instead of a raw shell-out that leaves no telemetry. Triggers when hermes or one of its cron jobs / skills needs to build, fix, test, or review code.",
-  "version": "0.1.0",
+  "description": "The routing guide for a Hermes-primary Legion session. Hermes can work inline as a registered coding family and use a metered, isolated `legion-delegate run --executor <different-harness>` handoff for independent implementation, review, and tie-breaks. Triggers when Hermes or one of its cron jobs / skills needs to build, fix, test, review, or delegate code work.",
+  "version": "0.1.1",
   "author": {
     "name": "legion-core"
   },

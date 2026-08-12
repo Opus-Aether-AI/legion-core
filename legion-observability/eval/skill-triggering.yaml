@@ -40,9 +40,12 @@ cases:
     expect: legion-opencode-mode
     why: opencode-primary decision guide is the legion-opencode-mode skill
 
-  - prompt: "hermes is driving and needs code built and reviewed — hand it to a coding harness from hermes's terminal tool with telemetry"
+  - prompt: "hermes is driving a bounded fix; decide whether to keep it inline or ask a different harness for an independent review with telemetry"
     expect: legion-hermes-mode
-    why: hermes-primary metered-delegation guide is the legion-hermes-mode skill
+    why: Hermes-primary symmetric routing guidance is the legion-hermes-mode skill
+  - prompt: "pi is driving a coding task and needs a second opinion from another harness"
+    expect: legion-pi-mode
+    why: Pi-primary symmetric routing guidance is the legion-pi-mode skill
 
   # ── anti-trigger (must NOT mis-route) ────────────────────────────────
   - prompt: "Show me the telemetry dashboard of cost and latency per model"

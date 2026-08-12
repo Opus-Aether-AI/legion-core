@@ -52,8 +52,8 @@ delegated.
 
 ## Plugin map
 
-- `legion-router`: scoped delegation to Codex, Cursor, and Claude-side
-  executors with routing policy, isolated worktrees, and telemetry.
+- `legion-router`: scoped delegation across Claude, Codex, Cursor, opencode,
+  Hermes, and Pi with routing policy, isolated worktrees, and telemetry.
 - `legion-orchestrate`: decompose a larger coding goal, fan out parallel slices,
   cross-verify, then synthesize.
 - `legion-run`: execute substantial tasks through the plan, route, fan-out,
@@ -63,12 +63,13 @@ delegated.
 - `legion-code-intel`: optional repo-native TypeScript/Pyright diagnostics,
   changed-file gates, and code-intelligence telemetry.
 - `legion-setup`: install/update the marketplace, manage repo instruction
-  blocks with `legion-init`, and wire Codex/Cursor/opencode bridges plus shared
-  skills/bins.
+  blocks with `legion-init`, wire Codex/Cursor/opencode bridges, and verify
+  Pi shared-skill readiness plus Hermes's managed native discovery link.
 - `legion-codex-mode`: Codex-primary routing guidance for choosing inline work
   versus Claude delegation.
 - `legion-opencode-mode`: opencode-primary routing and delegation guidance.
-- `legion-hermes-mode`: metered delegation guidance for Hermes-driven coding.
+- `legion-hermes-mode`: symmetric primary/coding guidance for Hermes-driven work.
+- `legion-pi-mode`: symmetric primary/coding guidance for Pi-driven work.
 
 ## Editing rules
 

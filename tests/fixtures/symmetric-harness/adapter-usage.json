@@ -1,0 +1,4 @@
+{
+  "pi": {"input_tokens": 128, "cached_input_tokens": 16, "output_tokens": 32, "reasoning_output_tokens": 8},
+  "hermes": {"input_tokens": 256, "cached_input_tokens": 24, "output_tokens": 48, "reasoning_output_tokens": 12}
+}

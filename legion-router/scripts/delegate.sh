@@ -65,7 +65,7 @@ with_git_worktree_lock() {
   if declare -F legion_with_git_worktree_lock >/dev/null 2>&1; then
     legion_with_git_worktree_lock "$repo" "$@"
   else
-    "$@"
+    return 1
   fi
 }
 
@@ -349,9 +349,12 @@ emit_primary_baseline_span() {
   [[ -z "${LEGION_PARENT_ID:-}" ]] || return 0
   [[ -n "${RUN_ID:-}" ]] || return 0
   local primary; primary="$(legion_primary 2>/dev/null || echo claude)"
-  # No counterfactual when the primary IS the executor we delegated to. Match the
-  # executor FAMILY so a codex primary also skips codex-review / codex-resume.
-  [[ "${delegated_executor%%-*}" == "$primary" ]] && return 0
+  # No counterfactual when the primary IS the executor we delegated to. Family
+  # normalization comes from the registry so future coding harnesses do not
+  # need another prefix allowlist here.
+  local delegated_family
+  delegated_family="$(legion_executor_family "$delegated_executor" 2>/dev/null || true)"
+  [[ "$delegated_family" == "$primary" ]] && return 0
 
   LEGION_PRIMARY_BASELINE_EMITTED=1
   # Historical label for a Claude primary is "opus-baseline"; keep it so existing
@@ -430,7 +433,7 @@ legion_delegated_context() {
 route_preflight() {
   local target_executor="${1:-codex}" target_model="${2:-}"
   local route_archetype="${4:-}" explicit_target="${5:-0}"
-  local primary reason="" art receipt payload artifacts source depth max_depth source_run
+  local primary reason="" art receipt payload artifacts source depth max_depth source_run source_family target_family
   : "${3:-}"  # task text is intentionally never persisted for blocked routes
   primary="$(legion_primary)"
   if [[ "$target_executor" == "self" ]]; then
@@ -442,9 +445,12 @@ route_preflight() {
     source_run="${LEGION_RUN_ID:-}"
     if [[ "$explicit_target" != "1" ]]; then
       reason="nested-delegation-requires-explicit-executor"
-    elif [[ ! "$source" =~ ^(claude|codex|cursor|opencode|hermes)$ || -z "$source_run" ]]; then
+    elif [[ -z "$source_run" ]]; then
       reason="nested-delegation-unknown-source"
-    elif [[ "$source" == "$target_executor" ]]; then
+    elif ! source_family="$(legion_executor_family "$source" 2>/dev/null)" || \
+         ! target_family="$(legion_executor_family "$target_executor" 2>/dev/null)"; then
+      reason="nested-delegation-unknown-source"
+    elif [[ "$source_family" == "$target_family" ]]; then
       reason="nested-delegation-same-executor"
     elif [[ ! "$depth" =~ ^[0-9]+$ || ! "$max_depth" =~ ^[1-9][0-9]*$ || "$depth" -ge "$max_depth" ]]; then
       reason="nested-delegation-depth-limit"
@@ -1554,6 +1560,73 @@ cmd_status() {
 # Bulk/targeted cleanup of delegation worktrees + branches (+ run artifacts with --purge).
 # `run` auto-deletes its own worktree on completion (unless --keep); this reclaims --keep'd
 # runs, resume sessions, and anything orphaned by a crash.
+owned_branch_for_run() {
+  local repo="$1" run="$2" wtroot="$3" runsroot="$4"
+  local owner="$runsroot/$run/worktree-owner.json"
+  local status="$runsroot/$run/status.json" branch="" physical_repo physical_worktree recorded_worktree
+  physical_repo="$(cd "$repo" && pwd -P)" || return 1
+  physical_worktree="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$wtroot/$run")"
+  if [[ -f "$owner" && ! -L "$owner" ]]; then
+    branch="$(jq -er --arg run "$run" --arg repo "$physical_repo" --arg wt "$physical_worktree" '
+      select(.schema == "legion.worktree-owner.v1" and .run_id == $run and .repo == $repo
+        and .worktree == $wt and (.executor == "pi" or .executor == "hermes")
+        and .branch == ("legion/" + .executor + "-" + $run)) | .branch' "$owner" 2>/dev/null || true)"
+    [[ -z "$branch" ]] || { printf '%s\n' "$branch"; return 0; }
+  fi
+  if [[ -f "$status" && ! -L "$status" ]] \
+      && jq -e --arg run "$run" '.run_id == $run' "$status" >/dev/null 2>&1; then
+    recorded_worktree="$(jq -r '.worktree // empty' "$status")"
+    if [[ -n "$recorded_worktree" \
+        && "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$recorded_worktree")" == "$physical_worktree" ]]; then
+      printf 'legion/delegate-%s\n' "$run"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+registered_worktree_branch() {
+  local repo="$1" worktree="$2"
+  worktree="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$worktree")"
+  git -C "$repo" worktree list --porcelain 2>/dev/null \
+    | awk -v target="worktree $worktree" '
+      $0 == target { found=1; next }
+      found && /^branch refs\/heads\// { sub(/^branch refs\/heads\//, ""); print; exit }
+      found && /^$/ { exit }'
+}
+
+cleanup_owned_run_unlocked() {
+  local repo="$1" run="$2" wtroot="$3" runsroot="$4"
+  local worktree="$wtroot/$run"
+  local owned_branch registered_branch
+  owned_branch="$(owned_branch_for_run "$repo" "$run" "$wtroot" "$runsroot" 2>/dev/null || true)"
+  [[ -n "$owned_branch" ]] || return 0
+  registered_branch="$(registered_worktree_branch "$repo" "$worktree")"
+  if [[ -n "$registered_branch" ]]; then
+    [[ "$registered_branch" == "$owned_branch" ]] || return 0
+    git -C "$repo" worktree remove --force "$worktree" >/dev/null 2>&1 || return 1
+    n_wt=$((n_wt + 1))
+  elif [[ -e "$worktree" || -L "$worktree" ]]; then
+    return 0
+  fi
+  git -C "$repo" branch -D "$owned_branch" >/dev/null 2>&1 && n_br=$((n_br + 1)) || true
+}
+
+cleanup_selected_runs_unlocked() {
+  local repo="$1" wtroot="$2" runsroot="$3" selected_run="${4:-}" run_dir run
+  if [[ -n "$selected_run" ]]; then
+    cleanup_owned_run_unlocked "$repo" "$selected_run" "$wtroot" "$runsroot"
+  elif [[ -d "$runsroot" ]]; then
+    for run_dir in "$runsroot"/*; do
+      [[ -d "$run_dir" && ! -L "$run_dir" ]] || continue
+      run="${run_dir##*/}"
+      legion_validate_run_id "$run" || continue
+      cleanup_owned_run_unlocked "$repo" "$run" "$wtroot" "$runsroot"
+    done
+  fi
+  git -C "$repo" worktree prune >/dev/null 2>&1
+}
+
 cmd_cleanup() {
   local run="" all=0 repo="$PWD" purge=0
   while [[ $# -gt 0 ]]; do
@@ -1568,22 +1641,10 @@ cmd_cleanup() {
   done
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
   local wtroot="$repo/.legion/worktrees" runsroot="$repo/.legion/runs"
-  local n_wt=0 n_br=0 n_runs=0 wt b extra=""
+  local n_wt=0 n_br=0 n_runs=0 extra=""
   if [[ "$all" -eq 1 ]]; then
-    if [[ -d "$wtroot" ]]; then
-      for wt in "$wtroot"/*; do
-        [[ -d "$wt" ]] || continue
-        with_git_worktree_lock "$repo" \
-          git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
-        n_wt=$((n_wt + 1))
-      done
-    fi
-    while IFS= read -r b; do
-      [[ -z "$b" ]] && continue
-      git -C "$repo" branch -D "$b" >/dev/null 2>&1 && n_br=$((n_br + 1)) || true
-    done < <(git -C "$repo" branch --list 'legion/delegate-*' --format '%(refname:short)')
-    with_git_worktree_lock "$repo" \
-      git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    with_git_worktree_lock "$repo" cleanup_selected_runs_unlocked "$repo" "$wtroot" "$runsroot" \
+      || die 'cleanup: could not acquire the shared Git worktree lock or safely remove an owned worktree'
     if [[ "$purge" -eq 1 && -d "$runsroot" ]]; then
       n_runs="$(find "$runsroot" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
       rm -rf "$runsroot"
@@ -1591,15 +1652,10 @@ cmd_cleanup() {
     fi
     note "✓ cleaned $n_wt worktree(s) + $n_br branch(es)$extra"
   elif [[ -n "$run" ]]; then
-    local run_wt="$wtroot/$run" run_art="$runsroot/$run"
-    if [[ -d "$run_wt" ]]; then
-      with_git_worktree_lock "$repo" \
-        git -C "$repo" worktree remove --force "$run_wt" >/dev/null 2>&1 || rm -rf "${run_wt:?}"
-      n_wt=1
-    fi
-    git -C "$repo" branch -D "legion/delegate-$run" >/dev/null 2>&1 && n_br=1 || true
-    with_git_worktree_lock "$repo" \
-      git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    legion_validate_run_id "$run" || die "cleanup: invalid run id '$run'"
+    local run_art="$runsroot/$run"
+    with_git_worktree_lock "$repo" cleanup_selected_runs_unlocked "$repo" "$wtroot" "$runsroot" "$run" \
+      || die 'cleanup: could not acquire the shared Git worktree lock or safely remove the owned worktree'
     if [[ "$purge" -eq 1 && -d "$run_art" ]]; then rm -rf "${run_art:?}"; extra=" + artifacts"; fi
     note "✓ cleaned run $run ($n_wt worktree, $n_br branch)$extra"
   else
@@ -1620,7 +1676,7 @@ main() {
 legion-delegate — delegate a scoped task to an external model agent (Codex by
 default; any registered executor via --executor)
 
-  run      [--archetype A | --model M] [--executor codex|cursor|claude|opencode]
+  run      [--archetype A | --model M] [--executor claude|codex|cursor|opencode|pi|hermes]
            [--sandbox read-only|workspace-write|docker|podman|vercel]
            [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
            [--base REF] [--budget-tokens N] [--scope PATHSPEC ...] [--detach] [--apply] [--keep]

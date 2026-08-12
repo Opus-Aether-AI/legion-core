@@ -1,0 +1,1 @@
+{"run_id":"fixture-hermes-run","status":"ok","executor":"hermes","model":"hermes-default","result":"Hermes completed the scoped fixture task.","usage":{"input_tokens":256,"cached_input_tokens":24,"output_tokens":48,"reasoning_output_tokens":12},"cost_usd":0.002}

@@ -8,7 +8,9 @@
 # consumed by `legion-delegate --archetype`.
 #
 #   executor          self (the PRIMARY harness runs it inline) | a registered
-#                     executor name in executors.toml (codex | cursor | opencode | claude)
+#                     executor name in executors.toml (claude | codex | cursor |
+#                     opencode | pi | hermes). Pi and Hermes are intentionally
+#                     absent from archetypes: use only explicit --executor handoffs.
 #   model_ref         key in models.toml
 #   sandbox           read-only | workspace-write
 #   reasoning_effort  low | medium | high | xhigh | max

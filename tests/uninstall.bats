@@ -196,3 +196,33 @@ EOF
     [ ! -f "$HOME/.codex/commands/handoff.md" ]
     [ -f "$HOME/.codex/commands/user-command.md" ]
 }
+
+@test "uninstall removes only the Hermes skill link recorded as Legion-managed" {
+    local source="$AGENTS_HOME/skills/legion-hermes-mode"
+    local destination="$HOME/.hermes/skills/legion-hermes-mode"
+    mkdir -p "${destination%/*}" "$AGENTS_HOME/.managed-by-legion-core"
+    ln -s "$source" "$destination"
+    jq -cn --arg source "$source" --arg destination "$destination" \
+      '{schema:"legion.hermes-skill-link.v1",source:$source,destination:$destination}' \
+      > "$AGENTS_HOME/.managed-by-legion-core/hermes-skill-link.json"
+
+    run bash "$UNINSTALL_SH"
+    [ "$status" -eq 0 ]
+    [ ! -L "$destination" ]
+}
+
+@test "uninstall preserves a Hermes link changed after Legion setup" {
+    local source="$AGENTS_HOME/skills/legion-hermes-mode"
+    local replacement="$HOME/operator-hermes-mode"
+    local destination="$HOME/.hermes/skills/legion-hermes-mode"
+    mkdir -p "${destination%/*}" "$replacement" "$AGENTS_HOME/.managed-by-legion-core"
+    ln -s "$replacement" "$destination"
+    jq -cn --arg source "$source" --arg destination "$destination" \
+      '{schema:"legion.hermes-skill-link.v1",source:$source,destination:$destination}' \
+      > "$AGENTS_HOME/.managed-by-legion-core/hermes-skill-link.json"
+
+    run bash "$UNINSTALL_SH"
+    [ "$status" -eq 0 ]
+    [ -L "$destination" ]
+    [ "$(readlink "$destination")" = "$replacement" ]
+}

@@ -18,6 +18,7 @@ See everything Legion's multi-model runs do — per-executor **cost, success rat
 | `legion-self-learn` | `scripts/legion-self-learn.py` | Daily self-learning loop: spans + review findings + trigger evals + benchmark misses + session feedback + manual bug records -> entity-scoped memory/proposals. `--apply-source` is a compatibility-only dry-run response. |
 | `legion-improve` | `scripts/legion-improve.py` | Consume a maintainer-eligible typed proposal in `off` (default), `dry-run`, or `draft` mode. It freezes a base SHA, uses isolated worktrees, repeats paired gates, requires a receipt, and creates only idempotent draft PRs. |
 | `legion-context-profile` | `scripts/legion-context-profile.py` | Reversibly shape active Codex/.agents skills and Claude plugins from external context profiles and skill groups when context budget gets noisy. |
+| `legion-converge` | `scripts/legion-converge.py` | Classify a primary workflow checkpoint as actionable, complete, waiting on external state, or blocked by repeated evidence—without an arbitrary runtime deadline. |
 | `legion-session-learn` | `scripts/legion-session-learn.py` | Mine bounded, provenance-aware Claude/Codex/Cursor sessions and project memories for recurring gotchas and explicit corrections; output and recorded outcomes use hashes/counts instead of transcript text by default. |
 
 ## Quick start
@@ -35,6 +36,7 @@ legion-bench gate --baseline runs/base/run.json --candidate runs/new/run.json
 legion-report --by model --html > report.html
 legion-report --by archetype     # expose unclassified runs/cost before tuning routes
 legion-state --repo . --field telemetry_dir
+legion-converge --checkpoint checkpoint.json --repo . --json
 cat "$(legion-state --repo . --field telemetry_dir)"/*.jsonl | legion-otel-export --dry-run | jq .
 legion-learn analyze --repo . --repo-only --json
 legion-learn report --repo .

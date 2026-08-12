@@ -3,9 +3,11 @@
 # Concrete model IDs live in models.toml. This file should refer to model_ref
 # keys only, so model upgrades do not require sweeping route-policy edits.
 #
-# Goal: codex does >= [targets].codex_share of delegatable work, measured and
-# self-corrected by `legion-share`. Resolved by `legion-route <archetype>`,
-# consumed by `legion-delegate --archetype`.
+# Optional preference: `legion-share` compares observed Codex work with
+# [targets].codex_share. The value is advisory unless an operator explicitly
+# runs `legion-share gate`. Override it with LEGION_TARGET_CODEX_SHARE or the
+# command's --target flag. Routes still resolve by task fit through
+# `legion-route <archetype>` and `legion-delegate --archetype`.
 #
 #   executor          self (the PRIMARY harness runs it inline) | a registered
 #                     executor name in executors.toml (claude | codex | cursor |
@@ -30,7 +32,7 @@
 # Claude-primary default (Fable); a non-Claude primary runs its own model inline.
 
 [targets]
-codex_share = 0.5          # floor: >= 50% of delegatable work to codex
+codex_share = 0.5          # advisory default; choose any value from 0.0 to 1.0
 
 [defaults]
 executor = "self"          # an unclassified task: the primary decides (it should classify into an archetype)

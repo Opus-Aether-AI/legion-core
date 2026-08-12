@@ -6,7 +6,16 @@ description: Use when a primary harness should hand a scoped task to a configure
 
 # Legion Router — delegate to a legion of models
 
-## Work split — balance by strength (target: codex does ≥50%)
+## Primary-session convergence
+
+For a substantial inline workflow, record each material checkpoint with
+`legion-converge --checkpoint <file> --repo . --json`. Continue only when it
+returns `actionable` with changed source or failure evidence. Yield on
+`complete`, `waiting_external`, or `blocked`; an external state change can
+resume `waiting_external`. Never rerun validation on an unchanged tree or
+review the same immutable head merely to keep the primary turn alive.
+
+## Work split — balance by strength
 
 Before changing routing behavior or running a high-leverage delegation workflow,
 check learned harness guardrails when available:
@@ -23,12 +32,17 @@ Legion is a team. Play each configured role to its strength:
   tests, refactors, bulk edits, migrations, and independent verification by
   archetype. Concrete model IDs resolve from `config/models.toml`.
 
-**The rule:** codex should do **≥50% of delegatable work** (`routing.toml [targets].codex_share`). Concretely — when you have an implementation task, **delegate by archetype by default** rather than coding it yourself; reserve your own cycles for orchestration + judgement, and route the **final review to the independent Fable reviewer**.
+The share target is an advisory routing preference, not a hard workflow rule.
+It defaults to `0.5` in `routing.toml [targets].codex_share` and can be changed
+in that config, with `LEGION_TARGET_CODEX_SHARE`, or per command with
+`legion-share --target <0..1>`. Route by task fit even when that differs from
+the target; use an explicit `legion-share gate` only when a repository chooses
+to enforce its configured preference.
 
 **Make it measurable (the controller loop):**
 1. When you do a task **yourself**, log it: `legion-trace emit --executor opus --model "$(legion-route --model-ref claude_orchestrator)" --status ok` (so the split has a denominator).
-2. Before doing an eligible implementation task inline, check `legion-share next` — if it says `codex`, **delegate it** (you're under target); if it says `opus`, your call.
-3. `legion-share` shows the live ratio + per-model breakdown vs the 0.5 target.
+2. Optionally check `legion-share next` for a recommendation before an eligible implementation task; task fit and user intent still win.
+3. `legion-share` shows the live ratio + per-model breakdown against the configured target (default `0.5`).
 
 So: delegate any independent, self-contained task through its configured Legion
 route so the primary stays free to coordinate. Keep orchestration and genuine

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/blob/main/legion-observability/schema/legion.convergence-decision.v1.schema.json",
+  "title": "legion.convergence-decision.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "recorded_at",
+    "task_id_hash",
+    "source_fingerprint_hash",
+    "failure_evidence_fingerprint",
+    "state",
+    "action",
+    "reason"
+  ],
+  "properties": {
+    "schema": {"const": "legion.convergence-decision.v1"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "task_id_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_fingerprint_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "failure_evidence_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "state": {"enum": ["actionable", "complete", "waiting_external", "blocked"]},
+    "action": {"enum": ["continue", "yield"]},
+    "reason": {"type": "string", "minLength": 1},
+    "failed_checks": {"type": "array", "items": {"type": "string"}},
+    "pending_local": {"type": "array", "items": {"type": "string"}},
+    "pending_external": {"type": "array", "items": {"type": "string"}},
+    "blocking_finding_count": {"type": "integer", "minimum": 0},
+    "suggestion_count": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

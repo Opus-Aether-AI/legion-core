@@ -7,7 +7,7 @@ description: Use to deliver a multi-step coding goal with Legion's dynamic multi
 
 # Legion Orchestrate — dynamic multi-model delivery (ultracode for a legion of models)
 
-The Claude "ultracode" loop (decompose → fan out → adversarially verify → synthesize → gate), but **executor-aware**: Claude conducts, the configured Codex workhorse does the bulk of coding in parallel, and Fable provides the independent final judgement, all metered and kept at ≥50% codex ([[project_legion_marketplace]]).
+The Claude "ultracode" loop (decompose → fan out → adversarially verify → synthesize → gate), but **executor-aware**: the active primary conducts, configured harnesses handle work that fits their strengths, and an independent reviewer provides the final judgement. Every handoff is metered.
 
 ## Preflight
 
@@ -53,6 +53,11 @@ share accounting, self-learn, and heal planning. Existing
 when you are debugging the primitive, running small independent slices, or
 building a new runner profile.
 
+Do not manually replay this lifecycle after a terminal runner receipt. Return
+to the primary session and record a `legion-converge` checkpoint. Continue only
+for new source or failure evidence; yield on `complete`, `waiting_external`, or
+`blocked`.
+
 1. **Decompose** (Opus) — break the goal into **dependency-aware slices**. Independent slices can run in parallel; dependent ones are sequenced.
 2. **Classify** — tag each slice with a routing archetype (`legion-route --list`): implementation → `implement-feature`/`write-tests`/`fix-bug`/`refactor-module`/… (configured Codex workhorse); genuine design/judgement → `deep-reasoning`/`architecture-decision` (stays on Claude).
 3. **Fan out** (parallel) — write the independent slices as JSONL and run them at once:
@@ -81,13 +86,15 @@ Go maximally exhaustive:
 - **More parallelism** — decompose finer; fan out widely (`--max-concurrency` up).
 - **Multi-vote verify** — a diff is accepted only if **the independent Fable reviewer and the primary engineer** both approve (run `final-review` + your own review; disagreement → `cross-model-tiebreak`).
 - **Loop-until-dry** — re-run review fan-out until two consecutive passes surface nothing new.
-- Everything metered; check `legion-share` to confirm codex carried ≥50%.
+- Everything metered; use `legion-share` when the configured work-split preference is useful.
 
-## Keep it honest (the ≥50% controller)
+## Configurable work-share preference
 
-- Before doing an eligible implementation slice **yourself**, check `legion-share next` — if it says `codex`, delegate it.
+- The Codex share target defaults to `0.5`, but it is advisory unless a repository explicitly runs `legion-share gate`.
+- Configure it in `routing.toml [targets].codex_share`, with `LEGION_TARGET_CODEX_SHARE`, or per command via `--target`.
+- `legion-share next` is a recommendation; task fit and user intent take precedence.
 - **Log your own slices** so the split has a denominator: `legion-trace emit --executor opus --model "$(legion-route --model-ref claude_orchestrator)" --status ok`.
-- `legion-share` shows the live ratio; aim to keep codex ≥ target.
+- `legion-share` shows the live ratio against the configured preference.
 
 ## Verify every delegated diff
 

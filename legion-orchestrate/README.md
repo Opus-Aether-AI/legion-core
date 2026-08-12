@@ -133,7 +133,7 @@ printf '%s\n' \
 
 ## The playbook + ultracode mode
 
-`SKILL.md` is the orchestration playbook (decompose → fan out → cross-model verify → synthesize → gate). `LEGION_ULTRACODE=1` goes maximally exhaustive: wide fan-out, multi-vote verify (independent Fable reviewer **and** the primary engineer must approve), loop-until-dry — all metered, kept ≥50% codex via `legion-share`.
+`SKILL.md` is the orchestration playbook (decompose → fan out → cross-model verify → synthesize → gate). `LEGION_ULTRACODE=1` goes maximally exhaustive: wide fan-out, multi-vote verify (the independent reviewer **and** the primary engineer must approve), and loop-until-dry. `legion-share` reports against a configurable advisory work-split target whose default is `0.5`.
 
 ## Depends on
 

@@ -45,7 +45,7 @@ setup() {
   [ "$status" -eq 0 ]
 
   local command
-  for command in legion-state legion-context-profile legion-learn legion-improve legion-session-learn legion-opencode legion-opencode-setup; do
+  for command in legion-state legion-context-profile legion-converge legion-learn legion-improve legion-session-learn legion-opencode legion-opencode-setup; do
     run "$CONSUMER/node_modules/.bin/$command" --help
     [ "$status" -eq 0 ]
   done

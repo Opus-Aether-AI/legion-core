@@ -1,7 +1,7 @@
 {
   "name": "legion-opencode-mode",
   "description": "The decision guide for an opencode-primary Legion session: you are opencode doing most of the work yourself, and this skill tells you WHICH kind of task is worth handing to another model and to WHOM — Claude for deep architecture and polished frontend (with the impeccable skill), a workhorse model for bulk implementation, a different model for a second opinion — versus keeping it inline. The opencode counterpart of legion-codex-mode (Codex-primary) and legion-router (Claude-primary).",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": {
     "name": "legion-core"
   },

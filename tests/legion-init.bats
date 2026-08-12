@@ -23,6 +23,8 @@ setup() {
   [ "$(grep -c '<!-- legion:init:v1:agents:start -->' "$REPO/AGENTS.md")" -eq 1 ]
   [ "$(grep -c '<!-- legion:init:v1:claude:start -->' "$REPO/CLAUDE.md")" -eq 1 ]
   grep -Fq '@AGENTS.md' "$REPO/CLAUDE.md"
+  grep -Fq 'waiting_external' "$REPO/AGENTS.md"
+  grep -Fq 'same source and evidence fingerprints' "$REPO/AGENTS.md"
   [ "$(grep -n '^@AGENTS.md$' "$REPO/CLAUDE.md" | cut -d: -f1)" -le 3 ]
 }
 

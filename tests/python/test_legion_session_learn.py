@@ -126,6 +126,64 @@ def test_scan_codex_user_correction_feedback(tmp_path):
     assert "svineet/harness-bench" in correction["evidence"][0]["snippet"]
 
 
+def test_scan_attributes_long_primary_turn_from_structural_events(tmp_path):
+    session = tmp_path / ".codex" / "sessions" / "2026" / "08" / "11" / "session.jsonl"
+    session.parent.mkdir(parents=True)
+    records = [
+        {
+            "timestamp": "2026-08-11T08:49:45.997Z",
+            "type": "session_meta",
+            "payload": {"session_id": "session-a"},
+        },
+        {
+            "timestamp": "2026-08-11T08:49:46.000Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-a"},
+        },
+        {
+            "timestamp": "2026-08-11T08:50:00.000Z",
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "exec", "call_id": "call-a"},
+        },
+        {
+            "timestamp": "2026-08-11T21:19:50.000Z",
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "wait", "call_id": "call-b"},
+        },
+        {
+            "timestamp": "2026-08-11T21:20:06.783Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-a",
+                "duration_ms": 45_020_786,
+            },
+        },
+        {
+            "timestamp": "2026-08-12T09:00:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "Why did this task keep running for the whole day?",
+            },
+        },
+    ]
+    session.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    result = lsl.scan(tmp_path, days=0, roles={"user"})
+    candidates = {item["category"]: item for item in result["candidates"]}
+    convergence = candidates["primary-turn-convergence"]
+    metrics = convergence["evidence"][0]["session_metrics"]
+
+    assert metrics["longest_turn_duration_ms"] == 45_020_786
+    assert metrics["tool_call_count"] == 2
+    assert metrics["legion_run_ids"] == []
+    assert convergence["entity"] == "skill:legion-orchestrate"
+
+
 def test_assistant_correction_words_do_not_trigger_user_feedback(tmp_path):
     session = tmp_path / ".codex" / "sessions" / "2026" / "06" / "26" / "assistant.jsonl"
     session.parent.mkdir(parents=True)

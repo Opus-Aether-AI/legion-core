@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/blob/main/legion-observability/schema/legion.convergence-checkpoint.v1.schema.json",
+  "title": "legion.convergence-checkpoint.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "task_id", "source_fingerprint", "checks", "review"],
+  "properties": {
+    "schema": {"const": "legion.convergence-checkpoint.v1"},
+    "task_id": {"type": "string", "minLength": 1},
+    "source_fingerprint": {"type": "string", "minLength": 1},
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "scope", "status", "evidence_fingerprint"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "scope": {"enum": ["local", "external"]},
+          "status": {"enum": ["passed", "failed", "pending"]},
+          "evidence_fingerprint": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["head_sha", "blocking_findings", "suggestions"],
+      "properties": {
+        "head_sha": {"type": "string"},
+        "blocking_findings": {"$ref": "#/$defs/findings"},
+        "suggestions": {"$ref": "#/$defs/findings"}
+      }
+    }
+  },
+  "$defs": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fingerprint"],
+        "properties": {
+          "fingerprint": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

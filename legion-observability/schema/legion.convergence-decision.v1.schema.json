@@ -12,7 +12,12 @@
     "failure_evidence_fingerprint",
     "state",
     "action",
-    "reason"
+    "reason",
+    "failed_checks",
+    "pending_local",
+    "pending_external",
+    "blocking_finding_count",
+    "suggestion_count"
   ],
   "properties": {
     "schema": {"const": "legion.convergence-decision.v1"},

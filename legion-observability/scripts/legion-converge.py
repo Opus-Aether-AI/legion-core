@@ -29,6 +29,49 @@ MAX_CHECKS = 128
 MAX_FINDINGS = 128
 MAX_JOURNAL_TAIL_BYTES = 1024 * 1024
 MAX_DECISION_BYTES = 64 * 1024
+DURABLE_DECISION_KEYS = {
+    "schema",
+    "recorded_at",
+    "task_id_hash",
+    "source_fingerprint_hash",
+    "review_head_sha_hash",
+    "failure_evidence_fingerprint",
+    "state",
+    "action",
+    "reason",
+    "failed_checks",
+    "pending_local",
+    "pending_external",
+    "blocking_finding_count",
+    "suggestion_count",
+}
+DURABLE_DIGEST_KEYS = {
+    "task_id_hash",
+    "source_fingerprint_hash",
+    "review_head_sha_hash",
+    "failure_evidence_fingerprint",
+}
+DURABLE_CHECK_KEYS = {"failed_checks", "pending_local", "pending_external"}
+DURABLE_REASONS = {
+    "blocking_review_finding",
+    "required_check_failed",
+    "local_check_pending",
+    "new_failure_evidence",
+    "no_progress",
+    "external_checks_pending",
+    "all_required_evidence_passed",
+}
+DURABLE_STATE_REASONS = {
+    "actionable": {
+        "blocking_review_finding",
+        "required_check_failed",
+        "local_check_pending",
+        "new_failure_evidence",
+    },
+    "blocked": {"no_progress"},
+    "waiting_external": {"external_checks_pending"},
+    "complete": {"all_required_evidence_passed"},
+}
 
 
 class ConvergenceError(ValueError):
@@ -284,7 +327,92 @@ def evaluate_checkpoint(
     }
 
 
-def _latest_record(descriptor: int) -> dict[str, Any] | None:
+def _validate_durable_record(
+    record: Any, *, expected_task_id_hash: str
+) -> dict[str, Any]:
+    if not isinstance(record, dict) or set(record) != DURABLE_DECISION_KEYS:
+        raise ConvergenceError("persisted convergence decision has invalid fields")
+    if record.get("schema") != DECISION_SCHEMA:
+        raise ConvergenceError("persisted convergence decision has invalid schema")
+    for key in DURABLE_DIGEST_KEYS:
+        if not isinstance(record.get(key), str) or not re.fullmatch(
+            r"[0-9a-f]{64}", record[key]
+        ):
+            raise ConvergenceError(
+                f"persisted convergence decision has invalid {key}"
+            )
+    if record["task_id_hash"] != expected_task_id_hash:
+        raise ConvergenceError("persisted convergence decision belongs to another task")
+    recorded_at = record.get("recorded_at")
+    if not isinstance(recorded_at, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", recorded_at
+    ):
+        raise ConvergenceError("persisted convergence decision has invalid recorded_at")
+    state = record.get("state")
+    action = record.get("action")
+    reason = record.get("reason")
+    if state not in {"actionable", "complete", "waiting_external", "blocked"}:
+        raise ConvergenceError("persisted convergence decision has invalid state")
+    if action != ("continue" if state == "actionable" else "yield"):
+        raise ConvergenceError("persisted convergence decision has invalid action")
+    if not isinstance(reason, str) or reason not in DURABLE_REASONS:
+        raise ConvergenceError("persisted convergence decision has invalid reason")
+    for key in DURABLE_CHECK_KEYS:
+        values = record.get(key)
+        if (
+            not isinstance(values, list)
+            or len(values) > MAX_CHECKS
+            or any(
+                not isinstance(value, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in values
+            )
+        ):
+            raise ConvergenceError(
+                f"persisted convergence decision has invalid {key}"
+            )
+    for key in ("blocking_finding_count", "suggestion_count"):
+        value = record.get(key)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > MAX_FINDINGS
+        ):
+            raise ConvergenceError(
+                f"persisted convergence decision has invalid {key}"
+            )
+    if reason not in DURABLE_STATE_REASONS[state]:
+        raise ConvergenceError(
+            "persisted convergence decision has inconsistent state and reason"
+        )
+    has_actionable_evidence = bool(
+        record["failed_checks"]
+        or record["pending_local"]
+        or record["blocking_finding_count"]
+    )
+    if state in {"actionable", "blocked"} and not has_actionable_evidence:
+        raise ConvergenceError(
+            "persisted convergence decision lacks actionable evidence"
+        )
+    if state in {"complete", "waiting_external"} and has_actionable_evidence:
+        raise ConvergenceError(
+            "persisted convergence decision has contradictory actionable evidence"
+        )
+    if state == "waiting_external" and not record["pending_external"]:
+        raise ConvergenceError(
+            "persisted convergence decision lacks pending external evidence"
+        )
+    if state == "complete" and record["pending_external"]:
+        raise ConvergenceError(
+            "persisted convergence decision has contradictory external evidence"
+        )
+    return record
+
+
+def _latest_record(
+    descriptor: int, *, expected_task_id_hash: str
+) -> dict[str, Any] | None:
     end = os.lseek(descriptor, 0, os.SEEK_END)
     start = max(0, end - MAX_JOURNAL_TAIL_BYTES)
     os.lseek(descriptor, start, os.SEEK_SET)
@@ -302,16 +430,18 @@ def _latest_record(descriptor: int) -> dict[str, Any] | None:
         lines = lines[1:]
     latest = next((line for line in reversed(lines) if line.strip()), None)
     if latest is not None:
+        if len(latest.encode("utf-8")) + 1 > MAX_DECISION_BYTES:
+            raise ConvergenceError(
+                f"persisted convergence decision exceeds the {MAX_DECISION_BYTES}-byte limit"
+            )
         try:
             record = json.loads(latest)
         except ValueError as error:
             raise ConvergenceError(
                 "latest convergence journal decision is malformed"
             ) from error
-        if isinstance(record, dict) and record.get("schema") == DECISION_SCHEMA:
-            return record
-        raise ConvergenceError(
-            "latest convergence journal entry is not a convergence decision"
+        return _validate_durable_record(
+            record, expected_task_id_hash=expected_task_id_hash
         )
     if end:
         raise ConvergenceError(
@@ -448,7 +578,10 @@ def checkpoint(payload: dict[str, Any], *, state_root: Path) -> dict[str, Any]:
     try:
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         locked = True
-        previous = _latest_record(lock_descriptor)
+        previous = _latest_record(
+            lock_descriptor,
+            expected_task_id_hash=_digest(normalized["task_id"]),
+        )
         decision = evaluate_checkpoint(payload, previous=previous)
         if decision["state"] == "actionable" and _claim_actionable_pair(
             directory_descriptor, normalized["task_id"], decision

@@ -311,3 +311,52 @@ def test_checkpoint_rejects_a_corrupt_latest_history_entry(tmp_path):
         assert "latest convergence journal decision is malformed" in str(error)
     else:
         raise AssertionError("checkpoint ignored a corrupt latest journal entry")
+
+
+def test_checkpoint_rejects_schema_invalid_or_wrong_task_history(tmp_path):
+    converge = load_module()
+    converge.checkpoint(checkpoint(), state_root=tmp_path)
+    history = next((tmp_path / "convergence").glob("*.jsonl"))
+    valid = json.loads(history.read_text(encoding="utf-8"))
+
+    for corrupted in (
+        {"schema": "legion.convergence-decision.v1"},
+        {**valid, "task_id_hash": "f" * 64},
+        {
+            **valid,
+            "state": "actionable",
+            "action": "continue",
+            "reason": "all_required_evidence_passed",
+        },
+    ):
+        history.write_text(json.dumps(corrupted) + "\n", encoding="utf-8")
+        try:
+            converge.checkpoint(checkpoint(), state_root=tmp_path)
+        except converge.ConvergenceError as error:
+            assert "persisted convergence decision" in str(error)
+        else:
+            raise AssertionError("checkpoint trusted an invalid persisted decision")
+
+
+def test_checkpoint_rejects_an_oversized_persisted_decision(tmp_path):
+    converge = load_module()
+    convergence = tmp_path / "convergence"
+    convergence.mkdir()
+    history = convergence / f"{converge._digest('session-runtime-guard')}.jsonl"
+    history.write_text(
+        json.dumps(
+            {
+                "schema": "legion.convergence-decision.v1",
+                "padding": "x" * converge.MAX_DECISION_BYTES,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    try:
+        converge.checkpoint(checkpoint(), state_root=tmp_path)
+    except converge.ConvergenceError as error:
+        assert "exceeds the 65536-byte limit" in str(error)
+    else:
+        raise AssertionError("checkpoint trusted an oversized persisted decision")

@@ -46,12 +46,35 @@ resolve_optional_legion_cmd() {
   return 0
 }
 
+resolve_executable_path() {
+  local candidate="$1" link="" directory="" hops=0
+  if [[ "$candidate" != */* ]]; then
+    candidate="$(command -v "$candidate" 2>/dev/null)" || return 1
+  fi
+  while [[ -L "$candidate" ]]; do
+    hops=$((hops + 1))
+    [[ "$hops" -le 40 ]] || return 1
+    directory="$(cd -P "$(dirname "$candidate")" >/dev/null 2>&1 && pwd)" \
+      || return 1
+    link="$(readlink "$candidate")" || return 1
+    case "$link" in
+      /*) candidate="$link" ;;
+      *) candidate="$directory/$link" ;;
+    esac
+  done
+  printf '%s\n' "$candidate"
+}
+
 LEGION_DELEGATE="${LEGION_DELEGATE:-$(resolve_legion_cmd legion-delegate "$_self/../../legion-router/bin/legion-delegate")}"
 LEGION_ROUTE="${LEGION_ROUTE:-$(resolve_legion_cmd legion-route "$_self/../../legion-router/bin/legion-route")}"
 LEGION_TELEMETRY="${LEGION_TELEMETRY:-$(resolve_optional_legion_cmd legion-trace "$_self/../../legion-observability/bin/legion-trace")}"
 _run_id_lib="$_self/../../legion-router/scripts/lib/run-id.sh"
 if [[ ! -f "$_run_id_lib" ]]; then
-  _delegate_root="$(cd "$(dirname "$LEGION_DELEGATE")/.." >/dev/null 2>&1 && pwd)"
+  if ! _delegate_path="$(resolve_executable_path "$LEGION_DELEGATE")"; then
+    echo "legion-fanout: could not resolve legion-delegate executable" >&2
+    exit 2
+  fi
+  _delegate_root="$(cd "$(dirname "$_delegate_path")/.." >/dev/null 2>&1 && pwd)"
   _run_id_lib="$_delegate_root/scripts/lib/run-id.sh"
 fi
 if [[ ! -f "$_run_id_lib" ]]; then

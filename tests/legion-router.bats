@@ -39,6 +39,14 @@ setup() {
     done < "$ids"
 }
 
+@test "run ids work when PATH omits date and utility commands" {
+    run env PATH="$TEST_TMPDIR/empty-path" /bin/bash -c \
+        'source "$1"; legion_new_run_id' _ "$LIB/run-id.sh"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{24}$ ]]
+}
+
 # Make a throwaway git repo with one source file; echoes its path.
 make_test_repo() {
     local d="$TEST_TMPDIR/repo-${1:-a}"

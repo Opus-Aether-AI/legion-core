@@ -144,6 +144,14 @@ def test_scan_attributes_long_primary_turn_from_structural_events(tmp_path, monk
             "payload": {"type": "task_started", "turn_id": "turn-a"},
         },
         {
+            "timestamp": "2026-08-11T08:49:47.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "Why did this task keep running for the whole day?",
+            },
+        },
+        {
             "timestamp": "2026-08-11T08:50:00.000Z",
             "type": "response_item",
             "payload": {"type": "function_call", "name": "exec", "call_id": "call-a"},
@@ -160,14 +168,6 @@ def test_scan_attributes_long_primary_turn_from_structural_events(tmp_path, monk
                 "type": "task_complete",
                 "turn_id": "turn-a",
                 "duration_ms": 45_020_786,
-            },
-        },
-        {
-            "timestamp": "2026-08-12T09:00:00.000Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "user_message",
-                "message": "Why did this task keep running for the whole day?",
             },
         },
     ]

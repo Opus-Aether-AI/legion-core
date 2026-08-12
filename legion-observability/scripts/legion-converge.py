@@ -23,6 +23,12 @@ CHECKPOINT_SCHEMA = "legion.convergence-checkpoint.v1"
 DECISION_SCHEMA = "legion.convergence-decision.v1"
 VALID_SCOPES = {"external", "local"}
 VALID_STATUSES = {"failed", "passed", "pending"}
+MAX_IDENTIFIER_CHARS = 256
+MAX_FINGERPRINT_CHARS = 512
+MAX_CHECKS = 128
+MAX_FINDINGS = 128
+MAX_JOURNAL_TAIL_BYTES = 1024 * 1024
+MAX_DECISION_BYTES = 64 * 1024
 
 
 class ConvergenceError(ValueError):
@@ -39,11 +45,22 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _required_string(container: dict[str, Any], key: str, context: str) -> str:
+def _required_string(
+    container: dict[str, Any],
+    key: str,
+    context: str,
+    *,
+    max_chars: int = MAX_IDENTIFIER_CHARS,
+) -> str:
     value = container.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ConvergenceError(f"{context}.{key} must be a non-empty string")
-    return value.strip()
+    stripped = value.strip()
+    if len(stripped) > max_chars:
+        raise ConvergenceError(
+            f"{context}.{key} exceeds the {max_chars}-character limit"
+        )
+    return stripped
 
 
 def _finding_fingerprints(review: dict[str, Any], key: str) -> list[str]:
@@ -52,12 +69,21 @@ def _finding_fingerprints(review: dict[str, Any], key: str) -> list[str]:
     findings = review[key]
     if not isinstance(findings, list):
         raise ConvergenceError(f"review.{key} must be a list")
+    if len(findings) > MAX_FINDINGS:
+        raise ConvergenceError(
+            f"review.{key} exceeds the {MAX_FINDINGS}-finding limit"
+        )
     fingerprints: list[str] = []
     for index, finding in enumerate(findings):
         if not isinstance(finding, dict):
             raise ConvergenceError(f"review.{key}[{index}] must be an object")
         fingerprints.append(
-            _required_string(finding, "fingerprint", f"review.{key}[{index}]")
+            _required_string(
+                finding,
+                "fingerprint",
+                f"review.{key}[{index}]",
+                max_chars=MAX_FINGERPRINT_CHARS,
+            )
         )
     return sorted(fingerprints)
 
@@ -69,10 +95,19 @@ def _normalize_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
         raise ConvergenceError(f"schema must be {CHECKPOINT_SCHEMA}")
 
     task_id = _required_string(payload, "task_id", "checkpoint")
-    source = _required_string(payload, "source_fingerprint", "checkpoint")
+    source = _required_string(
+        payload,
+        "source_fingerprint",
+        "checkpoint",
+        max_chars=MAX_FINGERPRINT_CHARS,
+    )
     checks = payload.get("checks")
     if not isinstance(checks, list) or not checks:
         raise ConvergenceError("checkpoint.checks must be a non-empty list")
+    if len(checks) > MAX_CHECKS:
+        raise ConvergenceError(
+            f"checkpoint.checks exceeds the {MAX_CHECKS}-check limit"
+        )
 
     normalized_checks: list[dict[str, str]] = []
     check_ids: set[str] = set()
@@ -86,7 +121,12 @@ def _normalize_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
         check_ids.add(check_id)
         scope = _required_string(check, "scope", context)
         status = _required_string(check, "status", context)
-        evidence = _required_string(check, "evidence_fingerprint", context)
+        evidence = _required_string(
+            check,
+            "evidence_fingerprint",
+            context,
+            max_chars=MAX_FINGERPRINT_CHARS,
+        )
         if scope not in VALID_SCOPES:
             raise ConvergenceError(f"{context}.scope must be local or external")
         if status not in VALID_STATUSES:
@@ -109,12 +149,22 @@ def _normalize_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
         raise ConvergenceError("checkpoint.review must be an object")
     blocking = _finding_fingerprints(review, "blocking_findings")
     suggestions = _finding_fingerprints(review, "suggestions")
-    if "head_sha" not in review or not isinstance(review["head_sha"], str):
-        raise ConvergenceError("review.head_sha must be a string")
-    head_sha = review["head_sha"].strip()
-    if blocking and not re.fullmatch(r"[0-9a-fA-F]{7,64}", head_sha):
+    head_sha = _required_string(
+        review, "head_sha", "review", max_chars=64
+    ).casefold()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head_sha):
         raise ConvergenceError(
-            "review.head_sha must be an immutable commit SHA when blocking findings are present"
+            "review.head_sha must be a full immutable commit SHA"
+        )
+    reviewed_source = _required_string(
+        review,
+        "source_fingerprint",
+        "review",
+        max_chars=MAX_FINGERPRINT_CHARS,
+    )
+    if reviewed_source != source:
+        raise ConvergenceError(
+            "review.source_fingerprint must match checkpoint.source_fingerprint"
         )
 
     return {
@@ -123,6 +173,7 @@ def _normalize_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
         "checks": sorted(normalized_checks, key=lambda item: item["id"]),
         "review": {
             "head_sha": head_sha,
+            "source_fingerprint": reviewed_source,
             "blocking_findings": blocking,
             "suggestions": suggestions,
         },
@@ -130,7 +181,10 @@ def _normalize_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def evaluate_checkpoint(
-    payload: dict[str, Any], previous: dict[str, Any] | None = None
+    payload: dict[str, Any],
+    previous: dict[str, Any] | None = None,
+    *,
+    attempted_pair: bool = False,
 ) -> dict[str, Any]:
     """Return the next semantic state for a validated checkpoint."""
 
@@ -170,6 +224,7 @@ def evaluate_checkpoint(
 
     common: dict[str, Any] = {
         "source_fingerprint_hash": source_hash,
+        "review_head_sha_hash": _digest(checkpoint["review"]["head_sha"]),
         "failure_evidence_fingerprint": evidence_hash,
         "failed_checks": failed,
         "pending_local": pending_local,
@@ -178,6 +233,13 @@ def evaluate_checkpoint(
         "suggestion_count": len(suggestions),
     }
     if failed or pending_local or blocking:
+        if attempted_pair:
+            return {
+                **common,
+                "state": "blocked",
+                "action": "yield",
+                "reason": "no_progress",
+            }
         reason = (
             "blocking_review_finding"
             if blocking
@@ -224,7 +286,7 @@ def evaluate_checkpoint(
 
 def _latest_record(descriptor: int) -> dict[str, Any] | None:
     end = os.lseek(descriptor, 0, os.SEEK_END)
-    start = max(0, end - 1024 * 1024)
+    start = max(0, end - MAX_JOURNAL_TAIL_BYTES)
     os.lseek(descriptor, start, os.SEEK_SET)
     raw = bytearray()
     while len(raw) < end - start:
@@ -232,31 +294,53 @@ def _latest_record(descriptor: int) -> dict[str, Any] | None:
         if not chunk:
             break
         raw.extend(chunk)
-    lines = raw.decode("utf-8", errors="ignore").splitlines()
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise ConvergenceError("convergence journal is not valid UTF-8") from error
     if start and lines:
         lines = lines[1:]
-    for line in reversed(lines):
+    latest = next((line for line in reversed(lines) if line.strip()), None)
+    if latest is not None:
         try:
-            record = json.loads(line)
-        except ValueError:
-            continue
+            record = json.loads(latest)
+        except ValueError as error:
+            raise ConvergenceError(
+                "latest convergence journal decision is malformed"
+            ) from error
         if isinstance(record, dict) and record.get("schema") == DECISION_SCHEMA:
             return record
+        raise ConvergenceError(
+            "latest convergence journal entry is not a convergence decision"
+        )
+    if end:
+        raise ConvergenceError(
+            "nonempty convergence journal has no complete readable decision"
+        )
     return None
 
 
 def _record_decision(
     descriptor: int, task_id: str, decision: dict[str, Any]
 ) -> dict[str, Any]:
+    durable_decision = dict(decision)
+    for key in ("failed_checks", "pending_local", "pending_external"):
+        durable_decision[key] = [
+            _digest(["check-id", value]) for value in decision.get(key, [])
+        ]
     record = {
         "schema": DECISION_SCHEMA,
         "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "task_id_hash": _digest(task_id),
-        **decision,
+        **durable_decision,
     }
     encoded = (json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n").encode(
         "utf-8"
     )
+    if len(encoded) > MAX_DECISION_BYTES:
+        raise ConvergenceError(
+            f"convergence decision exceeds the {MAX_DECISION_BYTES}-byte limit"
+        )
     remaining = memoryview(encoded)
     while remaining:
         written = os.write(descriptor, remaining)
@@ -266,14 +350,24 @@ def _record_decision(
     return record
 
 
-def _open_history(state_root: Path, task_id: str) -> int:
+def _open_history(state_root: Path, task_id: str) -> tuple[int, int]:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory = getattr(os, "O_DIRECTORY", 0)
     if not nofollow or not directory:
         raise ConvergenceError("secure convergence journals require O_NOFOLLOW")
 
     state_root.mkdir(parents=True, exist_ok=True)
-    state_descriptor = os.open(state_root, os.O_RDONLY | directory)
+    try:
+        state_descriptor = os.open(
+            state_root, os.O_RDONLY | directory | nofollow
+        )
+    except OSError as error:
+        raise ConvergenceError(
+            "convergence state root must be a non-symlink directory"
+        ) from error
+    if not stat.S_ISDIR(os.fstat(state_descriptor).st_mode):
+        os.close(state_descriptor)
+        raise ConvergenceError("convergence state root must be a directory")
     convergence_descriptor = -1
     try:
         try:
@@ -296,30 +390,58 @@ def _open_history(state_root: Path, task_id: str) -> int:
     try:
         os.fchmod(convergence_descriptor, 0o700)
         journal_name = f"{_digest(task_id)}.jsonl"
-        try:
-            descriptor = os.open(
-                journal_name,
-                os.O_RDWR | os.O_APPEND | os.O_CREAT | nofollow,
-                0o600,
-                dir_fd=convergence_descriptor,
-            )
-        except OSError as error:
-            raise ConvergenceError(
-                "convergence journal must be a non-symlink regular file"
-            ) from error
-    finally:
+        descriptor = os.open(
+            journal_name,
+            os.O_RDWR | os.O_APPEND | os.O_CREAT | nofollow,
+            0o600,
+            dir_fd=convergence_descriptor,
+        )
+    except OSError as error:
         os.close(convergence_descriptor)
-
+        raise ConvergenceError(
+            "convergence journal must be a non-symlink regular file"
+        ) from error
     if not stat.S_ISREG(os.fstat(descriptor).st_mode):
         os.close(descriptor)
+        os.close(convergence_descriptor)
         raise ConvergenceError("convergence journal must be a regular file")
     os.fchmod(descriptor, 0o600)
-    return descriptor
+    return descriptor, convergence_descriptor
+
+
+def _claim_actionable_pair(
+    directory_descriptor: int,
+    task_id: str,
+    decision: dict[str, Any],
+) -> bool:
+    marker = (
+        f"{_digest(task_id)}.{decision['source_fingerprint_hash']}."
+        f"{decision['failure_evidence_fingerprint']}.attempted"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(
+            marker, flags, 0o600, dir_fd=directory_descriptor
+        )
+    except FileExistsError:
+        metadata = os.stat(
+            marker, dir_fd=directory_descriptor, follow_symlinks=False
+        )
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ConvergenceError(
+                "convergence attempt marker must be a regular file"
+            )
+        return True
+    except OSError as error:
+        raise ConvergenceError("could not claim convergence evidence") from error
+    os.fchmod(descriptor, 0o600)
+    os.close(descriptor)
+    return False
 
 
 def checkpoint(payload: dict[str, Any], *, state_root: Path) -> dict[str, Any]:
     normalized = _normalize_checkpoint(payload)
-    lock_descriptor = _open_history(
+    lock_descriptor, directory_descriptor = _open_history(
         Path(state_root).expanduser(), normalized["task_id"]
     )
     locked = False
@@ -328,11 +450,18 @@ def checkpoint(payload: dict[str, Any], *, state_root: Path) -> dict[str, Any]:
         locked = True
         previous = _latest_record(lock_descriptor)
         decision = evaluate_checkpoint(payload, previous=previous)
+        if decision["state"] == "actionable" and _claim_actionable_pair(
+            directory_descriptor, normalized["task_id"], decision
+        ):
+            decision = evaluate_checkpoint(
+                payload, previous=previous, attempted_pair=True
+            )
         _record_decision(lock_descriptor, normalized["task_id"], decision)
     finally:
         if locked:
             fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
         os.close(lock_descriptor)
+        os.close(directory_descriptor)
     return decision
 
 

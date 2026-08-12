@@ -33,7 +33,8 @@ def checkpoint(*, source="tree-a", checks=None, review=None):
         ],
         "review": review
         or {
-            "head_sha": source,
+            "head_sha": "a" * 40,
+            "source_fingerprint": source,
             "blocking_findings": [],
             "suggestions": [],
         },
@@ -44,7 +45,8 @@ def test_complete_ignores_non_blocking_review_suggestions():
     converge = load_module()
     payload = checkpoint(
         review={
-            "head_sha": "tree-a",
+            "head_sha": "a" * 40,
+            "source_fingerprint": "tree-a",
             "blocking_findings": [],
             "suggestions": [{"fingerprint": "rename-helper"}],
         }
@@ -155,6 +157,7 @@ def test_blocking_review_finding_requires_immutable_head():
     payload = checkpoint(
         review={
             "head_sha": "",
+            "source_fingerprint": "tree-a",
             "blocking_findings": [{"fingerprint": "unsafe-cleanup"}],
             "suggestions": [],
         }
@@ -174,8 +177,10 @@ def test_checkpoint_rejects_missing_review_evidence():
     del missing_review["review"]
     missing_findings = checkpoint()
     del missing_findings["review"]["blocking_findings"]
+    mismatched_source = checkpoint()
+    mismatched_source["review"]["source_fingerprint"] = "tree-b"
 
-    for payload in (missing_review, missing_findings):
+    for payload in (missing_review, missing_findings, mismatched_source):
         try:
             converge.evaluate_checkpoint(payload)
         except converge.ConvergenceError as error:
@@ -186,7 +191,16 @@ def test_checkpoint_rejects_missing_review_evidence():
 
 def test_recorded_history_is_privacy_safe(tmp_path):
     converge = load_module()
-    payload = checkpoint()
+    payload = checkpoint(
+        checks=[
+            {
+                "id": "private-customer-check",
+                "scope": "local",
+                "status": "passed",
+                "evidence_fingerprint": "tests-green-a",
+            }
+        ]
+    )
     payload["task_id"] = "customer secret project"
 
     decision = converge.checkpoint(payload, state_root=tmp_path)
@@ -196,6 +210,7 @@ def test_recorded_history_is_privacy_safe(tmp_path):
     assert decision["state"] == "complete"
     assert len(history) == 1
     assert "customer secret project" not in rendered
+    assert "private-customer-check" not in rendered
     assert json.loads(rendered)["schema"] == "legion.convergence-decision.v1"
     assert oct(os.stat(history[0]).st_mode & 0o777) == "0o600"
 
@@ -218,3 +233,81 @@ def test_checkpoint_refuses_a_symlinked_history_file(tmp_path):
         raise AssertionError("checkpoint followed a symlinked journal")
 
     assert outside.read_text(encoding="utf-8") == "sentinel\n"
+
+
+def test_checkpoint_blocks_non_adjacent_repeated_evidence(tmp_path):
+    converge = load_module()
+
+    def failed(evidence):
+        return checkpoint(
+            checks=[
+                {
+                    "id": "tests",
+                    "scope": "local",
+                    "status": "failed",
+                    "evidence_fingerprint": evidence,
+                }
+            ]
+        )
+
+    assert converge.checkpoint(failed("failure-a"), state_root=tmp_path)["state"] == "actionable"
+    assert converge.checkpoint(failed("failure-b"), state_root=tmp_path)["state"] == "actionable"
+    repeated = converge.checkpoint(failed("failure-a"), state_root=tmp_path)
+
+    assert repeated["state"] == "blocked"
+    assert repeated["reason"] == "no_progress"
+
+
+def test_checkpoint_refuses_a_symlinked_state_root(tmp_path):
+    converge = load_module()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    state_root = tmp_path / "state"
+    state_root.symlink_to(outside, target_is_directory=True)
+
+    try:
+        converge.checkpoint(checkpoint(), state_root=state_root)
+    except converge.ConvergenceError as error:
+        assert "state root" in str(error)
+    else:
+        raise AssertionError("checkpoint followed a symlinked state root")
+
+    assert list(outside.iterdir()) == []
+
+
+def test_checkpoint_bounds_identifiers_and_corrupt_history(tmp_path):
+    converge = load_module()
+    oversized = checkpoint()
+    oversized["checks"][0]["id"] = "x" * 257
+    try:
+        converge.evaluate_checkpoint(oversized)
+    except converge.ConvergenceError as error:
+        assert "256-character limit" in str(error)
+    else:
+        raise AssertionError("checkpoint accepted an oversized check id")
+
+    convergence = tmp_path / "convergence"
+    convergence.mkdir()
+    history = convergence / f"{converge._digest('session-runtime-guard')}.jsonl"
+    history.write_text("not-json\n", encoding="utf-8")
+    try:
+        converge.checkpoint(checkpoint(), state_root=tmp_path)
+    except converge.ConvergenceError as error:
+        assert "latest convergence journal decision is malformed" in str(error)
+    else:
+        raise AssertionError("checkpoint ignored a corrupt nonempty journal")
+
+
+def test_checkpoint_rejects_a_corrupt_latest_history_entry(tmp_path):
+    converge = load_module()
+    converge.checkpoint(checkpoint(), state_root=tmp_path)
+    history = next((tmp_path / "convergence").glob("*.jsonl"))
+    with history.open("a", encoding="utf-8") as stream:
+        stream.write("{truncated\n")
+
+    try:
+        converge.checkpoint(checkpoint(), state_root=tmp_path)
+    except converge.ConvergenceError as error:
+        assert "latest convergence journal decision is malformed" in str(error)
+    else:
+        raise AssertionError("checkpoint ignored a corrupt latest journal entry")

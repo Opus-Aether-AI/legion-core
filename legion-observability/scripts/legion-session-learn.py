@@ -771,7 +771,9 @@ def _new_codex_session_metrics(info: SourceInfo) -> dict[str, Any]:
         "starts": {},
         "durations": [],
         "tool_call_count": 0,
-        "legion_run_ids": set(info.legion_run_ids),
+        "legion_run_ids": {
+            _stable_id(["legion-run", value]) for value in info.legion_run_ids
+        },
     }
 
 
@@ -782,7 +784,8 @@ def _accumulate_codex_session_metrics(
     record_type = str(obj.get("type") or "").casefold()
     payload_type = str(payload.get("type") or "").casefold()
     metrics["legion_run_ids"].update(
-        _metadata_strings(obj, "legion_run_id", "LEGION_RUN_ID")
+        _stable_id(["legion-run", value])
+        for value in _metadata_strings(obj, "legion_run_id", "LEGION_RUN_ID")
     )
     if record_type == "response_item" and payload_type in {
         "custom_tool_call",
@@ -811,10 +814,7 @@ def _finalize_codex_session_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     return {
         "longest_turn_duration_ms": max(metrics["durations"], default=0),
         "tool_call_count": metrics["tool_call_count"],
-        "legion_run_ids": sorted(
-            _stable_id(["legion-run", value])
-            for value in metrics["legion_run_ids"]
-        ),
+        "legion_run_ids": sorted(metrics["legion_run_ids"]),
     }
 
 
@@ -949,6 +949,7 @@ def scan(
             include_tool_results=include_tool_results,
             session_metrics=metrics_accumulator,
         )
+        metric_evidence: list[dict[str, Any]] = []
         while record_limit <= 0 or records_scanned < record_limit:
             try:
                 record = next(records)
@@ -973,12 +974,6 @@ def scan(
             for hit in classify_block(block, role=role):
                 rule = hit["rule"]
                 category = str(rule["category"])
-                metrics = None
-                if (
-                    category == "primary-turn-convergence"
-                    and metrics_accumulator is not None
-                ):
-                    metrics = _finalize_codex_session_metrics(metrics_accumulator)
                 group = grouped.setdefault(
                     category,
                     {
@@ -1004,7 +999,6 @@ def scan(
                     block=block,
                     home=home,
                     show_evidence=show_evidence,
-                    session_metrics=metrics,
                 )
                 if evidence["evidence_id"] in group["evidence_ids"]:
                     continue
@@ -1017,6 +1011,15 @@ def scan(
                 )
                 if len(group["evidence"]) < limit:
                     group["evidence"].append(evidence)
+                    if (
+                        category == "primary-turn-convergence"
+                        and metrics_accumulator is not None
+                    ):
+                        metric_evidence.append(evidence)
+        if metrics_accumulator is not None and metric_evidence:
+            metrics = _finalize_codex_session_metrics(metrics_accumulator)
+            for evidence in metric_evidence:
+                evidence["session_metrics"] = metrics
         if record_limit > 0 and records_scanned >= record_limit:
             record_limit_reached = True
             break

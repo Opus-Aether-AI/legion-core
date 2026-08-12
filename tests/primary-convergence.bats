@@ -26,5 +26,7 @@ setup() {
   grep -Fq 'codex_share = 0.5' "$ROOT/legion-router/config/routing.toml"
   grep -Fq 'LEGION_TARGET_CODEX_SHARE' "$ROOT/legion-router/SKILL.md"
   grep -Fq 'advisory' "$ROOT/legion-orchestrate/SKILL.md"
+  grep -Fq 'It stays advisory unless an operator explicitly runs `legion-share gate`.' "$ROOT/CONTEXT.md"
   ! grep -Eq '≥50%|codex should do \*\*≥50%' "$ROOT/legion-router/SKILL.md" "$ROOT/legion-orchestrate/SKILL.md"
+  ! grep -Eq '>=50% controller|carries at least half' "$ROOT/CONTEXT.md"
 }

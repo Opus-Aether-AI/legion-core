@@ -18,9 +18,6 @@
 set -euo pipefail
 
 _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC1091
-# shellcheck source=../../legion-router/scripts/lib/run-id.sh
-source "$_self/../../legion-router/scripts/lib/run-id.sh"
 
 resolve_legion_cmd() {
   local cmd="$1" fallback="$2"
@@ -52,6 +49,17 @@ resolve_optional_legion_cmd() {
 LEGION_DELEGATE="${LEGION_DELEGATE:-$(resolve_legion_cmd legion-delegate "$_self/../../legion-router/bin/legion-delegate")}"
 LEGION_ROUTE="${LEGION_ROUTE:-$(resolve_legion_cmd legion-route "$_self/../../legion-router/bin/legion-route")}"
 LEGION_TELEMETRY="${LEGION_TELEMETRY:-$(resolve_optional_legion_cmd legion-trace "$_self/../../legion-observability/bin/legion-trace")}"
+_run_id_lib="$_self/../../legion-router/scripts/lib/run-id.sh"
+if [[ ! -f "$_run_id_lib" ]]; then
+  _delegate_root="$(cd "$(dirname "$LEGION_DELEGATE")/.." >/dev/null 2>&1 && pwd)"
+  _run_id_lib="$_delegate_root/scripts/lib/run-id.sh"
+fi
+if [[ ! -f "$_run_id_lib" ]]; then
+  echo "legion-fanout: required run-id helper not found beside legion-delegate" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+source "$_run_id_lib"
 # The harness driving this fan-out (Claude by default) — `self` slices come back
 # for it to run inline. Harness-generic: not hardcoded to Opus.
 FANOUT_PRIMARY="$("$LEGION_ROUTE" --primary 2>/dev/null || echo primary)"

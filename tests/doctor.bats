@@ -334,6 +334,21 @@ TOML
   [ "$status" -eq 1 ]
 }
 
+@test "doctor: descriptions fail on an unquoted colon that breaks a YAML read" {
+  y="$BATS_TEST_TMPDIR/yaml"; mkdir -p "$y/p"
+  printf -- '---\nname: p\ndescription: Diagnostics: run repo-native checks.\n---\nbody\n' > "$y/p/SKILL.md"
+  LEGION_ROOT="$y" run "$DOCTOR" --only descriptions
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not valid YAML"* ]]
+}
+
+@test "doctor: descriptions pass when a colon-bearing description is quoted" {
+  q="$BATS_TEST_TMPDIR/quoted"; mkdir -p "$q/p"
+  printf -- '---\nname: p\ndescription: "Diagnostics: run repo-native checks."\n---\nbody\n' > "$q/p/SKILL.md"
+  LEGION_ROOT="$q" run "$DOCTOR" --only descriptions
+  [ "$status" -eq 0 ]; [[ "$output" == *PASS* ]]
+}
+
 @test "doctor: descriptions scans --repo even when nested under a .legion state root" {
   bad="$BATS_TEST_TMPDIR/state/.legion/bench/run/bad"; mkdir -p "$bad/p"
   printf -- '---\nname: p\ndescription: >\n  Multi-line description body.\n---\nbody\n' > "$bad/p/SKILL.md"

@@ -1,7 +1,7 @@
 ---
 name: legion-code-intel
 kind: ability
-description: Optional Legion code-intelligence diagnostics: run repo-native TypeScript/Pyright checks, filter changed-file findings, and emit metered Legion artifacts/spans.
+description: "Optional Legion code-intelligence diagnostics: run repo-native TypeScript/Pyright checks, filter changed-file findings, and emit metered Legion artifacts/spans."
 ---
 
 Use this skill when a task needs static code-intelligence signals before or after

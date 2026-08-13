@@ -1,7 +1,7 @@
 {
   "name": "legion-code-intel",
   "description": "Optional Legion code-intelligence diagnostics. Runs repo-native TypeScript and Pyright checks, filters changed-file diagnostics, emits legion.code-intel.v1 artifacts, and can append legion.span.v1 telemetry for benchmarkable pre-PR gates without making LSP servers a core dependency.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": {
     "name": "legion-core"
   },

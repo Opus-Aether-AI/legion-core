@@ -105,6 +105,42 @@ import os
 import re
 import sys
 
+try:
+    import yaml
+except ImportError:  # PyYAML is not stdlib; fall back to the scalar heuristic.
+    yaml = None
+
+
+def yaml_unsafe(block):
+    """True when the frontmatter does not survive a real YAML read.
+
+    A line-based reader accepts `description: Diagnostics: run checks` but YAML
+    reads the second ": " as a nested mapping and rejects the document, so the
+    skill silently disappears from stricter loaders. Parse with PyYAML when it
+    is installed; otherwise flag the plain-scalar sequences that cause it.
+    """
+    if yaml is not None:
+        try:
+            yaml.safe_load("\n".join(block))
+        except Exception:
+            return True
+        return False
+    for entry in block:
+        matched = re.match(r"^[A-Za-z0-9_-]+:[ \t]*(.*)$", entry)
+        if not matched:
+            continue
+        value = matched.group(1).strip()
+        if not value or re.fullmatch(r"[>|][+-]?", value):
+            continue
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            continue
+        # Only the sequences that make YAML *reject* the document, so this
+        # fallback and the PyYAML path above always agree on a given file.
+        if ": " in value or value.endswith(":"):
+            return True
+    return False
+
+
 root = os.path.abspath(sys.argv[1])
 pruned = {
     ".git", ".hg", ".svn", ".legion", ".codex-worktrees",
@@ -139,10 +175,12 @@ for current, dirs, files in os.walk(root):
     value = descriptions[0].strip() if descriptions else ""
     desc = bool(value)
     block = bool(re.fullmatch(r"[>|][+-]?", value))
+    unsafe = first and yaml_unsafe(frontmatter)
     safe = lambda text: str(text).replace("|", "/").replace("\t", " ")
     print("|".join([
         safe(path), "1" if first else "0", "1" if name else "0",
-        "1" if desc else "0", "1" if block else "0", safe(value),
+        "1" if desc else "0", "1" if block else "0",
+        "1" if unsafe else "0", safe(value),
         safe(os.path.basename(current)),
     ]))
 PY
@@ -177,9 +215,9 @@ check_plugins() {
 }
 
 check_frontmatter() {
-  local bad=0 f has_front has_name _has_desc _block _val _skill
+  local bad=0 f has_front has_name _has_desc _block _unsafe _val _skill
   build_skill_metadata "$REPO" || { fail "could not scan SKILL.md metadata (python3 unavailable or failed)"; return; }
-  while IFS='|' read -r f has_front has_name _has_desc _block _val _skill; do
+  while IFS='|' read -r f has_front has_name _has_desc _block _unsafe _val _skill; do
     if [[ "$has_front" != "1" ]]; then
       fail "SKILL.md missing frontmatter: ${f#"$REPO/"}"; bad=1; continue
     fi
@@ -215,14 +253,16 @@ check_telemetry_schema() {
   fi
 }
 
-# ── descriptions: every SKILL.md description survives a line-based read ──
+# ── descriptions: every SKILL.md description survives both reader styles ──
 # A `description: >` / `| ` block scalar collapses to just ">"/"|" under the
 # line-based frontmatter readers used by the Cursor bridge and some skill
 # loaders — blanking the description + auto-trigger. Empty descriptions fail too.
+# The reverse also breaks: an unquoted value carrying ": " reads fine
+# line-by-line but is invalid YAML, so strict loaders drop the skill entirely.
 check_descriptions() {
-  local bad=0 f _front _name has_desc block val skill rel
+  local bad=0 f _front _name has_desc block unsafe val skill rel
   build_skill_metadata "$REPO" || { fail "could not scan SKILL.md metadata (python3 unavailable or failed)"; return; }
-  while IFS='|' read -r f _front _name has_desc block val skill; do
+  while IFS='|' read -r f _front _name has_desc block unsafe val skill; do
     rel="${f#"$REPO/"}"
     if [[ "$has_desc" != "1" ]]; then
       fail "SKILL.md empty/missing description: $rel" "skill:$skill"; bad=1; continue
@@ -231,8 +271,12 @@ check_descriptions() {
       fail "SKILL.md block-scalar description ('$val') blanks line-based readers: $rel" \
         "skill:$skill"; bad=1
     fi
+    if [[ "$unsafe" == "1" ]]; then
+      fail "SKILL.md frontmatter is not valid YAML (quote values containing ': '): $rel" \
+        "skill:$skill"; bad=1
+    fi
   done < "$_SKILL_META_FILE"
-  [[ "$bad" -eq 0 ]] && pass "all SKILL.md descriptions are single-line + non-empty"
+  [[ "$bad" -eq 0 ]] && pass "all SKILL.md descriptions are single-line + non-empty + YAML-parseable"
 }
 
 # ── mcp: every declared MCP server is actually resolvable ───────────────

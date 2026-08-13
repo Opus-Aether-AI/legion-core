@@ -87,6 +87,8 @@ delegated.
    change.
 2. Skill frontmatter must contain strict `name` and `description` fields; keep
    `description` on one line (no block scalars—`legion-doctor` enforces this).
+   Frontmatter must also parse as YAML: quote any value containing `": "`, or
+   strict loaders reject the document and drop the skill entirely.
 3. Bash is the lingua franca; scripts must pass `shellcheck`.
 4. Do not commit secrets. Gitleaks gates CI; credentials belong in the
    environment or Keychain.

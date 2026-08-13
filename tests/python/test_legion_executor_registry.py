@@ -30,6 +30,25 @@ MOCK_BIN = ROOT / "tests" / "mocks" / "bin"
 ALL_HARNESSES = ("claude", "codex", "cursor", "opencode", "hermes", "pi")
 
 
+def path_without(binary: str) -> str:
+    """PATH with every directory that provides `binary` dropped.
+
+    A test that asserts an adapter refuses to run because a provider CLI is
+    missing must not inherit the host PATH: on a machine where that CLI is
+    installed the adapter proceeds and launches the real provider, which hangs
+    the whole suite instead of failing.
+    """
+    kept = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = os.path.join(entry, binary)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            continue
+        kept.append(entry)
+    return os.pathsep.join(kept)
+
+
 def test_loads_router_supported_top_level_registry(tmp_path):
     path = tmp_path / "executors.toml"
     path.write_text(
@@ -333,7 +352,7 @@ def test_symmetric_adapter_requires_a_concrete_provider_binary_before_any_worktr
             "--task", "bounded fixture task", "--repo", str(repo), "--quiet",
         ],
         env={
-            "PATH": os.environ["PATH"],
+            "PATH": path_without("pi"),
             "HOME": str(tmp_path / "home"),
             "LEGION_EXECUTORS_FILE": str(FIXTURES / "executors.toml"),
             "LEGION_STATE_ROOT": str(tmp_path / "state"),
@@ -342,6 +361,9 @@ def test_symmetric_adapter_requires_a_concrete_provider_binary_before_any_worktr
         capture_output=True,
         text=True,
         cwd=repo,
+        # A regression here launches the real provider; fail fast rather than
+        # letting the suite hang indefinitely waiting on it.
+        timeout=120,
     )
 
     assert result.returncode != 0

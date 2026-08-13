@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic repeated gates, legion-self-learn evidence/proposals, review-only legion-improve draft PRs, legion-trace, legion-otel-export, and legion-doctor verification.",
-      "version": "0.2.19",
+      "version": "0.2.20",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -219,7 +219,7 @@
       "name": "legion-code-intel",
       "source": "./legion-code-intel",
       "description": "Optional Legion code-intelligence diagnostics. Runs repo-native TypeScript and Pyright checks, filters changed-file diagnostics, emits legion.code-intel.v1 artifacts, and can append legion.span.v1 telemetry for benchmarkable pre-PR gates without making LSP servers a core dependency.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "category": "code-quality",
       "keywords": [
         "code-intelligence",

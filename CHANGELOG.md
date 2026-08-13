@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.0...v0.23.1) (2026-08-13)
+
+
+### Fixed
+
+* **observability:** reject SKILL.md frontmatter that is not valid YAML ([#139](https://github.com/Opus-Aether-AI/legion-core/issues/139)) ([5f20671](https://github.com/Opus-Aether-AI/legion-core/commit/5f2067113e311036cda87effbc55c0d7964231e3))
+
 ## [0.23.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.22.2...v0.23.0) (2026-08-12)
 
 

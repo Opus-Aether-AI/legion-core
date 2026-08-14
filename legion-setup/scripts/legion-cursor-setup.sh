@@ -171,6 +171,11 @@ cmd_agents() {
     record_setup_failure "Cursor agent bridge failed." "$out"
     return 1
   fi
+  if [[ "$(jq -r '.skipped // ""' <<<"$out")" == "empty-resolve-would-clobber" ]]; then
+    yellow "Kept $(jq -r '.existing' <<<"$out") existing Cursor agents — marketplace root '$MARKETPLACE_ROOT' resolved no agents or commands."
+    yellow "Point MARKETPLACE_ROOT at the marketplace that owns them, e.g. MARKETPLACE_ROOT=<root> legion-cursor-setup agents"
+    return 0
+  fi
   count="$(jq -r '.count' <<<"$out")"
   pruned="$(jq -r '.pruned' <<<"$out")"
   agents="$(jq -r '.agents | length' <<<"$out")"
@@ -209,7 +214,7 @@ cmd_verify() {
   if [[ -f "$CURSOR_AGENTS/legion-skill-runner.md" && "$bridged" -gt 0 ]]; then
     dim "  ok $((bridged + 1)) Legion Cursor agents at $CURSOR_AGENTS"
   else
-    yellow "  no Legion Cursor agents - run: legion-cursor-setup agents"; ok=1
+    yellow "  no Legion Cursor agents - run: MARKETPLACE_ROOT=<marketplace owning your agents> legion-cursor-setup agents"; ok=1
   fi
 
   local skills

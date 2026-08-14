@@ -652,6 +652,11 @@ setup_cursor_agents() {
         fi
         return 0
     fi
+    if [ "$(echo "$out" | jq -r '.skipped // ""')" = "empty-resolve-would-clobber" ]; then
+        yellow "  · kept $(echo "$out" | jq -r '.existing') existing Cursor agents — this marketplace resolved none"
+        dim "    re-bridge the marketplace that owns them: MARKETPLACE_ROOT=<root> legion-cursor-setup agents"
+        return 0
+    fi
     count="$(echo "$out" | jq -r '.count')"
     green "  ✔ bridged $count Cursor agents/commands/skill-loader into $cursor_agents/"
 }

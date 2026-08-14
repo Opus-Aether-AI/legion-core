@@ -74,6 +74,24 @@ def _write_agent(out_dir: str, name: str, description: str, body: str) -> None:
         handle.write(frontmatter + body.lstrip("\n"))
 
 
+def _generated_count(out_dir: str) -> int:
+    """Count the bridge-generated agent files already present in out_dir."""
+    if not os.path.isdir(out_dir):
+        return 0
+    total = 0
+    for entry in os.listdir(out_dir):
+        if not entry.endswith(".md"):
+            continue
+        stem = entry[:-3]
+        if (
+            stem.startswith(_AGENT_PREFIX)
+            or stem.startswith(_CMD_PREFIX)
+            or stem == _SKILL_RUNNER
+        ):
+            total += 1
+    return total
+
+
 def _prune_generated(out_dir: str) -> int:
     if not os.path.isdir(out_dir):
         return 0
@@ -209,6 +227,30 @@ def bridge(
             "[Legion skills] Load and apply mirrored Legion/Claude/Codex skills from ~/.agents/skills.",
             _skill_runner_body(skills_dir),
         )
+        # A root that resolves to no agents and no commands yields only the skill
+        # runner, which silently destroys every agent a populated bridge had.
+        # Generation already stages off to the side so malformed sources cannot
+        # clobber the last known-good bridge; treat an accidental empty resolve
+        # the same way. An explicit plugin selection is *not* accidental — an
+        # empty profile means "bridge nothing" and must still prune — so this
+        # only guards the unscoped case, where empty means the root is wrong.
+        if (
+            plugin_names is None
+            and not agents
+            and not commands
+            and _generated_count(out_dir) > 1
+        ):
+            return {
+                "pruned": 0,
+                "agents": [],
+                "commands": [],
+                "skill_runner": _SKILL_RUNNER,
+                "count": 0,
+                "out": out_dir,
+                "skipped": "empty-resolve-would-clobber",
+                "existing": _generated_count(out_dir),
+                "selected_plugins": sorted(plugin_names) if plugin_names is not None else None,
+            }
         pruned = _prune_generated(out_dir)
         os.makedirs(out_dir, exist_ok=True)
         for entry in os.listdir(stage):

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.1...v0.23.2) (2026-08-14)
+
+
+### Fixed
+
+* **setup:** stop an empty marketplace resolve from wiping the Cursor bridge ([#143](https://github.com/Opus-Aether-AI/legion-core/issues/143)) ([0f1e8d9](https://github.com/Opus-Aether-AI/legion-core/commit/0f1e8d98552b8f6ba9eddcfac426e81eb2269626))
+
 ## [0.23.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.0...v0.23.1) (2026-08-13)
 
 

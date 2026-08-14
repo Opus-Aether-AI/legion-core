@@ -146,6 +146,48 @@ _mkt_with_profile() {  # $1 = marketplace dir
   [ -f "$CURSOR_AGENTS/legion-cmd-existing.md" ]
 }
 
+@test "cursor bridge: a root resolving to nothing keeps the existing agents" {
+  local empty="$BATS_TEST_TMPDIR/engine-only"
+  mkdir -p "$empty" "$CURSOR_AGENTS"
+  printf '%s\n' existing > "$CURSOR_AGENTS/legion-cmd-existing.md"
+  printf '%s\n' agent > "$CURSOR_AGENTS/legion-agent-kept.md"
+
+  run python3 "$ROOT/legion-setup/scripts/legion-cursor-bridge.py" \
+    --root "$empty" --out "$CURSOR_AGENTS" --skills-dir "$AGENTS_HOME/skills"
+
+  [ "$status" -eq 0 ]
+  [[ "$(jq -r '.skipped' <<<"$output")" == "empty-resolve-would-clobber" ]]
+  [ -f "$CURSOR_AGENTS/legion-cmd-existing.md" ]
+  [ -f "$CURSOR_AGENTS/legion-agent-kept.md" ]
+}
+
+@test "cursor bridge: an empty root still seeds a bridge when none exists" {
+  local empty="$BATS_TEST_TMPDIR/engine-only-fresh"
+  mkdir -p "$empty" "$CURSOR_AGENTS"
+
+  run python3 "$ROOT/legion-setup/scripts/legion-cursor-bridge.py" \
+    --root "$empty" --out "$CURSOR_AGENTS" --skills-dir "$AGENTS_HOME/skills"
+
+  [ "$status" -eq 0 ]
+  [[ "$(jq -r '.skipped // "none"' <<<"$output")" == "none" ]]
+  [ -f "$CURSOR_AGENTS/legion-skill-runner.md" ]
+}
+
+@test "cursor bridge: a populated root still replaces an existing bridge" {
+  local mkt="$BATS_TEST_TMPDIR/mkt-replace"
+  _mkt_with_profile "$mkt"
+  mkdir -p "$CURSOR_AGENTS"
+  printf '%s\n' stale > "$CURSOR_AGENTS/legion-cmd-stale.md"
+  printf '%s\n' stale > "$CURSOR_AGENTS/legion-agent-stale.md"
+
+  run python3 "$ROOT/legion-setup/scripts/legion-cursor-bridge.py" \
+    --root "$mkt" --out "$CURSOR_AGENTS" --skills-dir "$AGENTS_HOME/skills"
+
+  [ "$status" -eq 0 ]
+  [[ "$(jq -r '.skipped // "none"' <<<"$output")" == "none" ]]
+  [ ! -e "$CURSOR_AGENTS/legion-cmd-stale.md" ]
+}
+
 @test "cursor bridge: selected profile requires a marketplace manifest" {
   local mkt="$BATS_TEST_TMPDIR/missing-marketplace" selected="$BATS_TEST_TMPDIR/plugins.txt"
   mkdir -p "$mkt" "$CURSOR_AGENTS"

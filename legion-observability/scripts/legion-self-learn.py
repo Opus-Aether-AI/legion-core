@@ -1024,9 +1024,27 @@ def proposal_for_outcome(outcome: dict[str, Any], catalog: dict[str, Any]) -> di
         )
     elif source == "span-status":
         kind = "run_failure_guardrail"
+        # Name the run that actually failed. Every span-status outcome otherwise
+        # renders the same sentence, so a project accumulates several hints whose
+        # text is byte-identical — they survive dedupe (identity is the outcome
+        # id, not the text) and then spend the hint budget saying nothing about
+        # the failure they came from. The legion-run branch below already carries
+        # its stage into the guidance for the same reason.
+        span_metadata = _dict(outcome.get("metadata"))
+        failed_on = ", ".join(
+            part
+            for part in (
+                _short(_text(span_metadata.get("archetype")), 40),
+                _short(_text(span_metadata.get("executor")), 40),
+                _short(_text(span_metadata.get("model")), 40),
+            )
+            if part
+        )
+        context = f" (observed on {failed_on})" if failed_on else ""
         suggested = (
-            "Teach the target harness entity to detect this failure mode early, emit a "
-            "clearer artifact, or route to a stronger validator before returning."
+            f"Teach the target harness entity to detect this run failure{context} "
+            "early: emit a clearer artifact, or route to a stronger validator "
+            "before returning."
         )
         validation = "Run legion-doctor, legion-eval, and a targeted delegated smoke run."
     elif source.startswith("legion-run:"):

@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic repeated gates, legion-self-learn evidence/proposals, review-only legion-improve draft PRs, legion-trace, legion-otel-export, and legion-doctor verification.",
-      "version": "0.2.20",
+      "version": "0.2.21",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -109,7 +109,7 @@
       "name": "legion-setup",
       "source": "./legion-setup",
       "description": "Install and update Legion, wire Codex/Cursor/opencode bridges, verify Pi readiness, manage Hermes's native skill-discovery link, and make Legion the repository-default workflow without replacing existing instructions. Ships `legion-setup`, `legion-init`, and native harness setup commands; daily refresh/self-learning is opt-in.",
-      "version": "0.2.7",
+      "version": "0.2.8",
       "category": "productivity",
       "keywords": [
         "install",

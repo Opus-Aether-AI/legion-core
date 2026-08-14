@@ -126,6 +126,56 @@ def test_failed_span_attaches_to_narrow_command_entity(tmp_path):
     assert proposal["source_path"].endswith("feature.md")
 
 
+def test_failed_span_guidance_names_the_run_that_failed(tmp_path):
+    """Distinct run failures must not collapse to one identical sentence.
+
+    Proposal identity is the outcome id, not the guidance text, so identical
+    text survives dedupe and repeated failures spend the hint budget on
+    duplicates that say nothing about the failure they came from.
+    """
+    catalog = _catalog(tmp_path)
+
+    def _guidance(executor, model):
+        spans = [
+            {
+                "schema": "legion.span.v1",
+                "run_id": f"run-{executor}",
+                "status": "failed",
+                "executor": executor,
+                "model": model,
+                "task": "The /feature lane missed AGENTS.md release gates during planning.",
+            }
+        ]
+        outcomes = self_learn.span_outcomes(spans, catalog)
+        return self_learn.proposal_for_outcome(outcomes[0], catalog)["suggested_change"]
+
+    codex = _guidance("codex", "test-model-beta")
+    cursor = _guidance("cursor", "test-model-gamma")
+
+    assert codex != cursor
+    assert "codex" in codex
+    assert "cursor" in cursor
+
+
+def test_failed_span_guidance_survives_missing_metadata(tmp_path):
+    catalog = _catalog(tmp_path)
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "run_id": "run-bare",
+            "status": "failed",
+            "task": "The /feature lane missed AGENTS.md release gates during planning.",
+        }
+    ]
+
+    outcomes = self_learn.span_outcomes(spans, catalog)
+    proposal = self_learn.proposal_for_outcome(outcomes[0], catalog)
+
+    assert proposal["kind"] == "run_failure_guardrail"
+    assert proposal["suggested_change"].strip()
+    assert "observed on" not in proposal["suggested_change"]
+
+
 def test_failed_span_uses_explicit_target_metadata(tmp_path):
     catalog = _catalog(tmp_path)
     spans = [

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.3](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.2...v0.23.3) (2026-08-16)
+
+
+### Fixed
+
+* **learning:** repair the self-improvement loop's dead gates ([#146](https://github.com/Opus-Aether-AI/legion-core/issues/146)) ([442d512](https://github.com/Opus-Aether-AI/legion-core/commit/442d512ddb2f4928656f1ef28ff9a09185e9f533))
+
 ## [0.23.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.1...v0.23.2) (2026-08-14)
 
 

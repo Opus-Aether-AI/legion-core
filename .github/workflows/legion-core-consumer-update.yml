@@ -41,13 +41,15 @@ on:
         default: false
         type: boolean
 
+# A called workflow's permissions cannot exceed the caller's. Requesting a
+# scope no caller grants (packages: read) makes every consumer fail at startup
+# with "workflow file issue" and no job at all -- strictly worse than the E401
+# it was meant to fix. A consumer that scopes @opus-aether-ai to GitHub
+# Packages must grant packages: read in ITS OWN caller workflow; this workflow
+# forwards the token it is given and cannot widen it.
 permissions:
   contents: write
   pull-requests: write
-  # A consumer may scope @opus-aether-ai to GitHub Packages in its own .npmrc.
-  # Without this, the npx step below resolves the package against
-  # npm.pkg.github.com unauthenticated and fails with E401.
-  packages: read
 
 jobs:
   update:

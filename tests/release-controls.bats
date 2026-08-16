@@ -404,7 +404,12 @@ EOF
     # The npx validation step resolves the package before any PR is opened, so
     # a consumer whose .npmrc scopes @opus-aether-ai to GitHub Packages needs a
     # token in the environment or it 401s and no PR is ever created.
-    grep -q 'NODE_AUTH_TOKEN:' "$consumer"
+    # Job-level, not step-level: npx --package runs in two separate steps and a
+    # step-scoped token left the first one 401ing. Assert the token sits in the
+    # job env so both inherit it.
+    grep -qE '^    env:' "$consumer"
+    awk '/^    env:/,/^    steps:/' "$consumer" | grep -q 'NODE_AUTH_TOKEN:'
+    awk '/^    env:/,/^    steps:/' "$consumer" | grep -q 'GITHUB_TOKEN:'
 
     # ...but this workflow must NOT request packages: read itself. A called
     # workflow cannot exceed its caller's permissions, and every caller grants

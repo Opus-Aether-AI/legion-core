@@ -1402,8 +1402,23 @@ $run_error" ]
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '
       .status == "failed" and .reason == "invalid-verdict"
+      and .attempts == 1 and .max_attempts == 2 and .verdict == null
+    '
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
+}
+
+@test "delegate review: retries unparseable output but not a contradictory structured verdict" {
+    local repo; repo="$(make_test_repo review-unparseable)"
+
+    MOCK_CODEX_REVIEW_UNPARSEABLE=1 run "$DELEGATE" review \
+      --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "invalid-verdict"
       and .attempts == 2 and .max_attempts == 2 and .verdict == null
     '
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 2 ]
 }
 
 @test "delegate review: rejects dangerous reviewer task text before execution" {

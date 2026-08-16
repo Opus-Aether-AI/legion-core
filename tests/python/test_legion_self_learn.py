@@ -1654,6 +1654,11 @@ def test_scorecard_reports_missing_engine_evaluator_when_no_copy_exists(tmp_path
 
     assert scorecard["ok"] is False
     assert scorecard["reason"] == "missing engine legion-eval"
+    # A missing evaluator is an unmeasured run, not a measured zero. score must
+    # be None so the keep/discard gate cannot read it as "regressed to zero".
+    assert scorecard["measurement"] == "unmeasured"
+    assert scorecard["score"] is None
+    assert self_learn._scorecard_unmeasured(scorecard) is True
 
 
 def test_eval_datasets_prefer_vendored_copy_over_repo_local_copy(tmp_path):
@@ -1788,3 +1793,70 @@ def test_every_core_producer_sentence_is_accepted_on_read(tmp_path):
         "legion-fanout reported 2 failed slice(s) and 1 apply conflict(s).",
     ):
         assert self_learn._core_composed_sentence(sentence) == sentence, sentence
+
+
+def test_scorecard_reports_unmeasured_when_a_check_never_completed(tmp_path, monkeypatch):
+    """A timed-out or crashed check is infrastructure noise, not a regression.
+
+    Reporting it as a measured ok=false would be a false regression by a second
+    route -- the same failure mode the repo-scoped dataset rule prevents.
+    """
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_datasets(repo / "legion-eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+
+    real_proc_result = self_learn._proc_result
+
+    def flaky(name, argv, repo_arg, timeout=60):
+        if name == "legion-doctor":
+            return {
+                "name": name,
+                "cmd": argv,
+                "ok": False,
+                "error": "Command timed out after 60 seconds",
+                "duration_ms": 60000,
+            }
+        return real_proc_result(name, argv, repo_arg, timeout)
+
+    monkeypatch.setattr(self_learn, "_proc_result", flaky)
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["measurement"] == "unmeasured"
+    assert scorecard["score"] is None
+    assert "legion-doctor" in scorecard["reason"]
+    assert self_learn._scorecard_unmeasured(scorecard) is True
+
+
+def test_scorecard_stays_measured_when_a_check_ran_and_failed(tmp_path, monkeypatch):
+    """A check that ran and returned nonzero IS evidence -- keep it measured."""
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_datasets(repo / "legion-eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+
+    real_proc_result = self_learn._proc_result
+
+    def failing(name, argv, repo_arg, timeout=60):
+        if name == "legion-doctor":
+            return {
+                "name": name,
+                "cmd": argv,
+                "ok": False,
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "2 fail",
+                "duration_ms": 12,
+            }
+        return real_proc_result(name, argv, repo_arg, timeout)
+
+    monkeypatch.setattr(self_learn, "_proc_result", failing)
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["measurement"] == "measured"
+    assert scorecard["ok"] is False
+    assert self_learn._scorecard_unmeasured(scorecard) is False

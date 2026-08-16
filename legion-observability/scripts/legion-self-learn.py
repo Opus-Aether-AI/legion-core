@@ -841,13 +841,23 @@ def _aggregate_eval_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def empty_scorecard(repo: str, *, reason: str = "") -> dict[str, Any]:
-    return {
+def empty_scorecard(
+    repo: str, *, reason: str = "", measurement: str = ""
+) -> dict[str, Any]:
+    """Build a scorecard with no measured cases.
+
+    Pass measurement="unmeasured" when nothing could be scored at all. That
+    reports score=None rather than 0.0 on purpose: a literal 0.0 reads to the
+    keep/discard gate as "measured, and it regressed to zero", which is the
+    opposite of the truth when no measurement ever ran.
+    """
+    unmeasured = measurement == "unmeasured"
+    card: dict[str, Any] = {
         "schema": SCORECARD_SCHEMA,
         "generated_at": _iso_utc(),
         "repo": os.path.abspath(repo),
         "ok": False,
-        "score": 0.0,
+        "score": None if unmeasured else 0.0,
         "metrics": {
             "cases": 0,
             "pass": 0,
@@ -863,6 +873,9 @@ def empty_scorecard(repo: str, *, reason: str = "") -> dict[str, Any]:
         "checks": [],
         "reason": reason,
     }
+    if unmeasured:
+        card["measurement"] = "unmeasured"
+    return card
 
 
 def _engine_or_repo_path(repo: str, repo_path: str, engine_path: str) -> str:
@@ -919,7 +932,9 @@ def run_scorecard(repo: str) -> dict[str, Any]:
         "legion-doctor.sh",
     )
     if not eval_script:
-        return empty_scorecard(repo, reason="missing engine legion-eval")
+        return empty_scorecard(
+            repo, reason="missing engine legion-eval", measurement="unmeasured"
+        )
 
     checks: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
@@ -975,6 +990,25 @@ def run_scorecard(repo: str) -> dict[str, Any]:
             "metrics": metrics,
             "checks": checks,
             "reason": "no eval dataset in repo",
+        }
+    # A check that never completed -- timeout, missing interpreter, OSError --
+    # carries "error" instead of "returncode". That is an infrastructure
+    # failure, not evidence about the code being scored. Reporting it as a
+    # measured ok=false would be a false regression by a second route, exactly
+    # the failure mode the dataset fix above exists to prevent.
+    incomplete = [c for c in checks if "error" in c and "returncode" not in c]
+    if incomplete:
+        return {
+            "schema": SCORECARD_SCHEMA,
+            "generated_at": _iso_utc(),
+            "repo": repo,
+            "ok": False,
+            "measurement": "unmeasured",
+            "score": None,
+            "metrics": metrics,
+            "checks": checks,
+            "reason": "check did not complete: "
+            + ", ".join(sorted(_text(c.get("name")) for c in incomplete)),
         }
     ok = bool(summaries) and all(bool(check.get("ok")) for check in checks)
     return {

@@ -1110,7 +1110,7 @@ is_review_transient_failure() {
     "$err_file"
 }
 
-review_verdict_is_valid() {
+review_verdict_is_schema_conformant() {
   local verdict_file="$1"
   [[ -s "$verdict_file" ]] &&
     jq -e '
@@ -1128,9 +1128,16 @@ review_verdict_is_valid() {
         and ((has("line") | not) or (.line | type == "number" and floor == .))
         and ((has("detail") | not) or (.detail | type == "string"))
       )
-      and ((.verdict == "request_changes") or all(.findings[];
+    ' "$verdict_file" >/dev/null 2>&1
+}
+
+review_verdict_is_valid() {
+  local verdict_file="$1"
+  review_verdict_is_schema_conformant "$verdict_file" &&
+    jq -e '
+      (.verdict == "request_changes") or all(.findings[];
         .severity == "low"
-      ))
+      )
     ' "$verdict_file" >/dev/null 2>&1
 }
 
@@ -1262,11 +1269,12 @@ cmd_review() {
     if [[ -n "$task" ]]; then
       review_prompt="Review only the immutable diff $base_sha...$head_sha. $task"
     fi
-    # Codex can occasionally ignore --output-schema and write its prose review
-    # format. A schema-invalid clean exit is therefore retryable. Keep attempt
-    # one's prompt unchanged, but make later attempts explicitly require the
-    # machine-readable contract. base_sha and head_sha were resolved before the
-    # loop and deliberately remain the only diff identifiers used here.
+    # Codex can occasionally ignore --output-schema and write prose instead of
+    # the structured contract. Only that schema-conformance failure is
+    # retryable. Keep attempt one's prompt unchanged, but make later attempts
+    # explicitly require the machine-readable contract. base_sha and head_sha
+    # were resolved before the loop and deliberately remain the only diff
+    # identifiers used here.
     if [[ "$attempt" -gt 1 ]]; then
       local schema_retry_directive="Return ONLY a JSON object conforming exactly to the supplied output schema; do not include prose, Markdown, or code fences."
       if [[ -n "$review_prompt" ]]; then
@@ -1296,17 +1304,24 @@ cmd_review() {
         reason="missing-verdict"
         break
       fi
-      if ! review_verdict_is_valid "$attempt_verdict"; then
+      if ! review_verdict_is_schema_conformant "$attempt_verdict"; then
         python3 "$REVIEW_NORMALIZER" "$attempt_verdict" --repo "$wt" \
           >/dev/null 2>&1 || true
-        if ! review_verdict_is_valid "$attempt_verdict"; then
+        if ! review_verdict_is_schema_conformant "$attempt_verdict"; then
           if [[ "$attempt" -lt "$max_attempts" ]]; then
-            note "⚠ schema-invalid review verdict; retrying with the same immutable SHAs"
+            note "⚠ review output did not conform to the schema; retrying with the same immutable SHAs"
             continue
           fi
           reason="invalid-verdict"
           break
         fi
+      fi
+      # A structured but internally contradictory verdict is not a formatting
+      # failure. Fail closed on this attempt rather than giving an approving
+      # reviewer another chance to erase blocking findings.
+      if ! review_verdict_is_valid "$attempt_verdict"; then
+        reason="invalid-verdict"
+        break
       fi
       status="ok"
       reason="completed"

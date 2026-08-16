@@ -103,6 +103,80 @@ def _catalog(tmp_path):
     }
 
 
+def _span(run_id, ts, *, executor="codex", status="ok"):
+    return {
+        "schema": self_learn.SPAN_SCHEMA,
+        "ts": ts,
+        "run_id": run_id,
+        "executor": executor,
+        "model": "test-model",
+        "status": status,
+    }
+
+
+def _project_store(projects, project_id, repo_root, spans=(), *, repos_text=None):
+    state_root = projects / project_id
+    spans_dir = state_root / "spans"
+    spans_dir.mkdir(parents=True)
+    if repos_text is None:
+        repos_text = json.dumps({"repo_root": str(repo_root)}) + "\n"
+    (state_root / "repos.jsonl").write_text(repos_text, encoding="utf-8")
+    by_day = {}
+    for span in spans:
+        by_day.setdefault(span["ts"][:10], []).append(span)
+    for day, records in by_day.items():
+        (spans_dir / f"{day}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8",
+        )
+    return state_root
+
+
+def _aggregation_state(projects, current, repo_root):
+    return {
+        "repo": str(repo_root),
+        "source": "auto",
+        "state_root": str(current),
+        "telemetry_dir": str(current / "spans"),
+        "repository_identity": "github.com/acme/shared",
+        "repository_project_id": "shared-project",
+        "project_id": current.name,
+    }
+
+
+def _mock_repository_identities(monkeypatch, identities):
+    calls = []
+
+    def repository_identity(repo_root):
+        root = os.path.abspath(os.path.expanduser(str(repo_root)))
+        calls.append(root)
+        value = identities.get(root)
+        if isinstance(value, BaseException):
+            raise value
+        return value or root
+
+    def repository_project_id(repo_root, identity=None):
+        resolved = identity or repository_identity(repo_root)
+        if resolved == "github.com/acme/shared":
+            return "shared-project"
+        if resolved == "github.com/acme/other":
+            return "other-project"
+        return f"path-{os.path.basename(str(repo_root))}"
+
+    monkeypatch.setattr(
+        self_learn.legion_state, "repository_identity", repository_identity
+    )
+    monkeypatch.setattr(
+        self_learn.legion_state, "repository_project_id", repository_project_id
+    )
+    return calls
+
+
+def _enable_auto_span_aggregation(monkeypatch):
+    monkeypatch.delenv("LEGION_STATE_ROOT", raising=False)
+    monkeypatch.delenv("LEGION_TELEMETRY_DIR", raising=False)
+
+
 def test_failed_span_attaches_to_narrow_command_entity(tmp_path):
     catalog = _catalog(tmp_path)
     spans = [
@@ -267,6 +341,463 @@ def test_build_report_scan_all_keeps_late_manual_outcomes(tmp_path, monkeypatch)
 
     assert report["scan_scope"] == "all"
     assert report["outcomes"][0]["id"] == "late"
+
+
+def test_repository_span_stores_merge_matching_checkouts_and_report_sources(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    other_repo = tmp_path / "other-repo"
+    for repo in (install_repo, dev_repo, other_repo):
+        repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install", "2026-08-16T02:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [_span("dev", "2026-08-16T01:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "other-store",
+        other_repo,
+        [_span("other", "2026-08-16T00:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    identities = {
+        str(install_repo): "github.com/acme/shared",
+        str(dev_repo): "github.com/acme/shared",
+        str(other_repo): "github.com/acme/other",
+    }
+    calls = _mock_repository_identities(monkeypatch, identities)
+    diagnostics = {}
+
+    spans = self_learn.load_spans(
+        str(install),
+        "2026-08-16",
+        telemetry_dir=state["telemetry_dir"],
+        repo=str(install_repo),
+        state=state,
+        diagnostics=diagnostics,
+    )
+
+    assert [span["run_id"] for span in spans] == ["dev", "install"]
+    assert diagnostics["mode"] == "repository"
+    assert diagnostics["matched_stores"] == 2
+    assert diagnostics["matched_sibling_stores"] == 1
+    assert diagnostics["contributing_sibling_stores"] == 1
+    assert {store["project_id"] for store in diagnostics["stores"]} == {
+        "dev-store",
+        "install-store",
+    }
+    first_identity_calls = len(calls)
+    assert first_identity_calls == 3
+    assert (projects / self_learn.REPOSITORY_IDENTITY_CACHE_FILE).is_file()
+
+    monkeypatch.setattr(self_learn.legion_state, "resolve_state", lambda _repo: state)
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(
+        self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: []
+    )
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
+    monkeypatch.setattr(
+        self_learn,
+        "run_scorecard",
+        lambda _repo: self_learn.empty_scorecard(str(install_repo)),
+    )
+    report = self_learn.build_report(
+        str(install_repo),
+        str(install),
+        "2026-08-16",
+        telemetry_dir=state["telemetry_dir"],
+    )
+
+    assert report["spans"] == 2
+    assert report["span_sources"]["matched_stores"] == 2
+    # The unchanged identity cache avoids another Git identity lookup per store.
+    assert len(calls) == first_identity_calls
+
+
+def test_repository_span_stores_deduplicate_copied_spans(tmp_path, monkeypatch):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    install_repo.mkdir()
+    dev_repo.mkdir()
+    duplicate = _span("copied", "2026-08-16T01:00:00Z")
+    install = _project_store(
+        projects, "install-store", install_repo, [duplicate]
+    )
+    _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [duplicate, _span("dev-only", "2026-08-16T02:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(install_repo): "github.com/acme/shared",
+            str(dev_repo): "github.com/acme/shared",
+        },
+    )
+    diagnostics = {}
+
+    spans = self_learn.load_spans(
+        str(install),
+        repo=str(install_repo),
+        state=state,
+        diagnostics=diagnostics,
+    )
+
+    assert [span["run_id"] for span in spans] == ["copied", "dev-only"]
+    assert diagnostics["duplicates_removed"] == 1
+    assert sum(store["spans"] for store in diagnostics["stores"]) == 3
+    assert sum(store["unique_spans"] for store in diagnostics["stores"]) == 2
+
+
+def test_incremental_span_cursor_advances_each_store_and_discovers_new_siblings(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    late_repo = tmp_path / "late-repo"
+    for repo in (install_repo, dev_repo, late_repo):
+        repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install-first", "2026-08-16T01:00:00Z")],
+    )
+    dev = _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [_span("dev-first", "2026-08-16T02:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    identities = {
+        str(install_repo): "github.com/acme/shared",
+        str(dev_repo): "github.com/acme/shared",
+    }
+    _mock_repository_identities(monkeypatch, identities)
+
+    first, cursor = self_learn.load_spans_incremental(
+        str(install), repo=str(install_repo), state=state
+    )
+    assert [span["run_id"] for span in first] == ["install-first", "dev-first"]
+    assert len(cursor["stores"]) == 2
+    original_offsets = {
+        key: {
+            path: position["offset"]
+            for path, position in store["files"].items()
+        }
+        for key, store in cursor["stores"].items()
+    }
+
+    unchanged, cursor = self_learn.load_spans_incremental(
+        str(install), repo=str(install_repo), state=state, cursor=cursor
+    )
+    assert unchanged == []
+    assert {
+        key: {
+            path: position["offset"]
+            for path, position in store["files"].items()
+        }
+        for key, store in cursor["stores"].items()
+    } == original_offsets
+
+    install_path = install / "spans" / "2026-08-16.jsonl"
+    with install_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_span("install-new", "2026-08-16T03:00:00Z")) + "\n")
+    appended, cursor = self_learn.load_spans_incremental(
+        str(install), repo=str(install_repo), state=state, cursor=cursor
+    )
+    assert [span["run_id"] for span in appended] == ["install-new"]
+    dev_key = os.path.realpath(str(dev / "spans"))
+    assert {
+        path: position["offset"]
+        for path, position in cursor["stores"][dev_key]["files"].items()
+    } == original_offsets[dev_key]
+
+    identities[str(late_repo)] = "github.com/acme/shared"
+    _project_store(
+        projects,
+        "late-store",
+        late_repo,
+        [
+            _span("dev-first", "2026-08-16T02:00:00Z"),
+            _span("late-store-first", "2026-08-16T04:00:00Z"),
+        ],
+    )
+    diagnostics = {}
+    discovered, cursor = self_learn.load_spans_incremental(
+        str(install),
+        repo=str(install_repo),
+        state=state,
+        cursor=cursor,
+        diagnostics=diagnostics,
+    )
+
+    assert [span["run_id"] for span in discovered] == ["late-store-first"]
+    assert len(cursor["stores"]) == 3
+    assert diagnostics["matched_stores"] == 3
+    assert diagnostics["contributing_sibling_stores"] == 1
+    assert diagnostics["duplicates_removed"] == 1
+
+
+def test_old_flat_span_cursor_on_disk_migrates_without_recounting(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    logs = tmp_path / "logs"
+    spans_dir = logs / "spans"
+    repo.mkdir()
+    spans_dir.mkdir(parents=True)
+    span_path = spans_dir / "2026-08-16.jsonl"
+    span_path.write_text(
+        json.dumps(_span("already-consumed", "2026-08-16T01:00:00Z")) + "\n",
+        encoding="utf-8",
+    )
+    _records, old_cursor = self_learn._load_jsonl_paths([str(span_path)], None)
+    memory = self_learn._empty_memory()
+    memory["input_cursor"] = {
+        "schema": self_learn.INPUT_CURSOR_SCHEMA,
+        "spans": old_cursor,
+        "manual_outcomes": {},
+    }
+    self_learn._write_json(self_learn.memory_path(str(logs)), memory)
+    monkeypatch.setattr(
+        self_learn.legion_state,
+        "resolve_state",
+        lambda _repo: {
+            "source": "config",
+            "state_root": str(logs),
+            "telemetry_dir": str(spans_dir),
+        },
+    )
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(
+        self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: []
+    )
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
+    monkeypatch.setattr(
+        self_learn,
+        "run_scorecard",
+        lambda _repo: self_learn.empty_scorecard(str(repo)),
+    )
+
+    migrated = self_learn.build_report(str(repo), str(logs), scan_all=True)
+    assert migrated["spans"] == 0
+    assert migrated["input_cursor"]["spans"]["schema"] == self_learn.SPAN_CURSOR_SCHEMA
+    assert len(migrated["input_cursor"]["spans"]["stores"]) == 1
+    self_learn.apply_memory(migrated, str(logs))
+
+    with span_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_span("new", "2026-08-16T02:00:00Z")) + "\n")
+    follow_up = self_learn.build_report(str(repo), str(logs), scan_all=True)
+    assert follow_up["spans"] == 1
+
+
+def test_explicit_telemetry_or_configured_state_root_pins_one_store(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    install_repo.mkdir()
+    dev_repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install", "2026-08-16T01:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [_span("dev", "2026-08-16T02:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(install_repo): "github.com/acme/shared",
+            str(dev_repo): "github.com/acme/shared",
+        },
+    )
+    diagnostics = {}
+    override = tmp_path / "explicit-telemetry"
+    override.mkdir()
+    (override / "2026-08-16.jsonl").write_text(
+        json.dumps(_span("explicit", "2026-08-16T03:00:00Z")) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LEGION_TELEMETRY_DIR", str(override))
+
+    env_pinned = self_learn.load_spans(
+        str(install),
+        telemetry_dir=str(override),
+        repo=str(install_repo),
+        state=state,
+        diagnostics=diagnostics,
+    )
+    assert [span["run_id"] for span in env_pinned] == ["explicit"]
+    assert diagnostics["mode"] == "pinned"
+    assert diagnostics["matched_stores"] == 1
+    assert diagnostics["stores"][0]["telemetry_dir"] == str(override)
+
+    monkeypatch.delenv("LEGION_TELEMETRY_DIR")
+    configured = {**state, "source": "config"}
+    config_pinned = self_learn.load_spans(
+        str(install),
+        repo=str(install_repo),
+        state=configured,
+        diagnostics=diagnostics,
+    )
+    assert [span["run_id"] for span in config_pinned] == ["install"]
+    assert diagnostics["mode"] == "pinned"
+
+
+def test_malformed_and_unreadable_repository_stores_are_skipped(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    unreadable_repo = tmp_path / "unreadable-repo"
+    for repo in (install_repo, dev_repo, unreadable_repo):
+        repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install", "2026-08-16T01:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [_span("dev", "2026-08-16T02:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "malformed-store",
+        unreadable_repo,
+        [_span("malformed", "2026-08-16T03:00:00Z")],
+        repos_text="not json\n{\"repo_root\": 3}\n",
+    )
+    unreadable = _project_store(
+        projects,
+        "unreadable-store",
+        unreadable_repo,
+        [_span("unreadable", "2026-08-16T04:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(install_repo): "github.com/acme/shared",
+            str(dev_repo): "github.com/acme/shared",
+            str(unreadable_repo): "github.com/acme/shared",
+        },
+    )
+    blocked_path = os.path.abspath(str(unreadable / "repos.jsonl"))
+    real_open = open
+
+    def guarded_open(path, *args, **kwargs):
+        if os.path.abspath(os.fspath(path)) == blocked_path:
+            raise PermissionError(blocked_path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", guarded_open)
+    diagnostics = {}
+    spans = self_learn.load_spans(
+        str(install),
+        repo=str(install_repo),
+        state=state,
+        diagnostics=diagnostics,
+    )
+
+    assert [span["run_id"] for span in spans] == ["install", "dev"]
+    assert diagnostics["matched_stores"] == 2
+
+    # A transient read failure is not cached as an authoritative empty store.
+    monkeypatch.setattr("builtins.open", real_open)
+    retried = self_learn.load_spans(
+        str(install), repo=str(install_repo), state=state
+    )
+    assert [span["run_id"] for span in retried] == [
+        "install",
+        "dev",
+        "unreadable",
+    ]
+
+
+def test_repository_span_order_is_timestamp_then_stable_tiebreak(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    first_repo = tmp_path / "first-repo"
+    second_repo = tmp_path / "second-repo"
+    first_repo.mkdir()
+    second_repo.mkdir()
+    first = _project_store(
+        projects,
+        "z-store",
+        first_repo,
+        [
+            _span("b", "2026-08-16T02:00:00Z"),
+            _span("z", "2026-08-16T01:00:00Z"),
+        ],
+    )
+    _project_store(
+        projects,
+        "a-store",
+        second_repo,
+        [
+            _span("a", "2026-08-16T02:00:00Z"),
+            _span("a", "2026-08-16T01:00:00Z"),
+        ],
+    )
+    state = _aggregation_state(projects, first, first_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(first_repo): "github.com/acme/shared",
+            str(second_repo): "github.com/acme/shared",
+        },
+    )
+
+    spans = self_learn.load_spans(
+        str(first), repo=str(first_repo), state=state
+    )
+
+    assert [(span["ts"], span["run_id"]) for span in spans] == [
+        ("2026-08-16T01:00:00Z", "a"),
+        ("2026-08-16T01:00:00Z", "z"),
+        ("2026-08-16T02:00:00Z", "a"),
+        ("2026-08-16T02:00:00Z", "b"),
+    ]
 
 
 def test_default_cli_state_honors_resolved_telemetry_directory(

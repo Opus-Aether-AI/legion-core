@@ -865,11 +865,40 @@ def empty_scorecard(repo: str, *, reason: str = "") -> dict[str, Any]:
     }
 
 
+def _engine_or_repo_path(repo: str, repo_path: str, engine_path: str) -> str:
+    """Prefer a target-repo override, then use the running engine's copy."""
+    repo_candidate = os.path.abspath(os.path.join(repo, repo_path))
+    if os.path.isfile(repo_candidate):
+        return repo_candidate
+    engine_candidate = os.path.abspath(os.path.join(_here(), engine_path))
+    return engine_candidate if os.path.isfile(engine_candidate) else ""
+
+
 def _eval_datasets(repo: str) -> list[tuple[str, str]]:
-    eval_dir = os.path.join(repo, "legion-observability", "eval")
+    """Resolve vendored datasets first, with the engine baseline as fallback.
+
+    The standard datasets are part of legion-observability, so targets that do
+    not vendor the plugin must use the copy installed beside this script. A
+    target can nevertheless ship a same-named dataset to make its own scoring
+    contract authoritative.
+    """
     return [
-        (os.path.join(eval_dir, "skill-triggering.yaml"), "auto"),
-        (os.path.join(eval_dir, "entity-triggering.yaml"), "entity"),
+        (
+            _engine_or_repo_path(
+                repo,
+                os.path.join("legion-observability", "eval", "skill-triggering.yaml"),
+                os.path.join("..", "eval", "skill-triggering.yaml"),
+            ),
+            "auto",
+        ),
+        (
+            _engine_or_repo_path(
+                repo,
+                os.path.join("legion-observability", "eval", "entity-triggering.yaml"),
+                os.path.join("..", "eval", "entity-triggering.yaml"),
+            ),
+            "entity",
+        ),
     ]
 
 
@@ -880,15 +909,23 @@ def run_scorecard(repo: str) -> dict[str, Any]:
     autoresearch's fixed metric run: same datasets, same checks, compact metrics.
     """
     repo = os.path.abspath(repo)
-    eval_script = os.path.join(repo, "legion-observability", "scripts", "legion-eval.py")
-    doctor_script = os.path.join(repo, "legion-observability", "scripts", "legion-doctor.sh")
-    if not os.path.exists(eval_script):
-        return empty_scorecard(repo, reason="missing legion-eval")
+    eval_script = _engine_or_repo_path(
+        repo,
+        os.path.join("legion-observability", "scripts", "legion-eval.py"),
+        "legion-eval.py",
+    )
+    doctor_script = _engine_or_repo_path(
+        repo,
+        os.path.join("legion-observability", "scripts", "legion-doctor.sh"),
+        "legion-doctor.sh",
+    )
+    if not eval_script:
+        return empty_scorecard(repo, reason="missing engine legion-eval")
 
     checks: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     for dataset, scope in _eval_datasets(repo):
-        if not os.path.exists(dataset):
+        if not dataset:
             continue
         name = f"legion-eval:{os.path.basename(dataset)}"
         check = _proc_result(
@@ -916,7 +953,7 @@ def run_scorecard(repo: str) -> dict[str, Any]:
             summaries.append(summary)
         checks.append(check)
 
-    if os.path.exists(doctor_script):
+    if doctor_script:
         checks.append(_proc_result("legion-doctor", ["bash", doctor_script, "--repo", repo], repo))
 
     metrics = _aggregate_eval_summaries(summaries)

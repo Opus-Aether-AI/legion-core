@@ -107,7 +107,7 @@ def repository_identity(repo: str) -> str:
         identity = _normalize_remote(result.stdout) if result.returncode == 0 else ""
         if identity:
             return identity
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         pass
     return repo_abs
 
@@ -116,6 +116,45 @@ def project_id(repo: str) -> str:
     repo_abs = os.path.abspath(os.path.expanduser(repo))
     digest = hashlib.sha256(repo_abs.encode("utf-8")).hexdigest()[:12]
     return f"{_slug(os.path.basename(repo_abs))}-{digest}"
+
+
+def _linked_worktree_main(repo: str) -> str | None:
+    """Return the owning checkout for a linked Git worktree, if detectable.
+
+    State resolution is on every Legion command's hot path, so Git discovery is
+    deliberately best-effort. Unsupported Git versions, unreadable repositories,
+    malformed output, timeouts, and non-Git directories all preserve the legacy
+    path-keyed behavior.
+    """
+    repo_abs = os.path.abspath(os.path.expanduser(repo))
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                repo_abs,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+                "--git-common-dir",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+
+    if result.returncode != 0 or not isinstance(result.stdout, str):
+        return None
+    paths = result.stdout.splitlines()
+    if len(paths) != 2 or not all(os.path.isabs(path) for path in paths):
+        return None
+    git_dir, common_dir = (os.path.normpath(path) for path in paths)
+    if git_dir == common_dir:
+        return None
+    return os.path.dirname(common_dir)
 
 
 def repository_project_id(repo: str, identity: str | None = None) -> str:
@@ -199,7 +238,10 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
     env = dict(os.environ if env is None else env)
     repo_abs = _abs(repo or os.getcwd())
     identity = repository_identity(repo_abs)
-    path_project_id = project_id(repo_abs)
+    # Linked worktrees are transient children of one physical checkout. Keep
+    # runtime state path-keyed, but key those children to their owning checkout
+    # so their spans and registries survive worktree cleanup.
+    path_project_id = project_id(_linked_worktree_main(repo_abs) or repo_abs)
     stable_repository_project_id = repository_project_id(repo_abs, identity)
     config_file = _config_path(repo_abs, env)
     config = _read_config(config_file)
@@ -261,6 +303,181 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
     }
 
 
+def _recorded_repo_paths(project_dir: str) -> list[str]:
+    """Read repository roots recorded in one project state directory."""
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and value and value not in seen:
+            seen.add(value)
+            paths.append(value)
+
+    repos_file = os.path.join(project_dir, "repos.jsonl")
+    try:
+        with open(repos_file, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    add(json.loads(line).get("repo_root"))
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+    except (OSError, UnicodeError):
+        pass
+
+    # Older and interrupted runs may have a registry record without ever
+    # appending repos.jsonl. Use that metadata only when the canonical record is
+    # absent, keeping this opt-in scan bounded on mature stores.
+    if paths:
+        return paths
+    registry_dir = os.path.join(project_dir, "registry")
+    try:
+        with os.scandir(registry_dir) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name)
+    except OSError:
+        return paths
+    for entry in entries:
+        try:
+            if not entry.is_file(follow_symlinks=False) or not entry.name.endswith(".json"):
+                continue
+            with open(entry.path, encoding="utf-8") as handle:
+                add(json.load(handle).get("repo_root"))
+        except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
+            continue
+    return paths
+
+
+def _path_exists(path: str) -> bool | None:
+    """Return None rather than misclassifying an unreadable path as missing."""
+    try:
+        os.stat(path)
+        return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+
+
+def _ephemeral_worktree_reason(path: str, *, inspect_git: bool) -> str | None:
+    normalized = path.replace("\\", "/").rstrip("/") + "/"
+    if "/.legion/worktrees/" in normalized or "/improve/worktrees/" in normalized:
+        return "ephemeral_worktree_path"
+    if inspect_git and _linked_worktree_main(path):
+        return "linked_git_worktree"
+    return None
+
+
+def _directory_size(path: str) -> int:
+    """Return the apparent size of files below path without following links."""
+    total = 0
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = os.scandir(current)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+                    else:
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    return total
+
+
+def orphaned_project_report(env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Describe orphaned/per-worktree auto state without modifying it."""
+    env = dict(os.environ if env is None else env)
+    legion_home = _abs(
+        env.get("LEGION_HOME", os.path.join(env.get("HOME", "~"), ".legion"))
+    )
+    projects_dir = os.path.join(legion_home, "projects")
+    projects: list[dict[str, Any]] = []
+    try:
+        with os.scandir(projects_dir) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name)
+    except OSError:
+        entries = []
+
+    for entry in entries:
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        repo_paths = _recorded_repo_paths(entry.path)
+        statuses = {path: _path_exists(path) for path in repo_paths}
+        missing_paths = [path for path, exists in statuses.items() if exists is False]
+        ephemeral_paths: list[str] = []
+        ephemeral_reasons: set[str] = set()
+        for path, exists in statuses.items():
+            reason = _ephemeral_worktree_reason(path, inspect_git=exists is True)
+            if reason:
+                ephemeral_paths.append(path)
+                ephemeral_reasons.add(reason)
+
+        reasons = sorted(ephemeral_reasons)
+        if statuses and all(exists is False for exists in statuses.values()):
+            reasons.insert(0, "recorded_repo_missing")
+        if not reasons:
+            continue
+
+        projects.append(
+            {
+                "project_id": entry.name,
+                "path": entry.path,
+                "recorded_repo_paths": repo_paths,
+                "missing_repo_paths": missing_paths,
+                "ephemeral_repo_paths": ephemeral_paths,
+                "reasons": reasons,
+                "size_bytes": _directory_size(entry.path),
+            }
+        )
+
+    return {
+        "projects_dir": projects_dir,
+        "orphan_count": len(projects),
+        "total_size_bytes": sum(project["size_bytes"] for project in projects),
+        "projects": projects,
+        "read_only": True,
+    }
+
+
+def _human_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"  # pragma: no cover - loop always returns
+
+
+def render_orphaned_project_report(report: dict[str, Any]) -> str:
+    lines = [f"Orphaned per-worktree project state under {report['projects_dir']}:"]
+    projects = report["projects"]
+    if not projects:
+        lines.append("  none found")
+    for project in projects:
+        lines.append(
+            f"- {project['path']} ({_human_size(project['size_bytes'])}, "
+            f"{project['size_bytes']} bytes)"
+        )
+        lines.append(f"  reason: {', '.join(project['reasons'])}")
+        for repo_path in project["recorded_repo_paths"]:
+            lines.append(f"  repo: {repo_path}")
+    noun = "directory" if report["orphan_count"] == 1 else "directories"
+    lines.append(
+        f"Found {report['orphan_count']} {noun} totaling "
+        f"{_human_size(report['total_size_bytes'])} "
+        f"({report['total_size_bytes']} bytes)."
+    )
+    lines.append("Read-only report: no files were deleted, merged, or moved.")
+    return "\n".join(lines)
+
+
 def shell_exports(state: dict[str, str]) -> str:
     mapping = {
         "LEGION_STATE_ROOT": state["state_root"],
@@ -298,10 +515,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--field", default="")
     parser.add_argument("--log-root", action="store_true",
                         help="print the harness-neutral global log root and exit")
+    parser.add_argument(
+        "--report-orphans",
+        action="store_true",
+        help=(
+            "report orphaned/per-worktree state under $LEGION_HOME/projects "
+            "(default ~/.legion/projects) and its total size; never modify it"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.log_root:
         print(default_log_root())
+        return 0
+    if args.report_orphans:
+        report = orphaned_project_report()
+        print(
+            json.dumps(report, indent=2, sort_keys=True)
+            if args.json
+            else render_orphaned_project_report(report)
+        )
         return 0
 
     resolved = resolve_state(args.repo)

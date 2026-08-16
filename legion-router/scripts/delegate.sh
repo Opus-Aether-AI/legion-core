@@ -1262,6 +1262,19 @@ cmd_review() {
     if [[ -n "$task" ]]; then
       review_prompt="Review only the immutable diff $base_sha...$head_sha. $task"
     fi
+    # Codex can occasionally ignore --output-schema and write its prose review
+    # format. A schema-invalid clean exit is therefore retryable. Keep attempt
+    # one's prompt unchanged, but make later attempts explicitly require the
+    # machine-readable contract. base_sha and head_sha were resolved before the
+    # loop and deliberately remain the only diff identifiers used here.
+    if [[ "$attempt" -gt 1 ]]; then
+      local schema_retry_directive="Return ONLY a JSON object conforming exactly to the supplied output schema; do not include prose, Markdown, or code fences."
+      if [[ -n "$review_prompt" ]]; then
+        review_prompt+=" $schema_retry_directive"
+      else
+        review_prompt="$schema_retry_directive"
+      fi
+    fi
     codex_review_args+=(-m "$model" --json)
     [[ -n "$effort" ]] && codex_review_args+=(-c "model_reasoning_effort=$effort")
     if [[ -n "$review_prompt" ]]; then
@@ -1287,6 +1300,10 @@ cmd_review() {
         python3 "$REVIEW_NORMALIZER" "$attempt_verdict" --repo "$wt" \
           >/dev/null 2>&1 || true
         if ! review_verdict_is_valid "$attempt_verdict"; then
+          if [[ "$attempt" -lt "$max_attempts" ]]; then
+            note "⚠ schema-invalid review verdict; retrying with the same immutable SHAs"
+            continue
+          fi
           reason="invalid-verdict"
           break
         fi

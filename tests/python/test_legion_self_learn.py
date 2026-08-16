@@ -1586,7 +1586,12 @@ def _write_scorecard_tools(scripts, *, cases=1):
         encoding="utf-8",
     )
     doctor = scripts / "legion-doctor.sh"
-    doctor.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    doctor.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ -n \"${DOCTOR_SENTINEL:-}\" ]; then touch \"$DOCTOR_SENTINEL\"; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
     os.chmod(doctor, 0o755)
 
 
@@ -1604,6 +1609,7 @@ def test_scorecard_uses_engine_tools_for_repo_without_vendored_observability(
     repo.mkdir()
     _write_scorecard_tools(engine_scripts)
     _write_scorecard_datasets(engine_scripts.parent / "eval")
+    _write_scorecard_datasets(repo / "legion-eval")
     monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
 
     scorecard = self_learn.run_scorecard(str(repo))
@@ -1624,13 +1630,16 @@ def test_scorecard_prefers_vendored_tools_over_engine_copy(tmp_path, monkeypatch
     repo_scripts = repo / "legion-observability" / "scripts"
     _write_scorecard_tools(engine_scripts)
     _write_scorecard_tools(repo_scripts)
-    _write_scorecard_datasets(engine_scripts.parent / "eval")
+    _write_scorecard_datasets(repo / "legion-observability" / "eval")
     monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
 
     scorecard = self_learn.run_scorecard(str(repo))
 
     assert scorecard["ok"] is True
     assert scorecard["checks"][0]["cmd"][1] == str(repo_scripts / "legion-eval.py")
+    assert scorecard["checks"][0]["cmd"][5] == str(
+        repo / "legion-observability" / "eval" / "skill-triggering.yaml"
+    )
     assert scorecard["checks"][-1]["cmd"][1] == str(repo_scripts / "legion-doctor.sh")
 
 
@@ -1647,23 +1656,98 @@ def test_scorecard_reports_missing_engine_evaluator_when_no_copy_exists(tmp_path
     assert scorecard["reason"] == "missing engine legion-eval"
 
 
-def test_eval_datasets_prefer_repo_overrides_and_fall_back_to_engine(tmp_path, monkeypatch):
+def test_eval_datasets_prefer_vendored_copy_over_repo_local_copy(tmp_path):
     engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
     repo = tmp_path / "target-repo"
-    engine_eval = engine_scripts.parent / "eval"
     repo_eval = repo / "legion-observability" / "eval"
-    _write_scorecard_datasets(engine_eval)
     repo_eval.mkdir(parents=True)
     repo_skill = repo_eval / "skill-triggering.yaml"
     repo_skill.write_text("cases: []\n", encoding="utf-8")
-    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+    local_entity = repo / "legion-eval" / "entity-triggering.yaml"
+    local_entity.parent.mkdir(parents=True)
+    local_entity.write_text("cases: []\n", encoding="utf-8")
+    _write_scorecard_datasets(engine_scripts.parent / "eval")
 
     datasets = self_learn._eval_datasets(str(repo))
 
     assert datasets == [
         (str(repo_skill), "auto"),
-        (str(engine_eval / "entity-triggering.yaml"), "entity"),
+        (str(local_entity), "entity"),
     ]
+
+
+def test_scorecard_uses_repo_local_datasets_without_vendored_plugin(tmp_path, monkeypatch):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_datasets(repo / "legion-eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["ok"] is True
+    assert scorecard["measurement"] == "measured"
+    assert [check["cmd"][5] for check in scorecard["checks"][:-1]] == [
+        str(repo / "legion-eval" / "skill-triggering.yaml"),
+        str(repo / "legion-eval" / "entity-triggering.yaml"),
+    ]
+
+
+def test_scorecard_without_repo_dataset_is_unmeasured_and_still_runs_doctor(
+    tmp_path, monkeypatch
+):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    sentinel = tmp_path / "doctor-ran"
+    repo.mkdir()
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_datasets(engine_scripts.parent / "eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+    monkeypatch.setenv("DOCTOR_SENTINEL", str(sentinel))
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["ok"] is False
+    assert scorecard["measurement"] == "unmeasured"
+    assert scorecard["reason"] == "no eval dataset in repo"
+    assert scorecard["score"] is None
+    assert scorecard["metrics"]["cases"] == 0
+    assert [check["name"] for check in scorecard["checks"]] == ["legion-doctor"]
+    assert sentinel.exists()
+
+
+def test_unmeasured_scorecard_is_not_ledgered_as_a_zero_baseline(tmp_path, monkeypatch):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    logs = str(tmp_path / "logs")
+    repo.mkdir()
+    _write_scorecard_tools(engine_scripts)
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    self_learn.append_experiment_log(
+        {
+            "repo": str(repo),
+            "day": "2026-08-16",
+            "spans": 0,
+            "outcomes": [],
+            "proposals": [],
+            "scorecard": scorecard,
+        },
+        logs,
+    )
+
+    log = open(self_learn.experiments_path(logs), encoding="utf-8").read()
+    row = (
+        open(self_learn.experiment_ledger_path(logs), encoding="utf-8")
+        .readlines()[1]
+        .rstrip("\n")
+        .split("\t")
+    )
+    assert "Baseline score: unmeasured (no eval dataset in repo; doctor=ok)" in log
+    assert row[8:14] == ["", "", "", "", "", ""]
+    assert row[15] == ""
+    assert row[18] == "unmeasured"
 
 
 def test_forged_first_party_marker_gains_nothing(tmp_path):

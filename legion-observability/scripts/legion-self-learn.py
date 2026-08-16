@@ -875,31 +875,30 @@ def _engine_or_repo_path(repo: str, repo_path: str, engine_path: str) -> str:
 
 
 def _eval_datasets(repo: str) -> list[tuple[str, str]]:
-    """Resolve vendored datasets first, with the engine baseline as fallback.
+    """Resolve only the scored repo's datasets, preferring its vendored copy.
 
-    The standard datasets are part of legion-observability, so targets that do
-    not vendor the plugin must use the copy installed beside this script. A
-    target can nevertheless ship a same-named dataset to make its own scoring
-    contract authoritative.
+    Eval cases describe the target's skill surface.  The engine's calibrated
+    legion-core cases are therefore not a valid fallback for a consumer repo:
+    they can turn an absent measurement into a fabricated regression.
     """
-    return [
-        (
-            _engine_or_repo_path(
-                repo,
-                os.path.join("legion-observability", "eval", "skill-triggering.yaml"),
-                os.path.join("..", "eval", "skill-triggering.yaml"),
-            ),
-            "auto",
-        ),
-        (
-            _engine_or_repo_path(
-                repo,
-                os.path.join("legion-observability", "eval", "entity-triggering.yaml"),
-                os.path.join("..", "eval", "entity-triggering.yaml"),
-            ),
-            "entity",
-        ),
-    ]
+    datasets: list[tuple[str, str]] = []
+    for name, scope in (
+        ("skill-triggering.yaml", "auto"),
+        ("entity-triggering.yaml", "entity"),
+    ):
+        # `legion-eval/`, not `.legion/eval/`: `.legion/` is Legion's runtime
+        # directory for runs and worktrees and is conventionally git-ignored, so
+        # a dataset placed there can never be committed or shipped. Scoring
+        # config is source, not runtime state.
+        for directory in (
+            os.path.join(repo, "legion-observability", "eval"),
+            os.path.join(repo, "legion-eval"),
+        ):
+            candidate = os.path.abspath(os.path.join(directory, name))
+            if os.path.isfile(candidate):
+                datasets.append((candidate, scope))
+                break
+    return datasets
 
 
 def run_scorecard(repo: str) -> dict[str, Any]:
@@ -924,9 +923,8 @@ def run_scorecard(repo: str) -> dict[str, Any]:
 
     checks: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
-    for dataset, scope in _eval_datasets(repo):
-        if not dataset:
-            continue
+    datasets = _eval_datasets(repo)
+    for dataset, scope in datasets:
         name = f"legion-eval:{os.path.basename(dataset)}"
         check = _proc_result(
             name,
@@ -966,12 +964,25 @@ def run_scorecard(repo: str) -> dict[str, Any]:
             "duration_ms": sum(int(check.get("duration_ms") or 0) for check in checks),
         }
     )
+    if not datasets:
+        return {
+            "schema": SCORECARD_SCHEMA,
+            "generated_at": _iso_utc(),
+            "repo": repo,
+            "ok": False,
+            "measurement": "unmeasured",
+            "score": None,
+            "metrics": metrics,
+            "checks": checks,
+            "reason": "no eval dataset in repo",
+        }
     ok = bool(summaries) and all(bool(check.get("ok")) for check in checks)
     return {
         "schema": SCORECARD_SCHEMA,
         "generated_at": _iso_utc(),
         "repo": repo,
         "ok": ok,
+        "measurement": "measured",
         "score": metrics["precision_at_1"] if ok else 0.0,
         "metrics": metrics,
         "checks": checks,
@@ -1910,13 +1921,20 @@ def append_experiment_log(report: dict[str, Any], log_root: str) -> None:
         scorecard = _dict(report.get("scorecard"))
         metrics = _dict(scorecard.get("metrics"))
         if scorecard:
-            handle.write(
-                "- Baseline score: "
-                f"{scorecard.get('score', 0)} "
-                f"(P@1={metrics.get('precision_at_1', 0)}, "
-                f"hit@k={metrics.get('hit_at_k', 0)}, "
-                f"doctor={'ok' if _doctor_ok(scorecard) else 'fail'})\n"
-            )
+            if _scorecard_unmeasured(scorecard):
+                handle.write(
+                    "- Baseline score: unmeasured "
+                    f"({_text(scorecard.get('reason'))}; "
+                    f"doctor={'ok' if _doctor_ok(scorecard) else 'fail'})\n"
+                )
+            else:
+                handle.write(
+                    "- Baseline score: "
+                    f"{scorecard.get('score', 0)} "
+                    f"(P@1={metrics.get('precision_at_1', 0)}, "
+                    f"hit@k={metrics.get('hit_at_k', 0)}, "
+                    f"doctor={'ok' if _doctor_ok(scorecard) else 'fail'})\n"
+                )
         top = sorted(
             _dict(report.get("by_entity")).items(),
             key=lambda item: (-item[1], item[0]),
@@ -1952,8 +1970,14 @@ def _doctor_ok(scorecard: dict[str, Any]) -> bool:
     )
 
 
+def _scorecard_unmeasured(scorecard: dict[str, Any]) -> bool:
+    return _text(scorecard.get("measurement")) == "unmeasured"
+
+
 def _ledger_score_fields(scorecard: dict[str, Any]) -> list[Any]:
     metrics = _dict(scorecard.get("metrics"))
+    if _scorecard_unmeasured(scorecard):
+        return ["", "", "", "", "", "", "1" if _doctor_ok(scorecard) else "0"]
     return [
         metrics.get("cases", 0),
         metrics.get("pass", 0),
@@ -1972,9 +1996,12 @@ def append_experiment_ledger(report: dict[str, Any], log_root: str) -> None:
     exists = os.path.exists(path)
     outcomes = len(_list(report.get("outcomes")))
     proposals = len(_list(report.get("proposals")))
-    status = "clean" if outcomes == 0 else "proposal"
+    unmeasured = _scorecard_unmeasured(_dict(report.get("scorecard")))
+    status = "unmeasured" if unmeasured else ("clean" if outcomes == 0 else "proposal")
     description = f"{outcomes} outcome(s), {proposals} proposal(s), {report.get('spans', 0)} span(s)"
     baseline = _dict(report.get("scorecard"))
+    if unmeasured:
+        description = f"unmeasured scorecard: {_text(baseline.get('reason'))}; {description}"
     rows = [[
         _text(report.get("day")) or _date_utc(),
         _git_commit(_text(report.get("repo"))),
@@ -1985,7 +2012,7 @@ def append_experiment_ledger(report: dict[str, Any], log_root: str) -> None:
         outcomes,
         proposals,
         *_ledger_score_fields(baseline),
-        baseline.get("score", 0),
+        "" if unmeasured else baseline.get("score", 0),
         "",
         0,
         status,

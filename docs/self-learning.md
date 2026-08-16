@@ -123,9 +123,26 @@ legion-improve queue --repo ~/.agents/sources/legion-core --base-ref main --mode
 The first step writes the project report under
 `<state_root>/learning/reports/` and the cross-project law store under
 `~/.legion/global/learning/`. Evidence provenance and cross-project aggregation
-use a normalized Git remote when available. Existing operational state remains
-path-keyed for upgrade compatibility; `legion-state` exposes both the legacy
-`project_id` and clone-stable `repository_project_id` identities.
+use a normalized Git remote when available. Auto-selected operational state is
+path-keyed for ordinary clones and durable developer worktrees. A registered
+Legion transient worktree at a reserved `.legion/worktrees/...` path instead
+shares its owning checkout's operational state root, so its spans, registry,
+reports, queue, and benchmark state remain with that checkout. This requires
+the owner's Git administrative entry to point back to the worktree; an
+arbitrary pathname or Git metadata claim cannot select another checkout's
+state. A durable linked worktree under a generic `improve/worktrees` directory
+remains path-keyed.
+`LEGION_STATE_ROOT` and configured roots still take precedence.
+
+`legion-state` continues to expose the path-derived `project_id` and the
+clone-stable `repository_project_id`; learning-identity semantics are unchanged.
+When a state root looks unexpectedly empty, inspect
+`legion-state --repo . --json` from both the owner and worktree, then run
+`legion-state --report-orphans`. Legacy per-worktree roots can still contain
+pre-upgrade data. Legion deliberately does not migrate their mutable memory,
+cursor, report, queue, registry, or benchmark data: the worktrees are normally
+short-lived, and `--report-orphans` is the smaller, strictly read-only way to
+surface both live legacy worktrees and removed ones.
 
 This writes under the project `state_root` reported by
 `legion-state --repo ~/.agents/sources/legion-core`:
@@ -313,7 +330,11 @@ legion-self-learn hints --repo . --entity plugin:legion-router
 Default typed project memory is keyed by the normalized repository identity,
 not the checkout path. The managed source clone, ordinary checkouts, and Legion
 worktrees therefore consume the same learned guidance. Runtime spans, run
-registries, and worktree artifacts remain checkout-local. During upgrades,
+registries, and worktree artifacts remain checkout-local except that registered
+Legion worktrees at a reserved `.legion/worktrees/` path share their owner's
+operational state root. A self-learning scan can also aggregate sibling
+checkout-local span stores with the same repository identity; it keeps an
+identity cache and an independent byte cursor for each store. During upgrades,
 typed hints from the older path-local learning directory are read as a bounded
 fallback while all new promotions are written to the shared project store.
 

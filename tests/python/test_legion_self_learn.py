@@ -3,7 +3,9 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 
 HERE = os.path.dirname(__file__)
@@ -101,6 +103,95 @@ def _catalog(tmp_path):
             },
         ]
     }
+
+
+def _span(run_id, ts, *, executor="codex", status="ok"):
+    return {
+        "schema": self_learn.SPAN_SCHEMA,
+        "ts": ts,
+        "run_id": run_id,
+        "executor": executor,
+        "model": "test-model",
+        "status": status,
+    }
+
+
+def _project_store(projects, project_id, repo_root, spans=(), *, repos_text=None):
+    state_root = projects / project_id
+    spans_dir = state_root / "spans"
+    spans_dir.mkdir(parents=True)
+    if repos_text is None:
+        repos_text = json.dumps({"repo_root": str(repo_root)}) + "\n"
+    (state_root / "repos.jsonl").write_text(repos_text, encoding="utf-8")
+    by_day = {}
+    for span in spans:
+        by_day.setdefault(span["ts"][:10], []).append(span)
+    for day, records in by_day.items():
+        (spans_dir / f"{day}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8",
+        )
+    return state_root
+
+
+def _aggregation_state(projects, current, repo_root):
+    return {
+        "repo": str(repo_root),
+        "source": "auto",
+        "state_root": str(current),
+        "telemetry_dir": str(current / "spans"),
+        "repository_identity": "github.com/acme/shared",
+        "repository_project_id": "shared-project",
+        "project_id": current.name,
+    }
+
+
+def _write_repository_remote(repo_root, identity):
+    repo_root = Path(repo_root)
+    git_dir = repo_root / ".git"
+    git_dir.mkdir(exist_ok=True)
+    (git_dir / "config").write_text(
+        '[remote "origin"]\n'
+        f"\turl = https://{identity}.git\n",
+        encoding="utf-8",
+    )
+
+
+def _mock_repository_identities(monkeypatch, identities):
+    calls = []
+
+    for repo_root, identity in identities.items():
+        if isinstance(identity, str):
+            _write_repository_remote(repo_root, identity)
+
+    def repository_identity(repo_root):
+        root = os.path.abspath(os.path.expanduser(str(repo_root)))
+        calls.append(root)
+        value = identities.get(root)
+        if isinstance(value, BaseException):
+            raise value
+        return value or root
+
+    def repository_project_id(repo_root, identity=None):
+        resolved = identity or repository_identity(repo_root)
+        if resolved == "github.com/acme/shared":
+            return "shared-project"
+        if resolved == "github.com/acme/other":
+            return "other-project"
+        return f"path-{os.path.basename(str(repo_root))}"
+
+    monkeypatch.setattr(
+        self_learn.legion_state, "repository_identity", repository_identity
+    )
+    monkeypatch.setattr(
+        self_learn.legion_state, "repository_project_id", repository_project_id
+    )
+    return calls
+
+
+def _enable_auto_span_aggregation(monkeypatch):
+    monkeypatch.delenv("LEGION_STATE_ROOT", raising=False)
+    monkeypatch.delenv("LEGION_TELEMETRY_DIR", raising=False)
 
 
 def test_failed_span_attaches_to_narrow_command_entity(tmp_path):
@@ -269,6 +360,766 @@ def test_build_report_scan_all_keeps_late_manual_outcomes(tmp_path, monkeypatch)
     assert report["outcomes"][0]["id"] == "late"
 
 
+def test_repository_span_stores_merge_matching_checkouts_and_report_sources(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    other_repo = tmp_path / "other-repo"
+    for repo in (install_repo, dev_repo, other_repo):
+        repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install", "2026-08-16T02:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [_span("dev", "2026-08-16T01:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "other-store",
+        other_repo,
+        [_span("other", "2026-08-16T00:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    identities = {
+        str(install_repo): "github.com/acme/shared",
+        str(dev_repo): "github.com/acme/shared",
+        str(other_repo): "github.com/acme/other",
+    }
+    calls = _mock_repository_identities(monkeypatch, identities)
+    diagnostics = {}
+
+    spans = self_learn.load_spans(
+        str(install),
+        "2026-08-16",
+        telemetry_dir=state["telemetry_dir"],
+        repo=str(install_repo),
+        state=state,
+        diagnostics=diagnostics,
+    )
+
+    assert [span["run_id"] for span in spans] == ["dev", "install"]
+    assert diagnostics["mode"] == "repository"
+    assert diagnostics["matched_stores"] == 2
+    assert diagnostics["matched_sibling_stores"] == 1
+    assert diagnostics["contributing_sibling_stores"] == 1
+    assert {store["project_id"] for store in diagnostics["stores"]} == {
+        "dev-store",
+        "install-store",
+    }
+    first_identity_calls = len(calls)
+    assert first_identity_calls == 0
+    assert (projects / self_learn.REPOSITORY_IDENTITY_CACHE_FILE).is_file()
+
+    monkeypatch.setattr(self_learn.legion_state, "resolve_state", lambda _repo: state)
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(
+        self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: []
+    )
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
+    monkeypatch.setattr(
+        self_learn,
+        "run_scorecard",
+        lambda _repo: self_learn.empty_scorecard(str(install_repo)),
+    )
+    report = self_learn.build_report(
+        str(install_repo),
+        str(install),
+        "2026-08-16",
+        telemetry_dir=state["telemetry_dir"],
+    )
+
+    assert report["spans"] == 2
+    assert report["span_sources"]["matched_stores"] == 2
+    # Filesystem verification keeps the unchanged cache off the Git subprocess
+    # path while still re-checking the identity represented by each entry.
+    assert len(calls) == first_identity_calls
+
+    _write_repository_remote(dev_repo, "github.com/acme/other")
+    changed = self_learn.load_spans(
+        str(install), repo=str(install_repo), state=state
+    )
+    assert [span["run_id"] for span in changed] == ["install"]
+
+
+def test_repository_span_stores_deduplicate_copied_spans(tmp_path, monkeypatch):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    install_repo.mkdir()
+    dev_repo.mkdir()
+    duplicate = _span("copied", "2026-08-16T01:00:00Z")
+    install = _project_store(
+        projects, "install-store", install_repo, [duplicate]
+    )
+    _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [duplicate, _span("dev-only", "2026-08-16T02:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(install_repo): "github.com/acme/shared",
+            str(dev_repo): "github.com/acme/shared",
+        },
+    )
+    diagnostics = {}
+
+    spans = self_learn.load_spans(
+        str(install),
+        repo=str(install_repo),
+        state=state,
+        diagnostics=diagnostics,
+    )
+
+    assert [span["run_id"] for span in spans] == ["copied", "dev-only"]
+    assert diagnostics["duplicates_removed"] == 1
+    assert sum(store["spans"] for store in diagnostics["stores"]) == 3
+    assert sum(store["unique_spans"] for store in diagnostics["stores"]) == 2
+
+
+def test_incremental_span_cursor_advances_each_store_and_discovers_new_siblings(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    late_repo = tmp_path / "late-repo"
+    for repo in (install_repo, dev_repo, late_repo):
+        repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install-first", "2026-08-16T01:00:00Z")],
+    )
+    dev = _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [_span("dev-first", "2026-08-16T02:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    identities = {
+        str(install_repo): "github.com/acme/shared",
+        str(dev_repo): "github.com/acme/shared",
+    }
+    _mock_repository_identities(monkeypatch, identities)
+
+    first, cursor = self_learn.load_spans_incremental(
+        str(install), repo=str(install_repo), state=state
+    )
+    assert [span["run_id"] for span in first] == ["install-first", "dev-first"]
+    assert len(cursor["stores"]) == 2
+    original_offsets = {
+        key: {
+            path: position["offset"]
+            for path, position in store["files"].items()
+        }
+        for key, store in cursor["stores"].items()
+    }
+
+    unchanged, cursor = self_learn.load_spans_incremental(
+        str(install), repo=str(install_repo), state=state, cursor=cursor
+    )
+    assert unchanged == []
+    assert {
+        key: {
+            path: position["offset"]
+            for path, position in store["files"].items()
+        }
+        for key, store in cursor["stores"].items()
+    } == original_offsets
+
+    install_path = install / "spans" / "2026-08-16.jsonl"
+    with install_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_span("install-new", "2026-08-16T03:00:00Z")) + "\n")
+    appended, cursor = self_learn.load_spans_incremental(
+        str(install), repo=str(install_repo), state=state, cursor=cursor
+    )
+    assert [span["run_id"] for span in appended] == ["install-new"]
+    install_key = os.path.realpath(str(install / "spans"))
+    dev_key = os.path.realpath(str(dev / "spans"))
+    appended_offsets = {
+        path: position["offset"]
+        for path, position in cursor["stores"][install_key]["files"].items()
+    }
+    assert all(
+        appended_offsets[path] > original_offsets[install_key][path]
+        for path in appended_offsets
+    )
+    assert {
+        path: position["offset"]
+        for path, position in cursor["stores"][dev_key]["files"].items()
+    } == original_offsets[dev_key]
+
+    diagnostics = {}
+    settled, cursor = self_learn.load_spans_incremental(
+        str(install),
+        repo=str(install_repo),
+        state=state,
+        cursor=cursor,
+        diagnostics=diagnostics,
+    )
+    assert settled == []
+    assert all(store["spans"] == 0 for store in diagnostics["stores"])
+    assert {
+        path: position["offset"]
+        for path, position in cursor["stores"][install_key]["files"].items()
+    } == appended_offsets
+
+    identities[str(late_repo)] = "github.com/acme/shared"
+    _write_repository_remote(late_repo, "github.com/acme/shared")
+    _project_store(
+        projects,
+        "late-store",
+        late_repo,
+        [
+            _span("dev-first", "2026-08-16T02:00:00Z"),
+            _span("late-store-first", "2026-08-16T04:00:00Z"),
+        ],
+    )
+    diagnostics = {}
+    discovered, cursor = self_learn.load_spans_incremental(
+        str(install),
+        repo=str(install_repo),
+        state=state,
+        cursor=cursor,
+        diagnostics=diagnostics,
+    )
+
+    assert [span["run_id"] for span in discovered] == ["late-store-first"]
+    assert len(cursor["stores"]) == 3
+    assert diagnostics["matched_stores"] == 3
+    assert diagnostics["contributing_sibling_stores"] == 1
+    assert diagnostics["duplicates_removed"] == 1
+
+
+def test_incremental_reset_drops_absent_store_cursor_until_store_returns(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    sibling_repo = tmp_path / "sibling-repo"
+    install_repo.mkdir()
+    sibling_repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install-old", "2026-08-16T01:00:00Z")],
+    )
+    sibling = _project_store(
+        projects,
+        "sibling-store",
+        sibling_repo,
+        [_span("sibling-history", "2026-08-16T02:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(install_repo): "github.com/acme/shared",
+            str(sibling_repo): "github.com/acme/shared",
+        },
+    )
+
+    _first, cursor = self_learn.load_spans_incremental(
+        str(install), repo=str(install_repo), state=state
+    )
+    sibling_key = os.path.realpath(str(sibling / "spans"))
+    assert sibling_key in cursor["stores"]
+
+    sibling_repos = sibling / "repos.jsonl"
+    sibling_repos.unlink()
+    (install / "spans" / "2026-08-16.jsonl").write_text(
+        json.dumps(_span("install-new", "2026-08-16T03:00:00Z")) + "\n",
+        encoding="utf-8",
+    )
+    rebuilt, cursor = self_learn.load_spans_incremental(
+        str(install), repo=str(install_repo), state=state, cursor=cursor
+    )
+
+    assert cursor["rebuilt"] is True
+    assert [span["run_id"] for span in rebuilt] == ["install-new"]
+    assert sibling_key not in cursor["stores"]
+
+    sibling_repos.write_text(
+        json.dumps({"repo_root": str(sibling_repo)}) + "\n", encoding="utf-8"
+    )
+    returned, cursor = self_learn.load_spans_incremental(
+        str(install), repo=str(install_repo), state=state, cursor=cursor
+    )
+    assert [span["run_id"] for span in returned] == ["sibling-history"]
+    assert sibling_key in cursor["stores"]
+
+
+def test_unreadable_legacy_prefix_forces_rebuild_instead_of_empty_seen_set(
+    tmp_path, monkeypatch
+):
+    logs = tmp_path / "logs"
+    spans_dir = logs / "spans"
+    spans_dir.mkdir(parents=True)
+    first_path = spans_dir / "2026-08-15.jsonl"
+    copied_path = spans_dir / "2026-08-16.jsonl"
+    copied = _span("copied", "2026-08-15T23:59:00Z")
+    first_path.write_text(json.dumps(copied) + "\n", encoding="utf-8")
+    _records, legacy_cursor = self_learn._load_jsonl_paths([str(first_path)], None)
+    copied_path.write_text(json.dumps(copied) + "\n", encoding="utf-8")
+
+    real_open = open
+    failed_once = False
+
+    def transient_open(path, *args, **kwargs):
+        nonlocal failed_once
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if (
+            not failed_once
+            and mode == "rb"
+            and os.path.abspath(os.fspath(path)) == os.path.abspath(str(first_path))
+        ):
+            failed_once = True
+            raise PermissionError(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", transient_open)
+    spans, cursor = self_learn.load_spans_incremental(
+        str(logs), cursor=legacy_cursor
+    )
+
+    assert failed_once is True
+    assert cursor["rebuilt"] is True
+    assert [span["run_id"] for span in spans] == ["copied"]
+    assert len(cursor["seen_span_ids"]) == 1
+
+
+def test_span_dedup_uses_payload_and_normalized_timestamp():
+    completed = _span("same-run", "2026-08-16T00:00:00Z", status="ok")
+    interrupted = {**completed, "status": "failed"}
+    equivalent_timestamp = {
+        **completed,
+        "ts": "2026-08-16T00:00:00+00:00",
+    }
+
+    spans, _seen, counts = self_learn._dedupe_span_batches(
+        [{}, {}],
+        [[completed, interrupted], [dict(completed), equivalent_timestamp]],
+    )
+
+    assert {span["status"] for span in spans} == {"ok", "failed"}
+    assert len(spans) == 2
+    assert sum(count["spans"] for count in counts) == 4
+    assert sum(count["unique_spans"] for count in counts) == 2
+
+
+def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
+    logs = tmp_path / "logs"
+    spans_dir = logs / "spans"
+    spans_dir.mkdir(parents=True)
+    huge = "x" * (self_learn.MAX_SPAN_TEXT_LENGTH + 100)
+    valid = {
+        **_span("valid", "2026-08-16T01:00:00Z", status="failed"),
+        "model": huge,
+        "archetype": huge,
+        "task": huge,
+        "artifacts": {"verdict": huge, "nested": {"detail": huge}},
+    }
+    malformed = [
+        {key: value for key, value in valid.items() if key != "model"},
+        {**valid, "run_id": 7},
+        {**valid, "status": "invented"},
+        {**valid, "duration_ms": -1},
+        {**valid, "artifacts": "not-an-object"},
+    ]
+    deep = (
+        '{"schema":"legion.span.v1","ts":"2026-08-16T00:00:00Z",'
+        '"run_id":"deep","executor":"codex","model":"m","status":"ok",'
+        '"artifacts":'
+        + "[" * 2000
+        + "0"
+        + "]" * 2000
+        + "}\n"
+    )
+    (spans_dir / "2026-08-16.jsonl").write_text(
+        deep
+        + "".join(json.dumps(record) + "\n" for record in [*malformed, valid]),
+        encoding="utf-8",
+    )
+
+    spans = self_learn.load_spans(str(logs))
+
+    assert [span["run_id"] for span in spans] == ["valid"]
+    assert len(spans[0]["task"]) == self_learn.MAX_SPAN_TEXT_LENGTH
+    assert len(spans[0]["model"]) == self_learn.MAX_SPAN_IDENTIFIER_LENGTH
+    assert len(spans[0]["archetype"]) == self_learn.MAX_SPAN_IDENTIFIER_LENGTH
+    assert len(spans[0]["artifacts"]["verdict"]) == self_learn.MAX_SPAN_TEXT_LENGTH
+    assert (
+        len(spans[0]["artifacts"]["nested"]["detail"])
+        == self_learn.MAX_SPAN_TEXT_LENGTH
+    )
+
+    incremental, cursor = self_learn.load_spans_incremental(str(logs))
+    assert [span["run_id"] for span in incremental] == ["valid"]
+    diagnostics = {}
+    unchanged, _cursor = self_learn.load_spans_incremental(
+        str(logs), cursor=cursor, diagnostics=diagnostics
+    )
+    assert unchanged == []
+    assert diagnostics["stores"][0]["spans"] == 0
+
+
+def test_cached_sibling_requires_recorded_checkout_to_still_exist(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    sibling_repo = tmp_path / "sibling-repo"
+    install_repo.mkdir()
+    sibling_repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install", "2026-08-16T01:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "sibling-store",
+        sibling_repo,
+        [_span("sibling", "2026-08-16T02:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(install_repo): "github.com/acme/shared",
+            str(sibling_repo): "github.com/acme/shared",
+        },
+    )
+    assert [
+        span["run_id"]
+        for span in self_learn.load_spans(
+            str(install), repo=str(install_repo), state=state
+        )
+    ] == ["install", "sibling"]
+
+    sibling_repo.rename(tmp_path / "moved-sibling-repo")
+    spans = self_learn.load_spans(
+        str(install), repo=str(install_repo), state=state
+    )
+
+    assert [span["run_id"] for span in spans] == ["install"]
+
+
+def test_repository_identity_git_probes_are_deduplicated_capped_and_diagnosed(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    repo_roots = [tmp_path / f"repo-{index}" for index in range(4)]
+    for repo_root in repo_roots:
+        repo_root.mkdir()
+    install = _project_store(
+        projects,
+        "store-0",
+        repo_roots[0],
+        [_span("install", "2026-08-16T01:00:00Z")],
+    )
+    _project_store(projects, "store-1-duplicate", repo_roots[0])
+    for index, repo_root in enumerate(repo_roots[1:], start=2):
+        _project_store(projects, f"store-{index}", repo_root)
+    state = _aggregation_state(projects, install, repo_roots[0])
+    calls = []
+
+    monkeypatch.setattr(self_learn, "MAX_REPOSITORY_GIT_PROBES", 2)
+    monkeypatch.setattr(
+        self_learn, "_filesystem_repository_identity", lambda _repo: ""
+    )
+
+    def repository_identity(repo_root):
+        calls.append(os.path.realpath(str(repo_root)))
+        return "github.com/acme/shared"
+
+    monkeypatch.setattr(
+        self_learn.legion_state, "repository_identity", repository_identity
+    )
+    monkeypatch.setattr(
+        self_learn.legion_state,
+        "repository_project_id",
+        lambda _repo, _identity=None: "shared-project",
+    )
+    diagnostics = {}
+
+    self_learn.load_spans(
+        str(install),
+        repo=str(repo_roots[0]),
+        state=state,
+        diagnostics=diagnostics,
+    )
+
+    assert len(calls) == 2
+    assert len(set(calls)) == 2
+    assert diagnostics["identity_git_probes"] == 2
+    assert diagnostics["identity_probe_capped"] is True
+    assert diagnostics["identity_probe_skipped_roots"] >= 1
+
+
+def test_old_flat_span_cursor_on_disk_migrates_without_recounting(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    logs = tmp_path / "logs"
+    spans_dir = logs / "spans"
+    repo.mkdir()
+    spans_dir.mkdir(parents=True)
+    span_path = spans_dir / "2026-08-16.jsonl"
+    span_path.write_text(
+        json.dumps(_span("already-consumed", "2026-08-16T01:00:00Z")) + "\n",
+        encoding="utf-8",
+    )
+    _records, old_cursor = self_learn._load_jsonl_paths([str(span_path)], None)
+    memory = self_learn._empty_memory()
+    memory["input_cursor"] = {
+        "schema": self_learn.INPUT_CURSOR_SCHEMA,
+        "spans": old_cursor,
+        "manual_outcomes": {},
+    }
+    self_learn._write_json(self_learn.memory_path(str(logs)), memory)
+    monkeypatch.setattr(
+        self_learn.legion_state,
+        "resolve_state",
+        lambda _repo: {
+            "source": "config",
+            "state_root": str(logs),
+            "telemetry_dir": str(spans_dir),
+        },
+    )
+    monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
+    monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
+    monkeypatch.setattr(
+        self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: []
+    )
+    monkeypatch.setattr(self_learn, "learning_law_outcomes", lambda _repo: [])
+    monkeypatch.setattr(
+        self_learn,
+        "run_scorecard",
+        lambda _repo: self_learn.empty_scorecard(str(repo)),
+    )
+
+    migrated = self_learn.build_report(str(repo), str(logs), scan_all=True)
+    assert migrated["spans"] == 0
+    assert migrated["input_cursor"]["spans"]["schema"] == self_learn.SPAN_CURSOR_SCHEMA
+    assert len(migrated["input_cursor"]["spans"]["stores"]) == 1
+    self_learn.apply_memory(migrated, str(logs))
+
+    with span_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_span("new", "2026-08-16T02:00:00Z")) + "\n")
+    follow_up = self_learn.build_report(str(repo), str(logs), scan_all=True)
+    assert follow_up["spans"] == 1
+
+
+def test_explicit_telemetry_or_configured_state_root_pins_one_store(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    install_repo.mkdir()
+    dev_repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install", "2026-08-16T01:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [_span("dev", "2026-08-16T02:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(install_repo): "github.com/acme/shared",
+            str(dev_repo): "github.com/acme/shared",
+        },
+    )
+    diagnostics = {}
+    override = tmp_path / "explicit-telemetry"
+    override.mkdir()
+    (override / "2026-08-16.jsonl").write_text(
+        json.dumps(_span("explicit", "2026-08-16T03:00:00Z")) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LEGION_TELEMETRY_DIR", str(override))
+
+    env_pinned = self_learn.load_spans(
+        str(install),
+        telemetry_dir=str(override),
+        repo=str(install_repo),
+        state=state,
+        diagnostics=diagnostics,
+    )
+    assert [span["run_id"] for span in env_pinned] == ["explicit"]
+    assert diagnostics["mode"] == "pinned"
+    assert diagnostics["matched_stores"] == 1
+    assert diagnostics["stores"][0]["telemetry_dir"] == str(override)
+
+    monkeypatch.delenv("LEGION_TELEMETRY_DIR")
+    configured = {**state, "source": "config"}
+    config_pinned = self_learn.load_spans(
+        str(install),
+        repo=str(install_repo),
+        state=configured,
+        diagnostics=diagnostics,
+    )
+    assert [span["run_id"] for span in config_pinned] == ["install"]
+    assert diagnostics["mode"] == "pinned"
+
+
+def test_malformed_and_unreadable_repository_stores_are_skipped(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    install_repo = tmp_path / "install-repo"
+    dev_repo = tmp_path / "dev-repo"
+    unreadable_repo = tmp_path / "unreadable-repo"
+    for repo in (install_repo, dev_repo, unreadable_repo):
+        repo.mkdir()
+    install = _project_store(
+        projects,
+        "install-store",
+        install_repo,
+        [_span("install", "2026-08-16T01:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "dev-store",
+        dev_repo,
+        [_span("dev", "2026-08-16T02:00:00Z")],
+    )
+    _project_store(
+        projects,
+        "malformed-store",
+        unreadable_repo,
+        [_span("malformed", "2026-08-16T03:00:00Z")],
+        repos_text="not json\n{\"repo_root\": 3}\n",
+    )
+    unreadable = _project_store(
+        projects,
+        "unreadable-store",
+        unreadable_repo,
+        [_span("unreadable", "2026-08-16T04:00:00Z")],
+    )
+    state = _aggregation_state(projects, install, install_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(install_repo): "github.com/acme/shared",
+            str(dev_repo): "github.com/acme/shared",
+            str(unreadable_repo): "github.com/acme/shared",
+        },
+    )
+    blocked_path = os.path.abspath(str(unreadable / "repos.jsonl"))
+    real_open = open
+
+    def guarded_open(path, *args, **kwargs):
+        if os.path.abspath(os.fspath(path)) == blocked_path:
+            raise PermissionError(blocked_path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", guarded_open)
+    diagnostics = {}
+    spans = self_learn.load_spans(
+        str(install),
+        repo=str(install_repo),
+        state=state,
+        diagnostics=diagnostics,
+    )
+
+    assert [span["run_id"] for span in spans] == ["install", "dev"]
+    assert diagnostics["matched_stores"] == 2
+
+    # A transient read failure is not cached as an authoritative empty store.
+    monkeypatch.setattr("builtins.open", real_open)
+    retried = self_learn.load_spans(
+        str(install), repo=str(install_repo), state=state
+    )
+    assert [span["run_id"] for span in retried] == [
+        "install",
+        "dev",
+        "unreadable",
+    ]
+
+
+def test_repository_span_order_is_timestamp_then_stable_tiebreak(
+    tmp_path, monkeypatch
+):
+    _enable_auto_span_aggregation(monkeypatch)
+    projects = tmp_path / ".legion" / "projects"
+    first_repo = tmp_path / "first-repo"
+    second_repo = tmp_path / "second-repo"
+    first_repo.mkdir()
+    second_repo.mkdir()
+    first = _project_store(
+        projects,
+        "z-store",
+        first_repo,
+        [
+            _span("b", "2026-08-16T02:00:00Z"),
+            _span("z", "2026-08-16T01:00:00Z"),
+        ],
+    )
+    _project_store(
+        projects,
+        "a-store",
+        second_repo,
+        [
+            _span("a", "2026-08-16T02:00:00Z"),
+            _span("a", "2026-08-16T01:00:00Z"),
+        ],
+    )
+    state = _aggregation_state(projects, first, first_repo)
+    _mock_repository_identities(
+        monkeypatch,
+        {
+            str(first_repo): "github.com/acme/shared",
+            str(second_repo): "github.com/acme/shared",
+        },
+    )
+
+    spans = self_learn.load_spans(
+        str(first), repo=str(first_repo), state=state
+    )
+
+    assert [(span["ts"], span["run_id"]) for span in spans] == [
+        ("2026-08-16T01:00:00Z", "a"),
+        ("2026-08-16T01:00:00Z", "z"),
+        ("2026-08-16T02:00:00Z", "a"),
+        ("2026-08-16T02:00:00Z", "b"),
+    ]
+
+
 def test_default_cli_state_honors_resolved_telemetry_directory(
     tmp_path, monkeypatch, capsys
 ):
@@ -281,6 +1132,7 @@ def test_default_cli_state_honors_resolved_telemetry_directory(
         json.dumps(
             {
                 "schema": "legion.span.v1",
+                "ts": "2026-08-07T00:00:00Z",
                 "run_id": "telemetry-run",
                 "executor": "codex",
                 "model": "test-model",
@@ -1038,7 +1890,10 @@ def test_incremental_scan_reads_only_appended_rows_and_keeps_late_records(
     span_path = spans_dir / "2026-06-19.jsonl"
     first_span = {
         "schema": self_learn.SPAN_SCHEMA,
+        "ts": "2026-06-19T00:00:00Z",
         "run_id": "first",
+        "executor": "codex",
+        "model": "test-model",
         "status": "ok",
         "target_type": "command",
         "target_name": "feature",
@@ -1091,6 +1946,8 @@ def test_incremental_scan_bootstraps_cursor_without_recounting_legacy_contrast(
         "schema": self_learn.SPAN_SCHEMA,
         "run_id": "already-counted",
         "ts": "2026-06-18T23:59:00Z",
+        "executor": "codex",
+        "model": "test-model",
         "status": "ok",
         "target_type": "command",
         "target_name": "feature",
@@ -1150,6 +2007,9 @@ def test_apply_memory_does_not_rewind_incremental_cursor_with_stale_report(
     span_path = spans_dir / "2026-06-19.jsonl"
     base = {
         "schema": self_learn.SPAN_SCHEMA,
+        "ts": "2026-06-19T00:00:00Z",
+        "executor": "codex",
+        "model": "test-model",
         "target_type": "command",
         "target_name": "feature",
     }
@@ -1577,6 +2437,231 @@ def test_scorecards_omit_unmeasured_cost_and_token_metrics():
         assert "tokens" not in scorecard["metrics"]
 
 
+def test_scorecard_v2_identifies_the_nullable_measurement_contract(tmp_path):
+    scorecard = self_learn.empty_scorecard(
+        str(tmp_path), reason="unavailable", measurement="unmeasured"
+    )
+
+    assert scorecard["schema"] == "legion.self-learning.scorecard.v2"
+    assert scorecard["measurement"] == "unmeasured"
+    assert scorecard["score"] is None
+
+
+def _write_scorecard_tools(scripts, *, cases=1):
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "legion-eval.py").write_text(
+        "import json\n"
+        f"print(json.dumps({{'summary': {{'cases': {cases}, 'pass': {cases}, "
+        f"'collision': 0, 'miss': 0, 'precision_at_1': 1.0, 'hit_at_k': 1.0}}}}))\n",
+        encoding="utf-8",
+    )
+    doctor = scripts / "legion-doctor.sh"
+    doctor.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ -n \"${DOCTOR_SENTINEL:-}\" ]; then touch \"$DOCTOR_SENTINEL\"; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    os.chmod(doctor, 0o755)
+
+
+def _write_scorecard_datasets(eval_dir):
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("skill-triggering.yaml", "entity-triggering.yaml"):
+        (eval_dir / name).write_text("cases: []\n", encoding="utf-8")
+
+
+def test_scorecard_uses_engine_tools_for_repo_without_vendored_observability(
+    tmp_path, monkeypatch
+):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    repo.mkdir()
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_datasets(engine_scripts.parent / "eval")
+    _write_scorecard_datasets(repo / "legion-eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["ok"] is True
+    assert scorecard["metrics"]["cases"] == 2
+    assert scorecard["score"] == 1.0
+    assert scorecard["checks"][0]["cmd"][1] == str(engine_scripts / "legion-eval.py")
+    assert scorecard["checks"][0]["cmd"][3] == str(repo)
+    assert scorecard["checks"][-1]["cmd"] == [
+        "bash", str(engine_scripts / "legion-doctor.sh"), "--repo", str(repo)
+    ]
+
+
+def test_scorecard_prefers_engine_tools_over_scored_repo_copy(tmp_path, monkeypatch):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    repo_scripts = repo / "legion-observability" / "scripts"
+    repo_doctor_sentinel = tmp_path / "repo-doctor-ran"
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_tools(repo_scripts, cases=99)
+    (repo_scripts / "legion-doctor.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "touch \"$REPO_DOCTOR_SENTINEL\"\n"
+        "printf '%s\\n' \"${SCORECARD_SECRET:-missing}\"\n",
+        encoding="utf-8",
+    )
+    _write_scorecard_datasets(repo / "legion-observability" / "eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+    monkeypatch.setenv("REPO_DOCTOR_SENTINEL", str(repo_doctor_sentinel))
+    monkeypatch.setenv("SCORECARD_SECRET", "must-not-be-persisted")
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["ok"] is True
+    assert scorecard["metrics"]["cases"] == 2
+    assert scorecard["checks"][0]["cmd"][1] == str(engine_scripts / "legion-eval.py")
+    assert scorecard["checks"][0]["cmd"][5] == str(
+        repo / "legion-observability" / "eval" / "skill-triggering.yaml"
+    )
+    assert scorecard["checks"][-1]["cmd"][1] == str(
+        engine_scripts / "legion-doctor.sh"
+    )
+    assert repo_doctor_sentinel.exists() is False
+    assert "must-not-be-persisted" not in json.dumps(scorecard)
+
+
+def test_scorecard_falls_back_to_repo_tools_only_when_engine_copy_is_absent(
+    tmp_path, monkeypatch
+):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    repo_scripts = repo / "legion-observability" / "scripts"
+    sentinel = tmp_path / "repo-doctor-ran"
+    engine_scripts.mkdir(parents=True)
+    _write_scorecard_tools(repo_scripts)
+    _write_scorecard_datasets(repo / "legion-observability" / "eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+    monkeypatch.setenv("DOCTOR_SENTINEL", str(sentinel))
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["ok"] is True
+    assert scorecard["checks"][0]["cmd"][1] == str(repo_scripts / "legion-eval.py")
+    assert scorecard["checks"][-1]["cmd"][1] == str(
+        repo_scripts / "legion-doctor.sh"
+    )
+    assert sentinel.exists()
+
+
+def test_scorecard_reports_missing_engine_evaluator_when_no_copy_exists(tmp_path, monkeypatch):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    engine_scripts.mkdir(parents=True)
+    repo.mkdir()
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["ok"] is False
+    assert scorecard["reason"] == "missing engine legion-eval"
+    # A missing evaluator is an unmeasured run, not a measured zero. score must
+    # be None so the keep/discard gate cannot read it as "regressed to zero".
+    assert scorecard["measurement"] == "unmeasured"
+    assert scorecard["score"] is None
+    assert self_learn._scorecard_unmeasured(scorecard) is True
+
+
+def test_eval_datasets_prefer_vendored_copy_over_repo_local_copy(tmp_path):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    repo_eval = repo / "legion-observability" / "eval"
+    repo_eval.mkdir(parents=True)
+    repo_skill = repo_eval / "skill-triggering.yaml"
+    repo_skill.write_text("cases: []\n", encoding="utf-8")
+    local_entity = repo / "legion-eval" / "entity-triggering.yaml"
+    local_entity.parent.mkdir(parents=True)
+    local_entity.write_text("cases: []\n", encoding="utf-8")
+    _write_scorecard_datasets(engine_scripts.parent / "eval")
+
+    datasets = self_learn._eval_datasets(str(repo))
+
+    assert datasets == [
+        (str(repo_skill), "auto"),
+        (str(local_entity), "entity"),
+    ]
+
+
+def test_scorecard_uses_repo_local_datasets_without_vendored_plugin(tmp_path, monkeypatch):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_datasets(repo / "legion-eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["ok"] is True
+    assert scorecard["measurement"] == "measured"
+    assert [check["cmd"][5] for check in scorecard["checks"][:-1]] == [
+        str(repo / "legion-eval" / "skill-triggering.yaml"),
+        str(repo / "legion-eval" / "entity-triggering.yaml"),
+    ]
+
+
+def test_scorecard_without_repo_dataset_is_unmeasured_and_still_runs_doctor(
+    tmp_path, monkeypatch
+):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    sentinel = tmp_path / "doctor-ran"
+    repo.mkdir()
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_datasets(engine_scripts.parent / "eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+    monkeypatch.setenv("DOCTOR_SENTINEL", str(sentinel))
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["ok"] is False
+    assert scorecard["measurement"] == "unmeasured"
+    assert scorecard["reason"] == "no eval dataset in repo"
+    assert scorecard["score"] is None
+    assert scorecard["metrics"]["cases"] == 0
+    assert [check["name"] for check in scorecard["checks"]] == ["legion-doctor"]
+    assert sentinel.exists()
+
+
+def test_unmeasured_scorecard_is_not_ledgered_as_a_zero_baseline(tmp_path, monkeypatch):
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    logs = str(tmp_path / "logs")
+    repo.mkdir()
+    _write_scorecard_tools(engine_scripts)
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    self_learn.append_experiment_log(
+        {
+            "repo": str(repo),
+            "day": "2026-08-16",
+            "spans": 0,
+            "outcomes": [],
+            "proposals": [],
+            "scorecard": scorecard,
+        },
+        logs,
+    )
+
+    log = open(self_learn.experiments_path(logs), encoding="utf-8").read()
+    row = (
+        open(self_learn.experiment_ledger_path(logs), encoding="utf-8")
+        .readlines()[1]
+        .rstrip("\n")
+        .split("\t")
+    )
+    assert "Baseline score: unmeasured (no eval dataset in repo; doctor=ok)" in log
+    assert row[8:14] == ["", "", "", "", "", ""]
+    assert row[15] == ""
+    assert row[18] == "unmeasured"
+
+
 def test_forged_first_party_marker_gains_nothing(tmp_path):
     """Asserting the trust marker over chosen text must not promote that text.
 
@@ -1615,3 +2700,83 @@ def test_every_core_producer_sentence_is_accepted_on_read(tmp_path):
         "legion-fanout reported 2 failed slice(s) and 1 apply conflict(s).",
     ):
         assert self_learn._core_composed_sentence(sentence) == sentence, sentence
+
+
+def test_scorecard_reports_unmeasured_when_a_check_never_completed(tmp_path, monkeypatch):
+    """A timed-out or crashed check is infrastructure noise, not a regression.
+
+    Reporting it as a measured ok=false would be a false regression by a second
+    route -- the same failure mode the repo-scoped dataset rule prevents.
+    """
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_datasets(repo / "legion-eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+
+    real_proc_result = self_learn._proc_result
+
+    def flaky(name, argv, repo_arg, timeout=60):
+        if name == "legion-doctor":
+            return {
+                "name": name,
+                "cmd": argv,
+                "ok": False,
+                "error": "Command timed out after 60 seconds",
+                "duration_ms": 60000,
+            }
+        return real_proc_result(name, argv, repo_arg, timeout)
+
+    monkeypatch.setattr(self_learn, "_proc_result", flaky)
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["measurement"] == "unmeasured"
+    assert scorecard["score"] is None
+    assert "legion-doctor" in scorecard["reason"]
+    assert self_learn._scorecard_unmeasured(scorecard) is True
+
+
+def test_proc_result_real_timeout_has_error_without_returncode(tmp_path):
+    result = self_learn._proc_result(
+        "slow-fixture",
+        [sys.executable, "-c", "import time; time.sleep(1)"],
+        str(tmp_path),
+        timeout=0.05,
+    )
+
+    assert result["ok"] is False
+    assert "error" in result
+    assert "returncode" not in result
+
+
+def test_scorecard_stays_measured_when_a_check_ran_and_failed(tmp_path, monkeypatch):
+    """A check that ran and returned nonzero IS evidence -- keep it measured."""
+    engine_scripts = tmp_path / "engine" / "legion-observability" / "scripts"
+    repo = tmp_path / "target-repo"
+    _write_scorecard_tools(engine_scripts)
+    _write_scorecard_datasets(repo / "legion-eval")
+    monkeypatch.setattr(self_learn, "_here", lambda: str(engine_scripts))
+
+    real_proc_result = self_learn._proc_result
+
+    def failing(name, argv, repo_arg, timeout=60):
+        if name == "legion-doctor":
+            return {
+                "name": name,
+                "cmd": argv,
+                "ok": False,
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "2 fail",
+                "duration_ms": 12,
+            }
+        return real_proc_result(name, argv, repo_arg, timeout)
+
+    monkeypatch.setattr(self_learn, "_proc_result", failing)
+
+    scorecard = self_learn.run_scorecard(str(repo))
+
+    assert scorecard["measurement"] == "measured"
+    assert scorecard["ok"] is False
+    assert self_learn._scorecard_unmeasured(scorecard) is False

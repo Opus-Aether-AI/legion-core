@@ -1110,7 +1110,7 @@ is_review_transient_failure() {
     "$err_file"
 }
 
-review_verdict_is_valid() {
+review_verdict_is_schema_conformant() {
   local verdict_file="$1"
   [[ -s "$verdict_file" ]] &&
     jq -e '
@@ -1128,9 +1128,51 @@ review_verdict_is_valid() {
         and ((has("line") | not) or (.line | type == "number" and floor == .))
         and ((has("detail") | not) or (.detail | type == "string"))
       )
-      and ((.verdict == "request_changes") or all(.findings[];
+    ' "$verdict_file" >/dev/null 2>&1
+}
+
+# Does a payload carry ANY recognizable non-approving signal, however malformed?
+#
+# The retry added for schema failures exists to recover from codex emitting prose
+# instead of the JSON contract. But schema-conformance is also false for a payload
+# that is substantively a REJECTION and merely malformed -- e.g. a request_changes
+# carrying a critical finding that simply omits `title`. Retrying that discards the
+# reviewer's rejection, and a clean `approve` on the next attempt would then be
+# accepted: a critical finding erased by a missing field.
+#
+# The invariant this restores: a negative signal, however malformed, may only ever
+# WITHHOLD permission. It must never be erased by a subsequent attempt. Read every
+# probe defensively -- the payload is by definition not trusted to be well-formed,
+# and may not even be JSON.
+review_verdict_has_negative_signal() {
+  local verdict_file="$1"
+  [[ -s "$verdict_file" ]] || return 1
+
+  # An explicit non-approving verdict field, or any blocking-severity finding.
+  # `?//empty` keeps malformed shapes from aborting the probe.
+  if jq -e '
+        (.verdict? // empty) == "request_changes"
+        or ((.findings? // empty) | if type == "array" then
+              any(.[]?; (.severity? // empty)
+                        | . == "critical" or . == "high" or . == "medium")
+            else false end)
+      ' "$verdict_file" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Codex's prose review format carries priority markers. The normalizer already
+  # refuses to turn an unfamiliar priority-bearing format into an approval; treat
+  # its presence here as a rejection signal for the same reason.
+  grep -qiE '\[P[0-3]\]' "$verdict_file" 2>/dev/null
+}
+
+review_verdict_is_valid() {
+  local verdict_file="$1"
+  review_verdict_is_schema_conformant "$verdict_file" &&
+    jq -e '
+      (.verdict == "request_changes") or all(.findings[];
         .severity == "low"
-      ))
+      )
     ' "$verdict_file" >/dev/null 2>&1
 }
 
@@ -1262,6 +1304,20 @@ cmd_review() {
     if [[ -n "$task" ]]; then
       review_prompt="Review only the immutable diff $base_sha...$head_sha. $task"
     fi
+    # Codex can occasionally ignore --output-schema and write prose instead of
+    # the structured contract. Only that schema-conformance failure is
+    # retryable. Keep attempt one's prompt unchanged, but make later attempts
+    # explicitly require the machine-readable contract. base_sha and head_sha
+    # were resolved before the loop and deliberately remain the only diff
+    # identifiers used here.
+    if [[ "$attempt" -gt 1 ]]; then
+      local schema_retry_directive="Return ONLY a JSON object conforming exactly to the supplied output schema; do not include prose, Markdown, or code fences."
+      if [[ -n "$review_prompt" ]]; then
+        review_prompt+=" $schema_retry_directive"
+      else
+        review_prompt="$schema_retry_directive"
+      fi
+    fi
     codex_review_args+=(-m "$model" --json)
     [[ -n "$effort" ]] && codex_review_args+=(-c "model_reasoning_effort=$effort")
     if [[ -n "$review_prompt" ]]; then
@@ -1283,13 +1339,32 @@ cmd_review() {
         reason="missing-verdict"
         break
       fi
-      if ! review_verdict_is_valid "$attempt_verdict"; then
+      if ! review_verdict_is_schema_conformant "$attempt_verdict"; then
         python3 "$REVIEW_NORMALIZER" "$attempt_verdict" --repo "$wt" \
           >/dev/null 2>&1 || true
-        if ! review_verdict_is_valid "$attempt_verdict"; then
+        if ! review_verdict_is_schema_conformant "$attempt_verdict"; then
+          # Only a payload with NO negative signal may be retried. A malformed
+          # rejection is still a rejection, and retrying it would let a later
+          # approval overwrite it.
+          if review_verdict_has_negative_signal "$attempt_verdict"; then
+            note "⚠ malformed verdict carries a non-approving signal; failing closed without retry"
+            reason="invalid-verdict"
+            break
+          fi
+          if [[ "$attempt" -lt "$max_attempts" ]]; then
+            note "⚠ review output did not conform to the schema; retrying with the same immutable SHAs"
+            continue
+          fi
           reason="invalid-verdict"
           break
         fi
+      fi
+      # A structured but internally contradictory verdict is not a formatting
+      # failure. Fail closed on this attempt rather than giving an approving
+      # reviewer another chance to erase blocking findings.
+      if ! review_verdict_is_valid "$attempt_verdict"; then
+        reason="invalid-verdict"
+        break
       fi
       status="ok"
       reason="completed"

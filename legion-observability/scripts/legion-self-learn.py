@@ -44,13 +44,26 @@ import legion_learning_context  # noqa: E402
 SPAN_SCHEMA = "legion.span.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
 MEMORY_SCHEMA = "legion.self-learning.memory.v1"
-SCORECARD_SCHEMA = "legion.self-learning.scorecard.v1"
+# v2 makes the unmeasured state explicit: ``measurement`` is present and
+# ``score`` may be null. Emitting that under v1 would silently break consumers
+# that correctly treated the original v1 score as numeric.
+SCORECARD_SCHEMA = "legion.self-learning.scorecard.v2"
 IMPROVEMENT_PROPOSAL_SCHEMA = "legion.improvement-proposal.v1"
 DEFAULT_LOG_ROOT = ""
 SUCCESS_STATUSES = {"ok"}
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 INPUT_CURSOR_SCHEMA = "legion.self-learning.input-cursor.v1"
+SPAN_CURSOR_SCHEMA = "legion.self-learning.span-input-cursor.v2"
+REPOSITORY_IDENTITY_CACHE_SCHEMA = "legion.repository-identity-cache.v1"
+REPOSITORY_IDENTITY_CACHE_FILE = ".repository-identities.v1.json"
 CURSOR_TAIL_BYTES = 4096
+MAX_REPOSITORY_GIT_PROBES = 64
+MAX_SPAN_TEXT_LENGTH = 4096
+MAX_SPAN_IDENTIFIER_LENGTH = 512
+MAX_SPAN_COLLECTION_ITEMS = 128
+MAX_SPAN_NESTING = 8
+SPAN_IDENTITY_VERSION = 2
+SPAN_STATUSES = {"ok", "failed", "error", "over_budget", "blocked"}
 GLOBAL_HINT_RESERVE = 100
 PROJECT_HINT_CAP = (
     legion_learning_context.MAX_HINTS
@@ -230,7 +243,7 @@ def _json_file(path: str) -> Any:
     try:
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
-    except (OSError, ValueError, TypeError):
+    except (OSError, RecursionError, ValueError, TypeError):
         return None
 
 
@@ -255,6 +268,657 @@ def _spans_dir(log_root: str, telemetry_dir: str = "") -> str:
     return os.path.abspath(os.path.expanduser(path))
 
 
+def _canonical_path(path: str) -> str:
+    try:
+        return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
+def _stat_fingerprint(path: str) -> dict[str, Any]:
+    """Return cheap cache invalidation metadata without following Git."""
+    try:
+        stat = os.stat(path)
+    except (OSError, TypeError, ValueError):
+        return {"missing": True}
+    return {
+        "device": int(stat.st_dev),
+        "inode": int(stat.st_ino),
+        "mode": int(stat.st_mode),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "ctime_ns": int(stat.st_ctime_ns),
+    }
+
+
+def _git_config_paths(repo_root: str) -> list[str]:
+    """Find config files whose changes can stale a cached remote identity."""
+    git_marker = os.path.join(repo_root, ".git")
+    try:
+        if os.path.isdir(git_marker):
+            return [
+                os.path.join(git_marker, "config"),
+                os.path.join(git_marker, "config.worktree"),
+            ]
+        if not os.path.isfile(git_marker):
+            return []
+        with open(git_marker, encoding="utf-8") as handle:
+            line = handle.readline(8192).strip()
+        if not line.lower().startswith("gitdir:"):
+            return []
+        git_dir = line.split(":", 1)[1].strip()
+        if not os.path.isabs(git_dir):
+            git_dir = os.path.join(repo_root, git_dir)
+        git_dir = os.path.normpath(git_dir)
+        common_dir = git_dir
+        common_file = os.path.join(git_dir, "commondir")
+        try:
+            with open(common_file, encoding="utf-8") as handle:
+                common_value = handle.readline(8192).strip()
+            if common_value:
+                common_dir = (
+                    common_value
+                    if os.path.isabs(common_value)
+                    else os.path.normpath(os.path.join(git_dir, common_value))
+                )
+        except (OSError, UnicodeError):
+            pass
+        return [
+            os.path.join(common_dir, "config"),
+            os.path.join(git_dir, "config.worktree"),
+        ]
+    except (OSError, UnicodeError, TypeError, ValueError):
+        return []
+
+
+def _repository_cache_fingerprint(repo_root: str) -> dict[str, Any]:
+    """Fingerprint identity inputs cheaply enough to check every cached store."""
+    paths = [repo_root, os.path.join(repo_root, ".git"), *_git_config_paths(repo_root)]
+    return {
+        path: _stat_fingerprint(path)
+        for path in sorted(set(paths))
+    }
+
+
+def _recorded_repo_roots(project_dir: str) -> list[str] | None:
+    """Read the canonical checkout records for one project store, best-effort."""
+    roots: set[str] = set()
+    try:
+        with open(os.path.join(project_dir, "repos.jsonl"), encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    root = _text(json.loads(line).get("repo_root"))
+                except (
+                    AttributeError,
+                    json.JSONDecodeError,
+                    RecursionError,
+                    TypeError,
+                ):
+                    continue
+                if root:
+                    roots.add(os.path.abspath(os.path.expanduser(root)))
+    except (OSError, UnicodeError, TypeError, ValueError):
+        return None
+    return sorted(roots)
+
+
+def _filesystem_repository_identity(repo_root: str) -> str:
+    """Resolve the common Git identity without starting a subprocess.
+
+    Normal checkouts record ``remote.origin.url`` in their common config. Git
+    includes and malformed/unreadable layouts are deliberately left to the
+    bounded Git fallback because reproducing Git's complete config precedence
+    here would create a second, less reliable parser.
+    """
+    root = os.path.abspath(os.path.expanduser(repo_root))
+    if not os.path.isdir(root):
+        return ""
+    git_marker = os.path.join(root, ".git")
+    if not os.path.lexists(git_marker):
+        return root
+    config_paths = _git_config_paths(root)
+    if not config_paths:
+        return ""
+    origin = ""
+    uncertain = False
+    for path in config_paths:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                section = ""
+                read_chars = 0
+                for raw in handle:
+                    read_chars += len(raw)
+                    if read_chars > 1_048_576:
+                        return ""
+                    line = raw.strip()
+                    if not line or line.startswith(("#", ";")):
+                        continue
+                    if line.startswith("[") and line.endswith("]"):
+                        section = " ".join(line[1:-1].lower().split())
+                        if section.startswith("include"):
+                            uncertain = True
+                        continue
+                    if section != 'remote "origin"':
+                        continue
+                    match = re.match(r"url\s*=\s*(.*)$", line, flags=re.IGNORECASE)
+                    if not match:
+                        continue
+                    value = match.group(1).strip()
+                    if (
+                        len(value) >= 2
+                        and value[0] == value[-1]
+                        and value[0] in {'"', "'"}
+                    ):
+                        value = value[1:-1]
+                    origin = value
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError, ValueError):
+            return ""
+    if origin and not uncertain:
+        try:
+            return _text(legion_state._normalize_remote(origin))
+        except (AttributeError, TypeError, ValueError):
+            return ""
+    # Absence and include precedence are harder to prove from a partial parser;
+    # leave those cases to the bounded Git path instead of guessing an identity.
+    return ""
+
+
+def _repository_entry(
+    repo_root: str, identity: str | None = None
+) -> dict[str, Any] | None:
+    repo_root = os.path.abspath(os.path.expanduser(repo_root))
+    if not os.path.isdir(repo_root):
+        return None
+    used_git_fallback = identity is None
+    try:
+        if identity is None:
+            identity = legion_state.repository_identity(repo_root)
+        project = legion_state.repository_project_id(repo_root, identity)
+    except Exception:
+        return None
+    if not _text(identity) or not _text(project):
+        return None
+    # ``repository_identity`` deliberately falls back to the absolute path on
+    # Git failures. Do not make a transient timeout permanent in this cache; a
+    # Git checkout with a path fallback is retried on the next daily scan.
+    if (
+        used_git_fallback
+        and _canonical_path(identity) == _canonical_path(repo_root)
+        and os.path.lexists(os.path.join(repo_root, ".git"))
+    ):
+        return None
+    return {
+        "repo_root": repo_root,
+        "repository_identity": identity,
+        "repository_project_id": project,
+        "identity_fingerprint": _repository_cache_fingerprint(repo_root),
+    }
+
+
+def _identity_scan_diagnostics() -> dict[str, Any]:
+    return {
+        "identity_unique_roots": 0,
+        "identity_filesystem_resolutions": 0,
+        "identity_git_probes": 0,
+        "identity_probe_limit": MAX_REPOSITORY_GIT_PROBES,
+        "identity_probe_capped": False,
+        "identity_probe_skipped_roots": 0,
+    }
+
+
+def _cached_repository_stores(
+    projects_root: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Resolve store identities with one non-authoritative, atomic cache.
+
+    ``repos.jsonl`` and the relevant Git config metadata invalidate individual
+    entries. A missing, malformed, unwritable, or stale cache merely makes this
+    scan slower; it never decides correctness on its own.
+    """
+    scan = _identity_scan_diagnostics()
+    resolved_roots: dict[str, dict[str, Any] | None] = {}
+    skipped_roots: set[str] = set()
+
+    def finish() -> None:
+        scan["identity_unique_roots"] = len(resolved_roots)
+        scan["identity_probe_skipped_roots"] = len(skipped_roots)
+        if diagnostics is not None:
+            diagnostics.clear()
+            diagnostics.update(scan)
+
+    def resolve_root(repo_root: str) -> dict[str, Any] | None:
+        canonical = _canonical_path(repo_root)
+        if not canonical:
+            return None
+        if canonical in resolved_roots:
+            return resolved_roots[canonical]
+        if not os.path.isdir(repo_root):
+            resolved_roots[canonical] = None
+            return None
+        identity = _filesystem_repository_identity(repo_root)
+        if identity:
+            scan["identity_filesystem_resolutions"] += 1
+            entry = _repository_entry(repo_root, identity)
+        elif scan["identity_git_probes"] < MAX_REPOSITORY_GIT_PROBES:
+            scan["identity_git_probes"] += 1
+            entry = _repository_entry(repo_root)
+        else:
+            scan["identity_probe_capped"] = True
+            skipped_roots.add(canonical)
+            entry = None
+        resolved_roots[canonical] = entry
+        return entry
+
+    cache_path = os.path.join(projects_root, REPOSITORY_IDENTITY_CACHE_FILE)
+    cached_payload = _dict(_json_file(cache_path))
+    cached_stores = (
+        _dict(cached_payload.get("stores"))
+        if cached_payload.get("schema") == REPOSITORY_IDENTITY_CACHE_SCHEMA
+        else {}
+    )
+    try:
+        with os.scandir(projects_root) as iterator:
+            directories = sorted(iterator, key=lambda entry: entry.name)
+    except OSError:
+        finish()
+        return []
+
+    stores: list[dict[str, Any]] = []
+    next_cache: dict[str, Any] = {}
+    for directory in directories:
+        try:
+            if not directory.is_dir(follow_symlinks=False):
+                continue
+            project_dir = os.path.abspath(directory.path)
+            repos_path = os.path.join(project_dir, "repos.jsonl")
+            repos_fingerprint = _stat_fingerprint(repos_path)
+            if repos_fingerprint.get("missing"):
+                continue
+            cached = _dict(cached_stores.get(directory.name))
+            cached_repositories = cached.get("repositories")
+            repositories: list[dict[str, Any]] = []
+            cache_valid = (
+                cached.get("complete") is True
+                and cached.get("repos_fingerprint") == repos_fingerprint
+                and isinstance(cached_repositories, list)
+            )
+            if cache_valid:
+                for raw in cached_repositories:
+                    cached_entry = _dict(raw)
+                    root = _text(cached_entry.get("repo_root"))
+                    fingerprint = _repository_cache_fingerprint(root) if root else {}
+                    entry = resolve_root(root) if root else None
+                    if (
+                        not root
+                        or not os.path.isdir(root)
+                        or cached_entry.get("identity_fingerprint") != fingerprint
+                        or entry is None
+                        or _text(entry.get("repository_identity"))
+                        != _text(cached_entry.get("repository_identity"))
+                        or _text(entry.get("repository_project_id"))
+                        != _text(cached_entry.get("repository_project_id"))
+                    ):
+                        cache_valid = False
+                        break
+                    repositories.append(entry)
+            if not cache_valid:
+                repositories = []
+                roots = _recorded_repo_roots(project_dir)
+                cache_valid = roots is not None
+                for root in roots or []:
+                    entry = resolve_root(root)
+                    if entry is None:
+                        cache_valid = False
+                    else:
+                        repositories.append(entry)
+            repositories.sort(
+                key=lambda item: (
+                    _text(item.get("repository_project_id")),
+                    _text(item.get("repository_identity")),
+                    _text(item.get("repo_root")),
+                )
+            )
+            if cache_valid:
+                next_cache[directory.name] = {
+                    "complete": True,
+                    "repos_fingerprint": repos_fingerprint,
+                    "repositories": repositories,
+                }
+            stores.append(
+                {
+                    "project_id": directory.name,
+                    "state_root": project_dir,
+                    "repositories": repositories,
+                }
+            )
+        except Exception:
+            continue
+
+    next_payload = {
+        "schema": REPOSITORY_IDENTITY_CACHE_SCHEMA,
+        "stores": dict(sorted(next_cache.items())),
+    }
+    if next_payload != cached_payload:
+        try:
+            _write_json(cache_path, next_payload)
+        except Exception:
+            pass
+    finish()
+    return stores
+
+
+def _local_span_source(log_root: str, telemetry_dir: str) -> dict[str, Any]:
+    state_root = os.path.abspath(os.path.expanduser(log_root)) if log_root else ""
+    return {
+        "project_id": os.path.basename(state_root.rstrip(os.sep)) or "explicit",
+        "state_root": state_root,
+        "telemetry_dir": _spans_dir(log_root, telemetry_dir),
+        "current": True,
+    }
+
+
+def _span_sources(
+    log_root: str,
+    telemetry_dir: str,
+    *,
+    repo: str = "",
+    state: dict[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
+    """Return checkout-local span stores sharing the target repository identity."""
+    local = _local_span_source(log_root, telemetry_dir)
+    discovery = _identity_scan_diagnostics()
+    if not repo:
+        return [local], False, discovery
+    try:
+        resolved = state or legion_state.resolve_state(repo)
+        state_root = os.path.abspath(os.path.expanduser(resolved["state_root"]))
+        expected_telemetry = os.path.join(state_root, "spans")
+        requested_telemetry = _spans_dir(log_root, telemetry_dir)
+        # Env/config roots are deliberately isolated. An explicitly exported
+        # telemetry directory also pins even when it happens to equal the auto
+        # default byte-for-byte.
+        if (
+            resolved.get("source") != "auto"
+            or os.environ.get("LEGION_STATE_ROOT")
+            or os.environ.get("LEGION_TELEMETRY_DIR")
+            or _canonical_path(log_root) != _canonical_path(state_root)
+            or _canonical_path(requested_telemetry)
+            != _canonical_path(expected_telemetry)
+        ):
+            return [local], False, discovery
+        target_identity = _text(resolved.get("repository_identity"))
+        target_project = _text(resolved.get("repository_project_id"))
+        if not target_identity or not target_project:
+            return [local], False, discovery
+        projects_root = os.path.dirname(state_root)
+        sources: list[dict[str, Any]] = []
+        for store in _cached_repository_stores(projects_root, discovery):
+            repositories = _list(store.get("repositories"))
+            verified_roots = sorted(
+                _text(_dict(item).get("repo_root"))
+                for item in repositories
+                if _text(_dict(item).get("repository_identity")) == target_identity
+                and _text(_dict(item).get("repository_project_id"))
+                == target_project
+            )
+            if not verified_roots:
+                continue
+            store_root = _text(store.get("state_root"))
+            sources.append(
+                {
+                    "project_id": _text(store.get("project_id")),
+                    "state_root": store_root,
+                    "telemetry_dir": os.path.join(store_root, "spans"),
+                    "current": _canonical_path(store_root)
+                    == _canonical_path(state_root),
+                    "verified_repo_roots": verified_roots,
+                }
+            )
+        if not any(source.get("current") for source in sources):
+            sources.append(
+                {
+                    "project_id": _text(resolved.get("project_id"))
+                    or os.path.basename(state_root),
+                    "state_root": state_root,
+                    "telemetry_dir": expected_telemetry,
+                    "current": True,
+                }
+            )
+        unique: dict[str, dict[str, Any]] = {}
+        for source in sources:
+            key = _canonical_path(_text(source.get("telemetry_dir")))
+            if key:
+                previous = unique.get(key)
+                if previous is None or source.get("current"):
+                    unique[key] = source
+        return (
+            sorted(unique.values(), key=lambda item: _text(item.get("state_root"))),
+            True,
+            discovery,
+        )
+    except Exception:
+        return [local], False, discovery
+
+
+def _span_paths(telemetry_dir: str, day: str | None = None) -> list[str]:
+    if day:
+        return [os.path.join(telemetry_dir, f"{day}.jsonl")]
+    try:
+        return sorted(glob.glob(os.path.join(telemetry_dir, "*.jsonl")))
+    except (OSError, TypeError, ValueError):
+        return []
+
+
+def _read_span_paths(paths: list[str]) -> list[dict[str, Any]]:
+    spans: list[dict[str, Any]] = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                for line in handle:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        payload = json.loads(text)
+                    except (RecursionError, ValueError, TypeError):
+                        continue
+                    if isinstance(payload, dict) and payload.get("schema") == SPAN_SCHEMA:
+                        spans.append(payload)
+        except (OSError, UnicodeError, TypeError, ValueError):
+            continue
+    return spans
+
+
+_INVALID_SPAN_VALUE = object()
+
+
+def _bounded_span_value(value: Any, depth: int = 0) -> Any:
+    """Bound attacker-controlled JSON retained in learning reports and hashes."""
+    if isinstance(value, str):
+        return value[:MAX_SPAN_TEXT_LENGTH]
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _INVALID_SPAN_VALUE
+    if isinstance(value, dict):
+        if depth >= MAX_SPAN_NESTING:
+            return {}
+        bounded: dict[str, Any] = {}
+        for index, (raw_key, raw_value) in enumerate(value.items()):
+            if index >= MAX_SPAN_COLLECTION_ITEMS or not isinstance(raw_key, str):
+                break
+            child = _bounded_span_value(raw_value, depth + 1)
+            if child is _INVALID_SPAN_VALUE:
+                return _INVALID_SPAN_VALUE
+            bounded[raw_key[:MAX_SPAN_IDENTIFIER_LENGTH]] = child
+        return bounded
+    if isinstance(value, list):
+        if depth >= MAX_SPAN_NESTING:
+            return []
+        bounded_items: list[Any] = []
+        for raw_item in value[:MAX_SPAN_COLLECTION_ITEMS]:
+            child = _bounded_span_value(raw_item, depth + 1)
+            if child is _INVALID_SPAN_VALUE:
+                return _INVALID_SPAN_VALUE
+            bounded_items.append(child)
+        return bounded_items
+    return _INVALID_SPAN_VALUE
+
+
+def _validated_span(payload: Any) -> dict[str, Any] | None:
+    """Validate and bound the in-repository ``legion.span.v1`` contract."""
+    if not isinstance(payload, dict) or payload.get("schema") != SPAN_SCHEMA:
+        return None
+    required_strings = ("schema", "ts", "run_id", "executor", "model", "status")
+    if any(not isinstance(payload.get(field), str) for field in required_strings):
+        return None
+    if payload.get("status") not in SPAN_STATUSES:
+        return None
+    for field in ("task",):
+        if field in payload and not isinstance(payload.get(field), str):
+            return None
+    for field in ("trace_id", "parent_id", "archetype", "target_type", "target_name"):
+        if field in payload and payload.get(field) is not None and not isinstance(
+            payload.get(field), str
+        ):
+            return None
+    for field in ("duration_ms", "cost_usd"):
+        if field not in payload:
+            continue
+        value = payload.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            return None
+    for field in ("tokens", "artifacts"):
+        if field in payload and not isinstance(payload.get(field), dict):
+            return None
+    bounded = _bounded_span_value(payload)
+    if not isinstance(bounded, dict):
+        return None
+    for field in (
+        "ts",
+        "run_id",
+        "executor",
+        "model",
+        "status",
+        "trace_id",
+        "parent_id",
+        "archetype",
+        "target_type",
+        "target_name",
+    ):
+        if isinstance(bounded.get(field), str):
+            bounded[field] = bounded[field][:MAX_SPAN_IDENTIFIER_LENGTH]
+    return bounded
+
+
+def _normalized_span_timestamp(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(
+            text[:-1] + "+00:00" if text.endswith("Z") else text
+        )
+    except (OverflowError, TypeError, ValueError):
+        return text
+    if parsed.tzinfo is None:
+        return text
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _span_identity_digest(span: dict[str, Any]) -> str:
+    """Hash the complete normalized payload so distinct outcomes survive."""
+    normalized = dict(span)
+    normalized["ts"] = _normalized_span_timestamp(span.get("ts"))
+    raw = json.dumps(
+        normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _span_sort_key(span: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        _normalized_span_timestamp(span.get("ts")),
+        _text(span.get("run_id")),
+        _text(span.get("executor")),
+        hashlib.sha256(
+            json.dumps(
+                span, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        ).hexdigest(),
+    )
+
+
+def _dedupe_span_batches(
+    sources: list[dict[str, Any]],
+    batches: list[list[dict[str, Any]]],
+    seen: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], set[str], list[dict[str, int]]]:
+    known = set(seen or set())
+    unique_spans: list[dict[str, Any]] = []
+    counts: list[dict[str, int]] = []
+    for _source, batch in zip(sources, batches):
+        raw_count = 0
+        unique_count = 0
+        for raw_span in batch:
+            span = _validated_span(raw_span)
+            if span is None:
+                continue
+            raw_count += 1
+            identity = _span_identity_digest(span)
+            if identity in known:
+                continue
+            known.add(identity)
+            unique_count += 1
+            unique_spans.append(span)
+        counts.append({"spans": raw_count, "unique_spans": unique_count})
+    unique_spans.sort(key=_span_sort_key)
+    return unique_spans, known, counts
+
+
+def _span_source_diagnostics(
+    sources: list[dict[str, Any]],
+    counts: list[dict[str, int]],
+    *,
+    aggregated: bool,
+    discovery: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    stores: list[dict[str, Any]] = []
+    for source, count in zip(sources, counts):
+        stores.append(
+            {
+                "project_id": _text(source.get("project_id")),
+                "state_root": _text(source.get("state_root")),
+                "telemetry_dir": _text(source.get("telemetry_dir")),
+                "current": bool(source.get("current")),
+                "spans": int(count.get("spans") or 0),
+                "unique_spans": int(count.get("unique_spans") or 0),
+            }
+        )
+    result = {
+        "mode": "repository" if aggregated else "pinned",
+        "matched_stores": len(stores),
+        "matched_sibling_stores": sum(not store["current"] for store in stores),
+        "contributing_stores": sum(store["spans"] > 0 for store in stores),
+        "contributing_sibling_stores": sum(
+            store["spans"] > 0 and not store["current"] for store in stores
+        ),
+        "duplicates_removed": sum(store["spans"] for store in stores)
+        - sum(store["unique_spans"] for store in stores),
+        "stores": stores,
+    }
+    result.update(discovery or _identity_scan_diagnostics())
+    return result
+
+
 def _tail_digest(handle: Any, offset: int) -> str:
     start = max(0, offset - CURSOR_TAIL_BYTES)
     handle.seek(start)
@@ -272,46 +936,58 @@ def _read_jsonl_since(
     A final partial line is deliberately left unread for the next invocation.
     """
     records: list[dict[str, Any]] = []
-    canonical = os.path.realpath(path)
+    canonical = _canonical_path(path)
+    if not canonical:
+        return records, {}
     try:
         stat = os.stat(canonical)
         handle = open(canonical, "rb")
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return records, {}
     with handle:
         prior = _dict(previous)
-        offset = int(prior.get("offset") or 0)
-        can_resume = (
-            offset >= 0
-            and offset <= stat.st_size
-            and int(prior.get("device") or -1) == int(stat.st_dev)
-            and int(prior.get("inode") or -1) == int(stat.st_ino)
-            and _text(prior.get("tail_sha256")) == _tail_digest(handle, offset)
-        )
-        if not can_resume:
+        try:
+            offset = int(prior.get("offset") or 0)
+            prior_device = int(prior.get("device") or -1)
+            prior_inode = int(prior.get("inode") or -1)
+        except (OverflowError, TypeError, ValueError):
             offset = 0
-        handle.seek(offset)
-        committed = offset
-        while True:
-            raw = handle.readline()
-            if not raw:
-                break
-            if not raw.endswith(b"\n"):
-                break
-            committed = handle.tell()
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError, TypeError):
-                continue
-            if isinstance(payload, dict):
-                records.append(payload)
-        cursor = {
-            "device": int(stat.st_dev),
-            "inode": int(stat.st_ino),
-            "offset": committed,
-            "tail_sha256": _tail_digest(handle, committed),
-            "reset": bool(prior and not can_resume),
-        }
+            prior_device = -1
+            prior_inode = -1
+        try:
+            can_resume = (
+                offset >= 0
+                and offset <= stat.st_size
+                and prior_device == int(stat.st_dev)
+                and prior_inode == int(stat.st_ino)
+                and _text(prior.get("tail_sha256")) == _tail_digest(handle, offset)
+            )
+            if not can_resume:
+                offset = 0
+            handle.seek(offset)
+            committed = offset
+            while True:
+                raw = handle.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    break
+                committed = handle.tell()
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except (RecursionError, UnicodeDecodeError, ValueError, TypeError):
+                    continue
+                if isinstance(payload, dict):
+                    records.append(payload)
+            cursor = {
+                "device": int(stat.st_dev),
+                "inode": int(stat.st_ino),
+                "offset": committed,
+                "tail_sha256": _tail_digest(handle, committed),
+                "reset": bool(prior and not can_resume),
+            }
+        except (OSError, OverflowError, TypeError, ValueError):
+            return records, {}
     return records, cursor
 
 
@@ -324,7 +1000,9 @@ def _load_jsonl_paths(
     prior_files = _dict(_dict(cursor).get("files"))
     reset = False
     for path in paths:
-        canonical = os.path.realpath(path)
+        canonical = _canonical_path(path)
+        if not canonical:
+            continue
         batch, position = _read_jsonl_since(
             canonical, _dict(prior_files.get(canonical))
         )
@@ -339,34 +1017,146 @@ def _load_jsonl_paths(
     }
 
 
+def _span_cursor_stores(cursor: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Normalize v2 per-store cursors and the legacy flat ``files`` shape."""
+    prior = _dict(cursor)
+    stores: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_store in _dict(prior.get("stores")).items():
+        store = _dict(raw_store)
+        telemetry = _text(store.get("telemetry_dir")) or str(raw_key)
+        key = _canonical_path(telemetry)
+        if not key:
+            continue
+        files = {
+            canonical: _dict(position)
+            for path, position in _dict(store.get("files")).items()
+            if (canonical := _canonical_path(str(path)))
+        }
+        stores[key] = {
+            "project_id": _text(store.get("project_id")),
+            "state_root": _text(store.get("state_root")),
+            "telemetry_dir": telemetry,
+            "files": files,
+        }
+    # Before v2, span cursors used the generic per-file shape. Group those
+    # canonical file keys by their containing telemetry directory on upgrade.
+    for path, position in _dict(prior.get("files")).items():
+        canonical = _canonical_path(str(path))
+        if not canonical:
+            continue
+        key = _canonical_path(os.path.dirname(canonical))
+        if not key:
+            continue
+        store = stores.setdefault(
+            key,
+            {
+                "project_id": "",
+                "state_root": os.path.dirname(key),
+                "telemetry_dir": key,
+                "files": {},
+            },
+        )
+        _dict(store.get("files"))[canonical] = _dict(position)
+    return stores
+
+
+def _cursor_span_prefix(
+    path: str, position: dict[str, Any]
+) -> list[dict[str, Any]] | None:
+    """Read identities already consumed by a legacy cursor during v2 migration."""
+    spans: list[dict[str, Any]] = []
+    canonical = _canonical_path(path)
+    try:
+        offset = int(position.get("offset") or 0)
+        device = int(position.get("device") or -1)
+        inode = int(position.get("inode") or -1)
+        stat = os.stat(canonical)
+        handle = open(canonical, "rb")
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+    with handle:
+        try:
+            if (
+                offset < 0
+                or offset > stat.st_size
+                or device != int(stat.st_dev)
+                or inode != int(stat.st_ino)
+                or _text(position.get("tail_sha256")) != _tail_digest(handle, offset)
+            ):
+                return None
+            handle.seek(0)
+            while handle.tell() < offset:
+                raw = handle.readline()
+                if not raw or handle.tell() > offset or not raw.endswith(b"\n"):
+                    break
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except (RecursionError, UnicodeDecodeError, ValueError, TypeError):
+                    continue
+                span = _validated_span(payload)
+                if span is not None:
+                    spans.append(span)
+        except (OSError, OverflowError, TypeError, ValueError):
+            return None
+    return spans
+
+
+def _legacy_cursor_seen_ids(
+    cursor: dict[str, Any] | None,
+    stores: dict[str, dict[str, Any]],
+) -> set[str] | None:
+    prior = _dict(cursor)
+    if "seen_span_ids" in prior:
+        return {
+            value
+            for item in _list(prior.get("seen_span_ids"))
+            if (value := _text(item))
+        }
+    if not prior:
+        return set()
+    seen: set[str] = set()
+    for store in stores.values():
+        for path, position in sorted(_dict(store.get("files")).items()):
+            prefix = _cursor_span_prefix(path, _dict(position))
+            if prefix is None:
+                return None
+            for span in prefix:
+                seen.add(_span_identity_digest(span))
+    return seen
+
+
+def _flatten_span_cursor_files(stores: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    files: dict[str, Any] = {}
+    for key in sorted(stores):
+        for path, position in sorted(_dict(stores[key].get("files")).items()):
+            files[path] = position
+    return files
+
+
 def load_spans(
     log_root: str,
     day: str | None = None,
     *,
     telemetry_dir: str = "",
+    repo: str = "",
+    state: dict[str, str] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    spans: list[dict[str, Any]] = []
-    spans_dir = _spans_dir(log_root, telemetry_dir)
-    paths = (
-        [os.path.join(spans_dir, f"{day}.jsonl")]
-        if day
-        else sorted(glob.glob(os.path.join(spans_dir, "*.jsonl")))
+    sources, aggregated, discovery = _span_sources(
+        log_root, telemetry_dir, repo=repo, state=state
     )
-    for path in paths:
-        try:
-            with open(path, encoding="utf-8") as handle:
-                for line in handle:
-                    text = line.strip()
-                    if not text:
-                        continue
-                    try:
-                        payload = json.loads(text)
-                    except ValueError:
-                        continue
-                    if isinstance(payload, dict) and payload.get("schema") == SPAN_SCHEMA:
-                        spans.append(payload)
-        except OSError:
-            continue
+    batches = [
+        _read_span_paths(_span_paths(_text(source.get("telemetry_dir")), day))
+        for source in sources
+    ]
+    spans, _seen, counts = _dedupe_span_batches(sources, batches)
+    if diagnostics is not None:
+        diagnostics.clear()
+        diagnostics.update(
+            _span_source_diagnostics(
+                sources, counts, aggregated=aggregated, discovery=discovery
+            )
+        )
     return spans
 
 
@@ -375,13 +1165,96 @@ def load_spans_incremental(
     *,
     telemetry_dir: str = "",
     cursor: dict[str, Any] | None = None,
+    repo: str = "",
+    state: dict[str, str] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    paths = sorted(glob.glob(os.path.join(_spans_dir(log_root, telemetry_dir), "*.jsonl")))
-    records, next_cursor = _load_jsonl_paths(paths, cursor)
-    if next_cursor.get("reset"):
-        records, next_cursor = _load_jsonl_paths(paths, None)
+    sources, aggregated, discovery = _span_sources(
+        log_root, telemetry_dir, repo=repo, state=state
+    )
+    prior_stores = _span_cursor_stores(cursor)
+    seen_result = _legacy_cursor_seen_ids(cursor, prior_stores)
+    seen = set(seen_result or set())
+    prior_cursor = _dict(cursor)
+    identity_reset = (
+        prior_cursor.get("schema") == SPAN_CURSOR_SCHEMA
+        and "seen_span_ids" in prior_cursor
+        and prior_cursor.get("identity_version") != SPAN_IDENTITY_VERSION
+    )
+    next_stores = {
+        key: {
+            "project_id": _text(store.get("project_id")),
+            "state_root": _text(store.get("state_root")),
+            "telemetry_dir": _text(store.get("telemetry_dir")) or key,
+            "files": dict(_dict(store.get("files"))),
+        }
+        for key, store in prior_stores.items()
+    }
+    batches: list[list[dict[str, Any]]] = []
+    reset = seen_result is None or identity_reset
+    for source in sources:
+        telemetry = _text(source.get("telemetry_dir"))
+        key = _canonical_path(telemetry)
+        prior_files = _dict(_dict(prior_stores.get(key)).get("files"))
+        records, store_cursor = _load_jsonl_paths(
+            _span_paths(telemetry),
+            {"files": prior_files},
+        )
+        batches.append(records)
+        reset = reset or bool(store_cursor.get("reset"))
+        files = dict(prior_files)
+        files.update(_dict(store_cursor.get("files")))
+        next_stores[key] = {
+            "project_id": _text(source.get("project_id")),
+            "state_root": _text(source.get("state_root")),
+            "telemetry_dir": telemetry,
+            "files": files,
+        }
+
+    rebuilt = False
+    if reset:
+        # Preserve the historical all-input rebuild semantics when an append-only
+        # invariant breaks. It keeps aggregate contrast correct across stores.
+        rebuilt = True
+        seen = set()
+        batches = []
+        # A reset is an all-input rebuild. Stores absent from this rebuild must
+        # lose their EOF cursors so a later reappearance starts at byte zero.
+        next_stores = {}
+        for source in sources:
+            telemetry = _text(source.get("telemetry_dir"))
+            key = _canonical_path(telemetry)
+            records, store_cursor = _load_jsonl_paths(_span_paths(telemetry), None)
+            batches.append(records)
+            next_stores[key] = {
+                "project_id": _text(source.get("project_id")),
+                "state_root": _text(source.get("state_root")),
+                "telemetry_dir": telemetry,
+                "files": _dict(store_cursor.get("files")),
+            }
+
+    spans, seen, counts = _dedupe_span_batches(sources, batches, seen)
+    ordered_stores = {key: next_stores[key] for key in sorted(next_stores)}
+    next_cursor: dict[str, Any] = {
+        "schema": SPAN_CURSOR_SCHEMA,
+        "stores": ordered_stores,
+        # Keep the flat view for older readers while v2 uses ``stores`` as its
+        # authoritative per-checkout shape.
+        "files": _flatten_span_cursor_files(ordered_stores),
+        "seen_span_ids": sorted(seen),
+        "identity_version": SPAN_IDENTITY_VERSION,
+        "reset": False,
+    }
+    if rebuilt:
         next_cursor["rebuilt"] = True
-    return [item for item in records if item.get("schema") == SPAN_SCHEMA], next_cursor
+    if diagnostics is not None:
+        diagnostics.clear()
+        diagnostics.update(
+            _span_source_diagnostics(
+                sources, counts, aggregated=aggregated, discovery=discovery
+            )
+        )
+    return spans, next_cursor
 
 
 def load_manual_outcomes(log_root: str, day: str | None = None) -> list[dict[str, Any]]:
@@ -841,13 +1714,24 @@ def _aggregate_eval_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def empty_scorecard(repo: str, *, reason: str = "") -> dict[str, Any]:
-    return {
+def empty_scorecard(
+    repo: str, *, reason: str = "", measurement: str = ""
+) -> dict[str, Any]:
+    """Build a scorecard with no measured cases.
+
+    Scorecard v2 uses measurement="unmeasured" when nothing could be scored at
+    all and reports score=None rather than 0.0. A literal 0.0 reads to the
+    keep/discard gate as "measured, and it regressed to zero", which is the
+    opposite of the truth when no measurement ever ran. Readers remain tolerant
+    of stored v1 cards because a missing measurement still means "measured".
+    """
+    unmeasured = measurement == "unmeasured"
+    card: dict[str, Any] = {
         "schema": SCORECARD_SCHEMA,
         "generated_at": _iso_utc(),
         "repo": os.path.abspath(repo),
         "ok": False,
-        "score": 0.0,
+        "score": None if unmeasured else 0.0,
         "metrics": {
             "cases": 0,
             "pass": 0,
@@ -863,14 +1747,48 @@ def empty_scorecard(repo: str, *, reason: str = "") -> dict[str, Any]:
         "checks": [],
         "reason": reason,
     }
+    if unmeasured:
+        card["measurement"] = "unmeasured"
+    return card
+
+
+def _engine_or_repo_path(repo: str, repo_path: str, engine_path: str) -> str:
+    """Resolve executable scorecard tools from the trusted engine first."""
+    engine_candidate = os.path.abspath(os.path.join(_here(), engine_path))
+    if os.path.isfile(engine_candidate):
+        return engine_candidate
+    # Engine-first is the safe order: ``repo`` is the untrusted checkout being
+    # scored, while ``_here()`` is the code already chosen to run. Development
+    # checkouts still use their own tools because their running engine is here.
+    repo_candidate = os.path.abspath(os.path.join(repo, repo_path))
+    return repo_candidate if os.path.isfile(repo_candidate) else ""
 
 
 def _eval_datasets(repo: str) -> list[tuple[str, str]]:
-    eval_dir = os.path.join(repo, "legion-observability", "eval")
-    return [
-        (os.path.join(eval_dir, "skill-triggering.yaml"), "auto"),
-        (os.path.join(eval_dir, "entity-triggering.yaml"), "entity"),
-    ]
+    """Resolve only the scored repo's datasets, preferring its vendored copy.
+
+    Eval cases describe the target's skill surface.  The engine's calibrated
+    legion-core cases are therefore not a valid fallback for a consumer repo:
+    they can turn an absent measurement into a fabricated regression.
+    """
+    datasets: list[tuple[str, str]] = []
+    for name, scope in (
+        ("skill-triggering.yaml", "auto"),
+        ("entity-triggering.yaml", "entity"),
+    ):
+        # `legion-eval/`, not `.legion/eval/`: `.legion/` is Legion's runtime
+        # directory for runs and worktrees and is conventionally git-ignored, so
+        # a dataset placed there can never be committed or shipped. Scoring
+        # config is source, not runtime state.
+        for directory in (
+            os.path.join(repo, "legion-observability", "eval"),
+            os.path.join(repo, "legion-eval"),
+        ):
+            candidate = os.path.abspath(os.path.join(directory, name))
+            if os.path.isfile(candidate):
+                datasets.append((candidate, scope))
+                break
+    return datasets
 
 
 def run_scorecard(repo: str) -> dict[str, Any]:
@@ -880,16 +1798,25 @@ def run_scorecard(repo: str) -> dict[str, Any]:
     autoresearch's fixed metric run: same datasets, same checks, compact metrics.
     """
     repo = os.path.abspath(repo)
-    eval_script = os.path.join(repo, "legion-observability", "scripts", "legion-eval.py")
-    doctor_script = os.path.join(repo, "legion-observability", "scripts", "legion-doctor.sh")
-    if not os.path.exists(eval_script):
-        return empty_scorecard(repo, reason="missing legion-eval")
+    eval_script = _engine_or_repo_path(
+        repo,
+        os.path.join("legion-observability", "scripts", "legion-eval.py"),
+        "legion-eval.py",
+    )
+    doctor_script = _engine_or_repo_path(
+        repo,
+        os.path.join("legion-observability", "scripts", "legion-doctor.sh"),
+        "legion-doctor.sh",
+    )
+    if not eval_script:
+        return empty_scorecard(
+            repo, reason="missing engine legion-eval", measurement="unmeasured"
+        )
 
     checks: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
-    for dataset, scope in _eval_datasets(repo):
-        if not os.path.exists(dataset):
-            continue
+    datasets = _eval_datasets(repo)
+    for dataset, scope in datasets:
         name = f"legion-eval:{os.path.basename(dataset)}"
         check = _proc_result(
             name,
@@ -916,7 +1843,7 @@ def run_scorecard(repo: str) -> dict[str, Any]:
             summaries.append(summary)
         checks.append(check)
 
-    if os.path.exists(doctor_script):
+    if doctor_script:
         checks.append(_proc_result("legion-doctor", ["bash", doctor_script, "--repo", repo], repo))
 
     metrics = _aggregate_eval_summaries(summaries)
@@ -929,12 +1856,44 @@ def run_scorecard(repo: str) -> dict[str, Any]:
             "duration_ms": sum(int(check.get("duration_ms") or 0) for check in checks),
         }
     )
+    if not datasets:
+        return {
+            "schema": SCORECARD_SCHEMA,
+            "generated_at": _iso_utc(),
+            "repo": repo,
+            "ok": False,
+            "measurement": "unmeasured",
+            "score": None,
+            "metrics": metrics,
+            "checks": checks,
+            "reason": "no eval dataset in repo",
+        }
+    # A check that never completed -- timeout, missing interpreter, OSError --
+    # carries "error" instead of "returncode". That is an infrastructure
+    # failure, not evidence about the code being scored. Reporting it as a
+    # measured ok=false would be a false regression by a second route, exactly
+    # the failure mode the dataset fix above exists to prevent.
+    incomplete = [c for c in checks if "error" in c and "returncode" not in c]
+    if incomplete:
+        return {
+            "schema": SCORECARD_SCHEMA,
+            "generated_at": _iso_utc(),
+            "repo": repo,
+            "ok": False,
+            "measurement": "unmeasured",
+            "score": None,
+            "metrics": metrics,
+            "checks": checks,
+            "reason": "check did not complete: "
+            + ", ".join(sorted(_text(c.get("name")) for c in incomplete)),
+        }
     ok = bool(summaries) and all(bool(check.get("ok")) for check in checks)
     return {
         "schema": SCORECARD_SCHEMA,
         "generated_at": _iso_utc(),
         "repo": repo,
         "ok": ok,
+        "measurement": "measured",
         "score": metrics["precision_at_1"] if ok else 0.0,
         "metrics": metrics,
         "checks": checks,
@@ -1338,6 +2297,7 @@ def build_report(
     incremental = bool(scan_all and not include_processed)
     input_cursor: dict[str, Any] = {}
     input_cursor_base: dict[str, Any] = {}
+    span_source_report: dict[str, Any] = {}
     bootstrap_trace_contrast = False
     if incremental:
         prior_cursor = _dict(memory.get("input_cursor"))
@@ -1351,6 +2311,8 @@ def build_report(
             log_root,
             telemetry_dir=telemetry_dir,
             cursor=_dict(prior_cursor.get("spans")),
+            repo=repo,
+            diagnostics=span_source_report,
         )
         manual_outcomes, outcome_cursor = load_manual_outcomes_incremental(
             log_root,
@@ -1362,7 +2324,13 @@ def build_report(
             "manual_outcomes": outcome_cursor,
         }
     else:
-        spans = load_spans(log_root, scan_day, telemetry_dir=telemetry_dir)
+        spans = load_spans(
+            log_root,
+            scan_day,
+            telemetry_dir=telemetry_dir,
+            repo=repo,
+            diagnostics=span_source_report,
+        )
         manual_outcomes = load_manual_outcomes(log_root, scan_day)
     outcomes = dedupe_outcomes(
         span_outcomes(spans, catalog)
@@ -1415,6 +2383,7 @@ def build_report(
         "scan_scope": "all" if scan_all else day,
         "incremental": incremental,
         "spans": len(spans),
+        "span_sources": span_source_report,
         "catalog_entities": len(_list(catalog.get("entities"))),
         "outcomes": outcomes,
         "proposals": proposals,
@@ -1873,13 +2842,20 @@ def append_experiment_log(report: dict[str, Any], log_root: str) -> None:
         scorecard = _dict(report.get("scorecard"))
         metrics = _dict(scorecard.get("metrics"))
         if scorecard:
-            handle.write(
-                "- Baseline score: "
-                f"{scorecard.get('score', 0)} "
-                f"(P@1={metrics.get('precision_at_1', 0)}, "
-                f"hit@k={metrics.get('hit_at_k', 0)}, "
-                f"doctor={'ok' if _doctor_ok(scorecard) else 'fail'})\n"
-            )
+            if _scorecard_unmeasured(scorecard):
+                handle.write(
+                    "- Baseline score: unmeasured "
+                    f"({_text(scorecard.get('reason'))}; "
+                    f"doctor={'ok' if _doctor_ok(scorecard) else 'fail'})\n"
+                )
+            else:
+                handle.write(
+                    "- Baseline score: "
+                    f"{scorecard.get('score', 0)} "
+                    f"(P@1={metrics.get('precision_at_1', 0)}, "
+                    f"hit@k={metrics.get('hit_at_k', 0)}, "
+                    f"doctor={'ok' if _doctor_ok(scorecard) else 'fail'})\n"
+                )
         top = sorted(
             _dict(report.get("by_entity")).items(),
             key=lambda item: (-item[1], item[0]),
@@ -1915,8 +2891,14 @@ def _doctor_ok(scorecard: dict[str, Any]) -> bool:
     )
 
 
+def _scorecard_unmeasured(scorecard: dict[str, Any]) -> bool:
+    return _text(scorecard.get("measurement")) == "unmeasured"
+
+
 def _ledger_score_fields(scorecard: dict[str, Any]) -> list[Any]:
     metrics = _dict(scorecard.get("metrics"))
+    if _scorecard_unmeasured(scorecard):
+        return ["", "", "", "", "", "", "1" if _doctor_ok(scorecard) else "0"]
     return [
         metrics.get("cases", 0),
         metrics.get("pass", 0),
@@ -1935,9 +2917,12 @@ def append_experiment_ledger(report: dict[str, Any], log_root: str) -> None:
     exists = os.path.exists(path)
     outcomes = len(_list(report.get("outcomes")))
     proposals = len(_list(report.get("proposals")))
-    status = "clean" if outcomes == 0 else "proposal"
+    unmeasured = _scorecard_unmeasured(_dict(report.get("scorecard")))
+    status = "unmeasured" if unmeasured else ("clean" if outcomes == 0 else "proposal")
     description = f"{outcomes} outcome(s), {proposals} proposal(s), {report.get('spans', 0)} span(s)"
     baseline = _dict(report.get("scorecard"))
+    if unmeasured:
+        description = f"unmeasured scorecard: {_text(baseline.get('reason'))}; {description}"
     rows = [[
         _text(report.get("day")) or _date_utc(),
         _git_commit(_text(report.get("repo"))),
@@ -1948,7 +2933,7 @@ def append_experiment_ledger(report: dict[str, Any], log_root: str) -> None:
         outcomes,
         proposals,
         *_ledger_score_fields(baseline),
-        baseline.get("score", 0),
+        "" if unmeasured else baseline.get("score", 0),
         "",
         0,
         status,
@@ -2092,8 +3077,12 @@ def run_command(args: argparse.Namespace) -> int:
         "experiments": None,
         "improvement_queue": improvement_queue,
         "scorecard": report.get("scorecard"),
+        "span_sources": report.get("span_sources"),
         "summary": {
             "spans": report["spans"],
+            "span_stores": _dict(report.get("span_sources")).get(
+                "contributing_stores", 0
+            ),
             "catalog_entities": report["catalog_entities"],
             "outcomes": len(report["outcomes"]),
             "proposals": len(report["proposals"]),

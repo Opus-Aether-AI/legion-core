@@ -1356,10 +1356,41 @@ $run_error" ]
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '
       .status == "failed" and .reason == "invalid-verdict"
-      and .attempts == 1 and .verdict == null
+      and .attempts == 2 and .max_attempts == 2 and .verdict == null
     '
     local run_id; run_id="$(echo "$output" | jq -r .run_id)"
+    [ -s "$repo/.legion/runs/$run_id/attempt-1.stream.jsonl" ]
+    [ -f "$repo/.legion/runs/$run_id/attempt-1.codex.err" ]
+    [ -s "$repo/.legion/runs/$run_id/attempt-1.verdict.json" ]
+    [ -s "$repo/.legion/runs/$run_id/attempt-2.stream.jsonl" ]
+    [ -f "$repo/.legion/runs/$run_id/attempt-2.codex.err" ]
+    [ -s "$repo/.legion/runs/$run_id/attempt-2.verdict.json" ]
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 2 ]
     [ ! -d "$repo/.legion/worktrees/$run_id" ]
+}
+
+@test "delegate review: retries a clean schema-invalid verdict with immutable SHAs" {
+    local repo; repo="$(make_test_repo review-invalid-retry)"
+    local base_sha; base_sha="$(git -C "$repo" rev-parse HEAD)"
+    local review_context="$TEST_TMPDIR/review-invalid-retry-context.log"
+    export MOCK_CODEX_REVIEW_INVALID_VERDICTS=1
+    export MOCK_CODEX_REVIEW_INVALID_VERDICT_ATTEMPT_FILE="$TEST_TMPDIR/review-invalid-retry-attempts"
+
+    MOCK_CODEX_REVIEW_CONTEXT_LOG="$review_context" run "$DELEGATE" review \
+      --model test-model-beta --base HEAD --repo "$repo" \
+      --task "Check the retry contract." --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e --arg sha "$base_sha" '
+      .status == "ok" and .reason == "completed"
+      and .attempts == 2 and .max_attempts == 2
+      and .reviewed_base_sha == $sha and .reviewed_head_sha == $sha
+      and .verdict.verdict == "approve"
+    '
+    [ "$(grep -Fc "codex exec -s read-only review --base $base_sha" "$MOCK_CALL_LOG")" -eq 2 ]
+    [ "$(grep -Ec "^pwd=.* head=$base_sha$" "$review_context")" -eq 2 ]
+    grep -Fq "developer_instructions=\"Review only the immutable diff $base_sha...$base_sha. Check the retry contract.\"" "$MOCK_CALL_LOG"
+    [ "$(grep -Fc "Return ONLY a JSON object conforming exactly to the supplied output schema; do not include prose, Markdown, or code fences." "$MOCK_CALL_LOG")" -eq 1 ]
 }
 
 @test "delegate review: fails closed on an approving verdict with blocking findings" {
@@ -1371,8 +1402,23 @@ $run_error" ]
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '
       .status == "failed" and .reason == "invalid-verdict"
-      and .attempts == 1 and .verdict == null
+      and .attempts == 1 and .max_attempts == 2 and .verdict == null
     '
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
+}
+
+@test "delegate review: retries unparseable output but not a contradictory structured verdict" {
+    local repo; repo="$(make_test_repo review-unparseable)"
+
+    MOCK_CODEX_REVIEW_UNPARSEABLE=1 run "$DELEGATE" review \
+      --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "invalid-verdict"
+      and .attempts == 2 and .max_attempts == 2 and .verdict == null
+    '
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 2 ]
 }
 
 @test "delegate review: rejects dangerous reviewer task text before execution" {
@@ -2036,5 +2082,46 @@ $run_error" ]
       run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
 
     [ "$status" -ne 0 ]
-    echo "$output" | jq -e '.status == "failed" and .verdict == null'
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "review-failed"
+      and .attempts == 1 and .verdict == null
+    '
+}
+
+@test "delegate review: a malformed REJECTION fails closed and is never retried" {
+    # Regression for the one-directional rule failing in the overlooked direction.
+    # A request_changes carrying a CRITICAL finding, schema-invalid only because the
+    # finding omits `title`, must not be retried -- retrying would let a clean
+    # `approve` on attempt 2 erase the reviewer's rejection.
+    local repo; repo="$(make_test_repo review-malformed-reject)"
+    export MOCK_CODEX_REVIEW_MALFORMED_REJECT=1
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "invalid-verdict"
+      and .attempts == 1 and .max_attempts == 2 and .verdict == null
+    '
+    # exactly one codex invocation -- no second chance was taken
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
+}
+
+@test "delegate review: recognized [P*] prose normalizes to a rejection, not a retry" {
+    # The normalizer converts codex's recognized priority format into a proper
+    # request_changes. The rejection is preserved on attempt 1 -- it is neither
+    # retried nor allowed to become an approval.
+    local repo; repo="$(make_test_repo review-priority-prose)"
+    export MOCK_CODEX_REVIEW_PRIORITY_PROSE=1
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '
+      .status == "ok" and .attempts == 1
+      and .verdict.verdict == "request_changes"
+      and (.verdict.findings | length) == 1
+      and .verdict.findings[0].severity == "high"
+    '
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
 }

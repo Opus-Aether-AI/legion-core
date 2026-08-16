@@ -16,6 +16,9 @@
 #     optionally supplies that attempt counter's persistent location
 #   MOCK_CODEX_REVIEW_CONTRADICTORY=1 -> approve while reporting a blocking finding
 #   MOCK_CODEX_REVIEW_UNPARSEABLE=1 -> write unrecognized prose instead of a verdict
+#   MOCK_CODEX_REVIEW_MALFORMED_REJECT=1 -> a request_changes carrying a critical
+#     finding that is schema-invalid only because the finding omits `title`
+#   MOCK_CODEX_REVIEW_PRIORITY_PROSE=1 -> codex's prose review format with a [P1] marker
 #   MOCK_CODEX_REVIEW_DELAY=N -> keep a review alive for signal-handling tests
 #
 # Emits the codex-cli 0.139.x --json event shape. For `exec` with a writable
@@ -107,6 +110,10 @@ if [[ $review -eq 1 ]]; then
     msg='{"verdict":"approve","summary":"mock invalid review","findings":[{}]}'
   elif [[ "${MOCK_CODEX_REVIEW_CONTRADICTORY:-}" == "1" ]]; then
     msg='{"verdict":"approve","summary":"mock contradictory review","findings":[{"severity":"critical","title":"Blocking issue"}]}'
+  elif [[ "${MOCK_CODEX_REVIEW_MALFORMED_REJECT:-}" == "1" ]]; then
+    msg='{"verdict":"request_changes","summary":"auth bypass","findings":[{"severity":"critical","detail":"missing authorization"}]}'
+  elif [[ "${MOCK_CODEX_REVIEW_PRIORITY_PROSE:-}" == "1" ]]; then
+    msg='- [P1] Missing authorization check — auth.py:42'
   elif [[ "${MOCK_CODEX_REVIEW_UNPARSEABLE:-}" == "1" ]]; then
     msg='Review completed without a structured verdict.'
   elif [[ "${MOCK_CODEX_REVIEW_FINDINGS:-}" == "1" ]]; then

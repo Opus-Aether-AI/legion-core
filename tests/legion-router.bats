@@ -2087,3 +2087,41 @@ $run_error" ]
       and .attempts == 1 and .verdict == null
     '
 }
+
+@test "delegate review: a malformed REJECTION fails closed and is never retried" {
+    # Regression for the one-directional rule failing in the overlooked direction.
+    # A request_changes carrying a CRITICAL finding, schema-invalid only because the
+    # finding omits `title`, must not be retried -- retrying would let a clean
+    # `approve` on attempt 2 erase the reviewer's rejection.
+    local repo; repo="$(make_test_repo review-malformed-reject)"
+    export MOCK_CODEX_REVIEW_MALFORMED_REJECT=1
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed" and .reason == "invalid-verdict"
+      and .attempts == 1 and .max_attempts == 2 and .verdict == null
+    '
+    # exactly one codex invocation -- no second chance was taken
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
+}
+
+@test "delegate review: recognized [P*] prose normalizes to a rejection, not a retry" {
+    # The normalizer converts codex's recognized priority format into a proper
+    # request_changes. The rejection is preserved on attempt 1 -- it is neither
+    # retried nor allowed to become an approval.
+    local repo; repo="$(make_test_repo review-priority-prose)"
+    export MOCK_CODEX_REVIEW_PRIORITY_PROSE=1
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '
+      .status == "ok" and .attempts == 1
+      and .verdict.verdict == "request_changes"
+      and (.verdict.findings | length) == 1
+      and .verdict.findings[0].severity == "high"
+    '
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
+}

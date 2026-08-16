@@ -119,6 +119,13 @@ def project_id(repo: str) -> str:
 
 
 def _is_legion_managed_worktree(path: str) -> bool:
+    """Recognize historical Legion worktree paths for orphan reporting only.
+
+    Runtime state collapse additionally verifies Git's registration and requires
+    the reserved ``.legion/worktrees`` layout. A pathname alone is not a
+    trustworthy ownership claim, but retaining both historic path forms here
+    lets the read-only compatibility report find pre-upgrade stores.
+    """
     normalized = path.replace("\\", "/").rstrip("/") + "/"
     return (
         "/.legion/worktrees/" in normalized
@@ -154,18 +161,67 @@ def _logical_owner_path(repo: str, owner: str) -> str:
         current = parent
 
 
+def _same_real_path(first: str, second: str) -> bool:
+    """Compare paths conservatively without allowing discovery failures out."""
+    try:
+        return os.path.normcase(os.path.realpath(first)) == os.path.normcase(
+            os.path.realpath(second)
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def _owner_registers_worktree(repo: str, git_dir: str, common_dir: str) -> bool:
+    """Verify Git's owner-side administrative record points back to ``repo``."""
+    try:
+        worktree_name = os.path.basename(git_dir)
+        if not worktree_name or worktree_name in {os.curdir, os.pardir}:
+            return False
+        admin_dir = os.path.join(common_dir, "worktrees", worktree_name)
+        if not os.path.isdir(admin_dir) or not _same_real_path(git_dir, admin_dir):
+            return False
+
+        with open(os.path.join(admin_dir, "gitdir"), encoding="utf-8") as handle:
+            backref = handle.readline().strip()
+        if not backref:
+            return False
+        if not os.path.isabs(backref):
+            backref = os.path.join(admin_dir, backref)
+        if not os.path.isfile(backref):
+            return False
+        return _same_real_path(backref, os.path.join(repo, ".git"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
+def _is_runtime_managed_worktree_path(path: str) -> bool:
+    """Require Legion's reserved transient-worktree location.
+
+    A valid Git back-reference proves linkage, not that Legion owns the
+    worktree: developers may intentionally create durable worktrees below a
+    generic ``improve/worktrees`` directory. The generic historical pathname is
+    therefore retained only for read-only orphan reporting, while runtime
+    collapse is limited to Legion's reserved ``.legion/worktrees`` form.
+    """
+    normalized = path.replace("\\", "/").rstrip("/") + "/"
+    return "/.legion/worktrees/" in normalized
+
+
 def _linked_worktree_main(repo: str) -> str | None:
     """Return the owner of a Legion-managed ephemeral linked worktree.
 
-    Collapse is deliberately limited to ``/.legion/worktrees/`` and
-    ``/improve/worktrees/`` paths. Durable developer worktrees keep their legacy
-    path-keyed stores and do not undergo a silent project-ID migration. State
-    resolution is on every Legion command's hot path, so Git discovery is
-    best-effort: unsupported Git versions, unusual Git-dir layouts, malformed
+    Collapse requires Legion's reserved ``.legion/worktrees`` layout and an
+    owner administrative record whose ``gitdir`` back-reference points to this
+    worktree. The second check prevents untrusted Git metadata from selecting
+    another checkout's state root. It is not sufficient alone: a durable
+    developer worktree can be registered by Git under an
+    ``improve/worktrees`` pathname, so that generic historical pathname never
+    triggers runtime collapse. State resolution is on every Legion command's
+    hot path; unsupported Git versions, unusual Git-dir layouts, malformed
     output, timeouts, and non-Git directories all preserve legacy path-keying.
     """
     repo_abs = os.path.abspath(os.path.expanduser(repo))
-    if not _is_legion_managed_worktree(repo_abs):
+    if not _is_runtime_managed_worktree_path(repo_abs):
         return None
     try:
         result = subprocess.run(
@@ -195,6 +251,8 @@ def _linked_worktree_main(repo: str) -> str | None:
     if git_dir == common_dir or os.path.basename(common_dir) != ".git":
         return None
     owner = os.path.dirname(common_dir)
+    if not _owner_registers_worktree(repo_abs, git_dir, common_dir):
+        return None
     return _logical_owner_path(repo_abs, owner)
 
 
@@ -431,7 +489,15 @@ def _directory_size(path: str) -> int:
 
 
 def orphaned_project_report(env: dict[str, str] | None = None) -> dict[str, Any]:
-    """Describe orphaned/per-worktree auto state without modifying it."""
+    """Describe orphaned/per-worktree auto state without modifying it.
+
+    Compatibility decision: legacy path-keyed state is not migrated. Managed
+    worktree state is normally short-lived, and a migration would need to merge
+    mutable spans, cursors, reports, queues, registries, and benchmarks. This
+    read-only report instead surfaces old per-worktree roots both while their
+    worktree is still present (the C1 upgrade case) and after its recorded root
+    has disappeared (the C2 case); it never deletes, moves, or writes them.
+    """
     env = dict(os.environ if env is None else env)
     legion_home = _abs(
         env.get("LEGION_HOME", os.path.join(env.get("HOME", "~"), ".legion"))

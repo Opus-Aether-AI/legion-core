@@ -109,6 +109,40 @@ def test_linked_worktree_uses_main_checkout_project_id_and_honors_overrides(
     assert configured["project_id"] == state.project_id(str(main))
 
 
+def test_forged_common_dir_without_owner_backreference_keeps_path_keying(
+    tmp_path, monkeypatch
+):
+    victim = tmp_path / "victim"
+    forged = tmp_path / "evil" / ".legion" / "worktrees" / "x"
+    victim_admin = victim / ".git" / "worktrees" / "x"
+    victim_admin.mkdir(parents=True)
+    forged.mkdir(parents=True)
+    # Even an administrative entry with the right name must identify this
+    # worktree, rather than merely name the victim's common Git directory.
+    (victim_admin / "gitdir").write_text(
+        str(tmp_path / "elsewhere" / ".git") + "\n", encoding="utf-8"
+    )
+
+    def forged_git(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            "git",
+            0,
+            stdout=(
+                f"{victim_admin}\n"
+                f"{victim / '.git'}\n"
+            ),
+    )
+
+    monkeypatch.setattr(state.subprocess, "run", forged_git)
+
+    assert not state._owner_registers_worktree(
+        str(forged), str(victim_admin), str(victim / ".git")
+    )
+    assert state._linked_worktree_main(str(forged)) is None
+    resolved = state.resolve_state(str(forged), {"HOME": str(tmp_path / "home")})
+    assert resolved["project_id"] == state.project_id(str(forged))
+
+
 def test_durable_linked_worktree_keeps_its_own_path_keyed_project_id(tmp_path):
     home = tmp_path / "home"
     main = tmp_path / "main-checkout"
@@ -122,6 +156,43 @@ def test_durable_linked_worktree_keeps_its_own_path_keyed_project_id(tmp_path):
     resolved = state.resolve_state(str(linked), {"HOME": str(home)})
 
     assert state._linked_worktree_main(str(linked)) is None
+    assert resolved["project_id"] == state.project_id(str(linked))
+    assert resolved["state_root"] == str(
+        home / ".legion" / "projects" / state.project_id(str(linked))
+    )
+
+
+def test_durable_worktree_under_improve_worktrees_keeps_path_keying(tmp_path):
+    home = tmp_path / "home"
+    main = tmp_path / "main-checkout"
+    linked = main / "improve" / "worktrees" / "release-fix"
+    _init_committed_repo(main)
+    linked.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-C", str(main), "worktree", "add", "-q", "--detach", str(linked)],
+        check=True,
+    )
+    git_paths = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(linked),
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+    # This is a genuine Git worktree with an owner-side registration, but it is
+    # a developer-controlled generic improve/worktrees path, not Legion's
+    # reserved transient-worktree layout.
+    assert state._owner_registers_worktree(str(linked), *git_paths)
+    assert state._linked_worktree_main(str(linked)) is None
+    resolved = state.resolve_state(str(linked), {"HOME": str(home)})
     assert resolved["project_id"] == state.project_id(str(linked))
     assert resolved["state_root"] == str(
         home / ".legion" / "projects" / state.project_id(str(linked))

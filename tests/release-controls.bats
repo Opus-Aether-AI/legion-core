@@ -382,10 +382,30 @@ EOF
     grep -q 'bun_version:' "$consumer"
     grep -q 'python_version:' "$consumer"
     grep -q 'use_uv:' "$consumer"
-    grep -q 'oven-sh/setup-bun@v2' "$consumer"
-    grep -q 'astral-sh/setup-uv@v6' "$consumer"
+    grep -q 'oven-sh/setup-bun@' "$consumer"
+    grep -q 'astral-sh/setup-uv@' "$consumer"
     grep -q 'git push --force-with-lease=' "$consumer"
     grep -q 'gh pr create' "$consumer"
+
+    # Every action must be pinned to a full-length commit, not a mutable tag.
+    # This is a supply-chain property in its own right, and consumer repos can
+    # enforce it: nidavellir refused the whole run with "all actions must be
+    # pinned to a full-length commit" while these were tag references, so it
+    # silently stopped receiving engine updates.
+    local unpinned
+    unpinned="$(grep -E '^\s*-?\s*uses:' "$consumer" \
+        | grep -vE 'uses:\s*\S+@[0-9a-f]{40}(\s|$)' || true)"
+    [ -z "$unpinned" ] || {
+        echo "unpinned actions in consumer workflow:" >&2
+        echo "$unpinned" >&2
+        return 1
+    }
+
+    # The npx validation step resolves the package before any PR is opened. A
+    # consumer whose .npmrc scopes @opus-aether-ai to GitHub Packages needs a
+    # token in the environment, or it 401s and no PR is ever created.
+    grep -q 'packages: read' "$consumer"
+    grep -q 'NODE_AUTH_TOKEN:' "$consumer"
 }
 
 @test "recovery verifies a v0.19.0-style legacy tag with current controls" {

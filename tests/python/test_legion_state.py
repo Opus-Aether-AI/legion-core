@@ -72,8 +72,9 @@ def test_linked_worktree_uses_main_checkout_project_id_and_honors_overrides(
 ):
     home = tmp_path / "home"
     main = tmp_path / "main-checkout"
-    linked = tmp_path / "linked-worktree"
+    linked = tmp_path / ".legion" / "worktrees" / "linked-worktree"
     _init_committed_repo(main)
+    linked.parent.mkdir(parents=True)
     subprocess.run(
         ["git", "-C", str(main), "worktree", "add", "-q", "--detach", str(linked)],
         check=True,
@@ -106,6 +107,49 @@ def test_linked_worktree_uses_main_checkout_project_id_and_honors_overrides(
     assert configured["source"] == "config"
     assert configured["state_root"] == str(linked / ".legion/configured-state")
     assert configured["project_id"] == state.project_id(str(main))
+
+
+def test_durable_linked_worktree_keeps_its_own_path_keyed_project_id(tmp_path):
+    home = tmp_path / "home"
+    main = tmp_path / "main-checkout"
+    linked = tmp_path / "durable-worktree"
+    _init_committed_repo(main)
+    subprocess.run(
+        ["git", "-C", str(main), "worktree", "add", "-q", "--detach", str(linked)],
+        check=True,
+    )
+
+    resolved = state.resolve_state(str(linked), {"HOME": str(home)})
+
+    assert state._linked_worktree_main(str(linked)) is None
+    assert resolved["project_id"] == state.project_id(str(linked))
+    assert resolved["state_root"] == str(
+        home / ".legion" / "projects" / state.project_id(str(linked))
+    )
+
+
+def test_managed_worktree_collapse_preserves_a_symlinked_logical_prefix(tmp_path):
+    home = tmp_path / "home"
+    real_root = tmp_path / "real-root"
+    logical_root = tmp_path / "logical-root"
+    real_root.mkdir()
+    logical_root.symlink_to(real_root, target_is_directory=True)
+    main = logical_root / "main-checkout"
+    linked = logical_root / ".legion" / "worktrees" / "linked-worktree"
+    _init_committed_repo(main)
+    linked.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-C", str(main), "worktree", "add", "-q", "--detach", str(linked)],
+        check=True,
+    )
+
+    main_state = state.resolve_state(str(main), {"HOME": str(home)})
+    linked_state = state.resolve_state(str(linked), {"HOME": str(home)})
+
+    assert state._linked_worktree_main(str(linked)) == str(main)
+    assert linked_state["repo"] == str(linked)
+    assert linked_state["project_id"] == state.project_id(str(main))
+    assert linked_state["state_root"] == main_state["state_root"]
 
 
 def test_plain_clone_keeps_its_own_path_keyed_project_id(tmp_path):
@@ -278,6 +322,103 @@ def test_bare_repo_falls_back_without_crashing(tmp_path):
     assert resolved["project_id"] == state.project_id(str(repo))
 
 
+def test_worktree_of_bare_repo_does_not_collapse_into_git_dir_parent(tmp_path):
+    home = tmp_path / "home"
+    source = tmp_path / "source"
+    bare = tmp_path / "repo.git"
+    linked = tmp_path / ".legion" / "worktrees" / "bare-worktree"
+    _init_committed_repo(source)
+    subprocess.run(
+        ["git", "clone", "--bare", "-q", str(source), str(bare)], check=True
+    )
+    linked.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-C", str(bare), "worktree", "add", "-q", "--detach", str(linked)],
+        check=True,
+    )
+
+    resolved = state.resolve_state(str(linked), {"HOME": str(home)})
+
+    assert state._linked_worktree_main(str(linked)) is None
+    assert resolved["project_id"] == state.project_id(str(linked))
+    assert resolved["project_id"] != state.project_id(str(tmp_path))
+
+
+def test_orphan_report_never_reports_live_owner_store_with_worktree_records(
+    tmp_path,
+    monkeypatch,
+):
+    home = tmp_path / "home"
+    main = tmp_path / "main-checkout"
+    main.mkdir()
+    vanished = main / ".legion" / "worktrees" / "vanished"
+    project_id = state.project_id(str(main))
+    project = home / ".legion" / "projects" / project_id
+    project.mkdir(parents=True)
+    repos_file = project / "repos.jsonl"
+    repos_file.write_text(
+        "".join(
+            json.dumps({"repo_root": str(path)}) + "\n"
+            for path in (main, vanished)
+        ),
+        encoding="utf-8",
+    )
+
+    # The key check also protects an owner store whose repos.jsonl has only
+    # accumulated child-worktree records and never recorded the owner itself.
+    second_main = tmp_path / "second-main-checkout"
+    second_main.mkdir()
+    second_vanished = second_main / "improve" / "worktrees" / "vanished"
+    second_project_id = state.project_id(str(second_main))
+    second_project = home / ".legion" / "projects" / second_project_id
+    second_project.mkdir(parents=True)
+    second_repos_file = second_project / "repos.jsonl"
+    second_repos_file.write_text(
+        json.dumps({"repo_root": str(second_vanished)}) + "\n", encoding="utf-8"
+    )
+    before = {
+        repos_file: repos_file.read_bytes(),
+        second_repos_file: second_repos_file.read_bytes(),
+    }
+
+    def reject_git_probe(*_args, **_kwargs):
+        raise AssertionError("orphan reporting must not spawn Git")
+
+    monkeypatch.setattr(state.subprocess, "run", reject_git_probe)
+
+    report = state.orphaned_project_report({"HOME": str(home)})
+
+    assert report["orphan_count"] == 0
+    orphan_ids = {orphan["project_id"] for orphan in report["projects"]}
+    assert project_id not in orphan_ids
+    assert second_project_id not in orphan_ids
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+
+def test_orphan_report_reports_store_keyed_by_vanished_ephemeral_worktree(
+    tmp_path,
+):
+    home = tmp_path / "home"
+    vanished = tmp_path / ".legion" / "worktrees" / "vanished"
+    project_id = state.project_id(str(vanished))
+    project = home / ".legion" / "projects" / project_id
+    project.mkdir(parents=True)
+    (project / "repos.jsonl").write_text(
+        json.dumps({"repo_root": str(vanished)}) + "\n", encoding="utf-8"
+    )
+
+    report = state.orphaned_project_report({"HOME": str(home)})
+
+    assert report["orphan_count"] == 1
+    assert report["projects"][0]["project_id"] == project_id
+    assert report["projects"][0]["missing_repo_paths"] == [str(vanished)]
+    assert report["projects"][0]["ephemeral_repo_paths"] == [str(vanished)]
+    assert report["projects"][0]["reasons"] == [
+        "recorded_repo_missing",
+        "ephemeral_worktree_path",
+    ]
+
+
 def test_orphan_report_is_read_only_and_includes_total_size(tmp_path):
     home = tmp_path / "home"
     projects = home / ".legion" / "projects"
@@ -287,8 +428,8 @@ def test_orphan_report_is_read_only_and_includes_total_size(tmp_path):
     ephemeral_repo = live_repo / ".legion" / "worktrees" / "heal-pr-42"
     ephemeral_repo.mkdir(parents=True)
 
-    def write_project(name, repo_path, *, registry_only=False):
-        project = projects / name
+    def write_project(repo_path, *, registry_only=False):
+        project = projects / state.project_id(str(repo_path))
         project.mkdir(parents=True)
         record = json.dumps({"repo_root": str(repo_path)}) + "\n"
         if registry_only:
@@ -300,14 +441,11 @@ def test_orphan_report_is_read_only_and_includes_total_size(tmp_path):
         (project / "payload.bin").write_bytes(b"telemetry")
         return project
 
-    missing_project = write_project("missing-111111111111", missing_repo)
-    registry_project = write_project(
-        "registry-222222222222", tmp_path / "removed-registry-repo", registry_only=True
-    )
-    ephemeral_project = write_project(
-        "heal-pr-42-333333333333", ephemeral_repo
-    )
-    write_project("live-444444444444", live_repo)
+    missing_project = write_project(missing_repo)
+    registry_repo = tmp_path / "removed-registry-repo"
+    registry_project = write_project(registry_repo, registry_only=True)
+    ephemeral_project = write_project(ephemeral_repo)
+    write_project(live_repo)
     unrecorded = projects / "shared-learning-555555555555"
     unrecorded.mkdir()
     (unrecorded / "learning.json").write_text("{}\n", encoding="utf-8")
@@ -326,17 +464,17 @@ def test_orphan_report_is_read_only_and_includes_total_size(tmp_path):
     assert report["read_only"] is True
     assert report["orphan_count"] == 3
     assert set(by_id) == {
-        "missing-111111111111",
-        "registry-222222222222",
-        "heal-pr-42-333333333333",
+        state.project_id(str(missing_repo)),
+        state.project_id(str(registry_repo)),
+        state.project_id(str(ephemeral_repo)),
     }
-    assert by_id["missing-111111111111"]["reasons"] == [
+    assert by_id[state.project_id(str(missing_repo))]["reasons"] == [
         "recorded_repo_missing"
     ]
-    assert by_id["registry-222222222222"]["reasons"] == [
+    assert by_id[state.project_id(str(registry_repo))]["reasons"] == [
         "recorded_repo_missing"
     ]
-    assert by_id["heal-pr-42-333333333333"]["reasons"] == [
+    assert by_id[state.project_id(str(ephemeral_repo))]["reasons"] == [
         "ephemeral_worktree_path"
     ]
     assert report["total_size_bytes"] == sum(

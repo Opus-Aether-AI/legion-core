@@ -118,15 +118,55 @@ def project_id(repo: str) -> str:
     return f"{_slug(os.path.basename(repo_abs))}-{digest}"
 
 
-def _linked_worktree_main(repo: str) -> str | None:
-    """Return the owning checkout for a linked Git worktree, if detectable.
+def _is_legion_managed_worktree(path: str) -> bool:
+    normalized = path.replace("\\", "/").rstrip("/") + "/"
+    return (
+        "/.legion/worktrees/" in normalized
+        or "/improve/worktrees/" in normalized
+    )
 
-    State resolution is on every Legion command's hot path, so Git discovery is
-    deliberately best-effort. Unsupported Git versions, unreadable repositories,
-    malformed output, timeouts, and non-Git directories all preserve the legacy
-    path-keyed behavior.
+
+def _logical_owner_path(repo: str, owner: str) -> str:
+    """Map Git's real owner path back through the caller's logical prefix."""
+    try:
+        owner_real = os.path.realpath(owner)
+    except (OSError, ValueError):
+        return owner
+
+    current = repo
+    while True:
+        try:
+            current_real = os.path.realpath(current)
+            relative = os.path.relpath(owner_real, current_real)
+            is_descendant = relative != os.pardir and not relative.startswith(
+                os.pardir + os.sep
+            )
+            if is_descendant:
+                logical_owner = os.path.normpath(os.path.join(current, relative))
+                if os.path.realpath(logical_owner) == owner_real:
+                    return logical_owner
+        except (OSError, ValueError):
+            pass
+
+        parent = os.path.dirname(current)
+        if parent == current:
+            return owner
+        current = parent
+
+
+def _linked_worktree_main(repo: str) -> str | None:
+    """Return the owner of a Legion-managed ephemeral linked worktree.
+
+    Collapse is deliberately limited to ``/.legion/worktrees/`` and
+    ``/improve/worktrees/`` paths. Durable developer worktrees keep their legacy
+    path-keyed stores and do not undergo a silent project-ID migration. State
+    resolution is on every Legion command's hot path, so Git discovery is
+    best-effort: unsupported Git versions, unusual Git-dir layouts, malformed
+    output, timeouts, and non-Git directories all preserve legacy path-keying.
     """
     repo_abs = os.path.abspath(os.path.expanduser(repo))
+    if not _is_legion_managed_worktree(repo_abs):
+        return None
     try:
         result = subprocess.run(
             [
@@ -152,9 +192,10 @@ def _linked_worktree_main(repo: str) -> str | None:
     if len(paths) != 2 or not all(os.path.isabs(path) for path in paths):
         return None
     git_dir, common_dir = (os.path.normpath(path) for path in paths)
-    if git_dir == common_dir:
+    if git_dir == common_dir or os.path.basename(common_dir) != ".git":
         return None
-    return os.path.dirname(common_dir)
+    owner = os.path.dirname(common_dir)
+    return _logical_owner_path(repo_abs, owner)
 
 
 def repository_project_id(repo: str, identity: str | None = None) -> str:
@@ -238,9 +279,9 @@ def resolve_state(repo: str | None = None, env: dict[str, str] | None = None) ->
     env = dict(os.environ if env is None else env)
     repo_abs = _abs(repo or os.getcwd())
     identity = repository_identity(repo_abs)
-    # Linked worktrees are transient children of one physical checkout. Keep
-    # runtime state path-keyed, but key those children to their owning checkout
-    # so their spans and registries survive worktree cleanup.
+    # Legion-managed worktrees are transient children of one owning checkout.
+    # Key only those children to the owner so their state survives cleanup;
+    # durable developer worktrees remain independently path-keyed.
     path_project_id = project_id(_linked_worktree_main(repo_abs) or repo_abs)
     stable_repository_project_id = repository_project_id(repo_abs, identity)
     config_file = _config_path(repo_abs, env)
@@ -358,11 +399,12 @@ def _path_exists(path: str) -> bool | None:
 
 
 def _ephemeral_worktree_reason(path: str, *, inspect_git: bool) -> str | None:
-    normalized = path.replace("\\", "/").rstrip("/") + "/"
-    if "/.legion/worktrees/" in normalized or "/improve/worktrees/" in normalized:
+    if _is_legion_managed_worktree(path):
         return "ephemeral_worktree_path"
-    if inspect_git and _linked_worktree_main(path):
-        return "linked_git_worktree"
+    # ``inspect_git`` is retained for compatibility with branch-local callers,
+    # but unmanaged live worktrees are deliberately durable and must not be
+    # classified as safe-to-remove state. This also keeps the report bounded to
+    # cheap path and existence checks rather than one Git process per path.
     return None
 
 
@@ -413,14 +455,26 @@ def orphaned_project_report(env: dict[str, str] | None = None) -> dict[str, Any]
         missing_paths = [path for path, exists in statuses.items() if exists is False]
         ephemeral_paths: list[str] = []
         ephemeral_reasons: set[str] = set()
+        orphan_candidate_paths: list[str] = []
         for path, exists in statuses.items():
             reason = _ephemeral_worktree_reason(path, inspect_git=exists is True)
             if reason:
                 ephemeral_paths.append(path)
                 ephemeral_reasons.add(reason)
+            if exists is False or reason:
+                orphan_candidate_paths.append(path)
+
+        # Every recorded checkout must be gone or explicitly Legion-managed,
+        # and the directory name must prove this store was keyed by one of those
+        # paths. Owner-keyed stores often record child worktrees in repos.jsonl;
+        # neither that accumulation nor a vanished child makes the owner orphaned.
+        if not statuses or len(orphan_candidate_paths) != len(statuses):
+            continue
+        if not any(entry.name == project_id(path) for path in orphan_candidate_paths):
+            continue
 
         reasons = sorted(ephemeral_reasons)
-        if statuses and all(exists is False for exists in statuses.values()):
+        if all(exists is False for exists in statuses.values()):
             reasons.insert(0, "recorded_repo_missing")
         if not reasons:
             continue

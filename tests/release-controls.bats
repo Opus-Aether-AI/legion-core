@@ -401,11 +401,16 @@ EOF
         return 1
     }
 
-    # The npx validation step resolves the package before any PR is opened. A
-    # consumer whose .npmrc scopes @opus-aether-ai to GitHub Packages needs a
-    # token in the environment, or it 401s and no PR is ever created.
-    grep -q 'packages: read' "$consumer"
+    # The npx validation step resolves the package before any PR is opened, so
+    # a consumer whose .npmrc scopes @opus-aether-ai to GitHub Packages needs a
+    # token in the environment or it 401s and no PR is ever created.
     grep -q 'NODE_AUTH_TOKEN:' "$consumer"
+
+    # ...but this workflow must NOT request packages: read itself. A called
+    # workflow cannot exceed its caller's permissions, and every caller grants
+    # only contents+pull-requests, so requesting it made all consumers fail at
+    # startup with no job at all. The grant belongs in the caller.
+    ! grep -qE '^\s*packages:' "$consumer"
 }
 
 @test "recovery verifies a v0.19.0-style legacy tag with current controls" {

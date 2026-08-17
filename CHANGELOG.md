@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.5](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.4...v0.23.5) (2026-08-17)
+
+
+### Fixed
+
+* **consumer-update:** resolve legion-core from public npm, not the consumer's scope ([#152](https://github.com/Opus-Aether-AI/legion-core/issues/152)) ([d56d990](https://github.com/Opus-Aether-AI/legion-core/commit/d56d990581b39f48e70bac362bf75e00fee837fc))
+
 ## [0.23.4](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.3...v0.23.4) (2026-08-17)
 
 

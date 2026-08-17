@@ -63,6 +63,17 @@ jobs:
       UPDATE_COMMAND: ${{ inputs.update_command }}
       VALIDATION_COMMAND: ${{ inputs.validation_command }}
       GH_TOKEN: ${{ github.token }}
+      # Consumers whose .npmrc scopes @opus-aether-ai to GitHub Packages
+      # authenticate with a shell-expanded ${GITHUB_TOKEN}/${NODE_AUTH_TOKEN}.
+      # Job-level on purpose: `npx --package @opus-aether-ai/legion-core` runs in
+      # TWO steps (apply policy, then validate). Setting the token on only the
+      # second one still failed at the first, which is exactly what happened.
+      # A consumer must ALSO grant `packages: read` in its own caller workflow --
+      # a called workflow cannot widen its caller's permissions. Consumers on the
+      # public registry are unaffected: npm only sends a token to the host its
+      # .npmrc scopes it to.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -132,16 +143,6 @@ jobs:
         run: bash -euo pipefail -c "$UPDATE_COMMAND"
 
       - name: Validate Legion policy and repository integration
-        env:
-          # Consumers whose .npmrc scopes @opus-aether-ai to GitHub Packages
-          # authenticate with a shell-expanded ${GITHUB_TOKEN} / ${NODE_AUTH_TOKEN}.
-          # Neither was exported here, so the expansion produced an empty string
-          # and every run 401'd before a PR could be opened. Exporting both keeps
-          # the common .npmrc spellings working; consumers on the public registry
-          # are unaffected, because npm only sends a token to the host it is
-          # scoped to.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           npx --yes --package "@opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \

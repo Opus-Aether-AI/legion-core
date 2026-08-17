@@ -117,7 +117,8 @@ jobs:
 
       - name: Apply the published Legion policy
         run: |
-          npx --yes --package "@opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \
+          npx --yes --@opus-aether-ai:registry=https://registry.npmjs.org \
+            --package "@opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \
             legion-init --repo .
 
       - name: Record the repository core baseline
@@ -145,7 +146,8 @@ jobs:
       - name: Validate Legion policy and repository integration
         run: |
           set -euo pipefail
-          npx --yes --package "@opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \
+          npx --yes --@opus-aether-ai:registry=https://registry.npmjs.org \
+            --package "@opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \
             legion-init --repo . --check
           jq -e \
             --arg version "$LEGION_CORE_VERSION" \

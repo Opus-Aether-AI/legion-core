@@ -376,6 +376,19 @@ EOF
     grep -q 'workflow_call:' "$consumer"
     grep -q 'permission-contents' "$REPO_ROOT/.github/workflows/release-please.yml"
     grep -qF '"@opus-aether-ai/legion-core@$LEGION_CORE_VERSION"' "$consumer"
+
+    # Every npx call must pin the scope to public npm. A consumer's .npmrc may
+    # redirect @opus-aether-ai to GitHub Packages for its own private packages
+    # (config, logger); legion-core is published publicly, and a plain --registry
+    # flag does NOT override a scope-specific redirect -- only the scoped form
+    # does. Without this, resolution goes to GitHub Packages and dies 401 (no
+    # token) or 403 (token cannot read another repo's org package).
+    npx_calls="$(grep -c 'npx --yes' "$consumer")"
+    scoped="$(grep -c -- '--@opus-aether-ai:registry=https://registry.npmjs.org' "$consumer")"
+    [ "$npx_calls" -eq "$scoped" ] || {
+        echo "npx calls: $npx_calls, scope-pinned: $scoped" >&2
+        return 1
+    }
     grep -q 'legion-init --repo . --check' "$consumer"
     grep -q 'schema: "legion.core-pin.v1"' "$consumer"
     grep -q 'source_sha: $source_sha' "$consumer"

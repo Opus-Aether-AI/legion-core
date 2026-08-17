@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.23.4](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.3...v0.23.4) (2026-08-17)
+
+
+### Fixed
+
+* **consumer-update:** scope the registry token to the job, not one step ([#151](https://github.com/Opus-Aether-AI/legion-core/issues/151)) ([7afad66](https://github.com/Opus-Aether-AI/legion-core/commit/7afad66b4de05edd03110e1bd36e1d400c06a06b))
+* **consumer-update:** stop requesting a permission callers cannot grant ([#149](https://github.com/Opus-Aether-AI/legion-core/issues/149)) ([74a8b67](https://github.com/Opus-Aether-AI/legion-core/commit/74a8b67d1754ab7806b5cb250b056f6e124e63e7))
+
 ## [0.23.3](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.2...v0.23.3) (2026-08-16)
 
 

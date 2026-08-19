@@ -149,6 +149,33 @@ def executor_info(execs, name):
     return out
 
 
+def review_order(table, execs):
+    """Ordered reviewer candidates: config order, minus anything that can't review.
+
+    A reviewer is a candidate when it appears in ``[review].order`` and its
+    executors.toml entry declares a ``review`` capability other than ``none``.
+    Unknown names are dropped rather than raising, so removing an executor from
+    the registry cannot wedge review for every caller.
+    """
+    section = table.get("review") if isinstance(table, dict) else None
+    order = section.get("order") if isinstance(section, dict) else None
+    if not isinstance(order, (list, tuple)):
+        order = ["codex"]
+    out = []
+    for name in order:
+        if not isinstance(name, str):
+            continue
+        info = execs.get(name)
+        if not isinstance(info, dict):
+            continue
+        kind = info.get("review")
+        if not isinstance(kind, str) or kind == "none" or not kind:
+            continue
+        out.append({"executor": name, "kind": kind,
+                    "model_ref": info.get("review_model_ref") or info.get("model_ref") or ""})
+    return out
+
+
 def _strip_inline_comment(line):
     in_string = False
     escaped = False
@@ -335,6 +362,11 @@ def main(argv=None):
     ap.add_argument("--executors-file", default=os.environ.get("LEGION_EXECUTORS_FILE", _DEFAULT_EXECUTORS_FILE))
     ap.add_argument("--executor-info", metavar="NAME", help="print the registry entry for one executor as JSON")
     ap.add_argument("--list-executors", action="store_true")
+    ap.add_argument(
+        "--review-order",
+        action="store_true",
+        help="print the review fallback order, filtered to executors that can review",
+    )
     a = ap.parse_args(argv)
     if a.archetype and a.flag_archetype and a.archetype != a.flag_archetype:
         ap.error(f"positional archetype {a.archetype!r} conflicts with --archetype {a.flag_archetype!r}")
@@ -343,6 +375,9 @@ def main(argv=None):
         print(resolve_primary())
         return 0
     try:
+        if a.review_order:
+            print(json.dumps(review_order(load_table(a.file), load_executors(a.executors_file))))
+            return 0
         if a.list_executors or a.executor_info:
             execs = load_executors(a.executors_file)
             if a.list_executors:

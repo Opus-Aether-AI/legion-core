@@ -31,6 +31,15 @@
 # resolved by `legion-route --primary`). `model_ref` on a self archetype is the
 # Claude-primary default (Fable); a non-Claude primary runs its own model inline.
 
+# ── Review fallback ─────────────────────────────────────────────────────
+# `legion-delegate review` walks this order and uses the first executor whose
+# `review` capability in executors.toml is not "none" AND that is actually
+# reachable. Codex leads because its native review subcommand emits the verdict
+# schema directly; the rest review by prompt and are normalized. Lineage is
+# deliberately mixed so a single vendor outage cannot block review entirely.
+[review]
+order = ["codex", "cursor", "opencode", "claude"]
+
 [targets]
 codex_share = 0.5          # advisory default; choose any value from 0.0 to 1.0
 

@@ -2125,3 +2125,51 @@ $run_error" ]
     '
     [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
 }
+
+@test "route --review-order: lists only executors that can review, in config order" {
+    run python3 legion-router/scripts/legion-route.py --review-order
+    [ "$status" -eq 0 ]
+    # codex leads (native verb); hermes/pi declare review="none" and are excluded
+    echo "$output" | jq -e '.[0].executor == "codex" and .[0].kind == "native"'
+    echo "$output" | jq -e 'all(.[]; .kind != "none")'
+    echo "$output" | jq -e 'any(.[]; .executor == "hermes") | not'
+    echo "$output" | jq -e 'any(.[]; .executor == "pi") | not'
+}
+
+@test "delegate review: an archetype routing to a non-reviewer no longer aborts" {
+    # Regression: this used to `die` with "invoke its executor-specific review
+    # adapter", which made a whole class of archetypes unreviewable.
+    local repo; repo="$(make_test_repo review-archetype-nonreviewer)"
+
+    run "$DELEGATE" review --archetype implement-feature --base HEAD --repo "$repo" --quiet
+
+    # It must not fail with the old routing abort.
+    [[ "$output" != *"invoke its executor-specific review adapter"* ]]
+}
+
+@test "delegate review: a reviewer with no quota falls through to the next candidate" {
+    local repo; repo="$(make_test_repo review-quota-fallback)"
+    export MOCK_CODEX_REVIEW_QUOTA=1
+
+    run "$DELEGATE" review --base HEAD --repo "$repo" --quiet
+
+    # codex was tried and was unreachable, so the walk continued past it
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -ge 1 ]
+    [[ "$output" != *'"reason":"review-failed"'* ]] || \
+      { echo "review failed outright instead of falling through"; false; }
+}
+
+@test "delegate review: a real rejection is never retried on another executor" {
+    # The safety invariant behind the fallback: only an UNREACHABLE reviewer
+    # yields to the next candidate. A reviewer that ran and rejected ends the
+    # walk, or a later approval could erase its findings.
+    local repo; repo="$(make_test_repo review-reject-no-fallthrough)"
+    export MOCK_CODEX_REVIEW_FINDINGS=1
+
+    run "$DELEGATE" review --base HEAD --repo "$repo" --quiet
+
+    echo "$output" | jq -e '.status == "ok"'
+    echo "$output" | jq -e '.verdict.verdict == "request_changes"'
+    # exactly one reviewer ran
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
+}

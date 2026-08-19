@@ -978,6 +978,13 @@ cmd_run() {
   local thread_id usage cost filtered_err error_log
   filtered_err="$art/codex.filtered.err"
   filter_codex_stderr "$art/codex.err" "$filtered_err"
+  # A reviewer's real failure reason may only exist on stdout (codex prints
+  # quota exhaustion there). Append it so error_log points at the cause rather
+  # than at unrelated MCP noise.
+  if [[ -s "$art/stream.jsonl" ]] && ! grep -qiE "usage limit|quota" "$filtered_err" 2>/dev/null; then
+    grep -ioE "you've hit your usage limit[^\"]*|rate.?limit[^\"]*" "$art/stream.jsonl" 2>/dev/null \
+      | sort -u | head -3 >> "$filtered_err" || true
+  fi
   error_log="$(error_log_summary "$art/codex.err" "$filtered_err")"
   thread_id="$(codex_thread_id "$art/stream.jsonl")"
   usage="$(codex_usage "$art/stream.jsonl")"
@@ -1291,11 +1298,20 @@ review_resolve_candidates() {
 # returned a bad verdict is NOT unavailable, it is a failed review, and failing
 # closed on it is the whole point of the surrounding logic.
 review_executor_unavailable() {
-  local rc="$1" err_file="$2"
+  local rc="$1" err_file="$2" out_file="${3:-}"
   [[ "$rc" -ne 0 ]] || return 1
-  [[ -s "$err_file" ]] || return 1
-  grep -qiE "usage limit|rate.?limit|quota|insufficient_quota|429|authentication required|not authenticated|unauthorized|invalid_api_key|please run .*login|command not found|no such file or directory" \
-    "$err_file"
+  # Codex reports a spent quota on STDOUT, inside its JSON event stream -- its
+  # stderr carries only unrelated MCP OAuth noise. Checking stderr alone made
+  # an out-of-quota reviewer look like an ordinary review failure, which is the
+  # bug this fallback exists to fix. Search both streams.
+  local f
+  for f in "$err_file" "$out_file"; do
+    [[ -n "$f" && -s "$f" ]] || continue
+    if grep -qiE "usage limit|rate.?limit|quota exceeded|insufficient_quota|429 |authentication required|not authenticated|unauthorized|invalid_api_key|please run .*login|command not found" "$f"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 cmd_review() {
@@ -1389,6 +1405,20 @@ cmd_review() {
   local start_ms end_ms dur rc=0 attempt=0 status="failed" reason="review-failed"
   local attempt_stream attempt_err attempt_verdict
   local review_executor review_kind review_model_ref _cand _cand_n=0
+  # Activating a candidate's executor context marks this process as running
+  # INSIDE that executor. Without restoring the caller's context first, the
+  # next candidate's preflight sees itself as a nested delegation and blocks --
+  # which would silently defeat the fallback. Snapshot once, restore per hop.
+  local _ctx_active="${LEGION_ACTIVE:-}" _ctx_exec="${LEGION_EXECUTOR:-}"
+  local _ctx_depth="${LEGION_DEPTH:-}" _ctx_run="${LEGION_RUN_ID:-}"
+  local _ctx_name="${LEGION_EXECUTOR_NAME:-}"
+  review_restore_caller_context() {
+    if [[ -n "$_ctx_active" ]]; then export LEGION_ACTIVE="$_ctx_active"; else unset LEGION_ACTIVE; fi
+    if [[ -n "$_ctx_exec" ]]; then export LEGION_EXECUTOR="$_ctx_exec"; else unset LEGION_EXECUTOR; fi
+    if [[ -n "$_ctx_depth" ]]; then export LEGION_DEPTH="$_ctx_depth"; else unset LEGION_DEPTH; fi
+    if [[ -n "$_ctx_run" ]]; then export LEGION_RUN_ID="$_ctx_run"; else unset LEGION_RUN_ID; fi
+    if [[ -n "$_ctx_name" ]]; then export LEGION_EXECUTOR_NAME="$_ctx_name"; else unset LEGION_EXECUTOR_NAME; fi
+  }
   start_ms="$(date +%s000)"
   REVIEW_START_MS="$start_ms"
   # Walk reviewer candidates. A candidate that cannot be reached at all (no
@@ -1407,6 +1437,7 @@ cmd_review() {
       continue
     fi
     [[ "$_cand_n" -eq 1 ]] || note "→ falling back to reviewer '$review_executor'"
+    review_restore_caller_context
     if ! route_preflight "$review_executor" "$model" "review --base $base_sha --head $head_sha" "$archetype"; then
       note "⚠ reviewer '$review_executor' failed preflight; trying the next candidate"
       reason="reviewer-unavailable"
@@ -1543,7 +1574,7 @@ cmd_review() {
     if [[ "$status" == "ok" ]]; then
       break
     fi
-    if review_executor_unavailable "$rc" "$attempt_err"; then
+    if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
       note "⚠ reviewer '$review_executor' is unavailable (exit $rc); trying the next candidate"
       reason="reviewer-unavailable"
       continue

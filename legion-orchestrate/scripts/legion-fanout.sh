@@ -291,6 +291,7 @@ finalize_task_ledger_on_exit() {
     task_ledger_finalized=1
   fi
   terminalize_interrupted_run_records
+  cleanup_fanout_temp_files
   return "$rc"
 }
 
@@ -340,10 +341,14 @@ terminalize_interrupted_run_records() {
 fanout_descendant_pids=()
 fanout_descendant_pgids=()
 snapshot_descendant_tree() {
-  local pid="$1" child
+  local pid="$1" child child_pids
+  child_pids="$(mktemp "$work/descendant-pids.XXXXXX")"
+  fanout_temp_files+=("$child_pids")
+  pgrep -P "$pid" 2>/dev/null > "$child_pids" || true
   while IFS= read -r child; do
     [[ "$child" =~ ^[0-9]+$ ]] && snapshot_descendant_tree "$child"
-  done < <(pgrep -P "$pid" 2>/dev/null || true)
+  done < "$child_pids"
+  rm -f "$child_pids"
   fanout_descendant_pids+=("$pid")
 }
 
@@ -359,10 +364,14 @@ terminate_descendant_process_groups() {
   fanout_descendant_pids=()
   fanout_descendant_pgids=()
 
-  local pid pgid self_pgid
+  local pid pgid self_pgid job_pids
+  job_pids="$(mktemp "$work/job-pids.XXXXXX")"
+  fanout_temp_files+=("$job_pids")
+  jobs -pr > "$job_pids" || true
   while IFS= read -r pid; do
     [[ "$pid" =~ ^[0-9]+$ ]] && snapshot_descendant_tree "$pid"
-  done < <(jobs -pr)
+  done < "$job_pids"
+  rm -f "$job_pids"
 
   self_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
   for pid in "${fanout_descendant_pids[@]+"${fanout_descendant_pids[@]}"}"; do
@@ -455,6 +464,15 @@ fi
 
 work="$repo/.legion/fanout/$(date -u +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$work"
+fanout_temp_files=()
+
+cleanup_fanout_temp_files() {
+  local temp_file
+  for temp_file in "${fanout_temp_files[@]+"${fanout_temp_files[@]}"}"; do
+    rm -f "$temp_file" 2>/dev/null || true
+  done
+  fanout_temp_files=()
+}
 
 # Trace context: one trace per fan-out so every delegated slice's span hangs under
 # a single OTel tree (rooted at the fan-out's own span below). Honor an inherited
@@ -728,6 +746,7 @@ setup_integration_base() {
 }
 
 teardown_integration_base() {
+  local temporary_refs
   if [[ -n "$integration_wt" && -d "$integration_wt" ]]; then
     with_git_worktree_lock "$repo" \
       git -C "$repo" worktree remove --force "$integration_wt" >/dev/null 2>&1 \
@@ -736,9 +755,14 @@ teardown_integration_base() {
   with_git_worktree_lock "$repo" \
     git -C "$repo" worktree prune >/dev/null 2>&1 || true
   [[ -n "$integration_branch" ]] && git -C "$repo" branch -D "$integration_branch" >/dev/null 2>&1 || true
+  temporary_refs="$(mktemp "$work/temporary-refs.XXXXXX")"
+  fanout_temp_files+=("$temporary_refs")
+  (git -C "$repo" for-each-ref --format='%(refname)' "refs/legion/fanout/$FANOUT_RUN_ID/" \
+    2>/dev/null || true) > "$temporary_refs"
   while IFS= read -r temporary_ref; do
     [[ -n "$temporary_ref" ]] && git -C "$repo" update-ref -d "$temporary_ref" >/dev/null 2>&1 || true
-  done < <(git -C "$repo" for-each-ref --format='%(refname)' "refs/legion/fanout/$FANOUT_RUN_ID/" 2>/dev/null || true)
+  done < "$temporary_refs"
+  rm -f "$temporary_refs"
 }
 
 # Slices are delegated with --keep so their diffs survive until the sequential
@@ -1029,10 +1053,18 @@ fi
 routes_path="$work/routes.json"
 : > "$work/routes.jsonl"
 for ((i = 0; i < n; i++)); do
+  route_input="$(mktemp "$work/slice-$i.route.XXXXXX")"
+  fanout_temp_files+=("$route_input")
+  (if [[ -s "$work/slice-$i.route.json" ]]; then
+    cat "$work/slice-$i.route.json"
+  else
+    printf '{}\n'
+  fi) > "$route_input"
   jq -cn \
     --slurpfile slice "$work/slice-$i.in" \
-    --slurpfile route <(if [[ -s "$work/slice-$i.route.json" ]]; then cat "$work/slice-$i.route.json"; else echo '{}'; fi) \
+    --slurpfile route "$route_input" \
     '{slice:$slice[0],route:$route[0]}' >> "$work/routes.jsonl"
+  rm -f "$route_input"
 done
 jq -s '{routes:.}' "$work/routes.jsonl" > "$routes_path"
 

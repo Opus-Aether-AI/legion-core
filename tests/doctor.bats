@@ -435,3 +435,52 @@ EOF
   [ "$status" -eq 1 ]
   [ ! -f "$log" ]
 }
+
+@test "doctor: cursor warns when headless auth is unconfigured, even if the CLI is present" {
+  # Regression for a genuinely confusing failure: `agent status` reports a
+  # successful login while `agent -p` (the only mode Legion uses) refuses with
+  # "Authentication required". Doctor must catch that before a delegation does.
+  fake="$BATS_TEST_TMPDIR/cursorbin"; mkdir -p "$fake"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/agent"; chmod +x "$fake/agent"
+
+  PATH="$fake:$PATH" CURSOR_API_KEY="" run "$DOCTOR" --only cursor
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"headless auth is not configured"* ]]
+  [[ "$output" == *"CURSOR_API_KEY"* ]]
+}
+
+@test "doctor: cursor passes when CURSOR_API_KEY is set" {
+  fake="$BATS_TEST_TMPDIR/cursorbin2"; mkdir -p "$fake"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/agent"; chmod +x "$fake/agent"
+
+  PATH="$fake:$PATH" CURSOR_API_KEY="sk-test" run "$DOCTOR" --only cursor
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"headless auth configured"* ]]
+}
+
+@test "doctor: cursor warns (does not fail) when the CLI is absent" {
+  # A minimal system PATH: doctor's own tooling still resolves, but the user's
+  # ~/.local/bin (where agent/cursor-agent live) does not.
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin" CURSOR_API_KEY="" run "$DOCTOR" --only cursor
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cursor CLI not found"* ]]
+}
+
+@test "doctor: an invalid CURSOR_AGENT_BIN warns instead of falling back to agent" {
+  # legion-cursor's resolve_cursor_bin treats a non-empty override as
+  # authoritative and fails without trying defaults. Doctor must not report
+  # readiness by silently falling through to a working `agent` on PATH.
+  fake="$BATS_TEST_TMPDIR/cbin"; mkdir -p "$fake"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/agent"; chmod +x "$fake/agent"
+
+  PATH="$fake:$PATH" CURSOR_AGENT_BIN="/nonexistent/cursor-bin" CURSOR_API_KEY="sk-test" \
+    run "$DOCTOR" --only cursor
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CURSOR_AGENT_BIN"* ]]
+  [[ "$output" == *"not executable"* ]]
+  [[ "$output" != *"headless auth configured"* ]]
+}

@@ -220,6 +220,19 @@ cmd_run() {
   [[ -n "$model" ]] && cmd+=(--model "$model")
   cmd+=("$task")
 
+  # Headless mode needs an API key. An interactive `agent login` session does
+  # not grant `-p` access, and the CLI's own message ("run 'agent login'") sends
+  # you back to the thing you already did.
+  #
+  # This must NOT rely on `note`: fan-out and the prompt-based review fallback
+  # always pass --quiet, which makes note a no-op -- so the explanation would be
+  # missing from exactly the paths that motivated it. Record it and attach it to
+  # the returned result instead.
+  local cursor_auth_hint=""
+  if [[ -z "${CURSOR_API_KEY:-}" ]]; then
+    cursor_auth_hint="CURSOR_API_KEY is unset; cursor headless runs require it even when '$agent_bin status' reports a login"
+    note "⚠ $cursor_auth_hint"
+  fi
   legion_activate_executor_context "$RUN_ID" cursor
   note "-> ${cmd[*]}"
   start_ms="$(date +%s000)"
@@ -272,12 +285,19 @@ cmd_run() {
     "$sandbox" "$base" "$archetype"
   [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
 
+  # A failed run that had no API key almost certainly failed FOR that reason, and
+  # cursor's own stderr stays in an internal artifact the caller never reads.
+  local auth_note=""
+  [[ "$status" == "ok" ]] || auth_note="$cursor_auth_hint"
+
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --arg result "$result" --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
+    --arg result "$result" --arg auth_note "$auth_note" \
+    --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"cursor", model:$model, cursor_exit:$rc,
      result:$result, worktree:$wt, diff_path:$diff, last_message_path:$last,
-     usage:$usage, cost_usd:$cost}'
+     usage:$usage, cost_usd:$cost}
+    + (if $auth_note == "" then {} else {auth_error:$auth_note} end)'
   [[ "$status" == "ok" ]] || exit 1
 }
 

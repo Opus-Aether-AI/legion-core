@@ -72,7 +72,11 @@ formats; any other prose remains an invalid, fail-closed verdict. `approve` and
 Requires the CLI for each executor you use, plus `jq` and `git`. Pi and Hermes
 children also require `sandbox-exec` (included with macOS) or Bubblewrap
 (`bwrap`, install the `bubblewrap` package on Linux); their adapters fail closed
-when neither boundary exists. The proxy additionally needs `bun`.
+when neither boundary exists. The proxy additionally needs `bun`, and a
+`python3` on `PATH` (or `LEGION_PYTHON`) because it reads the model catalog
+through `legion-route.py` rather than parsing `models.toml` a second time. If no
+interpreter resolves, the proxy still starts and warns, but every model role
+falls through to its default.
 
 ## Tune routes from measured outcomes
 

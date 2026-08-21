@@ -53,34 +53,76 @@ function log(level: "info" | "warn" | "error", msg: string, meta?: Record<string
 	}
 }
 
-function parseModelCatalogToml(text: string): Record<string, string> {
-	const out: Record<string, string> = {};
-	let inModels = false;
-	for (const raw of text.split(/\r?\n/)) {
-		const line = raw.replace(/\s+#.*$/, "").trim();
-		if (!line || line.startsWith("#")) continue;
-		const section = line.match(/^\[([^\]]+)\]$/);
-		if (section) {
-			inModels = section[1] === "models";
-			continue;
-		}
-		if (!inModels) continue;
-		const entry = line.match(/^([A-Za-z0-9_-]+)\s*=\s*"([^"]+)"$/);
-		if (entry) out[entry[1]] = entry[2];
-	}
-	return out;
-}
-
+// The catalog has ONE reader: legion-route. This file used to hand-roll a second
+// TOML parser because it is a standalone bun script with no monorepo imports,
+// which left models.toml with two parsers free to drift -- and the drift is
+// silent, because a role this parser fails to see simply resolves to "" and the
+// request falls through to a default. The canonical reader is invoked once at
+// boot instead; a proxy that cannot read its own catalog should say so rather
+// than route on a half-parsed one.
+//
+// Deliberately not a bare `bun` import of the Python: this is a subprocess
+// boundary, not a module boundary, and keeping it explicit is what allows
+// legion-route to stay the single source of truth for every consumer.
 async function loadModelCatalog(path: string): Promise<Record<string, string>> {
+	const reader = `${import.meta.dir}/legion-route.py`;
+	// Resolve an interpreter rather than assuming `python3` is on PATH. The proxy
+	// is commonly started from launchd with a minimal PATH, and a pyenv- or
+	// Nix-only Python would otherwise leave the catalog empty -- silently, since
+	// every role then falls through to a default that looks deliberate.
+	const python = _optionalEnv("LEGION_PYTHON", "")
+		|| Bun.which("python3")
+		|| Bun.which("python")
+		|| "/usr/bin/python3";
 	try {
-		return parseModelCatalogToml(await Bun.file(path).text());
+		const proc = Bun.spawn([python, reader, "--models-json", "--models-file", path], {
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [out, err, code] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		if (code !== 0) {
+			log("warn", "model catalog unavailable", { path, python, exit: code, error: err.trim() });
+			return {};
+		}
+		const parsed = JSON.parse(out);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			log("warn", "model catalog is not an object", { path });
+			return {};
+		}
+		// Keep only string values. The canonical reader returns the catalog as
+		// TOML declares it, so a malformed entry (`role = 42`) would otherwise
+		// arrive typed as a string and be handed to an upstream as a model id.
+		const catalog: Record<string, string> = {};
+		for (const [role, value] of Object.entries(parsed as Record<string, unknown>)) {
+			if (typeof value === "string" && value) catalog[role] = value;
+			else log("warn", "ignoring non-string model role", { role, path });
+		}
+		return catalog;
 	} catch (err) {
-		log("warn", "model catalog unavailable", { path, error: String(err) });
+		log("warn", "model catalog unavailable", { path, python, error: String(err), hint: "the catalog is read through legion-route.py; set LEGION_PYTHON if python3 is not on PATH" });
 		return {};
 	}
 }
 
 const MODEL_CATALOG = await loadModelCatalog(MODEL_CONFIG_FILE);
+// An empty catalog is not fatal -- every lookup falls through to a default -- but
+// it is a silent degradation, which is the failure this file's second TOML
+// parser used to cause. Say the count out loud at boot so "routing on nothing"
+// is visible in the log rather than inferred from odd model choices later.
+if (Object.keys(MODEL_CATALOG).length === 0) {
+	log("warn", "model catalog is empty; every model role will fall through to its default", {
+		path: MODEL_CONFIG_FILE,
+	});
+} else {
+	log("info", "model catalog loaded", {
+		path: MODEL_CONFIG_FILE,
+		roles: Object.keys(MODEL_CATALOG).length,
+	});
+}
 function configuredModel(ref: string): string {
 	return MODEL_CATALOG[ref] ?? "";
 }

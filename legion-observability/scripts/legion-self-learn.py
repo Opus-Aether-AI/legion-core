@@ -21,7 +21,6 @@ optimizer; this script connects those pieces.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import glob
 import hashlib
 import importlib.util
@@ -40,6 +39,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
 import legion_learning_context  # noqa: E402
+import legion_file_lock  # noqa: E402
 
 SPAN_SCHEMA = "legion.span.v1"
 OUTCOME_SCHEMA = "legion.outcome.v1"
@@ -2178,8 +2178,7 @@ def write_improvement_queue(report: dict[str, Any], log_root: str) -> list[str]:
         and _text(_dict(proposal.get("provenance")).get("law_key"))
     }
     lock_path = os.path.join(queue_dir, ".queue.lock")
-    with open(lock_path, "a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with open(lock_path, "a+", encoding="utf-8") as lock, legion_file_lock.exclusive_lock(lock):
         if has_lifecycle:
             # Reconcile only Legion-generated law proposals. Maintainer-authored
             # queue entries are never removed by the learning loop. Exactly one
@@ -2576,8 +2575,7 @@ def sync_typed_hints(
     path = os.path.join(project_learning_dir, "hints.json")
     _ensure_dir(project_learning_dir)
     lock_path = os.path.join(project_learning_dir, ".hints.lock")
-    with open(lock_path, "a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with open(lock_path, "a+", encoding="utf-8") as lock, legion_file_lock.exclusive_lock(lock):
         existing = legion_learning_context.read_bounded_json(
             path, legion_learning_context.MAX_HINT_DOCUMENT_BYTES
         )
@@ -2729,8 +2727,7 @@ def apply_memory(
 ) -> dict[str, Any]:
     _ensure_dir(self_learn_dir(log_root))
     lock_path = memory_path(log_root) + ".lock"
-    with open(lock_path, "a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with open(lock_path, "a+", encoding="utf-8") as lock, legion_file_lock.exclusive_lock(lock):
         return _apply_memory_locked(
             report,
             log_root,

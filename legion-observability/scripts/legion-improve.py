@@ -10,7 +10,6 @@ an idempotent draft PR.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import math
@@ -28,6 +27,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
+import legion_file_lock  # noqa: E402
 
 
 PROPOSAL_SCHEMA = "legion.improvement-proposal.v1"
@@ -1904,8 +1904,7 @@ def execute(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         record = _initial_record(proposal, fingerprint, args.mode)
         terminal(record, "rejected", "repository_unavailable")
         return 2, public(record)
-    with open(lock_path, "a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with open(lock_path, "a+", encoding="utf-8") as lock, legion_file_lock.exclusive_lock(lock):
         path = state_path(root, fingerprint)
         if path.exists():
             record = read_json(path)

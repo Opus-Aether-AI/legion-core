@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import fcntl
 import hashlib
 import json
 import os
@@ -16,6 +15,8 @@ import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import legion_file_lock  # noqa: E402
 import legion_state  # noqa: E402
 
 
@@ -585,25 +586,21 @@ def checkpoint(payload: dict[str, Any], *, state_root: Path) -> dict[str, Any]:
     lock_descriptor, directory_descriptor = _open_history(
         Path(state_root).expanduser(), normalized["task_id"]
     )
-    locked = False
     try:
-        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
-        locked = True
-        previous = _latest_record(
-            lock_descriptor,
-            expected_task_id_hash=_digest(normalized["task_id"]),
-        )
-        decision = evaluate_checkpoint(payload, previous=previous)
-        if decision["state"] == "actionable" and _claim_actionable_pair(
-            directory_descriptor, normalized["task_id"], decision
-        ):
-            decision = evaluate_checkpoint(
-                payload, previous=previous, attempted_pair=True
+        with legion_file_lock.exclusive_lock(lock_descriptor):
+            previous = _latest_record(
+                lock_descriptor,
+                expected_task_id_hash=_digest(normalized["task_id"]),
             )
-        _record_decision(lock_descriptor, normalized["task_id"], decision)
+            decision = evaluate_checkpoint(payload, previous=previous)
+            if decision["state"] == "actionable" and _claim_actionable_pair(
+                directory_descriptor, normalized["task_id"], decision
+            ):
+                decision = evaluate_checkpoint(
+                    payload, previous=previous, attempted_pair=True
+                )
+            _record_decision(lock_descriptor, normalized["task_id"], decision)
     finally:
-        if locked:
-            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
         os.close(lock_descriptor)
         os.close(directory_descriptor)
     return decision

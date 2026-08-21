@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import argparse
 import base64
-import fcntl
 import json
 import math
+import contextlib
 import os
 import re
 import select
@@ -223,24 +223,62 @@ def _validate_span(payload: Any, expected_parent: str) -> dict[str, Any]:
     return payload
 
 
+@contextlib.contextmanager
+def _exclusive_lock(descriptor: int):
+    """Hold an exclusive advisory lock on a raw descriptor.
+
+    Deliberately self-contained. legion-router installs independently of
+    legion-observability, so importing that plugin's lock helper breaks the
+    moment the two are not siblings on disk -- which is exactly what the
+    installer-coverage job exercises. fcntl and msvcrt are imported lazily
+    inside their own branch so neither platform pays for the other's
+    platform-only module.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        # locking() acts at the current position, and LK_LOCK gives up after ten
+        # one-second retries rather than blocking. Seek at both ends and retry
+        # until acquired, so this matches flock(LOCK_EX).
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            yield
+        finally:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
 def _write_record_atomic(descriptor: int, encoded: bytes) -> None:
     """Append one record, rolling back a short/failed write while locked."""
 
-    fcntl.flock(descriptor, fcntl.LOCK_EX)
-    original_size = os.fstat(descriptor).st_size
-    try:
-        written = os.write(descriptor, encoded)
-        if written != len(encoded):
-            os.ftruncate(descriptor, original_size)
-            raise OSError("short canonical telemetry append")
-    except BaseException:
+    with _exclusive_lock(descriptor):
+        original_size = os.fstat(descriptor).st_size
         try:
-            os.ftruncate(descriptor, original_size)
-        except OSError:
-            pass
-        raise
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+            written = os.write(descriptor, encoded)
+            if written != len(encoded):
+                os.ftruncate(descriptor, original_size)
+                raise OSError("short canonical telemetry append")
+        except BaseException:
+            try:
+                os.ftruncate(descriptor, original_size)
+            except OSError:
+                pass
+            raise
 
 
 def _host_control_directories(home: Path) -> list[Path]:

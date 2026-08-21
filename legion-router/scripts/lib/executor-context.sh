@@ -39,10 +39,29 @@ legion_require_top_level_executor() {
     if legion_cross_harness_handoff_allowed "$executor"; then
       return 0
     fi
+    # A review is the one delegation that may target the SAME harness family.
+    # It is read-only and terminal -- the reviewer returns a verdict and never
+    # delegates onward -- so the recursion this guard exists to prevent cannot
+    # occur. Without this, a Claude-primary session has no reviewer at all once
+    # the other executors are unavailable, which is exactly when review matters.
+    if legion_review_handoff_allowed; then
+      return 0
+    fi
     printf 'legion-%s: nested Legion delegation is blocked; implement the assigned slice directly\n' \
       "$executor" >&2
     return 2
   fi
+}
+
+# Approval for a read-only review delegation. Set by legion-delegate's review
+# path only, after it has resolved a reviewer-capable executor and pinned the
+# sandbox to read-only. Depth still applies: a review cannot be used to climb
+# past LEGION_MAX_DEPTH.
+legion_review_handoff_allowed() {
+  [[ "${LEGION_REVIEW_HANDOFF:-0}" == "1" ]] || return 1
+  local depth="${LEGION_DEPTH:-0}" max_depth="${LEGION_MAX_DEPTH:-2}"
+  [[ "$depth" =~ ^[0-9]+$ && "$max_depth" =~ ^[1-9][0-9]*$ ]] || return 1
+  (( depth < max_depth ))
 }
 
 legion_cross_harness_handoff_allowed() {

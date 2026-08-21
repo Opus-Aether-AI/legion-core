@@ -222,8 +222,12 @@ cmd_run() {
   # this hop remains bounded by ARG_MAX. Say so before the kernel does: the
   # failure is otherwise a bare "Argument list too long" from deep in a
   # delegation.
-  if [[ "${#task}" -gt 100000 ]]; then
-    note "⚠ task is ${#task} bytes; cursor takes its prompt on argv and may exceed ARG_MAX"
+  # ${#task} counts CHARACTERS; MAX_ARG_STRLEN and ARG_MAX are byte limits, so a
+  # multibyte task can blow the real ceiling while the character count looks safe.
+  local task_bytes
+  task_bytes="$(printf '%s' "$task" | wc -c | tr -d ' ')"
+  if [[ "$task_bytes" -gt 100000 ]]; then
+    note "⚠ task is $task_bytes bytes; cursor takes its prompt on argv and may exceed ARG_MAX"
   fi
   cmd+=("$task")
 

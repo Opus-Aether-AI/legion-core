@@ -13,7 +13,7 @@
       "name": "legion-router",
       "source": "./legion-router",
       "description": "Legion's multi-model brain: registry-driven routing and scoped delegation across Claude, Codex, Cursor, OpenCode, Hermes, and Pi. Implemented adapters return a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
-      "version": "0.5.23",
+      "version": "0.5.24",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",
@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic repeated gates, legion-self-learn evidence/proposals, review-only legion-improve draft PRs, legion-trace, legion-otel-export, and legion-doctor verification.",
-      "version": "0.2.24",
+      "version": "0.2.25",
       "category": "infrastructure",
       "keywords": [
         "observability",

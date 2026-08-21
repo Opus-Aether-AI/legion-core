@@ -232,7 +232,7 @@ cmd_run() {
   # exceeds ARG_MAX -- moving it off the dispatcher's command line only to put
   # it back on the provider's would fix nothing.
   legion_activate_executor_context "$RUN_ID" opencode
-  note "-> ${cmd[*]} (task on stdin, ${#task} bytes)"
+  note "-> ${cmd[*]} (task on stdin, $(printf '%s' "$task" | wc -c | tr -d ' ') bytes)"
   start_ms="$(date +%s000)"
   set +e
   printf '%s' "$task" | ( cd "$wt" && "${cmd[@]}" ) >"$out_file" 2>"$err_file"

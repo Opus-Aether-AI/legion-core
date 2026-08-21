@@ -407,6 +407,13 @@ def _source_for_path(path: Path) -> str:
         return "opencode"
     if ".gemini" in lowered or "antigravity" in lowered:
         return "gemini"
+    if ".hermes" in lowered:
+        return "hermes"
+    # Match ".pi" only as a complete path segment. A bare substring test also
+    # catches ".pip/", which is on almost every machine, and would relabel pip's
+    # cache as Pi sessions.
+    if any(f".pi{sep}" in lowered for sep in ("/", "\\")):
+        return "pi"
     return "unknown"
 
 

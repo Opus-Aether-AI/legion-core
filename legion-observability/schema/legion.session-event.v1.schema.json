@@ -8,7 +8,7 @@
     "schema": {"const": "legion.session-event.v1"},
     "id": {"type": "string", "minLength": 1},
     "session_id": {"type": "string", "minLength": 1},
-    "source": {"type": "string", "enum": ["claude", "codex", "cursor", "opencode", "gemini", "unknown"]},
+    "source": {"type": "string", "enum": ["claude", "codex", "cursor", "opencode", "gemini", "pi", "hermes", "unknown"]},
     "project": {"type": "string", "minLength": 1},
     "ts": {"type": "string"},
     "sequence": {"type": "integer", "minimum": 0},

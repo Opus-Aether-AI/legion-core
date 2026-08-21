@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.23.7](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.6...v0.23.7) (2026-08-21)
+
+
+### Fixed
+
+* **doctor:** verify cursor is headless-ready, not merely installed ([#155](https://github.com/Opus-Aether-AI/legion-core/issues/155)) ([39762c4](https://github.com/Opus-Aether-AI/legion-core/commit/39762c4ad91c7c661135c750db3878e988691fb7))
+* make file locking work on Windows ([#158](https://github.com/Opus-Aether-AI/legion-core/issues/158)) ([45f0dc2](https://github.com/Opus-Aether-AI/legion-core/commit/45f0dc2e420ce2de24f1f2ee6e8d9d960e4f7b32))
+* **orchestrate:** make fanout work on Git Bash ([#159](https://github.com/Opus-Aether-AI/legion-core/issues/159)) ([157d9d9](https://github.com/Opus-Aether-AI/legion-core/commit/157d9d9069a25b0ab475d43239225a7e4133eae6))
+* **router:** take the task off the provider's argv too ([#160](https://github.com/Opus-Aether-AI/legion-core/issues/160)) ([5e2e5c0](https://github.com/Opus-Aether-AI/legion-core/commit/5e2e5c0b10aac162ec4e1db8fba48c8005b9ab6d))
+* **run:** accept a review verdict wrapped in a markdown fence ([#161](https://github.com/Opus-Aether-AI/legion-core/issues/161)) ([dfe6bf1](https://github.com/Opus-Aether-AI/legion-core/commit/dfe6bf18c5c3d1b8095af8cf01eff785b3fc7a0a))
+
+
+### Performance
+
+* **router:** seed delegated worktrees with copy-on-write dependencies ([#156](https://github.com/Opus-Aether-AI/legion-core/issues/156)) ([48e038e](https://github.com/Opus-Aether-AI/legion-core/commit/48e038e69f1a0c8457e27b7776395cabcaee4881))
+
 ## [0.23.6](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.5...v0.23.6) (2026-08-21)
 
 

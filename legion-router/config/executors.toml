@@ -23,26 +23,41 @@
 #               prompt — prompt executor, returns text; args: --task/--model/--repo
 #               ""     — primary-only, no coding adapter
 #   model_ref default model role (see models.toml); empty for primary-only.
+#   review    how this executor can produce a code review:
+#               native — has a first-class review subcommand with schema output
+#                        (codex: `codex exec review --output-schema`)
+#               prompt — reviews via an ordinary delegated prompt, normalized
+#                        into the verdict schema by normalize-review-verdict.py
+#               none   — cannot review; skipped by the review fallback order
+#   review_model_ref  model role used when THIS executor reviews.
 
 [executors.claude]
+review = "prompt"
+review_model_ref = "claude_default"
 kind = "primary coding"
 adapter = "legion-claude"
 contract = "diff"
 model_ref = "claude_default"
 
 [executors.codex]
+review = "native"
+review_model_ref = "codex_review"
 kind = "primary coding"
 adapter = "legion-delegate"
 contract = "native"
 model_ref = "codex_workhorse"
 
 [executors.cursor]
+review = "prompt"
+review_model_ref = "cursor_default"
 kind = "primary coding"
 adapter = "legion-cursor"
 contract = "diff"
 model_ref = "cursor_default"
 
 [executors.opencode]
+review = "prompt"
+review_model_ref = "opencode_review"
 kind = "primary coding"
 adapter = "legion-opencode"
 contract = "diff"
@@ -51,12 +66,14 @@ model_ref = "opencode_default"
 # Hermes and Pi use first-class diff adapters. Both create Legion-owned
 # worktrees and terminal artifacts; unsupported sandbox modes fail closed.
 [executors.hermes]
+review = "none"
 kind = "primary coding"
 adapter = "legion-hermes"
 contract = "diff"
 model_ref = "hermes_default"
 
 [executors.pi]
+review = "none"
 kind = "primary coding"
 adapter = "legion-pi"
 contract = "diff"

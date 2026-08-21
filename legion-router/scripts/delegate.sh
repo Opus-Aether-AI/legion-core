@@ -154,10 +154,11 @@ write_interrupted_review_receipt() {
     --arg model "$REVIEW_RECEIPT_MODEL" --arg archetype "$REVIEW_RECEIPT_ARCHETYPE" \
     --arg base "$REVIEW_RECEIPT_BASE_SHA" --arg head "$REVIEW_RECEIPT_HEAD_SHA" \
     --arg patch "$REVIEW_RECEIPT_PATCH" --arg completed "$(_now)" \
+    --arg rexec "${REVIEW_EXECUTOR_LABEL:-codex}" \
     --argjson attempts "$REVIEW_RECEIPT_ATTEMPT" \
     --argjson max_attempts "$REVIEW_RECEIPT_MAX_ATTEMPTS" '
     {schema:$schema, run_id:$run, status:$status, reason:$reason,
-     executor:"codex-review", model:$model,
+     executor:($rexec + "-review"), model:$model,
      archetype:(if $archetype=="" then null else $archetype end),
      reviewed_base_sha:$base, reviewed_head_sha:$head,
      review_patch:$patch, verdict_path:null,
@@ -185,7 +186,7 @@ on_terminating_signal() {
       '{terminal_receipt:$receipt, review_patch:$patch,
         reviewed_base_sha:$base, reviewed_head_sha:$head,
         reason:"interrupted", attempts:'"${REVIEW_RECEIPT_ATTEMPT:-0}"'}' 2>/dev/null || printf '{}')"
-    emit_span "codex-review" "$REVIEW_RECEIPT_MODEL" "failed" "$dur" "$cost" "$usage" \
+    emit_span "${REVIEW_EXECUTOR_LABEL:-codex}-review" "$REVIEW_RECEIPT_MODEL" "failed" "$dur" "$cost" "$usage" \
       "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" "$artifacts" || true
     ingest_usage "$REVIEW_RECEIPT_MODEL" "codex" 143 "$usage" "$cost" || true
     write_run_state failed || true
@@ -977,6 +978,13 @@ cmd_run() {
   local thread_id usage cost filtered_err error_log
   filtered_err="$art/codex.filtered.err"
   filter_codex_stderr "$art/codex.err" "$filtered_err"
+  # A reviewer's real failure reason may only exist on stdout (codex prints
+  # quota exhaustion there). Append it so error_log points at the cause rather
+  # than at unrelated MCP noise.
+  if [[ -s "$art/stream.jsonl" ]] && ! grep -qiE "usage limit|quota" "$filtered_err" 2>/dev/null; then
+    grep -ioE "you've hit your usage limit[^\"]*|rate.?limit[^\"]*" "$art/stream.jsonl" 2>/dev/null \
+      | sort -u | head -3 >> "$filtered_err" || true
+  fi
   error_log="$(error_log_summary "$art/codex.err" "$filtered_err")"
   thread_id="$(codex_thread_id "$art/stream.jsonl")"
   usage="$(codex_usage "$art/stream.jsonl")"
@@ -1200,10 +1208,11 @@ write_review_terminal_receipt() {
     --arg archetype "$archetype" --arg base "$base_sha" --arg head "$head_sha" \
     --arg patch "$patch_path" --arg verdict "$verdict_path" \
     --arg error_log "$error_log" --arg completed "$(_now)" \
+    --arg rexec "${REVIEW_EXECUTOR_LABEL:-codex}" \
     --argjson attempts "$attempts" --argjson max_attempts "$max_attempts" \
     --argjson exit_code "$exit_code" '
     {schema:$schema, run_id:$run, status:$status, reason:$reason,
-     executor:"codex-review", model:$model,
+     executor:($rexec + "-review"), model:$model,
      archetype:(if $archetype=="" then null else $archetype end),
      reviewed_base_sha:$base, reviewed_head_sha:$head,
      review_patch:$patch,
@@ -1212,6 +1221,97 @@ write_review_terminal_receipt() {
      error_log:$error_log, completed_at:$completed}' \
     > "$receipt.tmp.$$"
   mv -f "$receipt.tmp.$$" "$receipt"
+}
+
+# Review by ordinary delegation, for executors with no native review verb.
+# Writes the reviewer's answer to VERDICT_OUT; the caller's normalizer converts
+# prose into the verdict schema exactly as it already does for codex prose.
+review_invoke_prompt() {
+  local ex="$1" model="$2" wt="$3" patch="$4" verdict_out="$5" stream="$6" err="$7" extra="$8"
+  local adapter adapter_bin info prompt rc=0 last
+  info="$(python3 "$ROUTE_BIN" --executor-info "$ex" 2>/dev/null)" || return 127
+  adapter="$(jq -r '.adapter // ""' <<<"$info")"
+  [[ -n "$adapter" ]] || return 127
+  adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
+  [[ -x "$adapter_bin" ]] || { printf 'reviewer adapter %s: command not found\n' "$adapter" >"$err"; return 127; }
+  prompt="Act as a code reviewer. Review ONLY the unified diff below. Do not modify any file.
+Return ONLY a JSON object conforming to this schema, with no prose or code fences:
+$(cat "$REVIEW_SCHEMA")
+${extra}
+
+--- BEGIN IMMUTABLE DIFF ---
+$(cat "$patch")
+--- END IMMUTABLE DIFF ---"
+  set +e
+  ( cd "$wt" && "$adapter_bin" run --repo "$wt" --task "$prompt" ${model:+--model "$model"} --quiet ) \
+    </dev/null >"$stream" 2>"$err"
+  rc=$?
+  set -e
+  # Adapters return a JSON envelope; the reviewer's answer is .result (or the
+  # last-message file it points at). Either becomes the verdict candidate.
+  last="$(jq -r '.result // ""' "$stream" 2>/dev/null)"
+  if [[ -z "$last" ]]; then
+    local lmp; lmp="$(jq -r '.last_message_path // ""' "$stream" 2>/dev/null)"
+    [[ -n "$lmp" && -s "$lmp" ]] && last="$(cat "$lmp")"
+  fi
+  [[ -z "$last" ]] || printf '%s' "$last" >"$verdict_out"
+  return "$rc"
+}
+
+# ── Reviewer capability resolution ──────────────────────────────────────
+# Cached so the candidate list costs one python call per process, not one per
+# executor probed.
+_REVIEW_ORDER_JSON=""
+review_order_json() {
+  [[ -n "$_REVIEW_ORDER_JSON" ]] || _REVIEW_ORDER_JSON="$(python3 "$ROUTE_BIN" --review-order 2>/dev/null || echo '[]')"
+  printf '%s' "$_REVIEW_ORDER_JSON"
+}
+
+# True when NAME declares a review capability other than "none".
+review_executor_can_review() {
+  local name="$1"
+  [[ -n "$name" && "$name" != "self" ]] || return 1
+  jq -e --arg n "$name" 'any(.[]; .executor == $n)' <<<"$(review_order_json)" >/dev/null 2>&1
+}
+
+# Populate review_candidates (caller-declared) as "executor|kind|model_ref"
+# rows. PINNED, when reviewer-capable, is moved to the front without being
+# duplicated further down the order.
+review_resolve_candidates() {
+  local pinned="$1" row
+  review_candidates=()
+  if [[ -n "$pinned" ]] && review_executor_can_review "$pinned"; then
+    row="$(jq -r --arg n "$pinned" '.[] | select(.executor == $n) | "\(.executor)|\(.kind)|\(.model_ref)"' <<<"$(review_order_json)")"
+    [[ -z "$row" ]] || review_candidates+=("$row")
+  fi
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    [[ "${row%%|*}" != "$pinned" ]] || continue
+    review_candidates+=("$row")
+  done < <(jq -r '.[] | "\(.executor)|\(.kind)|\(.model_ref)"' <<<"$(review_order_json)")
+  [[ "${#review_candidates[@]}" -gt 0 ]]
+}
+
+# An executor that cannot be reached at all (no quota, not authenticated, no
+# binary) must not consume the review's retry budget -- the next candidate
+# should get the work. This is deliberately narrow: a reviewer that ran and
+# returned a bad verdict is NOT unavailable, it is a failed review, and failing
+# closed on it is the whole point of the surrounding logic.
+review_executor_unavailable() {
+  local rc="$1" err_file="$2" out_file="${3:-}"
+  [[ "$rc" -ne 0 ]] || return 1
+  # Codex reports a spent quota on STDOUT, inside its JSON event stream -- its
+  # stderr carries only unrelated MCP OAuth noise. Checking stderr alone made
+  # an out-of-quota reviewer look like an ordinary review failure, which is the
+  # bug this fallback exists to fix. Search both streams.
+  local f
+  for f in "$err_file" "$out_file"; do
+    [[ -n "$f" && -s "$f" ]] || continue
+    if grep -qiE "usage limit|rate.?limit|quota exceeded|insufficient_quota|429 |authentication required|not authenticated|unauthorized|invalid_api_key|please run .*login|command not found" "$f"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 cmd_review() {
@@ -1232,15 +1332,31 @@ cmd_review() {
       *) die "review: unknown arg '$1'" ;;
     esac
   done
+  # Reviewer selection is a capability, not a hardcoded vendor. Candidates come
+  # from [review].order in routing.toml, filtered to executors whose
+  # `review` capability in executors.toml is not "none". An archetype that
+  # routes to a reviewer-capable executor promotes it to the front; one that
+  # routes elsewhere no longer aborts the review, it just does not preempt the
+  # configured order.
+  local review_pinned=""
   if [[ -n "$archetype" ]]; then
     local r_exec r_model r_sandbox r_effort
     local _r_fb
     IFS='|' read -r r_exec r_model r_sandbox r_effort _r_fb <<< "$(resolve_archetype "$archetype")"
-    [[ "$r_exec" == "codex" ]] || die "review archetype '$archetype' routes to executor=$r_exec; invoke its executor-specific review adapter"
-    [[ -n "$model" ]]  || model="$r_model"
+    if review_executor_can_review "$r_exec"; then
+      review_pinned="$r_exec"
+      [[ -n "$model" ]]  || model="$r_model"
+    else
+      note "⚠ review archetype '$archetype' routes to executor=$r_exec, which cannot review; using the configured review order"
+    fi
     [[ -n "$effort" ]] || effort="$r_effort"
   fi
-  [[ -n "$model" ]] || model="$(legion_model_ref codex_review)" || die "could not resolve codex_review in models.toml"
+  local -a review_candidates=()
+  review_resolve_candidates "$review_pinned" || die "no reviewer available: [review].order in routing.toml matched no executor with a review capability"
+  # An explicit --model pins the first candidate's model only; later candidates
+  # fall back to their own review_model_ref, because one executor's model id is
+  # not runnable by another.
+  local explicit_review_model="$model"
   [[ -n "$effort" ]] || effort="xhigh"
   [[ -n "$base" ]] || die "review: --base REF required"
   [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || die "review: --max-attempts must be a positive integer"
@@ -1256,8 +1372,6 @@ cmd_review() {
     || die "review: could not resolve --head '$head' to a commit"
 
   RUN_ID="$(_run_id)"
-  route_preflight "codex" "$model" "review --base $base_sha --head $head_sha" "$archetype" || return $?
-  legion_activate_executor_context "$RUN_ID" codex
   local art="$repo/.legion/runs/$RUN_ID"; mkdir -p "$art"
   local wt="$repo/.legion/worktrees/$RUN_ID"
   local branch="" sandbox="read-only"
@@ -1290,15 +1404,56 @@ cmd_review() {
   # separate raw artifacts; only the terminal attempt is copied to stable paths.
   local start_ms end_ms dur rc=0 attempt=0 status="failed" reason="review-failed"
   local attempt_stream attempt_err attempt_verdict
+  local review_executor review_kind review_model_ref _cand _cand_n=0
+  # Activating a candidate's executor context marks this process as running
+  # INSIDE that executor. Without restoring the caller's context first, the
+  # next candidate's preflight sees itself as a nested delegation and blocks --
+  # which would silently defeat the fallback. Snapshot once, restore per hop.
+  local _ctx_active="${LEGION_ACTIVE:-}" _ctx_exec="${LEGION_EXECUTOR:-}"
+  local _ctx_depth="${LEGION_DEPTH:-}" _ctx_run="${LEGION_RUN_ID:-}"
+  local _ctx_name="${LEGION_EXECUTOR_NAME:-}"
+  review_restore_caller_context() {
+    if [[ -n "$_ctx_active" ]]; then export LEGION_ACTIVE="$_ctx_active"; else unset LEGION_ACTIVE; fi
+    if [[ -n "$_ctx_exec" ]]; then export LEGION_EXECUTOR="$_ctx_exec"; else unset LEGION_EXECUTOR; fi
+    if [[ -n "$_ctx_depth" ]]; then export LEGION_DEPTH="$_ctx_depth"; else unset LEGION_DEPTH; fi
+    if [[ -n "$_ctx_run" ]]; then export LEGION_RUN_ID="$_ctx_run"; else unset LEGION_RUN_ID; fi
+    if [[ -n "$_ctx_name" ]]; then export LEGION_EXECUTOR_NAME="$_ctx_name"; else unset LEGION_EXECUTOR_NAME; fi
+  }
   start_ms="$(date +%s000)"
   REVIEW_START_MS="$start_ms"
+  # Walk reviewer candidates. A candidate that cannot be reached at all (no
+  # quota, not authenticated, missing binary) yields to the next one; any
+  # candidate that actually reviewed ends the walk, whatever its verdict.
+  for _cand in "${review_candidates[@]}"; do
+    _cand_n=$((_cand_n + 1))
+    IFS='|' read -r review_executor review_kind review_model_ref <<< "$_cand"
+    if [[ "$_cand_n" -eq 1 && -n "$explicit_review_model" ]]; then
+      model="$explicit_review_model"
+    else
+      model="$(legion_model_ref "$review_model_ref" 2>/dev/null || true)"
+    fi
+    if [[ -z "$model" ]]; then
+      note "⚠ reviewer '$review_executor' has no resolvable model ($review_model_ref); trying the next candidate"
+      continue
+    fi
+    [[ "$_cand_n" -eq 1 ]] || note "→ falling back to reviewer '$review_executor'"
+    review_restore_caller_context
+    if ! route_preflight "$review_executor" "$model" "review --base $base_sha --head $head_sha" "$archetype"; then
+      note "⚠ reviewer '$review_executor' failed preflight; trying the next candidate"
+      reason="reviewer-unavailable"
+      continue
+    fi
+    legion_activate_executor_context "$RUN_ID" "$review_executor"
+    REVIEW_EXECUTOR_LABEL="$review_executor"
+    REVIEW_RECEIPT_MODEL="$model"
+    status="failed"; reason="review-failed"
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     REVIEW_RECEIPT_ATTEMPT="$attempt"
     attempt_stream="$art/attempt-$attempt.stream.jsonl"
     attempt_err="$art/attempt-$attempt.codex.err"
     attempt_verdict="$art/attempt-$attempt.verdict.json"
     rm -f "$attempt_verdict"
-    note "→ codex review attempt $attempt/$max_attempts (base $base_sha, head $head_sha)"
+    note "→ $review_executor review attempt $attempt/$max_attempts (base $base_sha, head $head_sha)"
     local -a codex_review_args=(exec -s "$sandbox" review --base "$base_sha")
     local review_prompt=""
     if [[ -n "$task" ]]; then
@@ -1326,13 +1481,21 @@ cmd_review() {
       codex_review_args+=(-c "developer_instructions=$encoded_review_prompt")
     fi
     codex_review_args+=(--output-schema "$REVIEW_SCHEMA" -o "$attempt_verdict")
-    set +e
-    ( cd "$wt" && "$CODEX_BIN" "${codex_review_args[@]}" ) \
-      </dev/null >"$attempt_stream" 2>"$attempt_err" &
-    CODEX_CHILD_PID=$!
-    wait "$CODEX_CHILD_PID"; rc=$?
-    CODEX_CHILD_PID=""
-    set -e
+    if [[ "$review_kind" == "native" ]]; then
+      set +e
+      ( cd "$wt" && "$CODEX_BIN" "${codex_review_args[@]}" ) \
+        </dev/null >"$attempt_stream" 2>"$attempt_err" &
+      CODEX_CHILD_PID=$!
+      wait "$CODEX_CHILD_PID"; rc=$?
+      CODEX_CHILD_PID=""
+      set -e
+    else
+      set +e
+      review_invoke_prompt "$review_executor" "$model" "$wt" "$patch_path" \
+        "$attempt_verdict" "$attempt_stream" "$attempt_err" "$review_prompt"
+      rc=$?
+      set -e
+    fi
 
     if [[ "$rc" -eq 0 ]]; then
       if [[ ! -s "$attempt_verdict" ]]; then
@@ -1402,6 +1565,19 @@ cmd_review() {
       fi
     else
       reason="review-failed"
+    fi
+    break
+  done
+    # This candidate finished. Only an unreachable executor yields to the next
+    # one -- a reviewer that ran and rejected must NOT be retried elsewhere, or
+    # a later approval could erase its findings.
+    if [[ "$status" == "ok" ]]; then
+      break
+    fi
+    if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
+      note "⚠ reviewer '$review_executor' is unavailable (exit $rc); trying the next candidate"
+      reason="reviewer-unavailable"
+      continue
     fi
     break
   done

@@ -2417,10 +2417,51 @@ def _empty_memory() -> dict[str, Any]:
     }
 
 
-def load_memory(log_root: str) -> dict[str, Any]:
-    payload = _json_file(memory_path(log_root))
+class CorruptMemoryError(RuntimeError):
+    """The memory store exists but could not be read as a valid store.
+
+    Distinct from "absent". An absent store is a normal first run; a corrupt one
+    holds deduplication history, outcome attribution and learned evidence that
+    nobody can reconstruct, so it must never be silently replaced.
+    """
+
+
+def memory_quarantine_path(log_root: str) -> str:
+    return memory_path(log_root) + ".corrupt"
+
+
+def load_memory(log_root: str, *, allow_corrupt_reset: bool = False) -> dict[str, Any]:
+    """Load the harness memory store, failing closed on corruption.
+
+    Absent -> a fresh empty store, which is the ordinary first run.
+    Valid   -> the store.
+    Corrupt -> raise, unless the caller explicitly opted into a reset.
+
+    Treating corrupt input as empty was fail-OPEN: the next successful apply
+    rewrote the file wholesale, so a truncated write or a bad edit silently
+    destroyed every learned hint and every processed-outcome record. Losing that
+    history is invisible -- the loop simply relearns from nothing and reports
+    success -- which is exactly the failure mode that most deserves to be loud.
+    """
+    path = memory_path(log_root)
+    if not os.path.exists(path):
+        return _empty_memory()
+    payload = _json_file(path)
     if isinstance(payload, dict) and payload.get("schema") == MEMORY_SCHEMA:
         return payload
+    if not allow_corrupt_reset:
+        raise CorruptMemoryError(
+            f"harness memory at {path} is unreadable or has an unexpected schema; "
+            f"refusing to overwrite it. Inspect it, or re-run with "
+            f"--reset-corrupt-memory to quarantine it as "
+            f"{os.path.basename(memory_quarantine_path(log_root))} and start fresh."
+        )
+    # An explicit reset preserves the original bytes rather than deleting them:
+    # the operator asked to move past it, not to lose the evidence of what broke.
+    try:
+        os.replace(path, memory_quarantine_path(log_root))
+    except OSError:
+        pass
     return _empty_memory()
 
 
@@ -2740,8 +2781,9 @@ def _apply_memory_locked(
     log_root: str,
     *,
     project_learning_dir: str = "",
+    allow_corrupt_reset: bool = False,
 ) -> dict[str, Any]:
-    memory = load_memory(log_root)
+    memory = load_memory(log_root, allow_corrupt_reset=allow_corrupt_reset)
     if not isinstance(memory.get("entities"), dict):
         memory["entities"] = {}
     entities = memory["entities"]
@@ -2979,7 +3021,19 @@ def _path_uses_symlink(path: str, repo: str) -> bool:
 
 
 def hints(log_root: str, entity: str | None = None, limit: int = 20) -> dict[str, Any]:
-    memory = load_memory(log_root)
+    # Read-only: surface corruption rather than crashing, and never report a
+    # corrupt store as an empty one -- "no hints" and "hints unreadable" lead a
+    # caller to opposite conclusions.
+    try:
+        memory = load_memory(log_root)
+    except CorruptMemoryError as exc:
+        return {
+            "schema": "legion.self-learning.hints.v1",
+            "updated_at": None,
+            "entities": {},
+            "memory_status": "corrupt",
+            "error": str(exc),
+        }
     entries = _dict(memory.get("entities"))
     if entity:
         entries = {entity: entries.get(entity, {})} if entity in entries else {}

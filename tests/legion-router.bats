@@ -2174,6 +2174,67 @@ $run_error" ]
     [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
 }
 
+@test "delegate: seeds gitignored dependency dirs into the delegated worktree" {
+    local repo; repo="$(make_test_repo seed-deps)"
+    mkdir -p "$repo/node_modules/left-pad"
+    echo "module.exports=1" > "$repo/node_modules/left-pad/index.js"
+    printf 'node_modules/\n' > "$repo/.gitignore"
+    git -C "$repo" add .gitignore && git -C "$repo" commit -qm "ignore node_modules"
+
+    run "$DELEGATE" run --model test-model-beta --task "touch seeded.txt" --repo "$repo" --keep --quiet
+    [ "$status" -eq 0 ]
+
+    local wt; wt="$(echo "$output" | jq -r '.worktree')"
+    [ -f "$wt/node_modules/left-pad/index.js" ]
+}
+
+@test "delegate: never seeds a git-tracked directory" {
+    # A tracked dir already came with the worktree at the base commit; copying
+    # the main repo's version over it would silently diverge the delegate's tree.
+    local repo; repo="$(make_test_repo seed-tracked)"
+    mkdir -p "$repo/node_modules/pkg"
+    echo "committed" > "$repo/node_modules/pkg/marker.txt"
+    git -C "$repo" add node_modules && git -C "$repo" commit -qm "track node_modules"
+    echo "local-only-change" > "$repo/node_modules/pkg/marker.txt"
+
+    run "$DELEGATE" run --model test-model-beta --task "noop" --repo "$repo" --keep --quiet
+    [ "$status" -eq 0 ]
+
+    local wt; wt="$(echo "$output" | jq -r '.worktree')"
+    [ "$(cat "$wt/node_modules/pkg/marker.txt")" = "committed" ]
+}
+
+@test "delegate: LEGION_SEED_DEPS=0 disables seeding" {
+    local repo; repo="$(make_test_repo seed-off)"
+    mkdir -p "$repo/node_modules/pkg"
+    echo x > "$repo/node_modules/pkg/i.js"
+    printf 'node_modules/\n' > "$repo/.gitignore"
+    git -C "$repo" add .gitignore && git -C "$repo" commit -qm "ignore"
+
+    LEGION_SEED_DEPS=0 run "$DELEGATE" run --model test-model-beta --task "noop" --repo "$repo" --keep --quiet
+    [ "$status" -eq 0 ]
+
+    local wt; wt="$(echo "$output" | jq -r '.worktree')"
+    [ ! -e "$wt/node_modules" ]
+}
+
+@test "delegate: never seeds a virtualenv by default (they are not relocatable)" {
+    # A venv bakes its own absolute path into console-script shebangs and
+    # bin/activate, so a clone at a different path points back at the original
+    # -- the delegate would run against the operator's environment.
+    local repo; repo="$(make_test_repo seed-no-venv)"
+    mkdir -p "$repo/.venv/bin"
+    printf '#!/%s/.venv/bin/python\n' "$repo" > "$repo/.venv/bin/pytest"
+    printf '.venv/\nnode_modules/\n' > "$repo/.gitignore"
+    git -C "$repo" add .gitignore && git -C "$repo" commit -qm ignore
+
+    run "$DELEGATE" run --model test-model-beta --task "noop" --repo "$repo" --keep --quiet
+    [ "$status" -eq 0 ]
+
+    local wt; wt="$(echo "$output" | jq -r '.worktree')"
+    [ ! -e "$wt/.venv" ]
+}
+
 @test "delegate: a task larger than ARG_MAX reaches the adapter" {
     # Regression for E2BIG at the adapter boundary: delegate.sh accepted a big
     # task on stdin, then re-serialised it onto argv when dispatching, so the

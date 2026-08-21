@@ -237,8 +237,16 @@ def _exclusive_lock(descriptor: int):
     if os.name == "nt":
         import msvcrt
 
+        # locking() acts at the current position, and LK_LOCK gives up after ten
+        # one-second retries rather than blocking. Seek at both ends and retry
+        # until acquired, so this matches flock(LOCK_EX).
         os.lseek(descriptor, 0, os.SEEK_SET)
-        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        while True:
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                os.lseek(descriptor, 0, os.SEEK_SET)
         try:
             yield
         finally:

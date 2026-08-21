@@ -215,6 +215,12 @@ cmd_run() {
   [[ -n "$model" ]] && cmd+=(--model "$model")
   cmd+=("$task")
 
+  # Headless mode needs an API key. An interactive `agent login` session does
+  # not grant `-p` access, and the CLI's own message ("run 'agent login'") sends
+  # you back to the thing you already did -- so say the useful half here.
+  if [[ -z "${CURSOR_API_KEY:-}" ]]; then
+    note "⚠ CURSOR_API_KEY is unset; cursor headless runs require it even when '$agent_bin status' reports a login"
+  fi
   legion_activate_executor_context "$RUN_ID" cursor
   note "-> ${cmd[*]}"
   start_ms="$(date +%s000)"

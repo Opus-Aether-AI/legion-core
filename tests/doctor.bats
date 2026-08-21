@@ -435,3 +435,36 @@ EOF
   [ "$status" -eq 1 ]
   [ ! -f "$log" ]
 }
+
+@test "doctor: cursor warns when headless auth is unconfigured, even if the CLI is present" {
+  # Regression for a genuinely confusing failure: `agent status` reports a
+  # successful login while `agent -p` (the only mode Legion uses) refuses with
+  # "Authentication required". Doctor must catch that before a delegation does.
+  fake="$BATS_TEST_TMPDIR/cursorbin"; mkdir -p "$fake"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/agent"; chmod +x "$fake/agent"
+
+  PATH="$fake:$PATH" CURSOR_API_KEY="" run "$DOCTOR" --only cursor
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"headless auth is not configured"* ]]
+  [[ "$output" == *"CURSOR_API_KEY"* ]]
+}
+
+@test "doctor: cursor passes when CURSOR_API_KEY is set" {
+  fake="$BATS_TEST_TMPDIR/cursorbin2"; mkdir -p "$fake"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/agent"; chmod +x "$fake/agent"
+
+  PATH="$fake:$PATH" CURSOR_API_KEY="sk-test" run "$DOCTOR" --only cursor
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"headless auth configured"* ]]
+}
+
+@test "doctor: cursor warns (does not fail) when the CLI is absent" {
+  # A minimal system PATH: doctor's own tooling still resolves, but the user's
+  # ~/.local/bin (where agent/cursor-agent live) does not.
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin" CURSOR_API_KEY="" run "$DOCTOR" --only cursor
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cursor CLI not found"* ]]
+}

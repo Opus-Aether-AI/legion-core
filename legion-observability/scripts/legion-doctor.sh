@@ -373,6 +373,32 @@ check_codex() {
   fi
 }
 
+check_cursor() {
+  # Cursor is a first-class executor in executors.toml and sits in the review
+  # fallback order, so "installed" is not the question -- Legion always drives
+  # it headlessly (`agent -p`), and an interactive `agent login` session does
+  # NOT grant that. Without CURSOR_API_KEY the CLI reports "Authentication
+  # required" even though `agent status` says logged in, which is a genuinely
+  # confusing failure to debug from the delegation side.
+  local bin=""
+  if [[ -n "${CURSOR_AGENT_BIN:-}" ]] && command -v "$CURSOR_AGENT_BIN" >/dev/null 2>&1; then
+    bin="$CURSOR_AGENT_BIN"
+  elif command -v agent >/dev/null 2>&1; then
+    bin="agent"
+  elif command -v cursor-agent >/dev/null 2>&1; then
+    bin="cursor-agent"
+  fi
+  if [[ -z "$bin" ]]; then
+    warn "cursor CLI not found — cursor delegation and its review-fallback slot are unavailable"
+    return
+  fi
+  if [[ -n "${CURSOR_API_KEY:-}" ]]; then
+    pass "cursor present + headless auth configured (CURSOR_API_KEY)"
+  else
+    warn "cursor present but headless auth is not configured — an interactive '$bin login' does NOT grant '$bin -p' access; set CURSOR_API_KEY. Cursor delegation and its slot in the review fallback will fail."
+  fi
+}
+
 check_opencode() {
   # opencode is an optional executor; pin $HOME/.opencode/bin first (a stray
   # OpenWork build on PATH is a different binary — see legion-opencode.sh).
@@ -640,6 +666,7 @@ run_one() {
     telemetry-schema)   check_telemetry_schema ;;
     codex)              check_codex ;;
     opencode)           check_opencode ;;
+    cursor)             check_cursor ;;
     route-smoke)        check_route_smoke ;;
     delegate-smoke)     check_delegate_smoke ;;
     state-root)         check_state_root ;;
@@ -656,7 +683,7 @@ run_one() {
 if [[ -n "$ONLY" ]]; then
   run_one "$ONLY"
 else
-  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs telemetry-schema codex opencode router; do
+  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs telemetry-schema codex opencode cursor router; do
     run_one "$c"
   done
   if [[ "$STRICT_DEMO" == "1" ]]; then

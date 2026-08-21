@@ -352,6 +352,11 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--task", default="", help="optional task text hint; accepted for demo/runbook compatibility")
     ap.add_argument("--list-models", action="store_true")
+    ap.add_argument(
+        "--models-json",
+        action="store_true",
+        help="print the whole model catalog as a JSON object (role -> model id)",
+    )
     ap.add_argument("--model-ref")
     ap.add_argument("--primary", action="store_true", help="print the resolved primary harness and exit")
     ap.add_argument(
@@ -388,6 +393,9 @@ def main(argv=None):
         models = load_models(a.models_file)
         if a.model_ref:
             print(resolve_model_ref(models, a.model_ref))
+            return 0
+        if a.models_json:
+            print(json.dumps(models, sort_keys=True))
             return 0
         if a.list_models:
             print(json.dumps(sorted(models.keys())))

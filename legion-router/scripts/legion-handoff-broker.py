@@ -13,20 +13,8 @@ import argparse
 import base64
 import json
 import math
+import contextlib
 import os
-import sys
-
-# One cross-platform lock implementation for the whole repo; it lives with
-# the observability scripts and takes a file object or a raw descriptor.
-sys.path.insert(
-    0,
-    os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "legion-observability",
-        "scripts",
-    ),
-)
-import legion_file_lock  # noqa: E402
 import re
 import select
 import selectors
@@ -235,10 +223,42 @@ def _validate_span(payload: Any, expected_parent: str) -> dict[str, Any]:
     return payload
 
 
+@contextlib.contextmanager
+def _exclusive_lock(descriptor: int):
+    """Hold an exclusive advisory lock on a raw descriptor.
+
+    Deliberately self-contained. legion-router installs independently of
+    legion-observability, so importing that plugin's lock helper breaks the
+    moment the two are not siblings on disk -- which is exactly what the
+    installer-coverage job exercises. fcntl and msvcrt are imported lazily
+    inside their own branch so neither platform pays for the other's
+    platform-only module.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
 def _write_record_atomic(descriptor: int, encoded: bytes) -> None:
     """Append one record, rolling back a short/failed write while locked."""
 
-    with legion_file_lock.exclusive_lock(descriptor):
+    with _exclusive_lock(descriptor):
         original_size = os.fstat(descriptor).st_size
         try:
             written = os.write(descriptor, encoded)

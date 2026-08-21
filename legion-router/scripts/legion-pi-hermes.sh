@@ -231,6 +231,22 @@ hermes_cost() {
   [[ -s "$file" ]] || { printf 0; return 0; }
   jq -r '.estimated_cost_usd' "$file" 2>/dev/null || printf 0
 }
+
+# The span schema requires cost_usd to be a non-null number, so a missing or
+# malformed cost necessarily becomes 0 -- which is indistinguishable from
+# genuinely free execution. Hermes already reports cost_status and cost_source
+# (the terminal validator above checks both), so carry them alongside the number
+# and let a reader tell "free" from "we do not know".
+hermes_cost_provenance() {
+  local file="$1"
+  if [[ ! -s "$file" ]]; then
+    printf '{"cost_status":"unknown","cost_source":"none"}'
+    return 0
+  fi
+  jq -c '{cost_status: (.cost_status // "unknown"),
+          cost_source: (.cost_source // "none")}' "$file" 2>/dev/null \
+    || printf '{"cost_status":"unknown","cost_source":"none"}'
+}
 hermes_result() {
   cat "$1"
 }
@@ -734,7 +750,16 @@ cmd_run() {
   [[ "$SANDBOX" != read-only || ! -s "$diff" ]] || { status=error; result="${result:+$result$'\n'}Pi produced file changes during a read-only run; refusing to report ok."; }
   [[ "$status" != ok || -n "$result" || -s "$diff" ]] || { status=error; result="$ADAPTER_KIND completed without an authoritative terminal result or diff."; }
   printf '%s\n' "$result" > "$ART/last-message.txt"
-  local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" '{worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage}')"
+  # Only read provenance from a VERIFIED artifact. provider_files_ok is cleared
+  # when the provider replaced or symlinked a parent-owned file, and the whole
+  # point of that guard is to refuse consuming it -- reading cost_status out of
+  # an unverified, provider-selected JSON would walk straight past it. An
+  # unverified run keeps the honest default: we do not know what it cost.
+  local cost_provenance='{"cost_status":"unknown","cost_source":"none"}'
+  if [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == hermes ]]; then
+    cost_provenance="$(hermes_cost_provenance "$usage_art")"
+  fi
+  local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" --argjson cost_provenance "$cost_provenance" '{worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage} + $cost_provenance')"
   emit_span "$status" "$duration" "$cost" "$usage" "$task" "$artifacts"
   if [[ "$apply" == 1 && "$status" == ok && -s "$diff" ]]; then
     if git -C "$REPO" apply --check "$diff"; then git -C "$REPO" apply "$diff"; else note "diff did not apply cleanly; left in $diff"; fi

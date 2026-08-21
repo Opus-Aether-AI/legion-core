@@ -66,8 +66,16 @@ function log(level: "info" | "warn" | "error", msg: string, meta?: Record<string
 // legion-route to stay the single source of truth for every consumer.
 async function loadModelCatalog(path: string): Promise<Record<string, string>> {
 	const reader = `${import.meta.dir}/legion-route.py`;
+	// Resolve an interpreter rather than assuming `python3` is on PATH. The proxy
+	// is commonly started from launchd with a minimal PATH, and a pyenv- or
+	// Nix-only Python would otherwise leave the catalog empty -- silently, since
+	// every role then falls through to a default that looks deliberate.
+	const python = _optionalEnv("LEGION_PYTHON", "")
+		|| Bun.which("python3")
+		|| Bun.which("python")
+		|| "/usr/bin/python3";
 	try {
-		const proc = Bun.spawn(["python3", reader, "--models-json", "--models-file", path], {
+		const proc = Bun.spawn([python, reader, "--models-json", "--models-file", path], {
 			stdout: "pipe",
 			stderr: "pipe",
 		});
@@ -77,7 +85,7 @@ async function loadModelCatalog(path: string): Promise<Record<string, string>> {
 			proc.exited,
 		]);
 		if (code !== 0) {
-			log("warn", "model catalog unavailable", { path, exit: code, error: err.trim() });
+			log("warn", "model catalog unavailable", { path, python, exit: code, error: err.trim() });
 			return {};
 		}
 		const parsed = JSON.parse(out);
@@ -95,7 +103,7 @@ async function loadModelCatalog(path: string): Promise<Record<string, string>> {
 		}
 		return catalog;
 	} catch (err) {
-		log("warn", "model catalog unavailable", { path, error: String(err) });
+		log("warn", "model catalog unavailable", { path, python, error: String(err), hint: "the catalog is read through legion-route.py; set LEGION_PYTHON if python3 is not on PATH" });
 		return {};
 	}
 }

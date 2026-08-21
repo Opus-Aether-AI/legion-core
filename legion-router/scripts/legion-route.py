@@ -395,7 +395,17 @@ def main(argv=None):
             print(resolve_model_ref(models, a.model_ref))
             return 0
         if a.models_json:
-            print(json.dumps(models, sort_keys=True))
+            # TOML types that JSON cannot carry (dates, inf/nan) would either
+            # raise here or emit text no strict parser accepts -- and the
+            # consumer treats a failed read as an EMPTY catalog, so one bad
+            # entry would silently blank every valid role. Drop the offenders
+            # individually and keep the rest.
+            usable = {
+                role: value
+                for role, value in models.items()
+                if isinstance(value, str) and value
+            }
+            print(json.dumps(usable, sort_keys=True, allow_nan=False))
             return 0
         if a.list_models:
             print(json.dumps(sorted(models.keys())))

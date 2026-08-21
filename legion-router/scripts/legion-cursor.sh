@@ -141,6 +141,11 @@ cmd_run() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --task) task="$2"; shift 2 ;;
+      # The task can exceed ARG_MAX once a diff or a long spec is in it.
+      # --task-file carries the same value out of band; last flag wins.
+      --task-file)
+        [[ -r "$2" ]] || die "--task-file not readable: $2"
+        task="$(cat "$2")"; shift 2 ;;
       --model) model="$2"; shift 2 ;;
       --archetype) archetype="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
@@ -281,7 +286,7 @@ usage() {
 legion-cursor — delegate a scoped task to Cursor Agent headless.
 
 Usage:
-  legion-cursor run --task "TASK" [--model MODEL] [--archetype NAME] [--repo DIR] [--base REF] [--run-id ID]
+  legion-cursor run --task "TASK" | --task-file F [--model MODEL] [--archetype NAME] [--repo DIR] [--base REF] [--run-id ID]
                     [--sandbox read-only|workspace-write] [--apply] [--keep] [--quiet]
   legion-cursor run [--repo DIR] < task.txt
 

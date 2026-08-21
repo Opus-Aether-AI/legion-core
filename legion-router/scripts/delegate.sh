@@ -9,7 +9,8 @@
 # usage to the router /ingest sink so cost shows up next to Claude.
 #
 # Commands:
-#   run     --model M [--sandbox S] [--task T | stdin] [--repo DIR] [--base REF]
+#   run     --model M [--sandbox S] [--task T | --task-file F | stdin] [--repo DIR]
+#           [--base REF]
 #           [--budget-tokens N] [--scope PATHSPEC] [--detach] [--apply] [--quiet]
 #   review  --model M --base REF [--head REF] [--max-attempts N] [--repo DIR]
 #           [--task BOUNDED_REVIEW_INSTRUCTIONS]
@@ -690,6 +691,16 @@ summarize_changed_paths() {
   done < "$all_paths"
 }
 
+# Writing the task to a file and passing --task-file keeps a large payload out
+# of argv entirely. delegate.sh accepts the task on stdin precisely because it
+# can be big, but every adapter dispatch used to re-serialise it back onto the
+# command line, reimposing ARG_MAX at the boundary rather than at the door.
+write_task_payload() {
+  local text="$1" dest="$2"
+  printf '%s' "$text" > "$dest" || die "could not stage the task payload at $dest"
+  printf '%s' "$dest"
+}
+
 # Dispatch a scoped run to a non-codex executor's adapter (the Legion runner
 # contract: `<adapter> run --repo … --task … [--model …] …`). Reads the adapter
 # and its I/O contract from executors.toml via legion-route, builds the right
@@ -725,7 +736,32 @@ dispatch_adapter() {
   [[ -n "$use_model" || -z "$model_ref" ]] || use_model="$(legion_model_ref "$model_ref" 2>/dev/null || true)"
   # Identity is part of the adapter contract. Never retry without it: doing so
   # would strand fanout's preallocated record in queued state.
-  local -a aargs=(run --repo "$repo" --task "$task" --run-id "$RUN_ID")
+  # Stage it BESIDE the run artifact dir, not inside it: adapters create and own
+  # that directory and some (legion-pi) refuse to start if it already has
+  # contents. This keeps the payload in-repo as evidence and inside the tree
+  # `legion-delegate cleanup` already sweeps.
+  local task_payload="$repo/.legion/tasks/$RUN_ID.txt"
+  mkdir -p "$(dirname "$task_payload")" 2>/dev/null || true
+  write_task_payload "$task" "$task_payload" >/dev/null
+  # A globally installed adapter predating --task-file may still be first on
+  # PATH, and PATH precedence here is deliberate (see above). Feature-detect
+  # rather than assume: an old adapter keeps the argv path and its ARG_MAX
+  # ceiling, a current one takes the payload out of argv entirely.
+  local -a aargs
+  # The declaration in executors.toml describes THIS install's adapter. PATH may
+  # deliberately resolve a different one -- substituting an adapter is a
+  # supported extension point -- and a foreign adapter has not agreed to any of
+  # this, so it keeps the argv path.
+  local supports_task_file="false" sibling="$_self_dir/../bin/$adapter"
+  if [[ -x "$sibling" ]] && [[ "$adapter_bin" -ef "$sibling" ]]; then
+    supports_task_file="$(jq -r '.task_file // false' <<<"$info")"
+  fi
+  if [[ "$supports_task_file" == "true" ]]; then
+    aargs=(run --repo "$repo" --task-file "$task_payload" --run-id "$RUN_ID")
+  else
+    note "⚠ adapter for '$ex' is not this install's; passing the task on argv (large tasks may fail)"
+    aargs=(run --repo "$repo" --task "$task" --run-id "$RUN_ID")
+  fi
   [[ -n "$use_model" ]] && aargs+=(--model "$use_model")
   [[ "${QUIET:-0}" == "1" ]] && aargs+=(--quiet)
   case "$contract" in
@@ -762,6 +798,9 @@ cmd_run() {
       --archetype) archetype="$2"; shift 2 ;;
       --reasoning-effort) effort="$2"; shift 2 ;;
       --task) task="$2"; shift 2 ;;
+      --task-file)
+        [[ -r "$2" ]] || die "--task-file not readable: $2"
+        task="$(cat "$2")"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
       --base) base="$2"; shift 2 ;;
       --budget-tokens) budget="$2"; shift 2 ;;
@@ -910,8 +949,11 @@ cmd_run() {
   fi
 
   if [[ "$detach" -eq 1 ]]; then
+    local worker_task_file="$art/task.txt"
+    write_task_payload "$task" "$worker_task_file" >/dev/null
     local -a worker_args=(run --_detached-worker --run-id "$RUN_ID" --model "$model" \
-      --sandbox "$sandbox" --reasoning-effort "$effort" --task "$task" --repo "$repo" --base "$base" \
+      --sandbox "$sandbox" --reasoning-effort "$effort" --task-file "$worker_task_file" \
+      --repo "$repo" --base "$base" \
       --budget-tokens "$budget" --no-dirty-warn)
     [[ -n "$archetype" ]] && worker_args+=(--archetype "$archetype")
     [[ -n "$forced_executor" ]] && worker_args+=(--executor "$forced_executor")
@@ -1243,7 +1285,9 @@ ${extra}
 $(cat "$patch")
 --- END IMMUTABLE DIFF ---"
   set +e
-  ( cd "$wt" && "$adapter_bin" run --repo "$wt" --task "$prompt" ${model:+--model "$model"} --quiet ) \
+  local review_task_file="${err%.err}.task.txt"
+  write_task_payload "$prompt" "$review_task_file" >/dev/null
+  ( cd "$wt" && "$adapter_bin" run --repo "$wt" --task-file "$review_task_file" ${model:+--model "$model"} --quiet ) \
     </dev/null >"$stream" 2>"$err"
   rc=$?
   set -e
@@ -1328,6 +1372,9 @@ cmd_review() {
       --reasoning-effort) effort="$2"; shift 2 ;;
       --max-attempts) max_attempts="$2"; shift 2 ;;
       --task) task="$2"; shift 2 ;;
+      --task-file)
+        [[ -r "$2" ]] || die "--task-file not readable: $2"
+        task="$(cat "$2")"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
       *) die "review: unknown arg '$1'" ;;
     esac
@@ -1646,6 +1693,9 @@ cmd_resume() {
     case "$1" in
       --run) run="$2"; shift 2 ;;
       --task) task="$2"; shift 2 ;;
+      --task-file)
+        [[ -r "$2" ]] || die "--task-file not readable: $2"
+        task="$(cat "$2")"; shift 2 ;;
       --model) model="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
       --reasoning-effort) effort="$2"; shift 2 ;;

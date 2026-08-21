@@ -646,7 +646,8 @@ cmd_run() {
   ARCHETYPE="${LEGION_ARCHETYPE:-}"; PRESET_RUN_ID=""; THINKING="${LEGION_PI_THINKING:-${PI_THINKING:-}}"; PROVIDER_RC=0
   [[ "$ADAPTER_KIND" == hermes ]] && explicit_model="${HERMES_MODEL:-}"
   while [[ $# -gt 0 ]]; do case "$1" in
-    --task) task="$2"; shift 2;; --model) explicit_model="$2"; shift 2;; --thinking) [[ "$ADAPTER_KIND" == pi ]] || die '--thinking is only supported by Pi'; THINKING="$2"; shift 2;;
+    --task) task="$2"; shift 2;;
+    --task-file) [[ -r "$2" ]] || die "--task-file not readable: $2"; task="$(cat "$2")"; shift 2;; --model) explicit_model="$2"; shift 2;; --thinking) [[ "$ADAPTER_KIND" == pi ]] || die '--thinking is only supported by Pi'; THINKING="$2"; shift 2;;
     --archetype) ARCHETYPE="$2"; shift 2;; --repo) REPO="$2"; shift 2;; --base) base="$2"; shift 2;; --sandbox) sandbox="$2"; shift 2;;
     --run-id) PRESET_RUN_ID="$2"; shift 2;; --apply) apply=1; shift;; --keep) KEEP=1; shift;; --quiet) QUIET=1; shift;; *) die "run: unknown arg '$1'";; esac; done
   # The OS sandbox matches canonical paths. On macOS, /tmp is a symlink to

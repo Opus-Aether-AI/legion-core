@@ -468,3 +468,19 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"cursor CLI not found"* ]]
 }
+
+@test "doctor: an invalid CURSOR_AGENT_BIN warns instead of falling back to agent" {
+  # legion-cursor's resolve_cursor_bin treats a non-empty override as
+  # authoritative and fails without trying defaults. Doctor must not report
+  # readiness by silently falling through to a working `agent` on PATH.
+  fake="$BATS_TEST_TMPDIR/cbin"; mkdir -p "$fake"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/agent"; chmod +x "$fake/agent"
+
+  PATH="$fake:$PATH" CURSOR_AGENT_BIN="/nonexistent/cursor-bin" CURSOR_API_KEY="sk-test" \
+    run "$DOCTOR" --only cursor
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CURSOR_AGENT_BIN"* ]]
+  [[ "$output" == *"not executable"* ]]
+  [[ "$output" != *"headless auth configured"* ]]
+}

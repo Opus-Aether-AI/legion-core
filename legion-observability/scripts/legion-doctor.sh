@@ -380,9 +380,18 @@ check_cursor() {
   # NOT grant that. Without CURSOR_API_KEY the CLI reports "Authentication
   # required" even though `agent status` says logged in, which is a genuinely
   # confusing failure to debug from the delegation side.
+  # Mirror resolve_cursor_bin in legion-cursor.sh exactly: a non-empty
+  # CURSOR_AGENT_BIN is AUTHORITATIVE there -- the adapter fails outright rather
+  # than falling back to agent/cursor-agent. Falling through here would report
+  # readiness for a configuration that cannot delegate.
   local bin=""
-  if [[ -n "${CURSOR_AGENT_BIN:-}" ]] && command -v "$CURSOR_AGENT_BIN" >/dev/null 2>&1; then
-    bin="$CURSOR_AGENT_BIN"
+  if [[ -n "${CURSOR_AGENT_BIN:-}" ]]; then
+    if command -v "$CURSOR_AGENT_BIN" >/dev/null 2>&1; then
+      bin="$CURSOR_AGENT_BIN"
+    else
+      warn "CURSOR_AGENT_BIN is set to '$CURSOR_AGENT_BIN', which is not executable — legion-cursor treats that override as authoritative and will not fall back, so cursor delegation will fail"
+      return
+    fi
   elif command -v agent >/dev/null 2>&1; then
     bin="agent"
   elif command -v cursor-agent >/dev/null 2>&1; then

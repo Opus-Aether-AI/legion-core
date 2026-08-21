@@ -28,10 +28,10 @@ codex_cheap         = "gpt-5.6-luna"     # bounded search, boilerplate, mechanic
 codex_default       = "gpt-5.6-terra"    # generic Codex
 
 # ── Cursor harness roles (Cursor-native models ONLY; effort encoded in the id) ──
-# Grok 4.5 for independent second-opinion / tie-break (a different lineage than the
+# Grok 4.6 for independent second-opinion / tie-break (a different lineage than the
 # Claude primary / GPT codex). Cursor never hosts Claude models — those run on
 # Claude Code (claude_opus / claude_default above).
-cursor_default      = "cursor-grok-4.5-high"          # Grok's ceiling (no xhigh)
+cursor_default      = "cursor-grok-4.6-high"          # Grok's ceiling (no xhigh)
 cursor_composer     = "composer-2.5"                  # Cursor in-house; kept available but UNROUTED (no archetype)
 
 # ── opencode (harness kept; in-family GPT default for explicit --executor opencode) ──

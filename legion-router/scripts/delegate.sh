@@ -1303,9 +1303,19 @@ $(cat "$patch")
     write_task_payload "$prompt" "$review_task_file" >/dev/null
     task_args=(--task-file "$review_task_file")
   else
+    # Same ARG_MAX exposure as any argv hand-off, and a review prompt embeds the
+    # whole patch. Say so rather than letting the kernel emit a bare E2BIG.
+    local prompt_bytes
+    prompt_bytes="$(printf '%s' "$prompt" | wc -c | tr -d ' ')"
+    [[ "$prompt_bytes" -le 100000 ]] || \
+      note "⚠ review prompt is $prompt_bytes bytes and '$adapter' is not this install's adapter; passing on argv may exceed ARG_MAX"
     task_args=(--task "$prompt")
   fi
-  ( cd "$wt" && "$adapter_bin" run --repo "$wt" "${task_args[@]}" ${model:+--model "$model"} --quiet ) \
+  # Grant the read-only review approval for this call only. The sandbox is
+  # already read-only here and the reviewer never delegates onward, so the
+  # same-harness case (a Claude-primary session reviewed by Claude on a
+  # different model) is safe and is often the only reviewer left standing.
+  ( cd "$wt" && LEGION_REVIEW_HANDOFF=1 "$adapter_bin" run --repo "$wt" "${task_args[@]}" ${model:+--model "$model"} --quiet ) \
     </dev/null >"$stream" 2>"$err"
   rc=$?
   set -e
@@ -2042,20 +2052,20 @@ cmd_cleanup() {
   if [[ "$all" -eq 1 ]]; then
     with_git_worktree_lock "$repo" cleanup_selected_runs_unlocked "$repo" "$wtroot" "$runsroot" \
       || die 'cleanup: could not acquire the shared Git worktree lock or safely remove an owned worktree'
+    # Staged task payloads sit beside the runs (not inside: adapters own the run
+    # directory and one of them refuses a non-empty start). Sweep them whenever
+    # purging, not only when runs/ happens to exist -- dispatch can stage a
+    # payload and fail before the run directory is ever created.
+    [[ "$purge" -ne 1 || ! -d "$tasksroot" ]] || rm -rf "$tasksroot"
     if [[ "$purge" -eq 1 && -d "$runsroot" ]]; then
       n_runs="$(find "$runsroot" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
       rm -rf "$runsroot"
-      # Staged task payloads sit beside the runs (not inside: adapters own the
-      # run directory and one of them refuses a non-empty start). They are part
-      # of the same run's evidence and are purged with it.
-      rm -rf "$tasksroot"
       extra=" + $n_runs run artifact(s)"
     fi
     note "✓ cleaned $n_wt worktree(s) + $n_br branch(es)$extra"
   elif [[ -n "$run" ]]; then
     legion_validate_run_id "$run" || die "cleanup: invalid run id '$run'"
     local run_art="$runsroot/$run"
-    [[ "$purge" -ne 1 ]] || rm -f "$tasksroot/$run.txt" 2>/dev/null || true
     with_git_worktree_lock "$repo" cleanup_selected_runs_unlocked "$repo" "$wtroot" "$runsroot" "$run" \
       || die 'cleanup: could not acquire the shared Git worktree lock or safely remove the owned worktree'
     if [[ "$purge" -eq 1 && -d "$run_art" ]]; then rm -rf "${run_art:?}"; extra=" + artifacts"; fi

@@ -364,7 +364,7 @@ check_bridges() {
 check_codex() {
   if command -v codex >/dev/null 2>&1; then
     if [[ -f "$HOME/.codex/auth.json" ]]; then
-      pass "codex present + authenticated"
+      pass "codex present + credentials on disk"
     else
       warn "codex present but not authenticated (~/.codex/auth.json missing) — GPT delegation will fail"
     fi
@@ -414,10 +414,38 @@ check_opencode() {
   local oc="${OPENCODE_BIN:-}"
   [[ -n "$oc" && -x "$oc" ]] || oc="$HOME/.opencode/bin/opencode"
   if [[ -x "$oc" ]] || command -v opencode >/dev/null 2>&1; then
-    if [[ -f "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" ]]; then
-      pass "opencode present + authenticated"
-    else
+    local oc_auth="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+    if [[ ! -f "$oc_auth" ]]; then
       warn "opencode present but no auth (~/.local/share/opencode/auth.json missing) — opencode delegation will fail"
+    else
+      # The presence of a credentials file is not readiness: opencode stores an
+      # oauth `expires` per provider, and an expired one fails at dispatch with
+      # "Provided authentication token is expired" long after doctor said PASS.
+      # Report expiry when we can see it, and do not claim more than we checked
+      # -- a live token can still be rejected server-side, and only a real call
+      # would prove otherwise.
+      local oc_expired
+      oc_expired="$(python3 - "$oc_auth" <<'PY' 2>/dev/null || true
+import json, sys, time
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+now = time.time() * 1000
+stale = [
+    name for name, entry in data.items()
+    if isinstance(entry, dict) and entry.get("expires")
+    and str(entry["expires"]).replace(".", "", 1).isdigit()
+    and float(entry["expires"]) < now
+]
+print(",".join(stale))
+PY
+)"
+      if [[ -n "$oc_expired" ]]; then
+        warn "opencode credentials for '$oc_expired' have expired — run 'opencode auth login'; delegation and its review-fallback slot will fail"
+      else
+        pass "opencode present + credentials on disk"
+      fi
     fi
   else
     warn "opencode CLI not found — opencode delegation unavailable (optional)"

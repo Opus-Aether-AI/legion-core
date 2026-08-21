@@ -38,7 +38,10 @@
 [executors.claude]
 task_file = true
 review = "prompt"
-review_model_ref = "claude_default"
+# Deliberately NOT claude_default: the Claude primary already runs Fable, so a
+# same-harness review on the same model would be self-review. Opus is a genuine
+# second opinion from the same harness.
+review_model_ref = "claude_opus"
 kind = "primary coding"
 adapter = "legion-claude"
 contract = "diff"

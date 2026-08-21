@@ -2288,11 +2288,12 @@ def build_report(
     scan_all: bool = False,
     include_processed: bool = False,
     telemetry_dir: str = "",
+    allow_corrupt_reset: bool = False,
 ) -> dict[str, Any]:
     day = day or _date_utc()
     catalog = build_catalog(repo)
     scan_day = None if scan_all else day
-    memory = load_memory(log_root)
+    memory = load_memory(log_root, allow_corrupt_reset=allow_corrupt_reset)
     incremental = bool(scan_all and not include_processed)
     input_cursor: dict[str, Any] = {}
     input_cursor_base: dict[str, Any] = {}
@@ -2417,10 +2418,51 @@ def _empty_memory() -> dict[str, Any]:
     }
 
 
-def load_memory(log_root: str) -> dict[str, Any]:
-    payload = _json_file(memory_path(log_root))
+class CorruptMemoryError(RuntimeError):
+    """The memory store exists but could not be read as a valid store.
+
+    Distinct from "absent". An absent store is a normal first run; a corrupt one
+    holds deduplication history, outcome attribution and learned evidence that
+    nobody can reconstruct, so it must never be silently replaced.
+    """
+
+
+def memory_quarantine_path(log_root: str) -> str:
+    return memory_path(log_root) + ".corrupt"
+
+
+def load_memory(log_root: str, *, allow_corrupt_reset: bool = False) -> dict[str, Any]:
+    """Load the harness memory store, failing closed on corruption.
+
+    Absent -> a fresh empty store, which is the ordinary first run.
+    Valid   -> the store.
+    Corrupt -> raise, unless the caller explicitly opted into a reset.
+
+    Treating corrupt input as empty was fail-OPEN: the next successful apply
+    rewrote the file wholesale, so a truncated write or a bad edit silently
+    destroyed every learned hint and every processed-outcome record. Losing that
+    history is invisible -- the loop simply relearns from nothing and reports
+    success -- which is exactly the failure mode that most deserves to be loud.
+    """
+    path = memory_path(log_root)
+    if not os.path.exists(path):
+        return _empty_memory()
+    payload = _json_file(path)
     if isinstance(payload, dict) and payload.get("schema") == MEMORY_SCHEMA:
         return payload
+    if not allow_corrupt_reset:
+        raise CorruptMemoryError(
+            f"harness memory at {path} is unreadable or has an unexpected schema; "
+            f"refusing to overwrite it. Inspect it, or re-run with "
+            f"--reset-corrupt-memory to quarantine it as "
+            f"{os.path.basename(memory_quarantine_path(log_root))} and start fresh."
+        )
+    # An explicit reset preserves the original bytes rather than deleting them:
+    # the operator asked to move past it, not to lose the evidence of what broke.
+    try:
+        os.replace(path, memory_quarantine_path(log_root))
+    except OSError:
+        pass
     return _empty_memory()
 
 
@@ -2724,6 +2766,7 @@ def apply_memory(
     log_root: str,
     *,
     project_learning_dir: str = "",
+    allow_corrupt_reset: bool = False,
 ) -> dict[str, Any]:
     _ensure_dir(self_learn_dir(log_root))
     lock_path = memory_path(log_root) + ".lock"
@@ -2732,6 +2775,7 @@ def apply_memory(
             report,
             log_root,
             project_learning_dir=project_learning_dir,
+            allow_corrupt_reset=allow_corrupt_reset,
         )
 
 
@@ -2740,8 +2784,9 @@ def _apply_memory_locked(
     log_root: str,
     *,
     project_learning_dir: str = "",
+    allow_corrupt_reset: bool = False,
 ) -> dict[str, Any]:
-    memory = load_memory(log_root)
+    memory = load_memory(log_root, allow_corrupt_reset=allow_corrupt_reset)
     if not isinstance(memory.get("entities"), dict):
         memory["entities"] = {}
     entities = memory["entities"]
@@ -2979,7 +3024,25 @@ def _path_uses_symlink(path: str, repo: str) -> bool:
 
 
 def hints(log_root: str, entity: str | None = None, limit: int = 20) -> dict[str, Any]:
-    memory = load_memory(log_root)
+    # Read-only: surface corruption rather than crashing, and never report a
+    # corrupt store as an empty one -- "no hints" and "hints unreadable" lead a
+    # caller to opposite conclusions.
+    try:
+        memory = load_memory(log_root)
+    except CorruptMemoryError as exc:
+        # Carried through merge_human_hints and render_hints below. Without
+        # that, the CLI prints "No Legion self-learning hints yet" for an
+        # unreadable store -- the single most misleading thing it could say,
+        # because it reads as "nothing has been learned".
+        return {
+            "schema": "legion.self-learning.hints.v1",
+            "updated_at": None,
+            "entities": {},
+            "hints": [],
+            "total": 0,
+            "memory_status": "corrupt",
+            "error": str(exc),
+        }
     entries = _dict(memory.get("entities"))
     if entity:
         entries = {entity: entries.get(entity, {})} if entity in entries else {}
@@ -2998,6 +3061,11 @@ def hints(log_root: str, entity: str | None = None, limit: int = 20) -> dict[str
 
 
 def render_hints(payload: dict[str, Any]) -> str:
+    if payload.get("memory_status") == "corrupt":
+        return (
+            "Legion self-learning memory is UNREADABLE; no hints can be shown.\n"
+            f"{payload.get('error', '')}"
+        ).rstrip()
     entities = _dict(payload.get("entities"))
     if not entities:
         return "No Legion self-learning hints yet."
@@ -3047,6 +3115,7 @@ def run_command(args: argparse.Namespace) -> int:
         scan_all=not bool(args.day),
         include_processed=args.include_processed,
         telemetry_dir=getattr(args, "telemetry_dir", ""),
+        allow_corrupt_reset=getattr(args, "reset_corrupt_memory", False),
     )
     report_path = daily_report_path(args.logs, day)
 
@@ -3060,6 +3129,7 @@ def run_command(args: argparse.Namespace) -> int:
             report,
             args.logs,
             project_learning_dir=state["project_learning_dir"],
+            allow_corrupt_reset=getattr(args, "reset_corrupt_memory", False),
         )
 
     payload = {
@@ -3217,11 +3287,20 @@ def merge_human_hints(*payloads: dict[str, Any], limit: int) -> dict[str, Any]:
                 count += 1
                 if count >= limit:
                     break
-    return {
+    out: dict[str, Any] = {
         "schema": "legion.self-learning.hints.v1",
         "updated_at": updated_at,
         "entities": merged,
     }
+    # An unreadable store must survive the merge. Dropping it here made the CLI
+    # print "No Legion self-learning hints yet" for corrupt memory, which reads
+    # as "nothing has been learned" -- the opposite of the truth.
+    for payload in payloads:
+        if payload.get("memory_status") == "corrupt":
+            out["memory_status"] = "corrupt"
+            out["error"] = payload.get("error", "")
+            break
+    return out
 
 
 def reconcile_command(args: argparse.Namespace) -> int:
@@ -3247,6 +3326,14 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--apply-memory", action="store_true")
     run.add_argument("--apply-source", action="store_true")
     run.add_argument("--include-processed", action="store_true")
+    run.add_argument(
+        "--reset-corrupt-memory",
+        action="store_true",
+        help=(
+            "quarantine an unreadable harness-memory.json as harness-memory.json.corrupt "
+            "and start a fresh store; without this a corrupt store fails closed"
+        ),
+    )
     run.add_argument("--json", action="store_true")
     run.add_argument("--quiet", action="store_true")
 

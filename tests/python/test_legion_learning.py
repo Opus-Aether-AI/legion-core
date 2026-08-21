@@ -1010,3 +1010,98 @@ def test_normalization_stops_at_event_budget(tmp_path):
     events = learning.normalize_session_file(session, home=tmp_path, max_events=3)
 
     assert len(events) == 3
+
+
+def _self_learn():
+    import importlib.util, os
+    here = os.path.dirname(__file__)
+    path = os.path.join(here, "..", "..", "legion-observability", "scripts", "legion-self-learn.py")
+    spec = importlib.util.spec_from_file_location("sl_mem", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_absent_memory_still_initialises(tmp_path):
+    sl = _self_learn()
+    memory = sl.load_memory(str(tmp_path))
+    assert memory.get("schema") == sl.MEMORY_SCHEMA
+
+
+def test_corrupt_memory_raises_instead_of_reading_as_empty(tmp_path):
+    """Fail closed: treating corruption as empty let the next apply erase it."""
+    sl = _self_learn()
+    target = sl.memory_path(str(tmp_path))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write('{"schema": "legion.harness-memory', )  # truncated mid-write
+
+    try:
+        sl.load_memory(str(tmp_path))
+    except sl.CorruptMemoryError as exc:
+        assert "refusing to overwrite" in str(exc)
+    else:
+        raise AssertionError("corrupt memory was read as empty instead of raising")
+
+
+def test_corrupt_memory_is_quarantined_not_deleted_on_explicit_reset(tmp_path):
+    sl = _self_learn()
+    target = sl.memory_path(str(tmp_path))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    original = '{"schema": "wrong", "entities": {"a": 1}}'
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(original)
+
+    memory = sl.load_memory(str(tmp_path), allow_corrupt_reset=True)
+
+    assert memory.get("schema") == sl.MEMORY_SCHEMA
+    quarantined = sl.memory_quarantine_path(str(tmp_path))
+    assert os.path.exists(quarantined), "the operator asked to move on, not to lose evidence"
+    with open(quarantined, encoding="utf-8") as handle:
+        assert handle.read() == original
+
+
+def test_hints_reports_corruption_rather_than_an_empty_store(tmp_path):
+    """"no hints" and "hints unreadable" lead a caller to opposite conclusions."""
+    sl = _self_learn()
+    target = sl.memory_path(str(tmp_path))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write("not json at all")
+
+    result = sl.hints(str(tmp_path))
+
+    assert result.get("memory_status") == "corrupt"
+    assert result.get("entities") == {}
+    assert "refusing to overwrite" in result.get("error", "")
+
+
+def test_render_hints_distinguishes_unreadable_from_empty():
+    """"No hints yet" for a corrupt store reads as "nothing learned" — the opposite."""
+    sl = _self_learn()
+    corrupt = sl.render_hints({"memory_status": "corrupt", "error": "boom", "entities": {}})
+    empty = sl.render_hints({"entities": {}})
+    assert "UNREADABLE" in corrupt
+    assert "boom" in corrupt
+    assert empty == "No Legion self-learning hints yet."
+
+
+def test_merge_human_hints_preserves_corruption_status():
+    sl = _self_learn()
+    merged = sl.merge_human_hints(
+        {"entities": {}, "memory_status": "corrupt", "error": "boom"},
+        {"entities": {}},
+        limit=10,
+    )
+    assert merged.get("memory_status") == "corrupt"
+    assert merged.get("error") == "boom"
+
+
+def test_run_parser_exposes_the_advertised_reset_flag():
+    """The corrupt-memory error names this flag; argparse must accept it."""
+    sl = _self_learn()
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+        sl.main(["run", "--help"])
+    assert "--reset-corrupt-memory" in buf.getvalue()

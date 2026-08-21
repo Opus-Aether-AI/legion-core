@@ -1100,18 +1100,38 @@ _REVIEW_VERDICT_KEYS = {"verdict", "summary", "findings"}
 _REVIEW_FINDING_KEYS = {"severity", "title", "file", "line", "detail"}
 
 
+def _strip_code_fence(text: str) -> str:
+    """Unwrap a ```json ... ``` block, leaving anything else untouched.
+
+    Reviewers routinely return their verdict inside a fence: it is the default shape for a model
+    asked to emit JSON alongside prose. legion-router's normalizer already accounts for this in
+    ``normalize-review-verdict.py::_json_payload``; legion-run did not, so a review that passed on
+    substance was recorded as a failed stage, and the failure then skipped evaluate, report and
+    share. Only a closed fence is unwrapped - an unterminated one is returned as-is rather than
+    guessed at, because a gate that gets creative about malformed input is worse than one that
+    rejects it.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if len(lines) >= 2 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
 def _review_verdict_value(payload: dict[str, Any]) -> Any:
     verdict = payload.get("verdict", payload.get("result"))
-    if isinstance(verdict, str):
-        text = verdict.strip()
-        if text.startswith("{") and text.endswith("}"):
-            try:
-                decoded = json.loads(text)
-            except ValueError:
-                return verdict
-            if isinstance(decoded, dict):
-                return decoded
-    return verdict
+    if not isinstance(verdict, str):
+        return verdict
+    text = _strip_code_fence(verdict)
+    if not (text.startswith("{") and text.endswith("}")):
+        return verdict
+    try:
+        decoded = json.loads(text)
+    except ValueError:
+        return verdict
+    return decoded if isinstance(decoded, dict) else verdict
 
 
 def _blocking_review_findings(verdict: Any) -> list[dict[str, Any]]:

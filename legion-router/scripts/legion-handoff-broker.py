@@ -11,10 +11,22 @@ from __future__ import annotations
 
 import argparse
 import base64
-import fcntl
 import json
 import math
 import os
+import sys
+
+# One cross-platform lock implementation for the whole repo; it lives with
+# the observability scripts and takes a file object or a raw descriptor.
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "legion-observability",
+        "scripts",
+    ),
+)
+import legion_file_lock  # noqa: E402
 import re
 import select
 import selectors
@@ -226,21 +238,19 @@ def _validate_span(payload: Any, expected_parent: str) -> dict[str, Any]:
 def _write_record_atomic(descriptor: int, encoded: bytes) -> None:
     """Append one record, rolling back a short/failed write while locked."""
 
-    fcntl.flock(descriptor, fcntl.LOCK_EX)
-    original_size = os.fstat(descriptor).st_size
-    try:
-        written = os.write(descriptor, encoded)
-        if written != len(encoded):
-            os.ftruncate(descriptor, original_size)
-            raise OSError("short canonical telemetry append")
-    except BaseException:
+    with legion_file_lock.exclusive_lock(descriptor):
+        original_size = os.fstat(descriptor).st_size
         try:
-            os.ftruncate(descriptor, original_size)
-        except OSError:
-            pass
-        raise
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+            written = os.write(descriptor, encoded)
+            if written != len(encoded):
+                os.ftruncate(descriptor, original_size)
+                raise OSError("short canonical telemetry append")
+        except BaseException:
+            try:
+                os.ftruncate(descriptor, original_size)
+            except OSError:
+                pass
+            raise
 
 
 def _host_control_directories(home: Path) -> list[Path]:

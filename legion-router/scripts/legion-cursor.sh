@@ -218,6 +218,13 @@ cmd_run() {
     cmd+=(--force)
   fi
   [[ -n "$model" ]] && cmd+=(--model "$model")
+  # cursor-agent takes its prompt positionally and documents no stdin form, so
+  # this hop remains bounded by ARG_MAX. Say so before the kernel does: the
+  # failure is otherwise a bare "Argument list too long" from deep in a
+  # delegation.
+  if [[ "${#task}" -gt 100000 ]]; then
+    note "⚠ task is ${#task} bytes; cursor takes its prompt on argv and may exceed ARG_MAX"
+  fi
   cmd+=("$task")
 
   legion_activate_executor_context "$RUN_ID" cursor

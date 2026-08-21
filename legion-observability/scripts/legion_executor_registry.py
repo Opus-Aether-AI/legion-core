@@ -70,6 +70,12 @@ def _fallback_table(path):
                     current[key] = json.loads(value)
                 except json.JSONDecodeError as exc:
                     raise ValueError(f"invalid quoted TOML value for {key}") from exc
+            elif value in ("true", "false"):
+                # Capability flags (task_file) are bare booleans. Preserving only
+                # quoted strings silently dropped them on 3.9/3.10, so a
+                # capability declared in executors.toml simply vanished there and
+                # the dispatcher fell back to its pre-capability behaviour.
+                current[key] = value == "true"
     return table
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import importlib.util
 import json
@@ -33,6 +32,7 @@ OUTCOME_SCHEMA = "legion.outcome.v1"
 SPAN_SCHEMA = "legion.span.v1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
+import legion_file_lock  # noqa: E402
 
 DEFAULT_LOG_ROOT = ""
 DEFAULT_BENCH_ROOT = ""
@@ -1078,13 +1078,9 @@ def _bench_run_lease(run_dir: str):
     parent = os.path.dirname(run_dir) or "."
     os.makedirs(parent, exist_ok=True)
     lock_path = f"{run_dir}.active.lock"
-    with open(lock_path, "a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            os.makedirs(run_dir, exist_ok=True)
-            yield
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    with open(lock_path, "a+", encoding="utf-8") as lock, legion_file_lock.exclusive_lock(lock):
+        os.makedirs(run_dir, exist_ok=True)
+        yield
     try:
         os.unlink(lock_path)
     except FileNotFoundError:
@@ -1097,18 +1093,11 @@ def _bench_run_is_active(run_dir: str) -> bool:
         return False
     try:
         with open(lock_path, "a+", encoding="utf-8") as lock:
-            acquired = False
             try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
+                with legion_file_lock.exclusive_lock(lock, blocking=False):
+                    pass
             except BlockingIOError:
                 return True
-            finally:
-                if acquired:
-                    try:
-                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                    except OSError:
-                        pass
     except OSError:
         # A concurrently disappearing directory is already outside the set we
         # can safely prune.

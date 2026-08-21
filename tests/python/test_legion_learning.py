@@ -1074,3 +1074,34 @@ def test_hints_reports_corruption_rather_than_an_empty_store(tmp_path):
     assert result.get("memory_status") == "corrupt"
     assert result.get("entities") == {}
     assert "refusing to overwrite" in result.get("error", "")
+
+
+def test_render_hints_distinguishes_unreadable_from_empty():
+    """"No hints yet" for a corrupt store reads as "nothing learned" — the opposite."""
+    sl = _self_learn()
+    corrupt = sl.render_hints({"memory_status": "corrupt", "error": "boom", "entities": {}})
+    empty = sl.render_hints({"entities": {}})
+    assert "UNREADABLE" in corrupt
+    assert "boom" in corrupt
+    assert empty == "No Legion self-learning hints yet."
+
+
+def test_merge_human_hints_preserves_corruption_status():
+    sl = _self_learn()
+    merged = sl.merge_human_hints(
+        {"entities": {}, "memory_status": "corrupt", "error": "boom"},
+        {"entities": {}},
+        limit=10,
+    )
+    assert merged.get("memory_status") == "corrupt"
+    assert merged.get("error") == "boom"
+
+
+def test_run_parser_exposes_the_advertised_reset_flag():
+    """The corrupt-memory error names this flag; argparse must accept it."""
+    sl = _self_learn()
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+        sl.main(["run", "--help"])
+    assert "--reset-corrupt-memory" in buf.getvalue()

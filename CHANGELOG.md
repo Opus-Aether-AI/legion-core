@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.6](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.5...v0.23.6) (2026-08-21)
+
+
+### Fixed
+
+* **router:** make review a capability with cross-executor fallback ([#154](https://github.com/Opus-Aether-AI/legion-core/issues/154)) ([bb48b8c](https://github.com/Opus-Aether-AI/legion-core/commit/bb48b8c0b58f47eb8a1c57001cfa76c180cd9897))
+
 ## [0.23.5](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.4...v0.23.5) (2026-08-17)
 
 

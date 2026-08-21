@@ -750,8 +750,15 @@ cmd_run() {
   [[ "$SANDBOX" != read-only || ! -s "$diff" ]] || { status=error; result="${result:+$result$'\n'}Pi produced file changes during a read-only run; refusing to report ok."; }
   [[ "$status" != ok || -n "$result" || -s "$diff" ]] || { status=error; result="$ADAPTER_KIND completed without an authoritative terminal result or diff."; }
   printf '%s\n' "$result" > "$ART/last-message.txt"
+  # Only read provenance from a VERIFIED artifact. provider_files_ok is cleared
+  # when the provider replaced or symlinked a parent-owned file, and the whole
+  # point of that guard is to refuse consuming it -- reading cost_status out of
+  # an unverified, provider-selected JSON would walk straight past it. An
+  # unverified run keeps the honest default: we do not know what it cost.
   local cost_provenance='{"cost_status":"unknown","cost_source":"none"}'
-  [[ "$ADAPTER_KIND" != hermes ]] || cost_provenance="$(hermes_cost_provenance "$usage_art")"
+  if [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == hermes ]]; then
+    cost_provenance="$(hermes_cost_provenance "$usage_art")"
+  fi
   local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" --argjson cost_provenance "$cost_provenance" '{worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage} + $cost_provenance')"
   emit_span "$status" "$duration" "$cost" "$usage" "$task" "$artifacts"
   if [[ "$apply" == 1 && "$status" == ok && -s "$diff" ]]; then

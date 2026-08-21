@@ -31,7 +31,11 @@ MAX_BLOCK_CHARS = 20000
 DEFAULT_SESSION_LIMIT = 100
 DEFAULT_RECORD_LIMIT = 20_000
 DEFAULT_ROLES = {"assistant", "unknown", "user"}
-VALID_HARNESSES = {"claude", "codex", "cursor"}
+# Every harness Legion can drive as a primary. opencode, Pi and Hermes were
+# missing, so `--harness pi` was rejected outright and their sessions were never
+# scanned -- a first-class executor that learning cannot see contributes nothing
+# back to routing.
+VALID_HARNESSES = {"claude", "codex", "cursor", "opencode", "pi", "hermes"}
 VALID_ROLES = {"assistant", "developer", "system", "tool", "unknown", "user"}
 VALID_SOURCE_KINDS = {
     "claude-memory",
@@ -587,6 +591,9 @@ def _iter_files(home: Path, days: int, max_file_mb: float) -> tuple[list[Path], 
         home / ".claude" / "plans",
         home / ".codex" / "sessions",
         home / ".cursor",
+        home / ".local" / "share" / "opencode",
+        home / ".pi" / "agent" / "sessions",
+        home / ".hermes" / "sessions",
     ]
     suffixes = {".md", ".txt", ".jsonl", ".json", ".log"}
     out: list[Path] = []

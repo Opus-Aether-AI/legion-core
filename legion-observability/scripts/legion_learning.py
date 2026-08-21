@@ -1143,6 +1143,12 @@ def _iter_session_files(
         home / ".cursor",
         home / ".local" / "share" / "opencode",
         home / ".gemini",
+        # Pi and Hermes are first-class primary/coding executors. Classifying
+        # their paths is not enough on its own -- without their roots here the
+        # classifier branches are unreachable and their sessions never enter
+        # learning at all.
+        home / ".pi" / "agent" / "sessions",
+        home / ".hermes" / "sessions",
     ]
     cutoff = (_now() - timedelta(days=lookback_days)).timestamp() if lookback_days > 0 else 0
     max_bytes = int(max_file_mb * 1024 * 1024) if max_file_mb > 0 else 0

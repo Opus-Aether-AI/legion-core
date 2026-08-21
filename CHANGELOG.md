@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.24.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.7...v0.24.0) (2026-08-21)
+
+
+### Added
+
+* **router:** let Claude review a Claude-primary session ([#163](https://github.com/Opus-Aether-AI/legion-core/issues/163)) ([fcdb06a](https://github.com/Opus-Aether-AI/legion-core/commit/fcdb06a0ae02d0996c7f520cd030baea20fef498))
+
+
+### Fixed
+
+* **observability:** fail closed on corrupt harness memory ([#165](https://github.com/Opus-Aether-AI/legion-core/issues/165)) ([2e486d7](https://github.com/Opus-Aether-AI/legion-core/commit/2e486d7647ca969382f7bf7690374110bd8bb783))
+* **observability:** recognise Pi and Hermes, and keep Hermes cost provenance ([#167](https://github.com/Opus-Aether-AI/legion-core/issues/167)) ([0650a25](https://github.com/Opus-Aether-AI/legion-core/commit/0650a2570ab4b25d845d376e2feb0713f3b5f447))
+
+
+### Changed
+
+* **router:** give models.toml one reader ([#168](https://github.com/Opus-Aether-AI/legion-core/issues/168)) ([8fec213](https://github.com/Opus-Aether-AI/legion-core/commit/8fec213ce05c447d932121b4820329323e0534e3))
+
 ## [0.23.7](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.6...v0.23.7) (2026-08-21)
 
 

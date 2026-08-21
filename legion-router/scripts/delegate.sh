@@ -929,6 +929,14 @@ cmd_run() {
   # Register for EXIT-trap cleanup so a crash/kill before the inline removal
   # below does not orphan the worktree + branch (WS6 worktree-leak guard).
   LEGION_WT_PATH="$wt"; LEGION_WT_BRANCH="$branch"; LEGION_WT_REPO="$repo"; LEGION_WT_KEEP="$keep"
+  # A Sandcastle run executes in a remote sandbox and never touches this local
+  # worktree, so seeding it is pure cost -- and on a large tree that cost is the
+  # very thing this feature exists to avoid.
+  if is_sandcastle_sandbox "$sandbox"; then
+    note "→ remote sandbox run; skipping local dependency seeding"
+  else
+    seed_worktree_dependencies "$repo" "$wt"
+  fi
   if [[ "$detached_worker" -eq 1 ]]; then
     sandbox_dev_pid="$sandbox_dev_pid_from_parent"
     SANDBOX_DEV_PID_TO_TEARDOWN="$sandbox_dev_pid"
@@ -1300,6 +1308,80 @@ $(cat "$patch")
   fi
   [[ -z "$last" ]] || printf '%s' "$last" >"$verdict_out"
   return "$rc"
+}
+
+# A fresh git worktree has none of the repo's gitignored dependency
+# directories, so a delegated agent pays a full `npm ci` / `uv sync` before it
+# can run a single test -- tens of seconds to minutes, on every delegation.
+# Copy-on-write cloning makes that near-free where the filesystem supports it
+# (APFS clonefile, btrfs/XFS reflink); elsewhere a plain copy is still far
+# cheaper than a network install.
+#
+# Opt out with LEGION_SEED_DEPS=0; override the list with LEGION_SEED_DEPS_DIRS
+# (colon-separated). A path tracked by git is never seeded: it already came with
+# the worktree, and overwriting it would silently diverge the delegate's tree
+# from its base commit.
+# Only position-independent directories are seeded by default. node_modules
+# qualifies: Node resolves by walking parent directories and npm's .bin shims
+# use `#!/usr/bin/env`, so the tree works wherever it sits.
+#
+# Virtualenvs emphatically do NOT, and are deliberately absent. A venv bakes its
+# own absolute path into every console-script shebang and into bin/activate, so
+# a clone at a different path still points at the ORIGINAL venv -- the delegate
+# would run tests against the operator's environment and could install into it.
+# A broken venv is recoverable; a contaminated one is not. Bundler's
+# .bundle/config can carry an absolute BUNDLE_PATH for the same reason.
+#
+# LEGION_SEED_DEPS_DIRS still opts any of them in, for a caller who knows their
+# toolchain relocates cleanly.
+LEGION_SEED_DEPS_DEFAULT="node_modules"
+
+# Clone SRC to DEST, preferring copy-on-write. Returns 0 on any success.
+_seed_copy_dir() {
+  local src="$1" dest="$2"
+  cp -Rc "$src" "$dest" 2>/dev/null && return 0            # macOS/BSD clonefile
+  cp -R --reflink=auto "$src" "$dest" 2>/dev/null && return 0  # GNU reflink
+  cp -R "$src" "$dest" 2>/dev/null                          # plain copy
+}
+
+seed_worktree_dependencies() {
+  local repo="$1" wt="$2"
+  [[ "${LEGION_SEED_DEPS:-1}" != "0" ]] || return 0
+  [[ -d "$repo" && -d "$wt" ]] || return 0
+  local dirs="${LEGION_SEED_DEPS_DIRS:-$LEGION_SEED_DEPS_DEFAULT}"
+  local seeded=0 name src dest saved_ifs="$IFS"
+  IFS=':'
+  # shellcheck disable=SC2206
+  local -a wanted=($dirs)
+  IFS="$saved_ifs"
+  for name in "${wanted[@]}"; do
+    [[ -n "$name" ]] || continue
+    src="$repo/$name"
+    dest="$wt/$name"
+    [[ -d "$src" ]] || continue
+    [[ ! -e "$dest" ]] || continue
+    # Decide against the TARGET worktree, not the source repo: the worktree is
+    # what the delegate works in, and its base commit may track a path the
+    # source repo happens to ignore. Seeding over a tracked path diverges the
+    # delegate's tree from the commit it claims to be based on.
+    if git -C "$wt" ls-files --error-unmatch "$name" >/dev/null 2>&1; then
+      continue
+    fi
+    # Trailing slash matters: a directory-only pattern ("node_modules/") does
+    # not match a bare path that does not yet exist in the fresh worktree, and
+    # the thing being seeded is always a directory.
+    if ! git -C "$wt" check-ignore -q "$name/" 2>/dev/null; then
+      note "⚠ $name is not ignored by the worktree; not seeding it"
+      continue
+    fi
+    mkdir -p "$(dirname "$dest")" 2>/dev/null || continue
+    if _seed_copy_dir "$src" "$dest"; then
+      seeded=$((seeded + 1))
+    else
+      note "⚠ could not seed $name into the worktree; the delegate will install it itself"
+    fi
+  done
+  [[ "$seeded" -eq 0 ]] || note "→ seeded $seeded dependency dir(s) into the worktree"
 }
 
 # ── Reviewer capability resolution ──────────────────────────────────────

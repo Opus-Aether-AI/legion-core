@@ -368,3 +368,32 @@ def test_symmetric_adapter_requires_a_concrete_provider_binary_before_any_worktr
 
     assert result.returncode != 0
     assert "pi CLI not found" in result.stderr
+
+
+def test_fallback_loader_preserves_bare_booleans(tmp_path):
+    """Capability flags are bare booleans; the 3.9/3.10 path dropped them.
+
+    Preserving only quoted strings meant a capability declared in
+    executors.toml simply vanished on older Pythons, and the dispatcher
+    silently fell back to its pre-capability behaviour.
+    """
+    import legion_executor_registry as registry
+
+    config = tmp_path / "executors.toml"
+    config.write_text(
+        '[executors.demo]\n'
+        'kind = "coding"\n'
+        'adapter = "legion-demo"\n'
+        'task_file = true\n'
+        'review = "prompt"\n'
+        'disabled = false\n',
+        encoding="utf-8",
+    )
+
+    table = registry._fallback_table(str(config))
+    demo = table["executors"]["demo"]
+
+    assert demo["task_file"] is True
+    assert demo["disabled"] is False
+    assert demo["review"] == "prompt"
+    assert demo["adapter"] == "legion-demo"

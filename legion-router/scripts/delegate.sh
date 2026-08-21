@@ -1293,9 +1293,19 @@ ${extra}
 $(cat "$patch")
 --- END IMMUTABLE DIFF ---"
   set +e
+  # Same rule as dispatch_adapter: --task-file is only safe for THIS install's
+  # adapter. A substituted one on PATH has agreed to none of it, so it keeps
+  # --task rather than being handed a flag it will reject.
   local review_task_file="${err%.err}.task.txt"
-  write_task_payload "$prompt" "$review_task_file" >/dev/null
-  ( cd "$wt" && "$adapter_bin" run --repo "$wt" --task-file "$review_task_file" ${model:+--model "$model"} --quiet ) \
+  local -a task_args
+  local review_sibling="$_self_dir/../bin/$adapter"
+  if [[ -x "$review_sibling" ]] && [[ "$adapter_bin" -ef "$review_sibling" ]]; then
+    write_task_payload "$prompt" "$review_task_file" >/dev/null
+    task_args=(--task-file "$review_task_file")
+  else
+    task_args=(--task "$prompt")
+  fi
+  ( cd "$wt" && "$adapter_bin" run --repo "$wt" "${task_args[@]}" ${model:+--model "$model"} --quiet ) \
     </dev/null >"$stream" 2>"$err"
   rc=$?
   set -e
@@ -2027,6 +2037,7 @@ cmd_cleanup() {
   done
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
   local wtroot="$repo/.legion/worktrees" runsroot="$repo/.legion/runs"
+  local tasksroot="$repo/.legion/tasks"
   local n_wt=0 n_br=0 n_runs=0 extra=""
   if [[ "$all" -eq 1 ]]; then
     with_git_worktree_lock "$repo" cleanup_selected_runs_unlocked "$repo" "$wtroot" "$runsroot" \
@@ -2034,12 +2045,17 @@ cmd_cleanup() {
     if [[ "$purge" -eq 1 && -d "$runsroot" ]]; then
       n_runs="$(find "$runsroot" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
       rm -rf "$runsroot"
+      # Staged task payloads sit beside the runs (not inside: adapters own the
+      # run directory and one of them refuses a non-empty start). They are part
+      # of the same run's evidence and are purged with it.
+      rm -rf "$tasksroot"
       extra=" + $n_runs run artifact(s)"
     fi
     note "✓ cleaned $n_wt worktree(s) + $n_br branch(es)$extra"
   elif [[ -n "$run" ]]; then
     legion_validate_run_id "$run" || die "cleanup: invalid run id '$run'"
     local run_art="$runsroot/$run"
+    [[ "$purge" -ne 1 ]] || rm -f "$tasksroot/$run.txt" 2>/dev/null || true
     with_git_worktree_lock "$repo" cleanup_selected_runs_unlocked "$repo" "$wtroot" "$runsroot" "$run" \
       || die 'cleanup: could not acquire the shared Git worktree lock or safely remove the owned worktree'
     if [[ "$purge" -eq 1 && -d "$run_art" ]]; then rm -rf "${run_art:?}"; extra=" + artifacts"; fi

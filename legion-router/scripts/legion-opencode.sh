@@ -227,14 +227,16 @@ cmd_run() {
   [[ -n "${LEGION_OPENCODE_VARIANT:-}" ]] && cmd+=(--variant "$LEGION_OPENCODE_VARIANT")
   # read-only maps to the non-writing `plan` agent (mirrors cursor's --mode plan).
   [[ "$sandbox" == "read-only" ]] && cmd+=(--agent plan)
-  cmd+=("$task")
-
+  # The task goes on STDIN, not argv. `opencode run` with no message argument
+  # reads its prompt from stdin, and a task carrying a diff or a long spec
+  # exceeds ARG_MAX -- moving it off the dispatcher's command line only to put
+  # it back on the provider's would fix nothing.
   legion_activate_executor_context "$RUN_ID" opencode
-  note "-> ${cmd[*]}"
+  note "-> ${cmd[*]} (task on stdin, ${#task} bytes)"
   start_ms="$(date +%s000)"
   set +e
-  ( cd "$wt" && "${cmd[@]}" >"$out_file" 2>"$err_file" )
-  rc=$?
+  printf '%s' "$task" | ( cd "$wt" && "${cmd[@]}" ) >"$out_file" 2>"$err_file"
+  rc=${PIPESTATUS[1]}
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 

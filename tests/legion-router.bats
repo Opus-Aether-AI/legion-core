@@ -2173,3 +2173,43 @@ $run_error" ]
     # exactly one reviewer ran
     [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
 }
+
+@test "delegate: a task larger than ARG_MAX reaches the adapter" {
+    # Regression for E2BIG at the adapter boundary: delegate.sh accepted a big
+    # task on stdin, then re-serialised it onto argv when dispatching, so the
+    # limit was reimposed at the boundary rather than at the door.
+    local repo; repo="$(make_test_repo big-task)"
+    local big; big="$BATS_TEST_TMPDIR/big.txt"
+    python3 -c "print('x'*400000)" > "$big"
+
+    run "$DELEGATE" run --executor opencode --model test-model-beta \
+        --task-file "$big" --repo "$repo" --quiet
+
+    # The failure this pins is "Argument list too long" — any other outcome
+    # means the payload made it across the boundary.
+    [[ "$output" != *"Argument list too long"* ]]
+    [[ "$output" != *"E2BIG"* ]]
+}
+
+@test "delegate: --task-file overrides an earlier --task (last flag wins)" {
+    local repo; repo="$(make_test_repo task-file-precedence)"
+    local f; f="$BATS_TEST_TMPDIR/t.txt"; printf 'from-file' > "$f"
+
+    run "$DELEGATE" run --executor opencode --model test-model-beta \
+        --task "from-argv" --task-file "$f" --repo "$repo" --keep --quiet
+    [ "$status" -eq 0 ]
+
+    # The staged payload is the run's own evidence of what the adapter was asked.
+    local run_id staged
+    run_id="$(echo "$output" | jq -r '.run_id')"
+    staged="$repo/.legion/tasks/$run_id.txt"
+    [ -f "$staged" ]
+    [ "$(cat "$staged")" = "from-file" ]
+}
+
+@test "delegate: --task-file rejects an unreadable path" {
+    local repo; repo="$(make_test_repo task-file-missing)"
+    run "$DELEGATE" run --model test-model-beta --task-file /nonexistent/nope.txt --repo "$repo" --quiet
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--task-file not readable"* ]]
+}

@@ -152,6 +152,11 @@ cmd_run() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --task) task="$2"; shift 2 ;;
+      # The task can exceed ARG_MAX once a diff or a long spec is in it.
+      # --task-file carries the same value out of band; last flag wins.
+      --task-file)
+        [[ -r "$2" ]] || die "--task-file not readable: $2"
+        task="$(cat "$2")"; shift 2 ;;
       --model) model="$2"; shift 2 ;;
       --archetype) archetype="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
@@ -329,7 +334,7 @@ usage() {
 legion-opencode — delegate a scoped task to opencode headless.
 
 Usage:
-  legion-opencode run --task "TASK" [--model provider/model] [--archetype NAME] [--repo DIR] [--run-id ID]
+  legion-opencode run --task "TASK" | --task-file F [--model provider/model] [--archetype NAME] [--repo DIR] [--run-id ID]
                       [--base REF] [--sandbox read-only|workspace-write] [--apply] [--keep] [--quiet]
   legion-opencode run [--repo DIR] < task.txt
 

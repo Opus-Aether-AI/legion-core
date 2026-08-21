@@ -190,6 +190,11 @@ cmd_run() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --task) task="$2"; shift 2 ;;
+      # The task can exceed ARG_MAX once a diff or a long spec is in it.
+      # --task-file carries the same value out of band; last flag wins.
+      --task-file)
+        [[ -r "$2" ]] || die "--task-file not readable: $2"
+        task="$(cat "$2")"; shift 2 ;;
       --model) model="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
@@ -429,7 +434,7 @@ usage() {
 legion-claude — delegate a scoped task to Claude headless, with fallback to Codex.
 
 Usage:
-  legion-claude run --task "TASK" [--model MODEL] [--repo DIR] [--effort LEVEL]
+  legion-claude run --task "TASK" | --task-file F [--model MODEL] [--repo DIR] [--effort LEVEL]
                     [--base REF] [--run-id ID] [--apply] [--keep]
                     [--sandbox read-only|workspace-write] [--archetype NAME]
                     [--append-system-prompt TEXT] [--dangerously-skip-permissions]

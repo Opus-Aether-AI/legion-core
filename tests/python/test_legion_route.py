@@ -326,3 +326,42 @@ def test_cheap_bulk_uses_cheapest_gpt_tier():
     r = lr.resolve(t, "cheap-bulk", m)
     assert r["model_ref"] == "codex_cheap"
     assert r["model"] == lr.resolve_model_ref(m, "codex_cheap")
+
+
+def test_provenance_names_the_layer_that_supplied_each_field():
+    """"Why did it route there?" should not require reconstructing a merge by hand."""
+    r = lr.resolve(table(), "implement-feature", models(), with_provenance=True)
+    prov = r["provenance"]
+    assert prov["executor"] == "archetypes.implement-feature"
+    assert prov["model_ref"] == "archetypes.implement-feature"
+
+
+def test_provenance_marks_inherited_fields_as_defaults():
+    r = lr.resolve(table(), "orchestrate", models(), with_provenance=True)
+    prov = r["provenance"]
+    inherited = [k for k, v in prov.items() if v == "defaults"]
+    assert inherited, "orchestrate should inherit at least one field from [defaults]"
+    assert prov["executor"] == "archetypes.orchestrate"
+
+
+def test_provenance_does_not_credit_a_config_layer_for_a_derived_model():
+    # `model` is derived from a role through models.toml. Attributing it to the
+    # layer that supplied the ROLE would be a lie about where the value is from.
+    r = lr.resolve(table(), "implement-feature", models(), with_provenance=True)
+    assert r["provenance"]["model"].startswith("models.toml")
+    assert r["model_ref"] in r["provenance"]["model"]
+
+
+def test_provenance_records_a_field_the_archetype_displaced():
+    # A model_ref that displaces a default `model` (or vice versa) is a routing
+    # decision; the vanished field must not linger in provenance.
+    t = {"defaults": {"executor": "self", "model": "literal-model"},
+         "archetypes": {"x": {"model_ref": "claude_default"}}}
+    r = lr.resolve(t, "x", models(), with_provenance=True)
+    assert "model_ref" in r
+    assert r["provenance"].get("model", "").startswith("models.toml")
+
+
+def test_resolve_without_provenance_is_unchanged():
+    plain = lr.resolve(table(), "implement-feature", models())
+    assert "provenance" not in plain

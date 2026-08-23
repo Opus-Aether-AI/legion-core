@@ -156,10 +156,11 @@ def test_frontend_implement_stays_on_claude_not_bulk_coder():
     assert r["model"] == lr.resolve_model_ref(model_table, "claude_orchestrator")
 
 
-def test_frontend_runs_on_opus_and_fable_on_claude_code():
-    # Frontend is taste + verified-by-screenshot: Opus polishes, Fable reviews (the
-    # best Claude combo). Claude models run on CLAUDE CODE (the `claude` executor),
-    # never piped through Cursor. Not Grok, not the bulk coder.
+def test_frontend_runs_on_opus_on_claude_code():
+    # Frontend is taste + verified-by-screenshot. Both roles now run Opus, since
+    # Fable is retired; what still matters here is that they stay on CLAUDE CODE
+    # (the `claude` executor) and are never piped through Cursor, and that review
+    # remains read-only. Not Grok, not the bulk coder.
     route_table = table()
     model_table = models()
     polish = lr.resolve(route_table, "frontend-polish", model_table)
@@ -169,7 +170,7 @@ def test_frontend_runs_on_opus_and_fable_on_claude_code():
     assert "opus" in polish["model"]
     assert review["executor"] == "claude"
     assert review["model_ref"] == "claude_default"
-    assert "fable" in review["model"]
+    assert "opus" in review["model"]
     assert review["sandbox"] == "read-only"        # verify by screenshot, no edits
 
 
@@ -235,15 +236,19 @@ def test_main_requires_archetype_or_list():
 
 
 # ── catalog policy: configured Claude, Codex, and Cursor roles ────────────
-# Opus is admitted but scoped to FRONTEND only (claude_opus, on Claude Code);
-# it must never leak into another role, and Cursor never hosts a Claude model.
-# Composer (Cursor in-house) is kept available but unrouted.
-_ALLOWED_FAMILIES = ("claude-fable", "claude-opus", "gpt-", "grok-", "composer")
+# Fable is retired from the catalog: every Claude role now runs Opus on Claude
+# Code, and Cursor never hosts a Claude model. Composer (Cursor in-house) is kept
+# available but unrouted.
+#
+# The former "Opus is scoped to FRONTEND only" rule is gone with Fable -- there is
+# no second Claude model left to scope it against. Cross-model independence for
+# frontend review now comes from the Cursor (Grok) or Codex roles.
+_ALLOWED_FAMILIES = ("claude-opus", "gpt-", "grok-", "composer")
 _FORBIDDEN_MODELS = ("sonnet", "haiku", "minimax", "kimi",
                      "gemini", "glm", "muse", "nemotron", "qwen")
 
 
-def test_catalog_is_only_fable_opus_gpt_grok_composer():
+def test_catalog_is_only_opus_gpt_grok_composer():
     m = models()
     assert m, "models.toml must have a [models] table"
     for role, model in m.items():
@@ -254,14 +259,19 @@ def test_catalog_is_only_fable_opus_gpt_grok_composer():
         assert gone not in m, f"removed role {gone} is still present"
 
 
-def test_opus_is_scoped_to_the_claude_frontend_polish_role_only():
-    # Opus is re-admitted ONLY for the frontend polish role, and it runs on Claude
-    # Code (claude_opus), never Cursor. It must not appear in orchestrator / codex /
-    # opencode / default / cursor roles.
+def test_every_claude_role_runs_opus():
+    # Replaces the former "opus is scoped to frontend only" rule, which existed to
+    # keep Opus from displacing Fable. Fable is retired, so there is no second
+    # Claude model left to scope against and the rule has nothing to protect.
+    #
+    # What still matters: no OTHER Claude model creeps back in under a claude_*
+    # role. A stray sonnet or fable pin would otherwise pass every remaining check
+    # while quietly changing who does the judgement work.
     m = models()
-    for role, model in m.items():
-        if "opus" in model.lower():
-            assert role == "claude_opus", f"opus leaked into non-frontend role {role}={model}"
+    claude_roles = {role: model for role, model in m.items() if role.startswith("claude_")}
+    assert claude_roles, "the catalog must define at least one claude_* role"
+    for role, model in claude_roles.items():
+        assert "opus" in model.lower(), f"{role}={model} is not an Opus model"
 
 
 def test_cursor_hosts_only_native_non_claude_models():

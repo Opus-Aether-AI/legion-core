@@ -29,7 +29,7 @@
 #
 # `self` archetypes stay with the PRIMARY harness (whoever is driving the session,
 # resolved by `legion-route --primary`). `model_ref` on a self archetype is the
-# Claude-primary default (Fable); a non-Claude primary runs its own model inline.
+# Claude-primary default (Opus); a non-Claude primary runs its own model inline.
 
 # ── Review fallback ─────────────────────────────────────────────────────
 # `legion-delegate review` walks this order and uses the first executor whose
@@ -50,24 +50,24 @@ sandbox = "workspace-write"
 reasoning_effort = "high"
 fallback_refs = []
 
-# ── Fable orchestrates (self) — judgement, not bulk execution (at high) ──
+# ── The primary orchestrates (self) — judgement, not bulk execution (at high) ──
 [archetypes.orchestrate]
 executor = "self"
 model_ref = "claude_orchestrator"
 reasoning_effort = "high"
-note = "Plan / decompose / coordinate / integrate — the orchestration itself stays with the primary harness (Fable)."
+note = "Plan / decompose / coordinate / integrate — the orchestration itself stays with the primary harness."
 
 [archetypes.architecture-decision]
 executor = "self"
 model_ref = "claude_orchestrator"
 reasoning_effort = "high"
-note = "MAKING a design/architecture/tradeoff decision — keep on the primary (Fable); review can use the Codex review role."
+note = "MAKING a design/architecture/tradeoff decision — keep on the primary; review can use the Codex review role."
 
 [archetypes.deep-reasoning]
 executor = "self"
 model_ref = "claude_orchestrator"
 reasoning_effort = "high"
-note = "High-judgement reasoning — keep on the primary (Fable), do NOT delegate."
+note = "High-judgement reasoning — keep on the primary, do NOT delegate."
 
 # ── Codex execution path — effort follows task risk ─────────────────────
 [archetypes.implement-feature]
@@ -94,7 +94,7 @@ note = "Fast repository/system investigation: find evidence, do not mutate."
 executor = "self"
 model_ref = "claude_orchestrator"
 reasoning_effort = "high"
-note = "Layout / component structure / design intent stays with the primary (Fable; impeccable shape->craft). Frontend quality is taste, not throughput."
+note = "Layout / component structure / design intent stays with the primary (impeccable shape->craft). Frontend quality is taste, not throughput."
 
 [archetypes.frontend-polish]
 executor = "claude"
@@ -109,7 +109,7 @@ executor = "claude"
 model_ref = "claude_default"
 sandbox = "read-only"
 reasoning_effort = "high"
-note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. FABLE on Claude Code signs off (a different Claude lens than the Opus polish)."
+note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Signed off on Claude Code. NOTE: with Fable retired this is the SAME model that did the polish, so it is a second look rather than an independent lens; route to the Cursor or Codex review roles when independence matters."
 
 [archetypes.write-tests]
 executor = "codex"
@@ -189,7 +189,7 @@ executor = "claude"
 model_ref = "claude_default"
 sandbox = "read-only"
 reasoning_effort = "high"
-note = "Final merge judgement and simplification pass — Fable reviews Codex output from an independent lens."
+note = "Final merge judgement and simplification pass — the primary reviews Codex output from an independent lens."
 
 [archetypes.second-opinion-review]
 executor = "cursor"

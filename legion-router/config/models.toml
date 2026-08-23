@@ -5,20 +5,24 @@
 # tasks in one line; add roles as new tiers/providers show up. Routing should
 # reference these role keys, never a raw model ID, so a model swap lives here.
 #
-# Catalog policy: Anthropic Fable + Opus, OpenAI GPT-5.6, xAI Grok. Opus is scoped
-# to FRONTEND (Opus + Fable are the best Claude frontend combo) and runs on CLAUDE
-# CODE (the `claude` executor), never piped through Cursor. Cursor hosts ONLY its
+# Catalog policy: Anthropic Opus, OpenAI GPT-5.6, xAI Grok. Fable is retired from
+# the catalog; every Claude role now runs Opus on CLAUDE CODE (the `claude`
+# executor), never piped through Cursor.
+#
+# NOTE: this collapses the frontend polish/review split, which existed so a
+# DIFFERENT Claude model reviewed the polish. Cross-model independence for
+# frontend now has to come from the Cursor (Grok) or Codex roles instead. Cursor hosts ONLY its
 # native non-Claude models (Grok + Composer, kept available). (sonnet / haiku
 # removed; Kimi deferred until it's routable via Cursor.)
-# EFFORT: Fable runs at `high` for judgement. GPT-5.6 is tiered: low/medium
+# EFFORT: the Claude roles run at `high` for judgement. GPT-5.6 is tiered: low/medium
 # for bounded work, high for scoped implementation, max only for hard or
 # persistent slices. Grok tops out at `high`.
 # The effort per archetype lives in routing.toml.
 
 [models]
 # ── Anthropic Claude on CLAUDE CODE (the `claude` executor / self) ──
-claude_orchestrator = "claude-fable-5"   # self: orchestration / architecture / deep reasoning (run at high)
-claude_default      = "claude-fable-5"   # generic Claude / reverse-delegate target / frontend review (Fable)
+claude_orchestrator = "claude-opus-5"    # self: orchestration / architecture / deep reasoning (run at high)
+claude_default      = "claude-opus-5"    # generic Claude / reverse-delegate target / frontend review
 claude_opus         = "claude-opus-5"    # FRONTEND polish only — Opus on Claude Code (run at high thinking)
 
 # ── OpenAI GPT-5.6 (Codex) — run at max ────────────────────────────

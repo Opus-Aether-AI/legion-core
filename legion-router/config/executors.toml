@@ -38,9 +38,11 @@
 [executors.claude]
 task_file = true
 review = "prompt"
-# Deliberately NOT claude_default: the Claude primary already runs Fable, so a
-# same-harness review on the same model would be self-review. Opus is a genuine
-# second opinion from the same harness.
+# With Fable retired every Claude role is Opus, so this is now the SAME model as
+# the primary -- a second pass, not an independent opinion. That is why claude
+# stays LAST in [review].order: it is the reviewer of last resort, for when codex,
+# cursor and opencode are all unavailable. Genuine cross-model review comes from
+# those, not from here.
 review_model_ref = "claude_opus"
 kind = "primary coding"
 adapter = "legion-claude"

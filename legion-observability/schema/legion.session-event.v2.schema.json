@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/legion-observability/schema/legion.session-event.v2.schema.json",
+  "title": "legion.session-event.v2",
+  "description": "One durable event in a session Legion OWNS, appended as JSONL. This is the source of the context a model saw, not a summary of it: v1 stored a redacted `excerpt` harvested from another harness's transcript, which records that something happened without recording what. The vocabulary deliberately reuses the Agent Client Protocol's SessionUpdate variant names, so an ACP peer's stream maps onto this log without translation and Legion does not invent a second name for the same thing. Turn and step boundaries are Legion's own: ACP carries them at the protocol level rather than inside SessionUpdate, and a log that cannot say where a turn began cannot reconstruct what a request contained.",
+  "type": "object",
+  "required": ["schema", "id", "session_id", "sequence", "ts", "type"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "legion.session-event.v2" },
+    "id": { "type": "string", "description": "stable id for this event" },
+    "session_id": { "type": "string" },
+    "run_id": { "type": ["string", "null"], "description": "links this session to legion.span.v1 records" },
+    "trace_id": { "type": ["string", "null"] },
+    "sequence": { "type": "integer", "minimum": 0, "description": "monotonic per session; the append order is the truth" },
+    "ts": { "type": "string", "description": "ISO-8601 UTC" },
+    "type": {
+      "type": "string",
+      "description": "ACP SessionUpdate variants, plus the turn/step boundaries ACP keeps at protocol level.",
+      "enum": [
+        "turn_start",
+        "turn_end",
+        "step_start",
+        "step_end",
+        "user_message",
+        "user_message_chunk",
+        "agent_message",
+        "agent_message_chunk",
+        "agent_thought",
+        "agent_thought_chunk",
+        "tool_call_update",
+        "tool_call_content_chunk",
+        "terminal_update",
+        "terminal_output_chunk",
+        "plan_update",
+        "state_update",
+        "usage_update",
+        "available_commands_update",
+        "config_option_update",
+        "session_info_update"
+      ]
+    },
+    "executor": {
+      "type": ["string", "null"],
+      "description": "which executor produced this event, when Legion drove it"
+    },
+    "content": {
+      "description": "The event payload, in full. NOT an excerpt: an event that cannot reproduce what the model saw fails the model-visible invariant this schema exists to support.",
+      "type": ["object", "string", "null"]
+    },
+    "model_visible": {
+      "type": "boolean",
+      "default": false,
+      "description": "true when this event's content formed part of a model request. Every such event must be reconstructable from this log alone; that is the invariant the writer asserts."
+    },
+    "redacted": {
+      "type": "boolean",
+      "default": false,
+      "description": "true when a secret scan removed content. Recorded explicitly so a redacted event is never mistaken for a faithful one -- silent redaction and full fidelity must not look identical."
+    }
+  }
+}

@@ -3,20 +3,74 @@
   "$id": "https://legion.local/schema/legion.session-event.v1.schema.json",
   "title": "legion.session-event.v1",
   "type": "object",
-  "required": ["schema", "id", "session_id", "source", "project", "sequence", "role", "event_type", "excerpt"],
+  "required": [
+    "schema",
+    "id",
+    "session_id",
+    "source",
+    "project",
+    "sequence",
+    "role",
+    "event_type",
+    "excerpt"
+  ],
   "properties": {
-    "schema": {"const": "legion.session-event.v1"},
-    "id": {"type": "string", "minLength": 1},
-    "session_id": {"type": "string", "minLength": 1},
-    "source": {"type": "string", "enum": ["claude", "codex", "cursor", "opencode", "gemini", "pi", "hermes", "unknown"]},
-    "project": {"type": "string", "minLength": 1},
-    "ts": {"type": "string"},
-    "sequence": {"type": "integer", "minimum": 0},
-    "role": {"type": "string"},
-    "event_type": {"type": "string", "enum": ["message", "dispatch"]},
-    "excerpt": {"type": "string", "maxLength": 700},
-    "dispatch_hash": {"type": "string"},
-    "run_in_background": {"type": "boolean"}
+    "schema": {
+      "const": "legion.session-event.v1"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex",
+        "cursor",
+        "opencode",
+        "gemini",
+        "pi",
+        "hermes",
+        "unknown"
+      ]
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ts": {
+      "type": "string"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "role": {
+      "type": "string"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "message",
+        "dispatch"
+      ]
+    },
+    "excerpt": {
+      "type": "string",
+      "maxLength": 700
+    },
+    "dispatch_hash": {
+      "type": "string"
+    },
+    "run_in_background": {
+      "type": "boolean"
+    }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "description": "Foreign-transcript import: one event harvested from ANOTHER harness's session file (Claude Code, Codex, Cursor, opencode, Gemini, Pi, Hermes). Content is a bounded, redacted `excerpt`, so this records that something happened, not what -- it cannot reproduce a model request and must not be read as evidence of one. Legion's own sessions use legion.session-event.v2, which is written rather than scraped and carries full content. Retained under the v1 id because existing state references it."
 }

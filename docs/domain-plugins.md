@@ -56,6 +56,18 @@ entrypoint = "legion-run"
 plan = "support-plan"
 validate = "support-validate"
 evaluate = "support-eval"
+
+# Optional. Each replaces a stage that otherwise uses Legion's built-in, behind
+# the same executable contract as the three above. Omit one and the built-in
+# runs -- which is what every manifest written before these existed already
+# means, so nothing has to be added to keep working.
+# review         = "support-review"    # instead of legion-delegate review
+# telemetry_sink = "support-spans"     # instead of appending legion.span.v1 JSONL
+# doctor_checks  = "support-doctor"    # extra health gates, merged with doctor's
+# heal           = "support-heal"      # instead of the built-in heal planner
+
+# A misspelled hook name is an error rather than a silent no-op: a dropped typo
+# looks exactly like a hook that ran and did nothing.
 ```
 
 `legion-run` rejects the manifest unless:

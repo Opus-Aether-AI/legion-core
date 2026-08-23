@@ -333,6 +333,33 @@ def load_plugin(manifest_path: Path, requested_plugin: str = "", requested_profi
     if missing:
         raise LegionRunError(f"domain plugin manifest missing commands: {', '.join(missing)}")
 
+    # Track C: the remaining lifecycle stages become swappable behind the SAME
+    # executable contract as plan/validate/evaluate, rather than staying wired
+    # into the engine.
+    #
+    # These are optional on purpose. plan/validate/evaluate are what makes a
+    # domain plugin a plugin; review, telemetry, doctor and heal have working
+    # built-ins, and forcing every existing manifest to declare four more
+    # commands to keep running would be a breaking change bought for nothing.
+    # An absent hook means "use the built-in", which is also what every manifest
+    # written before today already means.
+    optional_commands = ["review", "telemetry_sink", "doctor_checks", "heal"]
+    resolved = {key: str(commands[key]).strip() for key in required_commands}
+    for key in optional_commands:
+        value = str(commands.get(key) or "").strip()
+        if value:
+            resolved[key] = value
+
+    unknown = sorted(set(commands) - set(required_commands) - set(optional_commands))
+    if unknown:
+        # Fail rather than ignore. A typo'd hook name that is silently dropped
+        # looks identical to a hook that ran and did nothing, and the whole
+        # point of a seam is knowing which side handled the work.
+        raise LegionRunError(
+            f"unknown command(s) in domain plugin manifest: {', '.join(unknown)}; "
+            f"supported: {', '.join(required_commands + optional_commands)}"
+        )
+
     return {
         "name": name,
         "kind": kind,
@@ -340,7 +367,8 @@ def load_plugin(manifest_path: Path, requested_plugin: str = "", requested_profi
         "mode": "plugin",
         "target_type": "plugin",
         "pipeline": {"profile": profile, "entrypoint": entrypoint},
-        "commands": {key: str(commands[key]).strip() for key in required_commands},
+        "commands": resolved,
+        "hooks": {key: (key in resolved) for key in optional_commands},
     }
 
 

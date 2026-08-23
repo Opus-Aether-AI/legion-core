@@ -23,6 +23,14 @@
 #               prompt — prompt executor, returns text; args: --task/--model/--repo
 #               ""     — primary-only, no coding adapter
 #   model_ref default model role (see models.toml); empty for primary-only.
+#   acp       true when this executor can be driven over the Agent Client
+#             Protocol instead of its bespoke adapter. Every executor here is in
+#             the ACP registry, so one client reaches all of them -- and the
+#             thirty-odd agents Legion has never integrated -- through one wire.
+#             Opt-in per executor: the bespoke adapters stay authoritative until
+#             an executor has been exercised over ACP, because a protocol both
+#             sides implement is not the same as a protocol both sides implement
+#             the same way.
 #   task_file true when the adapter accepts `--task-file PATH`. The task can
 #             exceed ARG_MAX once a diff or long spec is in it, so the
 #             dispatcher hands it over out of band. Declared rather than
@@ -36,6 +44,7 @@
 #   review_model_ref  model role used when THIS executor reviews.
 
 [executors.claude]
+acp = false
 task_file = true
 review = "prompt"
 # With Fable retired every Claude role is Opus, so this is now the SAME model as
@@ -50,6 +59,7 @@ contract = "diff"
 model_ref = "claude_default"
 
 [executors.codex]
+acp = false
 task_file = true
 review = "native"
 review_model_ref = "codex_review"
@@ -59,6 +69,7 @@ contract = "native"
 model_ref = "codex_workhorse"
 
 [executors.cursor]
+acp = false
 task_file = true
 review = "prompt"
 review_model_ref = "cursor_default"
@@ -68,6 +79,7 @@ contract = "diff"
 model_ref = "cursor_default"
 
 [executors.opencode]
+acp = false
 task_file = true
 review = "prompt"
 review_model_ref = "opencode_review"
@@ -79,6 +91,7 @@ model_ref = "opencode_default"
 # Hermes and Pi use first-class diff adapters. Both create Legion-owned
 # worktrees and terminal artifacts; unsupported sandbox modes fail closed.
 [executors.hermes]
+acp = false
 task_file = true
 review = "none"
 kind = "primary coding"
@@ -87,6 +100,7 @@ contract = "diff"
 model_ref = "hermes_default"
 
 [executors.pi]
+acp = false
 task_file = true
 review = "none"
 kind = "primary coding"

@@ -1,7 +1,7 @@
 {
   "name": "legion-router",
   "description": "Legion's multi-model brain: registry-driven routing and scoped delegation across Claude, Codex, Cursor, OpenCode, Hermes, and Pi. Implemented adapters return a verified, metered diff from an isolated worktree. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, shared cost table, and codex-json parser.",
-  "version": "0.5.26",
+  "version": "0.6.0",
   "author": {
     "name": "legion-core"
   },

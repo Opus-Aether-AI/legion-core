@@ -307,27 +307,59 @@ def _resolve_model_refs(out, models=None):
     return out
 
 
-def resolve(table, archetype, models=None):
+def resolve(table, archetype, models=None, *, with_provenance=False):
+    """Resolve an archetype to a concrete route.
+
+    With ``with_provenance``, also return which layer supplied each field. The
+    resolver already knows this while it is merging and simply discarded it,
+    which left "why did it route there?" answerable only by reading four files
+    and reconstructing the merge by hand.
+    """
     defaults = copy.deepcopy(table.get("defaults", {}))   # deep so an unresolved result can't alias the table
+    provenance = {key: "defaults" for key in defaults}
     arch = (table.get("archetypes") or {}).get(archetype)
     out = defaults
     if arch is None:
         out["archetype"] = archetype
         out["resolved"] = False
-        return _resolve_model_refs(out, models)
+        resolved = _resolve_model_refs(out, models)
+        if with_provenance:
+            resolved["provenance"] = _model_provenance(provenance, resolved)
+        return resolved
     arch = copy.deepcopy(arch)   # deepcopy so a caller can't mutate the shared table's nested values
-    if "model" in arch:
-        out.pop("model_ref", None)
-    if "model_ref" in arch:
-        out.pop("model", None)
-    if "fallback" in arch:
-        out.pop("fallback_refs", None)
-    if "fallback_refs" in arch:
-        out.pop("fallback", None)
+    # A model/model_ref (or fallback/fallback_refs) pair is mutually exclusive:
+    # the archetype's form displaces the default's, so record the removal too --
+    # a field that vanished is as much a routing decision as one that changed.
+    for winner, loser in (("model", "model_ref"), ("model_ref", "model"),
+                          ("fallback", "fallback_refs"), ("fallback_refs", "fallback")):
+        if winner in arch and loser in out:
+            out.pop(loser, None)
+            provenance.pop(loser, None)
     out.update(arch)
+    for key in arch:
+        provenance[key] = f"archetypes.{archetype}"
     out["archetype"] = archetype
     out["resolved"] = True
-    return _resolve_model_refs(out, models)
+    resolved = _resolve_model_refs(out, models)
+    if with_provenance:
+        resolved["provenance"] = _model_provenance(provenance, resolved)
+    return resolved
+
+
+def _model_provenance(provenance, resolved):
+    """Attribute the fields _resolve_model_refs synthesises.
+
+    ``model`` and ``fallback`` are not read from any config layer -- they are
+    derived from a role name through models.toml. Labelling them with the layer
+    that supplied the ROLE would be a lie about where the value came from.
+    """
+    out = dict(provenance)
+    if "model" in resolved and "model" not in provenance:
+        ref = resolved.get("model_ref")
+        out["model"] = f"models.toml via {ref}" if ref else "models.toml"
+    if "fallback" in resolved and "fallback" not in provenance:
+        out["fallback"] = "models.toml via fallback_refs"
+    return {key: out[key] for key in sorted(out)}
 
 
 def _restore_default_sigpipe():
@@ -352,6 +384,11 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--task", default="", help="optional task text hint; accepted for demo/runbook compatibility")
     ap.add_argument("--list-models", action="store_true")
+    ap.add_argument(
+        "--dump",
+        action="store_true",
+        help="resolve every archetype and show which layer supplied each field",
+    )
     ap.add_argument(
         "--models-json",
         action="store_true",
@@ -393,6 +430,16 @@ def main(argv=None):
         models = load_models(a.models_file)
         if a.model_ref:
             print(resolve_model_ref(models, a.model_ref))
+            return 0
+        if a.dump:
+            table = load_table(a.file)
+            models = load_models(a.models_file)
+            rows = {
+                name: resolve(table, name, models, with_provenance=True)
+                for name in sorted((table.get("archetypes") or {}))
+            }
+            print(json.dumps({"defaults": table.get("defaults", {}), "archetypes": rows},
+                             indent=2, sort_keys=True))
             return 0
         if a.models_json:
             # TOML types that JSON cannot carry (dates, inf/nan) would either

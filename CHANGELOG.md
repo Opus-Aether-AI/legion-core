@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.25.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.24.0...v0.25.0) (2026-08-23)
+
+
+### Added
+
+* **observability:** own the session log ([#172](https://github.com/Opus-Aether-AI/legion-core/issues/172)) ([d6acb5d](https://github.com/Opus-Aether-AI/legion-core/commit/d6acb5d7edb2de4b20996dea04eb6126d71ef586))
+* **orchestrate:** make the last four lifecycle stages pluggable ([#173](https://github.com/Opus-Aether-AI/legion-core/issues/173)) ([aac5303](https://github.com/Opus-Aether-AI/legion-core/commit/aac53031cb09859b658c85a76d6fd76e210b46bb))
+* **router:** legion-route --dump shows which layer set each field ([#171](https://github.com/Opus-Aether-AI/legion-core/issues/171)) ([45b9d04](https://github.com/Opus-Aether-AI/legion-core/commit/45b9d04f6faba1abd489aa19e7c5b887a4985dfc))
+* **router:** record what a run was asked, and why it failed ([#170](https://github.com/Opus-Aether-AI/legion-core/issues/170)) ([5b6129b](https://github.com/Opus-Aether-AI/legion-core/commit/5b6129b26c51ad37bdcbceb241aaa307c0712f31))
+* **router:** speak the Agent Client Protocol, both directions ([#175](https://github.com/Opus-Aether-AI/legion-core/issues/175)) ([0df3ad4](https://github.com/Opus-Aether-AI/legion-core/commit/0df3ad46210adca1bd3a0c3bd19f1122d7220ad4))
+
 ## [0.24.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.23.7...v0.24.0) (2026-08-21)
 
 

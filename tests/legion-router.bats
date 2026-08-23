@@ -964,7 +964,12 @@ $run_error" run "$DELEGATE" run --model test-model-alpha --task "x" --repo "$rep
     [ "$(cat "$raw")" = "$mcp_noise
 $run_error" ]
     [ "$(cat "$filtered")" = "$run_error" ]
-    [ "$(echo "$output" | jq -r .error_log)" = "run-level errors: $filtered (raw stderr: $raw)" ]
+    # The summary must carry the REASON, not only paths. Pointing at a file that
+    # turned out to hold nothing but MCP noise is how a real cause got lost.
+    local summary; summary="$(echo "$output" | jq -r .error_log)"
+    [[ "$summary" == "run-level errors: $filtered (raw stderr: $raw)"* ]]
+    [[ "$summary" == *"first: $run_error"* ]]
+    [[ "$summary" != *"OAuth"* ]]
 }
 
 @test "delegate run: filters generated Python bytecode from captured diffs" {
@@ -2273,4 +2278,44 @@ $run_error" ]
     run "$DELEGATE" run --model test-model-beta --task-file /nonexistent/nope.txt --repo "$repo" --quiet
     [ "$status" -ne 0 ]
     [[ "$output" == *"--task-file not readable"* ]]
+}
+
+@test "delegate: a native codex run records what it was asked" {
+    # The native path pipes the task to codex on stdin and used to keep no copy,
+    # so the span recorded an outcome whose instruction could not be retrieved.
+    local repo; repo="$(make_test_repo task-evidence)"
+
+    run "$DELEGATE" run --model test-model-beta --task "make the thing" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+
+    local run_id; run_id="$(echo "$output" | jq -r '.run_id')"
+    [ -f "$repo/.legion/tasks/$run_id.txt" ]
+    [ "$(cat "$repo/.legion/tasks/$run_id.txt")" = "make the thing" ]
+}
+
+@test "delegate: the recorded digest matches the recorded bytes" {
+    # The hash is what makes the evidence verifiable rather than merely present.
+    local repo; repo="$(make_test_repo task-digest)"
+
+    run "$DELEGATE" run --model test-model-beta --task "hash me" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+
+    local run_id staged expected actual
+    run_id="$(echo "$output" | jq -r '.run_id')"
+    staged="$repo/.legion/tasks/$run_id.txt"
+    expected="$(shasum -a 256 "$staged" | cut -d' ' -f1)"
+    actual="$(jq -r '.artifacts.task_sha256 // empty' "$LEGION_TELEMETRY_DIR"/*.jsonl 2>/dev/null | tail -1)"
+    [ -n "$actual" ]
+    [ "$actual" = "$expected" ]
+}
+
+@test "delegate: evidence recording never fails the run" {
+    # Evidence is best-effort by contract: an unwritable tasks dir must not turn
+    # a successful delegation into a failure.
+    local repo; repo="$(make_test_repo evidence-readonly)"
+    mkdir -p "$repo/.legion"
+    : > "$repo/.legion/tasks"   # a FILE where the directory should be
+
+    run "$DELEGATE" run --model test-model-beta --task "still works" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
 }

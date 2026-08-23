@@ -246,10 +246,25 @@ filter_codex_stderr() {
   return "$grep_rc"
 }
 
+# Carry the REASON, not just a path to a file that might contain one.
+#
+# This used to emit "run-level errors: <path>" whenever the filtered stderr was
+# non-empty. When codex reported a spent quota on stdout while its stderr held
+# only unrelated MCP OAuth noise, that line pointed confidently at a file which
+# explained nothing -- and a reader following it lost the actual cause entirely.
+# A one-line excerpt travels with the span, so the record is legible without
+# opening anything.
 error_log_summary() {
-  local raw_err="$1" filtered_err="$2"
+  local raw_err="$1" filtered_err="$2" excerpt=""
   if [[ -s "$filtered_err" ]]; then
-    printf 'run-level errors: %s (raw stderr: %s)' "$filtered_err" "$raw_err"
+    # First line with substance, bounded: enough to recognise the failure, not
+    # enough to turn a span into a log dump.
+    excerpt="$(grep -m1 -vE '^[[:space:]]*$' "$filtered_err" 2>/dev/null | tr -d '\r' | cut -c1-200)"
+  fi
+  if [[ -n "$excerpt" ]]; then
+    printf 'run-level errors: %s (raw stderr: %s) — first: %s' "$filtered_err" "$raw_err" "$excerpt"
+  elif [[ -s "$filtered_err" ]]; then
+    printf 'run-level errors recorded but none were legible: %s (raw stderr: %s)' "$filtered_err" "$raw_err"
   else
     printf 'no run-level errors were recorded (raw stderr: %s)' "$raw_err"
   fi
@@ -695,6 +710,30 @@ summarize_changed_paths() {
 # of argv entirely. delegate.sh accepts the task on stdin precisely because it
 # can be big, but every adapter dispatch used to re-serialise it back onto the
 # command line, reimposing ARG_MAX at the boundary rather than at the door.
+# Record the exact bytes a run was asked to do, and a digest of them.
+#
+# A span already says what HAPPENED -- diff, cost, status. It could not say what
+# was ASKED, so a delegated run was unreviewable after the fact: you could see
+# the change and not the instruction that produced it. The digest is what makes
+# it verifiable rather than merely present; the file can be edited, the hash in
+# the span cannot be edited to match without noticing.
+#
+# Best-effort by design: evidence must never be the reason a run fails.
+record_task_evidence() {
+  local text="$1" repo="$2" run_id="$3"
+  local dir="$repo/.legion/tasks" path="$repo/.legion/tasks/$run_id.txt"
+  mkdir -p "$dir" 2>/dev/null || { printf '{}'; return 0; }
+  printf '%s' "$text" > "$path" 2>/dev/null || { printf '{}'; return 0; }
+  local digest=""
+  if command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 "$path" 2>/dev/null | cut -d" " -f1)"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum "$path" 2>/dev/null | cut -d" " -f1)"
+  fi
+  jq -cn --arg path "$path" --arg sha "$digest" --argjson bytes "${#text}" \
+    '{task_path:$path, task_sha256:$sha, task_bytes:$bytes}' 2>/dev/null || printf '{}'
+}
+
 write_task_payload() {
   local text="$1" dest="$2"
   printf '%s' "$text" > "$dest" || die "could not stage the task payload at $dest"
@@ -743,6 +782,9 @@ dispatch_adapter() {
   local task_payload="$repo/.legion/tasks/$RUN_ID.txt"
   mkdir -p "$(dirname "$task_payload")" 2>/dev/null || true
   write_task_payload "$task" "$task_payload" >/dev/null
+  # Same evidence contract as the native path. The adapter emits its own span, so
+  # this records the digest where the dispatcher can still see the exact bytes.
+  record_task_evidence "$task" "$repo" "$RUN_ID" > "$repo/.legion/tasks/$RUN_ID.evidence.json" 2>/dev/null || true
   # A globally installed adapter predating --task-file may still be first on
   # PATH, and PATH precedence here is deliberate (see above). Feature-detect
   # rather than assume: an old adapter keeps the argv path and its ARG_MAX
@@ -1109,9 +1151,12 @@ cmd_run() {
   if [[ -s "$art/copied-secrets.json" ]]; then
     copied_secret_names="$(jq -c '.copied_secret_names // []' "$art/copied-secrets.json" 2>/dev/null || echo '[]')"
   fi
+  # The native path pipes the task to codex on stdin and kept no copy, so its
+  # span recorded the outcome of an instruction nobody could retrieve.
+  local task_evidence; task_evidence="$(record_task_evidence "$task" "$repo" "$RUN_ID")"
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" --arg stream "$art/stream.jsonl" \
-    --argjson copied_secret_names "$copied_secret_names" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream, copied_secret_names:$copied_secret_names}')"
+    --argjson copied_secret_names "$copied_secret_names" --argjson task_evidence "$task_evidence" \
+    '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream, copied_secret_names:$copied_secret_names} + $task_evidence')"
   emit_span "codex" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
   write_run_state "$status"

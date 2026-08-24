@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "legion-landing",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/ithihas/Hackerman/legion-landing && npx next dev --port 9010"],
+      "port": 9010,
+      "autoPort": false
+    }
+  ]
+}

@@ -2319,3 +2319,60 @@ $run_error" ]
     run "$DELEGATE" run --model test-model-beta --task "still works" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
 }
+
+@test "delegate review: a failing prompt reviewer does not kill the walk" {
+    # Regression: review_invoke_prompt called a bare `set -e` and then returned
+    # the reviewer's exit code. Shell options are GLOBAL, so it undid the
+    # caller's `set +e` and a reviewer that merely failed took the whole script
+    # down mid-walk — exit 1, no next candidate, no terminal receipt, empty
+    # stdout. The walk must terminalize whatever the outcome.
+    local repo; repo="$(make_test_repo review-walk-survives)"
+    export MOCK_CODEX_REVIEW_QUOTA=1
+
+    run "$DELEGATE" review --base HEAD --repo "$repo" --quiet
+
+    [ -n "$output" ]
+    echo "$output" | jq -e '.run_id and .status' >/dev/null
+}
+
+@test "delegate review: an adapter reporting auth_error counts as unavailable" {
+    # Detection used to match prose only. When legion-cursor was given a
+    # friendlier message the pattern stopped matching, so the fallback died at
+    # exactly the executor it most needed to skip. Structured detection reads
+    # the adapter's own auth_error field instead of guessing at wording.
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe.sh"
+    err="$BATS_TEST_TMPDIR/e.err"
+    out="$BATS_TEST_TMPDIR/o.json"
+
+    : > "$err"
+    printf '{"status":"failed","auth_error":"CURSOR_API_KEY is unset"}\n' > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -eq 0 ]
+}
+
+@test "delegate review: a clean adapter result is not treated as unavailable" {
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe2.sh"
+    err="$BATS_TEST_TMPDIR/e2.err"
+    out="$BATS_TEST_TMPDIR/o2.json"
+
+    : > "$err"
+    printf '{"status":"ok","result":"looks fine"}\n' > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -ne 0 ]
+}

@@ -21,6 +21,8 @@ Stdlib only; JSON-RPC 2.0 over newline-delimited JSON on stdio.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import threading
 from typing import Any, Callable, Iterator
@@ -163,9 +165,13 @@ class AcpClient:
             return self._next_id
 
     def start(self) -> None:
+        # Own the whole process GROUP. An agent that spawns a child which
+        # inherits stderr keeps that pipe open after the agent itself exits, and
+        # closing it below would then block on the drainer's reader lock until
+        # the descendant happens to finish.
         self._proc = subprocess.Popen(
             self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, cwd=self.cwd,
+            stderr=subprocess.PIPE, cwd=self.cwd, start_new_session=True,
         )
         # stderr MUST be drained. A chatty agent fills the OS pipe buffer (~64 KB),
         # blocks in write(2), stops producing stdout, and the reader below waits
@@ -242,11 +248,16 @@ class AcpClient:
                 self._send({"jsonrpc": "2.0", "id": message.get("id"),
                             "result": {"outcome": outcome}})
                 continue
-            if name in ("elicitation_create", "elicitation_complete"):
+            if name == "elicitation_create":
                 # Legion runs unattended. Declining is the honest answer; making
                 # one up would put invented content into the agent's context.
                 self._send({"jsonrpc": "2.0", "id": message.get("id"),
                             "result": {"action": "decline"}})
+                continue
+            if name == "elicitation_complete":
+                # A NOTIFICATION: it carries no id. Answering it emits a response
+                # with id null, which a strict peer may reject outright or
+                # mis-correlate with a genuine null-id request.
                 continue
         tail = "; ".join(self.stderr_tail[-3:])
         raise AcpError(
@@ -277,17 +288,26 @@ class AcpClient:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.terminate()
+                self._signal_group(proc, signal.SIGTERM)
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()  # reap; kill() alone leaves a zombie until exit
+                    self._signal_group(proc, signal.SIGKILL)
+                    proc.wait()  # reap; killing alone leaves a zombie until exit
         else:
             proc.wait()
+        # Close a stream only once the drainer has let go of it. If a descendant
+        # still holds stderr open the thread cannot exit, and closing underneath
+        # it would block on the buffered reader's lock -- so leave that one to
+        # the garbage collector rather than hang the caller.
+        drainer_finished = True
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
-        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            drainer_finished = not self._stderr_thread.is_alive()
+        closeable = [proc.stdin, proc.stdout]
+        if drainer_finished:
+            closeable.append(proc.stderr)
+        for pipe in closeable:
             if pipe is None:
                 continue
             try:
@@ -295,6 +315,17 @@ class AcpClient:
             except OSError:
                 pass  # already closed, or the peer went away first
         self._proc = None
+
+    @staticmethod
+    def _signal_group(proc: subprocess.Popen[bytes], sig: int) -> None:
+        """Signal the peer's whole group, falling back to the process itself."""
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.send_signal(sig)
+            except (ProcessLookupError, OSError):
+                pass
 
 
 class AcpAgentServer:
@@ -355,17 +386,33 @@ class AcpAgentServer:
                              "error": {"code": -32601, "message": f"unsupported method: {wire}"}})
                 continue
 
+            # NOT daemon threads. A client disconnecting mid-prompt sends EOF,
+            # and a daemon worker would be abandoned when the process exits --
+            # taking a delegated run, its subprocesses and its worktree state
+            # with it. Owned work finishes, or is cancelled deliberately.
             worker = threading.Thread(
                 target=self._dispatch_request,
                 args=(name, message.get("params") or {}, request_id),
-                daemon=True,
+                daemon=False,
             )
             worker.start()
             workers.append(worker)
             workers = [w for w in workers if w.is_alive()]
 
+        # EOF: the client is gone. Tell the handler so it can unwind its own
+        # delegation, then wait rather than exiting out from under it.
+        self._notify_disconnect()
         for worker in workers:
-            worker.join(timeout=30)
+            worker.join()
+
+    def _notify_disconnect(self) -> None:
+        """Give the handler a chance to cancel work whose requester has left."""
+        if "session_cancel" not in AGENT_METHODS:
+            return
+        try:
+            self.handler("session_cancel", {"reason": "client_disconnected"})
+        except Exception:  # noqa: BLE001 - nobody left to report it to
+            pass
 
     def _dispatch_notification(self, name: str, params: dict[str, Any]) -> None:
         try:

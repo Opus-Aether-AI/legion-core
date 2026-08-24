@@ -244,10 +244,12 @@ def test_server_dispatches_a_notification_so_stop_actually_stops():
     # pressing stop has no effect and Legion keeps burning a metered run.
     seen = []
     out = io.BytesIO()
-    acp.AcpAgentServer(lambda m, p: seen.append(m), stdin=io.BytesIO(
+    acp.AcpAgentServer(lambda m, p: seen.append((m, p)), stdin=io.BytesIO(
         acp.encode({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "s"}})
     ), stdout=out).serve_forever()
-    assert seen == ["session_cancel"]
+    # The client's cancel, distinguishable from the synthetic one the server
+    # raises at EOF so a handler can unwind work whose requester has left.
+    assert ("session_cancel", {"sessionId": "s"}) in seen
     assert out.getvalue() == b"", "a notification must not be answered"
 
 
@@ -306,10 +308,11 @@ def test_server_ignores_a_request_only_method_sent_without_an_id():
     # perform its side effects while answering nobody.
     seen = []
     out = io.BytesIO()
-    acp.AcpAgentServer(lambda m, p: seen.append(m), stdin=io.BytesIO(
+    acp.AcpAgentServer(lambda m, p: seen.append((m, p)), stdin=io.BytesIO(
         acp.encode({"jsonrpc": "2.0", "method": "session/delete", "params": {}})
     ), stdout=out).serve_forever()
-    assert seen == [], "a request-only method must not be dispatched without an id"
+    dispatched = [m for m, p in seen if p.get("reason") != "client_disconnected"]
+    assert dispatched == [], "a request-only method must not be dispatched without an id"
     assert out.getvalue() == b""
 
 
@@ -346,3 +349,13 @@ def test_server_reads_cancel_while_a_prompt_handler_is_still_running():
     assert "session_cancel" in seen, (
         "cancel was not read until the prompt finished; Stop would do nothing"
     )
+
+
+def test_server_signals_disconnect_so_orphaned_work_can_unwind():
+    # A client vanishing mid-prompt used to leave a daemon worker to be killed
+    # at process exit, abandoning a delegated run, its subprocesses and its
+    # worktree. The handler is told, and owned workers are waited for.
+    seen = []
+    acp.AcpAgentServer(lambda m, p: seen.append((m, p)),
+                       stdin=io.BytesIO(b""), stdout=io.BytesIO()).serve_forever()
+    assert ("session_cancel", {"reason": "client_disconnected"}) in seen

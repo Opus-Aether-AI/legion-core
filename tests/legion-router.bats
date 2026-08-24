@@ -2360,9 +2360,9 @@ $run_error" ]
 
 @test "delegate review: a clean adapter result is not treated as unavailable" {
     local helper err out
-    helper="$BATS_TEST_TMPDIR/probe2.sh"
-    err="$BATS_TEST_TMPDIR/e2.err"
-    out="$BATS_TEST_TMPDIR/o2.json"
+    helper="$BATS_TEST_TMPDIR/probe-clean.sh"
+    err="$BATS_TEST_TMPDIR/clean.err"
+    out="$BATS_TEST_TMPDIR/clean.json"
 
     : > "$err"
     printf '{"status":"ok","result":"looks fine"}\n' > "$out"

@@ -167,7 +167,7 @@ def test_a_falsy_result_is_not_coerced_to_an_empty_object():
 
 def test_a_closed_connection_reports_the_peer_stderr():
     client = _client(b"", permission_handler=acp.allow_once)
-    client.stderr_tail = ["auth failed: no API key"]
+    client._stderr_bytes = b"auth failed: no API key\n"
     with pytest.raises(acp.AcpError) as excinfo:
         client.request("session_prompt")
     assert "auth failed" in str(excinfo.value)
@@ -481,3 +481,30 @@ def test_pgid_is_the_child_pid_and_survives_a_fast_leader():
     client.start()
     assert client._pgid == client._proc.pid
     client.close()
+
+
+def test_cancellation_does_not_leak_into_a_later_prompt():
+    # A cancel targets the prompt that was running. Left set, every later prompt
+    # in that session would start already cancelled.
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._dispatch_notification("session_cancel", {"sessionId": "s"})
+    assert server.is_cancelled("s") is True
+    server._end_turn({"sessionId": "s"})
+    assert server.is_cancelled("s") is False, "cancellation leaked past its turn"
+
+
+def test_a_replay_cannot_cancel_a_prompt_it_was_never_aimed_at():
+    # Cancellation can unwind fast enough for a NEW prompt to start before the
+    # replay fires; replaying blindly would stop work nobody asked to stop.
+    seen = []
+    server = acp.AcpAgentServer(lambda m, p: seen.append(m),
+                                stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._end_turn({"sessionId": "s"})          # a later turn is now current
+    server._replay_cancel({"sessionId": "s"}, "s", 0)   # aimed at the old turn
+    assert seen == [], "a stale replay cancelled the wrong turn"
+
+
+def test_stderr_tail_is_readable_before_the_drainer_sees_eof():
+    client = acp.AcpClient(["true"], permission_handler=acp.allow_once)
+    client._stderr_bytes = b"partial diagnostics\nsecond line\n"
+    assert client.stderr_tail == ["partial diagnostics", "second line"]

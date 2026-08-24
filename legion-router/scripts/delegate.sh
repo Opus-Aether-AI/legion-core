@@ -1504,7 +1504,8 @@ review_executor_unavailable() {
   # an out-of-quota reviewer look like an ordinary review failure, which is the
   # bug this fallback exists to fix. Search both streams.
   local f
-  # Structured first. An adapter that reports auth_error in its JSON result has
+  # Structured first, and safe on stdout: auth_error is a field the ADAPTER sets
+  # about itself, never reviewer content. An adapter that reports auth_error has
   # told us plainly that it could not authenticate, and that is worth more than
   # matching prose: this check used to rely on wording alone, and when
   # legion-cursor was given a friendlier message the pattern stopped matching --
@@ -1515,13 +1516,19 @@ review_executor_unavailable() {
       return 0
     fi
   done
-  # Prose fallback, for providers that only say it in a message.
-  for f in "$err_file" "$out_file"; do
-    [[ -n "$f" && -s "$f" ]] || continue
-    if grep -qiE "usage limit|rate.?limit|quota exceeded|insufficient_quota|429 |authentication required|not authenticated|unauthorized|invalid_api_key|api[_ ]key.*(unset|missing|required)|please run .*login|command not found" "$f"; then
+  # Prose fallback: STDERR ONLY, deliberately.
+  #
+  # stdout carries the adapter envelope, and inside it the reviewer's own text.
+  # A reviewer that writes "API key is required in config.py" as a genuine
+  # finding and exits nonzero would otherwise be classified as unavailable, the
+  # walk would move on, and a later candidate's approval could erase that
+  # rejection -- turning a request_changes into an approve through a regex.
+  # Provider unavailability is reported on stderr; findings are not.
+  if [[ -n "$err_file" && -s "$err_file" ]]; then
+    if grep -qiE "usage limit|rate.?limit|quota exceeded|insufficient_quota|429 |authentication required|not authenticated|unauthorized|invalid_api_key|api[_ ]key.*(unset|missing|required)|please run .*login|command not found" "$err_file"; then
       return 0
     fi
-  done
+  fi
   return 1
 }
 

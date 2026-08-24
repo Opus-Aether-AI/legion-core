@@ -162,7 +162,6 @@ class AcpClient:
         self._stderr_thread: threading.Thread | None = None
         self._pgid: int | None = None
         self._stderr_bytes = b""
-        self.stderr_tail: list[str] = []
 
     def _request_id(self) -> int:
         with self._id_lock:
@@ -207,8 +206,18 @@ class AcpClient:
                 break
             buffer = (buffer + chunk)[-self.STDERR_TAIL_BYTES:]
             self._stderr_bytes = buffer
-        self.stderr_tail = [
-            line for line in buffer.decode("utf-8", "replace").splitlines() if line.strip()
+
+    @property
+    def stderr_tail(self) -> list[str]:
+        """The peer's recent stderr, readable BEFORE the drainer sees EOF.
+
+        Publishing only at EOF meant a stdout that closed first -- exactly the
+        descendant-holds-stderr case -- raised its error with the diagnostics
+        already sitting in the buffer omitted.
+        """
+        return [
+            line for line in self._stderr_bytes.decode("utf-8", "replace").splitlines()
+            if line.strip()
         ]
 
     def _send(self, message: dict[str, Any]) -> None:
@@ -384,7 +393,8 @@ class AcpAgentServer:
         self.stdout = stdout
         self._write_lock = threading.Lock()
         self._cancel_lock = threading.Lock()
-        self._cancelled: set[str] = set()
+        self._cancelled: dict[str, int] = {}
+        self._turns: dict[str, int] = {}
         self._replays: list[threading.Timer] = []
 
     def _write(self, message: dict[str, Any]) -> None:
@@ -467,14 +477,16 @@ class AcpAgentServer:
             pass
 
     def is_cancelled(self, session_id: str) -> bool:
-        """Was this session cancelled? Sticky, so a late handler still sees it.
+        """Is the CURRENT prompt turn for this session cancelled?
 
-        Ordering alone is not enough for a handler that registers its work after
-        several hops; recording the cancel means the answer survives the race
-        rather than depending on winning it.
+        Sticky within a turn, because a handler registering its work several
+        hops in must still get a true answer. Retired when the turn ends: a
+        cancel targets the prompt that was running, and leaving it set would
+        make every later prompt in that session start already cancelled.
         """
         with self._cancel_lock:
-            return session_id in self._cancelled
+            turn = self._turns.get(session_id, 0)
+            return self._cancelled.get(session_id) == turn
 
     def _dispatch_notification(self, name: str, params: dict[str, Any]) -> None:
         if name != "session_cancel":
@@ -484,7 +496,7 @@ class AcpAgentServer:
         session_id = params.get("sessionId")
         if isinstance(session_id, str) and session_id:
             with self._cancel_lock:
-                self._cancelled.add(session_id)
+                self._cancelled[session_id] = self._turns.get(session_id, 0)
 
         # Deliver now, then once more shortly after.
         #
@@ -495,11 +507,35 @@ class AcpAgentServer:
         # is_cancelled -- which remains available, and remains the reliable
         # answer for a handler that registers several hops in.
         self._safe_handle(name, params)
-        replay = threading.Timer(0.25, self._safe_handle, args=(name, dict(params)))
+        target_turn = self._turns.get(session_id, 0) if isinstance(session_id, str) else None
+        replay = threading.Timer(
+            0.25, self._replay_cancel, args=(dict(params), session_id, target_turn)
+        )
         replay.daemon = True
         replay.start()
         with self._cancel_lock:
             self._replays.append(replay)
+
+    def _replay_cancel(self, params: dict[str, Any], session_id: Any, target_turn: Any) -> None:
+        """Redeliver the cancel, but only to the turn it was aimed at.
+
+        Cancellation can unwind fast enough for a NEW prompt to start in the
+        same session before this fires; replaying blindly would cancel work the
+        client never asked to stop.
+        """
+        if isinstance(session_id, str) and session_id:
+            with self._cancel_lock:
+                if self._turns.get(session_id, 0) != target_turn:
+                    return  # that turn is over; this cancel no longer applies
+        self._safe_handle("session_cancel", params)
+
+    def _end_turn(self, params: dict[str, Any]) -> None:
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        with self._cancel_lock:
+            self._turns[session_id] = self._turns.get(session_id, 0) + 1
+            self._cancelled.pop(session_id, None)
 
     def _safe_handle(self, name: str, params: dict[str, Any]) -> None:
         try:
@@ -514,8 +550,12 @@ class AcpAgentServer:
         try:
             result = self.handler(name, params)
         except Exception as exc:  # noqa: BLE001 - a handler fault must not kill the session
+            if name == "session_prompt":
+                self._end_turn(params)
             self._write({"jsonrpc": "2.0", "id": request_id,
                          "error": {"code": -32603, "message": str(exc)}})
             return
+        if name == "session_prompt":
+            self._end_turn(params)
         self._write({"jsonrpc": "2.0", "id": request_id,
                      "result": {} if result is None else result})

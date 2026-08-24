@@ -2376,3 +2376,44 @@ $run_error" ]
     run bash "$helper" "$err" "$out"
     [ "$status" -ne 0 ]
 }
+
+@test "delegate review: a finding that mentions an API key is not read as unavailable" {
+    # A reviewer writing "API key is required in config.py" as a genuine finding
+    # must not be classified as unavailable — the walk would move on and a later
+    # candidate's approval could erase that rejection.
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe-finding.sh"
+    err="$BATS_TEST_TMPDIR/finding.err"
+    out="$BATS_TEST_TMPDIR/finding.json"
+
+    : > "$err"
+    printf '{"status":"failed","result":"[P1] API key is required in config.py but never set"}\n' > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -ne 0 ]
+}
+
+@test "delegate review: a provider auth failure on stderr still counts as unavailable" {
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe-stderr.sh"
+    err="$BATS_TEST_TMPDIR/provider.err"
+    out="$BATS_TEST_TMPDIR/provider.json"
+
+    printf 'Error: Authentication required. Please run login first.\n' > "$err"
+    printf '{"status":"failed"}\n' > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -eq 0 ]
+}

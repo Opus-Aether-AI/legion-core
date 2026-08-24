@@ -395,6 +395,7 @@ class AcpAgentServer:
         self._cancel_lock = threading.Lock()
         self._cancelled: dict[str, int] = {}
         self._turns: dict[str, int] = {}
+        self._active: dict[str, int] = {}
         self._replays: list[threading.Timer] = []
 
     def _write(self, message: dict[str, Any]) -> None:
@@ -485,8 +486,8 @@ class AcpAgentServer:
         make every later prompt in that session start already cancelled.
         """
         with self._cancel_lock:
-            turn = self._turns.get(session_id, 0)
-            return self._cancelled.get(session_id) == turn
+            active = self._active.get(session_id)
+            return active is not None and self._cancelled.get(session_id) == active
 
     def _dispatch_notification(self, name: str, params: dict[str, Any]) -> None:
         if name != "session_cancel":
@@ -494,9 +495,15 @@ class AcpAgentServer:
             return
 
         session_id = params.get("sessionId")
+        target_turn = None
         if isinstance(session_id, str) and session_id:
             with self._cancel_lock:
-                self._cancelled[session_id] = self._turns.get(session_id, 0)
+                # Only an ACTIVE prompt can be cancelled. Reading the turn
+                # counter after _end_turn has advanced it would mark the NEXT
+                # prompt cancelled before it had even started.
+                if session_id in self._active:
+                    target_turn = self._active[session_id]
+                    self._cancelled[session_id] = target_turn
 
         # Deliver now, then once more shortly after.
         #
@@ -507,7 +514,6 @@ class AcpAgentServer:
         # is_cancelled -- which remains available, and remains the reliable
         # answer for a handler that registers several hops in.
         self._safe_handle(name, params)
-        target_turn = self._turns.get(session_id, 0) if isinstance(session_id, str) else None
         replay = threading.Timer(
             0.25, self._replay_cancel, args=(dict(params), session_id, target_turn)
         )
@@ -523,18 +529,29 @@ class AcpAgentServer:
         same session before this fires; replaying blindly would cancel work the
         client never asked to stop.
         """
+        if target_turn is None:
+            return  # nothing was running when the cancel arrived
         if isinstance(session_id, str) and session_id:
             with self._cancel_lock:
-                if self._turns.get(session_id, 0) != target_turn:
+                if self._active.get(session_id) != target_turn:
                     return  # that turn is over; this cancel no longer applies
         self._safe_handle("session_cancel", params)
+
+    def _begin_turn(self, params: dict[str, Any]) -> None:
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        with self._cancel_lock:
+            self._turns[session_id] = self._turns.get(session_id, 0) + 1
+            self._active[session_id] = self._turns[session_id]
+            self._cancelled.pop(session_id, None)
 
     def _end_turn(self, params: dict[str, Any]) -> None:
         session_id = params.get("sessionId")
         if not isinstance(session_id, str) or not session_id:
             return
         with self._cancel_lock:
-            self._turns[session_id] = self._turns.get(session_id, 0) + 1
+            self._active.pop(session_id, None)
             self._cancelled.pop(session_id, None)
 
     def _safe_handle(self, name: str, params: dict[str, Any]) -> None:
@@ -545,6 +562,8 @@ class AcpAgentServer:
 
     def _dispatch_request(self, name: str, params: dict[str, Any], request_id: Any,
                           entered: threading.Event | None = None) -> None:
+        if name == "session_prompt":
+            self._begin_turn(params)
         if entered is not None:
             entered.set()
         try:

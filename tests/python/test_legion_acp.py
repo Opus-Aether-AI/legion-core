@@ -398,6 +398,7 @@ def test_cancellation_is_sticky_for_a_late_registering_handler():
     # hops in; recording the cancel means the answer survives the race.
     server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
     assert server.is_cancelled("s") is False
+    server._begin_turn({"sessionId": "s"})          # a prompt is now running
     server._dispatch_notification("session_cancel", {"sessionId": "s"})
     assert server.is_cancelled("s") is True
 
@@ -442,6 +443,7 @@ def test_cancellation_is_replayed_past_the_registration_window():
     seen = []
     server = acp.AcpAgentServer(lambda m, p: seen.append(m),
                                 stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._begin_turn({"sessionId": "s"})          # a cancel needs a live turn
     server._dispatch_notification("session_cancel", {"sessionId": "s"})
     deadline = time.monotonic() + 5
     while seen.count("session_cancel") < 2 and time.monotonic() < deadline:
@@ -487,10 +489,13 @@ def test_cancellation_does_not_leak_into_a_later_prompt():
     # A cancel targets the prompt that was running. Left set, every later prompt
     # in that session would start already cancelled.
     server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._begin_turn({"sessionId": "s"})
     server._dispatch_notification("session_cancel", {"sessionId": "s"})
     assert server.is_cancelled("s") is True
     server._end_turn({"sessionId": "s"})
     assert server.is_cancelled("s") is False, "cancellation leaked past its turn"
+    server._begin_turn({"sessionId": "s"})          # the next prompt
+    assert server.is_cancelled("s") is False, "a new prompt started already cancelled"
 
 
 def test_a_replay_cannot_cancel_a_prompt_it_was_never_aimed_at():
@@ -499,8 +504,10 @@ def test_a_replay_cannot_cancel_a_prompt_it_was_never_aimed_at():
     seen = []
     server = acp.AcpAgentServer(lambda m, p: seen.append(m),
                                 stdin=io.BytesIO(b""), stdout=io.BytesIO())
-    server._end_turn({"sessionId": "s"})          # a later turn is now current
-    server._replay_cancel({"sessionId": "s"}, "s", 0)   # aimed at the old turn
+    server._begin_turn({"sessionId": "s"})
+    server._end_turn({"sessionId": "s"})         # the targeted turn is over
+    server._begin_turn({"sessionId": "s"})       # a NEW prompt is running
+    server._replay_cancel({"sessionId": "s"}, "s", 1)   # aimed at the old turn
     assert seen == [], "a stale replay cancelled the wrong turn"
 
 
@@ -508,3 +515,12 @@ def test_stderr_tail_is_readable_before_the_drainer_sees_eof():
     client = acp.AcpClient(["true"], permission_handler=acp.allow_once)
     client._stderr_bytes = b"partial diagnostics\nsecond line\n"
     assert client.stderr_tail == ["partial diagnostics", "second line"]
+
+
+def test_a_cancel_with_no_running_prompt_marks_nothing():
+    # Reading the turn counter after _end_turn advanced it used to mark the NEXT
+    # prompt cancelled before it had even started.
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._dispatch_notification("session_cancel", {"sessionId": "s"})
+    server._begin_turn({"sessionId": "s"})
+    assert server.is_cancelled("s") is False, "a stray cancel poisoned the next prompt"

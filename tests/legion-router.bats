@@ -2417,3 +2417,28 @@ $run_error" ]
     run bash "$helper" "$err" "$out"
     [ "$status" -eq 0 ]
 }
+
+@test "delegate review: a native codex quota error on stdout still triggers fallback" {
+    # The bug that started this: codex reports a spent quota inside its stdout
+    # JSON event stream, not on stderr and not as auth_error. Confining prose
+    # matching to stderr regressed exactly this case.
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe-quota.sh"
+    err="$BATS_TEST_TMPDIR/quota.err"
+    out="$BATS_TEST_TMPDIR/quota.jsonl"
+
+    : > "$err"
+    {
+      printf '{"type":"item.completed","item":{"id":"item_1"}}\n'
+      printf '{"type":"error","message":"You'"'"'ve hit your usage limit. Try again later."}\n'
+    } > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -eq 0 ]
+}

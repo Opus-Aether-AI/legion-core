@@ -1516,6 +1516,20 @@ review_executor_unavailable() {
       return 0
     fi
   done
+  # Codex reports a spent quota inside its stdout JSON event stream as
+  # {"type":"error","message":"You've hit your usage limit..."} -- not on stderr
+  # and not as auth_error. Read that FIELD rather than scanning the file: the
+  # prompt path's stdout carries reviewer prose in .result, and matching text
+  # there is how a finding gets mistaken for an outage.
+  if [[ -n "$out_file" && -s "$out_file" ]]; then
+    if jq -e -R 'fromjson? | select(.type == "error")
+                 | .message // ""
+                 | ascii_downcase
+                 | test("usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated")' \
+         "$out_file" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
   # Prose fallback: STDERR ONLY, deliberately.
   #
   # stdout carries the adapter envelope, and inside it the reviewer's own text.

@@ -168,8 +168,12 @@ def test_session_updates_reach_the_log_callback():
         acp.encode({"jsonrpc": "2.0", "method": "session/update",
                     "params": {"sessionUpdate": "agent_message_chunk"}})
         + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/update",
+                      "params": {"sessionId": "s", "update": {
+                          "sessionUpdate": "state_update", "state": "idle",
+                          "stopReason": "end_turn"}}})
     )
-    _client(script, permission_handler=acp.allow_once, on_update=seen.append).request("session_prompt")
+    _client(script, permission_handler=acp.allow_once, on_update=lambda update, _sid: seen.append(update)).request("session_prompt")
     assert seen and seen[0]["sessionUpdate"] == "agent_message_chunk"
 
 
@@ -542,6 +546,10 @@ def test_permission_is_refused_when_cancel_lands_while_the_handler_decides():
         acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
                     "params": dict(_PERMISSION_PARAMS, sessionId="s")})
         + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/update",
+                      "params": {"sessionId": "s", "update": {
+                          "sessionUpdate": "state_update", "state": "idle",
+                          "stopReason": "end_turn"}}})
     )
     holder = {}
 
@@ -566,6 +574,10 @@ def test_permission_is_granted_normally_when_not_cancelled():
         acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
                     "params": dict(_PERMISSION_PARAMS, sessionId="s")})
         + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/update",
+                      "params": {"sessionId": "s", "update": {
+                          "sessionUpdate": "state_update", "state": "idle",
+                          "stopReason": "end_turn"}}})
     )
     client = _client(script, permission_handler=acp.allow_once)
     client.request("session_prompt", {"sessionId": "s"})
@@ -745,6 +757,10 @@ def test_a_blocking_permission_handler_does_not_wedge_cancellation():
         acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
                     "params": dict(_PERMISSION_PARAMS, sessionId="s")})
         + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/update",
+                      "params": {"sessionId": "s", "update": {
+                          "sessionUpdate": "state_update", "state": "idle",
+                          "stopReason": "end_turn"}}})
     )
     client = _client(script, permission_handler=blocking_handler)
     try:
@@ -824,10 +840,108 @@ def test_an_accepted_prompt_reports_no_completion_yet():
     )
 
 
-def test_meta_survives_on_the_prompt_acknowledgement():
+
+
+def test_the_pump_keeps_reading_past_the_acknowledgement():
+    # A conforming v2 agent acknowledges immediately, THEN works, and may ask
+    # permission along the way. Returning at the acknowledgement stopped the only
+    # stdout reader, so that later request was never answered and the agent
+    # deadlocked waiting for a reply nobody was listening for.
+    script = (
+        acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})          # accepted
+        + acp.encode({"jsonrpc": "2.0", "id": 99,                       # ... then asks
+                      "method": "session/request_permission",
+                      "params": dict(_PERMISSION_PARAMS, sessionId="s")})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/update",
+                      "params": {"sessionId": "s", "update": {
+                          "sessionUpdate": "state_update", "state": "idle",
+                          "stopReason": "end_turn"}}})
+    )
+    client = _client(script, permission_handler=acp.allow_once)
+    idle = client.request("session_prompt", {"sessionId": "s"})
+    _settle_permissions(client)
+
+    replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines() if l.strip()]
+    assert [r for r in replies if r.get("id") == 99], (
+        "a permission asked after the acknowledgement went unanswered"
+    )
+    assert idle["stopReason"] == "end_turn", "the prompt should return the turn's outcome"
+
+
+def test_the_callback_receives_the_update_not_its_envelope():
+    # The wire shape is {sessionId, update}. Handing over the wrapper gave
+    # consumers something with no `sessionUpdate` key at all, so a real agent's
+    # updates could be neither interpreted nor logged.
+    seen = []
+    script = (
+        acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/update",
+                      "params": {"sessionId": "s", "update": {
+                          "sessionUpdate": "agent_message_chunk", "content": "hi"}}})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/update",
+                      "params": {"sessionId": "s", "update": {
+                          "sessionUpdate": "state_update", "state": "idle",
+                          "stopReason": "end_turn"}}})
+    )
+    _client(script, permission_handler=acp.allow_once,
+            on_update=lambda update, sid: seen.append((update, sid))).request(
+                "session_prompt", {"sessionId": "s"})
+
+    assert seen[0][0]["sessionUpdate"] == "agent_message_chunk"
+    assert seen[0][0]["content"] == "hi"
+    assert seen[0][1] == "s", "the session must still be recoverable alongside it"
+
+
+def test_emitting_idle_releases_the_turn():
+    # Going idle IS the end of the turn. Writing the notification without
+    # releasing it left a finished session in _running, so a later disconnect
+    # cancelled work that had already completed.
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 1)
+    server.emit_idle("s", "end_turn")           # the async work finished
+    server._notify_disconnect()
+    assert server.is_cancelled("s") is False
+
+
+def test_a_prompt_is_acknowledged_before_its_work_runs():
+    # A handler that runs a delegated task inline takes minutes. Acknowledging
+    # afterwards left the editor's request pending for that whole time -- long
+    # enough to time out -- and put updates ahead of the acknowledgement.
     out = io.BytesIO()
-    server = acp.AcpAgentServer(lambda m, p: {"stopReason": "end_turn", "_meta": {"k": 1}},
-                                stdin=io.BytesIO(b""), stdout=out)
-    server._dispatch_request("session_prompt", {"sessionId": "s"}, 7)
+    order = []
+
+    def slow_handler(_m, _p):
+        # What had reached the wire by the time the work started?
+        order.append([json.loads(l) for l in out.getvalue().splitlines() if l.strip()])
+        return {"stopReason": "end_turn"}
+
+    server = acp.AcpAgentServer(slow_handler, stdin=io.BytesIO(b""), stdout=out)
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 1)
+
+    assert order[0], "nothing was sent before the work began"
+    assert order[0][0]["id"] == 1 and order[0][0]["result"] == {}, (
+        "the acknowledgement had not been sent when work began"
+    )
     sent = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
-    assert next(m for m in sent if m.get("id") == 7)["result"] == {"_meta": {"k": 1}}
+    assert sent[0]["id"] == 1 and sent[0]["result"] == {}
+    assert sent[1]["method"] == "session/update"
+
+
+def test_a_faulting_handler_reports_through_idle_once_acknowledged():
+    out = io.BytesIO()
+
+    def boom(_m, _p):
+        raise RuntimeError("delegation failed")
+
+    server = acp.AcpAgentServer(boom, stdin=io.BytesIO(b""), stdout=out)
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 1)
+
+    sent = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    assert sent[0]["result"] == {}, "acceptance was already acknowledged"
+    assert not any("error" in m for m in sent), (
+        "a JSON-RPC error cannot follow an acknowledgement that already went out"
+    )
+    update = sent[1]["params"]["update"]
+    assert update["state"] == "idle"
+    assert update["stopReason"] == "_error", "underscore is the reserved extension space"
+    assert "delegation failed" in update["_meta"]["message"]

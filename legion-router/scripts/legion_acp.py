@@ -144,7 +144,7 @@ class AcpClient:
 
     def __init__(self, argv: list[str], *,
                  permission_handler: Callable[[dict[str, Any]], dict[str, Any]],
-                 on_update: Callable[[dict[str, Any]], None] | None = None,
+                 on_update: Callable[[dict[str, Any], Any], None] | None = None,
                  cwd: str | None = None) -> None:
         if not callable(permission_handler):
             raise AcpError(
@@ -300,6 +300,11 @@ class AcpClient:
         worker = threading.Thread(target=decide, name="acp-permission", daemon=True)
         with self._cancelled_lock:
             if request_id in self._pending_permissions:
+                # Drop the finished ones first: a long session asks for many
+                # permissions, and keeping every dead Thread object is a slow
+                # leak of exactly the kind nobody notices until it matters.
+                self._permission_workers = [w for w in self._permission_workers
+                                            if w.is_alive()]
                 self._permission_workers.append(worker)
                 worker.start()
 
@@ -355,16 +360,24 @@ class AcpClient:
             with self._cancelled_lock:
                 self._cancelled_sessions.discard(session_id)
                 self._send(message)
-        else:
-            self._send(message)
+            return self._pump(until_id=request_id, until_idle=session_id)
+        self._send(message)
         return self._pump(until_id=request_id)
 
-    def _pump(self, *, until_id: int) -> Any:
-        """Read until our response arrives, servicing the agent's calls meanwhile.
+    def _pump(self, *, until_id: int, until_idle: str | None = None) -> Any:
+        """Read until the exchange is over, servicing the agent's calls meanwhile.
 
         An ACP agent calls BACK during a prompt -- for permission, for
         elicitation. Waiting only for the response would deadlock the moment the
         agent asks a question, so the reader answers those inline.
+
+        For a v2 prompt the response is only an ACKNOWLEDGEMENT: the agent sends
+        it as soon as it accepts, then works, then reports the outcome on an idle
+        state_update -- and may ask permission in between. Returning at the
+        acknowledgement stops the only stdout reader, so those updates sit in the
+        pipe and a later permission request is never answered, which deadlocks
+        the agent. `until_idle` keeps the pump running to the end of the turn and
+        returns the idle update, which is what the caller actually wanted.
 
         Single-reader by design: this owns the stdout iterator, so cancellation
         goes out as a notification from another thread rather than a second pump
@@ -372,18 +385,41 @@ class AcpClient:
         """
         if self._proc is None or self._proc.stdout is None:
             raise AcpError("ACP client is not started")
+        acknowledged = until_idle is None
+        ack_result: Any = None
+        idle: Any = None
         for message in decode_stream(self._proc.stdout):
             if message.get("id") == until_id and ("result" in message or "error" in message):
                 if "error" in message:
                     raise AcpError(f"agent returned an error: {message['error']}")
                 # A result of null/false/0/"" is a real answer, not an absent one.
                 result = message.get("result", _Missing)
-                return {} if result is _Missing else result
+                ack_result = {} if result is _Missing else result
+                if until_idle is None:
+                    return ack_result
+                acknowledged = True
+                if idle is not None:
+                    return idle
+                continue
             wire = str(message.get("method") or "")
             name = _WIRE_TO_CLIENT.get(wire)
             if name == "session_update":
+                params = message.get("params") or {}
+                # The wire shape is {sessionId, update}. Handing the WRAPPER to
+                # the callback gave consumers something with no `sessionUpdate`
+                # key at all, so a real agent's updates could not be interpreted
+                # or logged. Pass the update; carry the session alongside it.
+                inner = params.get("update")
+                update = inner if isinstance(inner, dict) else params
+                session_id = params.get("sessionId")
                 if self.on_update:
-                    self.on_update(message.get("params") or {})
+                    self.on_update(update, session_id)
+                if (until_idle is not None and session_id == until_idle
+                        and update.get("sessionUpdate") == "state_update"
+                        and update.get("state") == "idle"):
+                    idle = update
+                    if acknowledged:
+                        return idle
                 continue
             if name == "session_request_permission":
                 # ACP v2 requires that once a client cancels, every pending
@@ -500,7 +536,6 @@ class AcpClient:
 
 
 AGENT_TO_CLIENT_UPDATE = CLIENT_METHODS["session_update"]
-_TURN_OVER = object()
 
 
 class AcpAgentServer:
@@ -645,7 +680,8 @@ class AcpAgentServer:
         # this notification is a courtesy for handlers that can act immediately.
         self._safe_handle(name, params)
 
-    def emit_idle(self, session_id: Any, stop_reason: Any = None) -> None:
+    def emit_idle(self, session_id: Any, stop_reason: Any = None,
+                  meta: dict[str, Any] | None = None) -> None:
         """Report that foreground work has stopped, the way v2 reports it.
 
         A turn ends with an idle state_update carrying the stopReason -- not
@@ -657,29 +693,14 @@ class AcpAgentServer:
         update: dict[str, Any] = {"sessionUpdate": "state_update", "state": "idle"}
         if stop_reason is not None:
             update["stopReason"] = stop_reason
+        if meta is not None:
+            update["_meta"] = meta
         self._write({"jsonrpc": "2.0", "method": AGENT_TO_CLIENT_UPDATE,
                      "params": {"sessionId": session_id, "update": update}})
-
-    def _end_prompt_for(self, params: dict[str, Any], result: Any = _TURN_OVER) -> None:
-        """Release a turn only once the turn is actually over.
-
-        ACP marks the end of a turn with a stopReason, and a v2 handler is
-        allowed to ACCEPT session/prompt and return immediately while the work
-        continues asynchronously. Releasing at handler-return instead tied the
-        prompt's lifetime to the REQUEST's: such a session left _running while
-        its run was still going, so a disconnect could not name it and the
-        orphaned run carried on with nobody waiting for it.
-
-        A handler that finishes inline reports stopReason and is released here.
-        One that works asynchronously keeps the turn and calls end_prompt()
-        when it is done.
-        """
-        if result is not _TURN_OVER and not (
-                isinstance(result, dict) and "stopReason" in result):
-            return
-        session_id = params.get("sessionId")
-        if isinstance(session_id, str) and session_id:
-            self.end_prompt(session_id)
+        # Going idle IS the end of the turn. Writing the notification without
+        # releasing it left a finished session in _running, so a later
+        # disconnect cancelled work that had already completed.
+        self.end_prompt(session_id)
 
     def _safe_handle(self, name: str, params: dict[str, Any]) -> None:
         try:
@@ -693,32 +714,33 @@ class AcpAgentServer:
             session_id = params.get("sessionId")
             if isinstance(session_id, str) and session_id:
                 self.begin_prompt(session_id)
+            # v2 wants the acknowledgement as soon as the prompt is ACCEPTED,
+            # before the work. Sending it afterwards left the editor's request
+            # pending for the whole run -- for a delegated task that is minutes,
+            # long enough to time out -- and put updates ahead of the
+            # acknowledgement they belong to.
+            self._write({"jsonrpc": "2.0", "id": request_id, "result": {}})
+            if entered is not None:
+                entered.set()
+            try:
+                result = self.handler(name, params)
+            except Exception as exc:  # noqa: BLE001 - a fault must not kill the session
+                # Already acknowledged, so the fault cannot be a JSON-RPC error
+                # any more. `_`-prefixed stop reasons are the reserved
+                # implementation-specific space, which is exactly this case.
+                self.emit_idle(session_id, "_error", meta={"message": str(exc)})
+                return
+            stop_reason = result.get("stopReason") if isinstance(result, dict) else None
+            if stop_reason is not None:
+                self.emit_idle(session_id, stop_reason)
+            return
         if entered is not None:
             entered.set()
         try:
             result = self.handler(name, params)
         except Exception as exc:  # noqa: BLE001 - a handler fault must not kill the session
-            if name == "session_prompt":
-                self._end_prompt_for(params)   # a fault ends the turn outright
             self._write({"jsonrpc": "2.0", "id": request_id,
                          "error": {"code": -32603, "message": str(exc)}})
-            return
-        if name == "session_prompt":
-            # v2 PromptResponse ACKNOWLEDGES acceptance and nothing more: the
-            # schema says "This response does not indicate that the agent has
-            # finished processing. Processing and completion are reported
-            # through state_update session updates." Forwarding a handler's
-            # stopReason as the result would be rejected by a schema-validating
-            # client, which would then never learn the turn had ended. Consume
-            # it here and report it the way the protocol does.
-            stop_reason = result.get("stopReason") if isinstance(result, dict) else None
-            self._end_prompt_for(params, result)
-            ack: dict[str, Any] = {}
-            if isinstance(result, dict) and isinstance(result.get("_meta"), dict):
-                ack["_meta"] = result["_meta"]      # _meta is allowed on PromptResponse
-            self._write({"jsonrpc": "2.0", "id": request_id, "result": ack})
-            if stop_reason is not None:
-                self.emit_idle(params.get("sessionId"), stop_reason)
             return
         self._write({"jsonrpc": "2.0", "id": request_id,
                      "result": {} if result is None else result})

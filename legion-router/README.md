@@ -101,15 +101,24 @@ Two contract details worth knowing before wiring it:
 - `session/cancel` is a **notification**. Use `client.cancel(session_id)`, which
   is safe to call from another thread; sending it as a request blocks forever on
   a reply that never comes.
-- A `session/prompt` **response only acknowledges acceptance**. The v2 schema is
-  explicit: it "does not indicate that the agent has finished processing", which
-  is reported through `state_update` session updates instead. So the result on
-  the wire is always `{}` (plus `_meta` if the handler set one). A handler that
-  finishes inline returns `{"stopReason": ...}`; the server consumes that, ends
-  the turn, and emits the idle `state_update` carrying it. One that continues
-  asynchronously returns `{}` and later calls `emit_idle(session_id, reason)`
-  itself -- and must call it, or a client that disconnects mid-run cannot be
-  matched to the run it orphaned.
+- **A prompt is a lifecycle, not a call.** `session/prompt` is acknowledged with
+  `{}` the moment it is ACCEPTED -- the v2 schema says the response "does not
+  indicate that the agent has finished processing" -- and the outcome arrives
+  later on an idle `state_update`. Both sides of the bridge follow that:
+  `AcpAgentServer` acknowledges before running the handler, so a handler that
+  delegates a minutes-long task does not leave the editor's request pending;
+  `AcpClient.request("session_prompt", ...)` keeps pumping past the
+  acknowledgement and returns the idle update, because stopping there would
+  strand the only stdout reader and leave a later `session/request_permission`
+  unanswered -- deadlocking the agent. A handler that finishes inline returns
+  `{"stopReason": ...}`; one that continues asynchronously returns `{}` and calls
+  `emit_idle(session_id, reason)` when it is done. `emit_idle` ends the turn, so
+  a client that disconnects mid-run can still be matched to the run it orphaned.
+  A fault after acknowledgement cannot become a JSON-RPC error, so it is reported
+  as idle with the reserved `_error` stop reason.
+- `session/update` carries `{sessionId, update}`; the `on_update` callback gets
+  the **update**, with the session id alongside it. Handing over the wrapper
+  gives a consumer an object with no `sessionUpdate` key at all.
 - **Cancellation is read, not received.** `is_cancelled(session_id)` is a token
   the handler consumes when it is ready, so work registered several hops in
   (after routing, preflight, worktree setup) cannot miss a cancel that arrived

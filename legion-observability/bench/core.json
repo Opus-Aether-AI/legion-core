@@ -35,7 +35,7 @@
       "id": "route.frontend-review",
       "type": "route",
       "dimension": "routing",
-      "summary": "Frontend review runs on Fable via Claude Code (verify-by-screenshot, a different Claude lens than the Opus polish), read-only. Claude models never go through Cursor.",
+      "summary": "Frontend review runs on Claude Code (verify-by-screenshot), read-only. With Fable retired this is the SAME model that did the polish, so it is a second look rather than an independent lens. Claude models never go through Cursor.",
       "archetype": "frontend-review",
       "expect": {
         "executor": "claude",

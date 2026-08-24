@@ -160,8 +160,8 @@ SH
   [ ! -s "$MOCK_CALL_LOG" ]
 }
 
-@test "fanout: routes final review slices to the configured Fable reviewer" {
-  # A Codex-primary run may delegate its independent review to Claude/Fable.
+@test "fanout: routes final review slices to the configured reviewer" {
+  # A Codex-primary run may delegate its independent review to Claude.
   export LEGION_PRIMARY=codex
   printf '%s\n' '{"archetype":"final-review","task":"review the diff"}' > "$BATS_TEST_TMPDIR/r.jsonl"
   run "$FANOUT" --slices "$BATS_TEST_TMPDIR/r.jsonl" --repo "$REPO"
@@ -183,7 +183,7 @@ SH
   run "$FANOUT" --task "$BATS_TEST_TMPDIR/task.md" --repo "$REPO" --json --max-concurrency 1
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.slices == 3 and .ok == 3 and .failed == 0'
-  # Demo expands to two workhorse slices + an independent Fable review slice; resolve the models
+  # Demo expands to two workhorse slices + an independent review slice; resolve the models
   # from config so this survives default-model swaps.
   echo "$output" | jq -e --arg w "$CODEX_WORKHORSE" --arg r "$CLAUDE_REVIEW" \
     '[.results[].model] == [$w, $w, $r]'

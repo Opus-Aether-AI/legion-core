@@ -1848,7 +1848,7 @@ $run_error" ]
 
 @test "delegate review: --archetype gives configured reviewer + structured verdict via --output-schema" {
   # `delegate review` is the codex structured-verdict flow -> use a codex review
-  # archetype (security-review). Final-review routes to Fable through legion-run.
+  # archetype (security-review). Final-review routes to Claude through legion-run.
   # Cross-lineage archetypes (second-opinion/tiebreak)
   # route to Cursor and run via `--executor cursor`, not this codex path.
   local repo; repo="$(make_test_repo arch4)"

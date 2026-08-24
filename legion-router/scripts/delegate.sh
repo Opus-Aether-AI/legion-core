@@ -768,8 +768,9 @@ dispatch_adapter() {
   # Model priority: explicit --model  >  the archetype's resolved model (ONLY when
   # the archetype routed here — not a forced --executor, whose archetype model may
   # name a model this harness can't run)  >  the executor's own default role. This
-  # lets one executor serve multiple per-archetype models (e.g. the claude executor
-  # runs Opus for frontend-polish but Fable for frontend-review).
+  # lets one executor serve multiple per-archetype models: a role map, not a
+  # single default. (Every Claude role is Opus today, so the mechanism is what
+  # matters here, not the current pins.)
   use_model="$explicit_model"
   [[ -n "$use_model" || -n "$forced_executor" || -z "$model" ]] || use_model="$model"
   [[ -n "$use_model" || -z "$model_ref" ]] || use_model="$(legion_model_ref "$model_ref" 2>/dev/null || true)"

@@ -674,3 +674,41 @@ def test_a_cancel_cannot_interleave_with_the_prompt_that_clears_it():
         assert client.is_cancelled("s") is False   # prompt started the new turn
     else:
         assert client.is_cancelled("s") is True    # cancel landed after
+
+
+def test_an_async_handler_keeps_its_turn_until_it_reports_a_stop_reason():
+    # A v2 handler may ACCEPT session/prompt and return immediately while work
+    # continues. Releasing at handler-return tied the prompt's lifetime to the
+    # REQUEST's, so a disconnect could not name the session and the orphaned run
+    # carried on with nobody waiting for it.
+    server = acp.AcpAgentServer(lambda m, p: {},          # accepted, no stopReason
+                                stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 1)
+    server._notify_disconnect()
+    assert server.is_cancelled("s") is True
+
+
+def test_an_inline_handler_reporting_a_stop_reason_releases_its_turn():
+    server = acp.AcpAgentServer(lambda m, p: {"stopReason": "end_turn"},
+                                stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 1)
+    server._notify_disconnect()
+    assert server.is_cancelled("s") is False
+
+
+def test_a_handler_fault_ends_the_turn_outright():
+    def boom(_m, _p):
+        raise RuntimeError("handler fault")
+
+    server = acp.AcpAgentServer(boom, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 1)
+    server._notify_disconnect()
+    assert server.is_cancelled("s") is False
+
+
+def test_an_async_handler_can_release_its_own_turn():
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 1)
+    server.end_prompt("s")          # the async work finished
+    server._notify_disconnect()
+    assert server.is_cancelled("s") is False

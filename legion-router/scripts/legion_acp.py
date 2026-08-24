@@ -441,6 +441,9 @@ class AcpClient:
                 pass
 
 
+_TURN_OVER = object()
+
+
 class AcpAgentServer:
     """Serve Legion to any ACP client (Zed, JetBrains, Neovim, VS Code).
 
@@ -583,7 +586,23 @@ class AcpAgentServer:
         # this notification is a courtesy for handlers that can act immediately.
         self._safe_handle(name, params)
 
-    def _end_prompt_for(self, params: dict[str, Any]) -> None:
+    def _end_prompt_for(self, params: dict[str, Any], result: Any = _TURN_OVER) -> None:
+        """Release a turn only once the turn is actually over.
+
+        ACP marks the end of a turn with a stopReason, and a v2 handler is
+        allowed to ACCEPT session/prompt and return immediately while the work
+        continues asynchronously. Releasing at handler-return instead tied the
+        prompt's lifetime to the REQUEST's: such a session left _running while
+        its run was still going, so a disconnect could not name it and the
+        orphaned run carried on with nobody waiting for it.
+
+        A handler that finishes inline reports stopReason and is released here.
+        One that works asynchronously keeps the turn and calls end_prompt()
+        when it is done.
+        """
+        if result is not _TURN_OVER and not (
+                isinstance(result, dict) and "stopReason" in result):
+            return
         session_id = params.get("sessionId")
         if isinstance(session_id, str) and session_id:
             self.end_prompt(session_id)
@@ -606,11 +625,11 @@ class AcpAgentServer:
             result = self.handler(name, params)
         except Exception as exc:  # noqa: BLE001 - a handler fault must not kill the session
             if name == "session_prompt":
-                self._end_prompt_for(params)
+                self._end_prompt_for(params)   # a fault ends the turn outright
             self._write({"jsonrpc": "2.0", "id": request_id,
                          "error": {"code": -32603, "message": str(exc)}})
             return
         if name == "session_prompt":
-            self._end_prompt_for(params)
+            self._end_prompt_for(params, result)
         self._write({"jsonrpc": "2.0", "id": request_id,
                      "result": {} if result is None else result})

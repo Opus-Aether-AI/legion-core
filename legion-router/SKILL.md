@@ -156,7 +156,7 @@ use `low`/`medium` for bounded investigation and mechanical work, `high` for a
 scoped implementation, and `max` only for a declared hard or persistent slice.
 Claude runs at `high` for intent, design, and final merge judgement. `review`
 returns a schema-valid verdict from the first reachable reviewer in
-`[review].order`; the final workflow review may also route to Claude for
+`[review].order` (routing.toml); the final workflow review may also route to Claude for
 independent simplification judgement.
 
 ## Credit / quota resilience (self-healing)

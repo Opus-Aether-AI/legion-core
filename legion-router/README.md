@@ -101,6 +101,15 @@ Two contract details worth knowing before wiring it:
 - `session/cancel` is a **notification**. Use `client.cancel(session_id)`, which
   is safe to call from another thread; sending it as a request blocks forever on
   a reply that never comes.
+- A turn ends at its **stopReason**, not when the handler returns. `AcpAgentServer`
+  releases a prompt when the handler reports a `stopReason` (or faults). A handler
+  that accepts `session/prompt` and continues asynchronously keeps the turn and
+  must call `end_prompt(session_id)` when the work finishes -- otherwise a client
+  that disconnects mid-run cannot be matched to the run it orphaned. Cancellation
+  is read, not received: `is_cancelled(session_id)` is a token the handler
+  consumes when it is ready, so work registered several hops in (after routing,
+  preflight, worktree setup) cannot miss a cancel that arrived while it was
+  still starting up.
 
 ## Tune routes from measured outcomes
 

@@ -31,7 +31,15 @@ node_modules/
 # and .legion/tasks holds the verbatim task text staged as run evidence, which
 # routinely contains prompts nobody intends to publish. .legion/worktrees can
 # also carry a full seeded node_modules.
-.legion/
+#
+# Ignore the CONTENTS, not the directory: .legion also holds repository-owned
+# configuration -- sandbox.json, documented in legion-router/README.md, and
+# legion-core.json, the declared Legion baseline per AGENTS.md. A blanket
+# `.legion/` hid both from `git status`, which is why committing a pin needs
+# `git add -f` in the consumer-update workflow.
+.legion/*
+!.legion/sandbox.json
+!.legion/legion-core.json
 
 # Claude Code local session state
 .claude/

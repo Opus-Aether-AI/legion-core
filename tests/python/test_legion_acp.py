@@ -606,3 +606,71 @@ def test_a_finished_prompt_is_not_cancelled_by_a_later_disconnect():
     server.end_prompt("s")
     server._notify_disconnect()
     assert server.is_cancelled("s") is False
+
+
+def _lock_witness(client):
+    """Replace _send with a spy that records whether the cancel lock was held."""
+    seen = {}
+
+    def spy(message):
+        held = not client._cancelled_lock.acquire(blocking=False)
+        if not held:
+            client._cancelled_lock.release()
+        seen.setdefault("held", []).append(held)
+        seen.setdefault("sent", []).append(message)
+
+    client._send = spy
+    return seen
+
+
+def test_cancel_marks_and_sends_under_one_lock():
+    # Unlocked, a prompt starting concurrently cleared the marker between the
+    # two steps: the cancel then reached the peer AFTER the new prompt, stopping
+    # the wrong turn, while locally nothing was cancelled — so a permission for
+    # the turn being stopped was still approved.
+    client = acp.AcpClient(["true"], permission_handler=acp.allow_once)
+    seen = _lock_witness(client)
+    client.cancel("s")
+    assert seen["held"] == [True]
+    assert client.is_cancelled("s") is True
+
+
+def test_prompt_start_clears_and_sends_under_one_lock():
+    client = acp.AcpClient(["true"], permission_handler=acp.allow_once)
+    seen = _lock_witness(client)
+    client._pump = lambda **_: None
+    client.request("session_prompt", {"sessionId": "s", "prompt": []})
+    assert seen["held"] == [True]
+
+
+def test_a_cancel_cannot_interleave_with_the_prompt_that_clears_it():
+    # The ordering the race produced: marker set, marker cleared by a starting
+    # prompt, cancel sent last. Under one lock the two sequences cannot split,
+    # so whichever runs second sees the other's completed state.
+    client = acp.AcpClient(["true"], permission_handler=acp.allow_once)
+    order = []
+    client._send = lambda m: order.append(m.get("method"))
+    client._pump = lambda **_: None
+
+    barrier = threading.Barrier(2)
+
+    def canceller():
+        barrier.wait()
+        client.cancel("s")
+
+    def prompter():
+        barrier.wait()
+        client.request("session_prompt", {"sessionId": "s", "prompt": []})
+
+    threads = [threading.Thread(target=canceller), threading.Thread(target=prompter)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+        assert not t.is_alive(), "cancel and prompt deadlocked against each other"
+
+    # Whichever won, the local marker agrees with the wire order.
+    if order == ["session/cancel", "session/prompt"]:
+        assert client.is_cancelled("s") is False   # prompt started the new turn
+    else:
+        assert client.is_cancelled("s") is True    # cancel landed after

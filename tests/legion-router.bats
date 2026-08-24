@@ -2494,3 +2494,32 @@ $run_error" ]
     run bash "$helper" "$BATS_TEST_TMPDIR/avail.json"
     [ "$status" -eq 0 ]
 }
+
+@test "delegate review: one vocabulary covers every unavailability detector" {
+    # The term list lived in three copies that drifted apart three times, each
+    # drift silently disabling the fallback for one executor: cursor's
+    # friendlier auth message, codex's stdout quota event, then codex's stdout
+    # AUTH event, which the quota-only copy did not match. All four detectors
+    # now read one list.
+    local helper
+    helper="$BATS_TEST_TMPDIR/probe-vocab.sh"
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+    : > "$BATS_TEST_TMPDIR/empty.err"
+
+    # native codex auth failure: stdout event, stderr silent
+    printf '{"type":"error","message":"Authentication required. Please run codex login."}\n' \
+      > "$BATS_TEST_TMPDIR/auth.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/empty.err" "$BATS_TEST_TMPDIR/auth.json"
+    [ "$status" -eq 0 ]
+
+    # a reviewer FINDING that says the same words is not an outage: .result is
+    # never scanned, so a rejection cannot be rewritten into an approval.
+    printf '{"status":"ok","result":"config.py fails because the api_key is required"}\n' \
+      > "$BATS_TEST_TMPDIR/finding.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/empty.err" "$BATS_TEST_TMPDIR/finding.json"
+    [ "$status" -ne 0 ]
+}

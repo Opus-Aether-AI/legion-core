@@ -240,9 +240,18 @@ class AcpClient:
         self._send({"jsonrpc": "2.0", "method": AGENT_METHODS[method], "params": params or {}})
 
     def cancel(self, session_id: str) -> None:
-        """Interrupt a running prompt. Safe to call from another thread."""
-        self.cancel_local(session_id)
-        self.notify("session_cancel", {"sessionId": session_id})
+        """Interrupt a running prompt. Safe to call from another thread.
+
+        Marker and notification go out under ONE lock, in the order the peer
+        sees them. Setting the marker and then sending unlocked left a window in
+        which a prompt starting concurrently cleared the marker between the two:
+        the cancel then arrived on the wire AFTER the new prompt -- stopping the
+        wrong turn at the peer -- while locally nothing was cancelled at all, so
+        a permission for the turn being stopped was still approved.
+        """
+        with self._cancelled_lock:
+            self._cancelled_sessions.add(session_id)
+            self.notify("session_cancel", {"sessionId": session_id})
 
     def cancel_local(self, session_id: str) -> None:
         """Record a cancellation without sending the notification.
@@ -272,13 +281,20 @@ class AcpClient:
             raise AcpError(f"{method!r} is a notification; use notify() or cancel()")
         if method not in AGENT_METHODS:
             raise AcpError(f"{method!r} is not an ACP agent method")
-        if method == "session_prompt":
-            session_id = (params or {}).get("sessionId")
-            if isinstance(session_id, str) and session_id:
-                self.resume(session_id)   # a new turn starts uncancelled
         request_id = self._request_id()
-        self._send({"jsonrpc": "2.0", "id": request_id,
-                    "method": AGENT_METHODS[method], "params": params or {}})
+        message = {"jsonrpc": "2.0", "id": request_id,
+                   "method": AGENT_METHODS[method], "params": params or {}}
+        session_id = (params or {}).get("sessionId") if method == "session_prompt" else None
+        if isinstance(session_id, str) and session_id:
+            # Clearing the marker and sending the prompt is one step, for the
+            # same reason cancel() is: a new turn starts uncancelled, and the
+            # peer must not be told about it out of order with respect to a
+            # cancel for the previous one.
+            with self._cancelled_lock:
+                self._cancelled_sessions.discard(session_id)
+                self._send(message)
+        else:
+            self._send(message)
         return self._pump(until_id=request_id)
 
     def _pump(self, *, until_id: int) -> Any:

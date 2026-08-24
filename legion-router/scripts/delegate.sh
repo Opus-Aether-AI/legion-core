@@ -1499,6 +1499,13 @@ review_resolve_candidates() {
 review_executor_unavailable() {
   local rc="$1" err_file="$2" out_file="${3:-}"
   [[ "$rc" -ne 0 ]] || return 1
+  # ONE vocabulary for "the provider could not serve this", shared by every
+  # detector below. This list lived in three copies with three different sets of
+  # terms, and each drift silently disabled the fallback for one executor:
+  # cursor's friendlier auth message, then codex's stdout quota event, then
+  # codex's stdout AUTH event, which the quota-only copy did not match. New
+  # terms go here, not into one branch.
+  local unavailable='usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated|authentication required|invalid_api_key|api[_ ]key.*(unset|missing|required|invalid)|please run .*login'
   # Codex reports a spent quota on STDOUT, inside its JSON event stream -- its
   # stderr carries only unrelated MCP OAuth noise. Checking stderr alone made
   # an out-of-quota reviewer look like an ordinary review failure, which is the
@@ -1522,7 +1529,7 @@ review_executor_unavailable() {
     # the normalizer parsing that rejection. Treating mere presence as an outage
     # therefore skips to a later candidate whose approval erases the finding.
     # Match the message, not the field.
-    if jq -e -s --arg avail "usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated|authentication required|invalid_api_key|api[_ ]key" \
+    if jq -e -s --arg avail "$unavailable" \
        'any(.[]?;
           ((.auth_error // "") != "")
           or (((.opencode_error // "") | ascii_downcase) | test($avail))
@@ -1540,10 +1547,9 @@ review_executor_unavailable() {
     # any(), not a per-line test: `jq -e` exits on the LAST value it emitted, so
     # a quota error followed by any other error event would end in `false` and
     # suppress the fallback.
-    if jq -e -R -s 'split("\n") | map(fromjson? // empty)
+    if jq -e -R -s --arg avail "$unavailable" 'split("\n") | map(fromjson? // empty)
                  | any(.[]?; (.type? == "error")
-                       and ((.message? // "") | ascii_downcase
-                            | test("usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated")))' \
+                       and ((.message? // "") | ascii_downcase | test($avail)))' \
          "$out_file" >/dev/null 2>&1; then
       return 0
     fi
@@ -1557,7 +1563,7 @@ review_executor_unavailable() {
   # rejection -- turning a request_changes into an approve through a regex.
   # Provider unavailability is reported on stderr; findings are not.
   if [[ -n "$err_file" && -s "$err_file" ]]; then
-    if grep -qiE "usage limit|rate.?limit|quota exceeded|insufficient_quota|429 |authentication required|not authenticated|unauthorized|invalid_api_key|api[_ ]key.*(unset|missing|required)|please run .*login|command not found" "$err_file"; then
+    if grep -qiE "$unavailable|command not found" "$err_file"; then
       return 0
     fi
   fi

@@ -2442,3 +2442,31 @@ $run_error" ]
     run bash "$helper" "$err" "$out"
     [ "$status" -eq 0 ]
 }
+
+@test "delegate review: a prompt adapter's own failure field triggers fallback" {
+    # Each adapter reports provider unavailability differently — opencode sets
+    # opencode_error, claude sets reason=claude_limit — and their provider
+    # stderr never reaches attempt_err, so the envelope is the only signal.
+    local helper
+    helper="$BATS_TEST_TMPDIR/probe-envelope.sh"
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 /dev/null "$1"\n'
+    } > "$helper"
+
+    printf '{"status":"failed","opencode_error":"provider rate limited"}\n' \
+      > "$BATS_TEST_TMPDIR/oc.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/oc.json"
+    [ "$status" -eq 0 ]
+
+    printf '{"status":"blocked","reason":"claude_limit"}\n' > "$BATS_TEST_TMPDIR/cl.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/cl.json"
+    [ "$status" -eq 0 ]
+
+    # and still not a finding that merely mentions limits
+    printf '{"status":"failed","result":"[P2] the rate limit handling is wrong"}\n' \
+      > "$BATS_TEST_TMPDIR/fd.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/fd.json"
+    [ "$status" -ne 0 ]
+}

@@ -398,7 +398,7 @@ def test_cancellation_is_sticky_for_a_late_registering_handler():
     # hops in; recording the cancel means the answer survives the race.
     server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
     assert server.is_cancelled("s") is False
-    server._begin_turn({"sessionId": "s"})          # a prompt is now running
+    server.begin_prompt("s")          # a prompt is now running
     server._dispatch_notification("session_cancel", {"sessionId": "s"})
     assert server.is_cancelled("s") is True
 
@@ -436,20 +436,15 @@ def test_close_kills_a_descendant_left_behind_by_an_exited_leader():
         pass
 
 
-def test_cancellation_is_replayed_past_the_registration_window():
-    # entered.set() can only fire at the TOP of the worker, so a thread switch
-    # before the handler body still lets a cancel land too early. The replay is
-    # what closes that window for a handler that does not poll is_cancelled.
-    seen = []
-    server = acp.AcpAgentServer(lambda m, p: seen.append(m),
-                                stdin=io.BytesIO(b""), stdout=io.BytesIO())
-    server._begin_turn({"sessionId": "s"})          # a cancel needs a live turn
+def test_cancellation_is_readable_whenever_the_handler_gets_there():
+    # The point of a token: a handler that registers work long after the cancel
+    # arrived still reads it. A replay could never cover a run slower than its
+    # own delay.
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server.begin_prompt("s")
     server._dispatch_notification("session_cancel", {"sessionId": "s"})
-    deadline = time.monotonic() + 5
-    while seen.count("session_cancel") < 2 and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert seen.count("session_cancel") >= 2, "cancel was delivered only once"
-
+    time.sleep(0.6)                      # far longer than the old 250ms replay
+    assert server.is_cancelled("s") is True
 
 def test_stderr_tail_is_bounded_by_bytes_not_lines():
     # One unterminated line buffers entirely before a line cap can apply, so a
@@ -489,27 +484,26 @@ def test_cancellation_does_not_leak_into_a_later_prompt():
     # A cancel targets the prompt that was running. Left set, every later prompt
     # in that session would start already cancelled.
     server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
-    server._begin_turn({"sessionId": "s"})
+    server.begin_prompt("s")
     server._dispatch_notification("session_cancel", {"sessionId": "s"})
     assert server.is_cancelled("s") is True
-    server._end_turn({"sessionId": "s"})
+    server.end_prompt("s")
     assert server.is_cancelled("s") is False, "cancellation leaked past its turn"
-    server._begin_turn({"sessionId": "s"})          # the next prompt
+    server.begin_prompt("s")          # the next prompt
     assert server.is_cancelled("s") is False, "a new prompt started already cancelled"
 
 
-def test_a_replay_cannot_cancel_a_prompt_it_was_never_aimed_at():
-    # Cancellation can unwind fast enough for a NEW prompt to start before the
-    # replay fires; replaying blindly would stop work nobody asked to stop.
-    seen = []
-    server = acp.AcpAgentServer(lambda m, p: seen.append(m),
-                                stdin=io.BytesIO(b""), stdout=io.BytesIO())
-    server._begin_turn({"sessionId": "s"})
-    server._end_turn({"sessionId": "s"})         # the targeted turn is over
-    server._begin_turn({"sessionId": "s"})       # a NEW prompt is running
-    server._replay_cancel({"sessionId": "s"}, "s", 1)   # aimed at the old turn
-    assert seen == [], "a stale replay cancelled the wrong turn"
-
+def test_a_new_prompt_starts_uncancelled():
+    # Replaced the old replay-timing test: there is no replay any more. A token
+    # consumed at registration cannot be aimed at the wrong turn, because it is
+    # read when the handler is ready rather than delivered on a timer.
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server.begin_prompt("s")
+    server._dispatch_notification("session_cancel", {"sessionId": "s"})
+    assert server.is_cancelled("s") is True
+    server.end_prompt("s")
+    server.begin_prompt("s")
+    assert server.is_cancelled("s") is False, "a new prompt inherited a stale cancel"
 
 def test_stderr_tail_is_readable_before_the_drainer_sees_eof():
     client = acp.AcpClient(["true"], permission_handler=acp.allow_once)
@@ -522,31 +516,35 @@ def test_a_cancel_with_no_running_prompt_marks_nothing():
     # prompt cancelled before it had even started.
     server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
     server._dispatch_notification("session_cancel", {"sessionId": "s"})
-    server._begin_turn({"sessionId": "s"})
+    server.begin_prompt("s")
     assert server.is_cancelled("s") is False, "a stray cancel poisoned the next prompt"
 
 
-def test_permission_is_refused_after_the_session_was_cancelled():
-    # ACP v2 REQUIRES that once a client cancels, pending permission requests
-    # for that session are answered `cancelled`. Otherwise a handler can still
-    # return `selected` and authorise a tool call after the user pressed Stop.
+def test_permission_is_refused_when_cancel_lands_while_the_handler_decides():
+    # The real race: the handler is still deciding when Stop arrives. Checking
+    # cancellation before calling it and sending afterwards leaves a window in
+    # which a tool is authorised after the user cancelled.
     script = (
         acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
                     "params": dict(_PERMISSION_PARAMS, sessionId="s")})
         + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
     )
-    client = _client(script, permission_handler=acp.allow_once)
-    with client._cancelled_lock:
-        client._cancelled_sessions.add("s")   # as cancel() would have
+    holder = {}
 
+    def slow_handler(params):
+        # Stop is pressed mid-decision, exactly as a user would.
+        holder["client"].cancel_local("s")
+        return acp.allow_once(params)
+
+    client = _client(script, permission_handler=slow_handler)
+    holder["client"] = client
     client.request("session_prompt", {"sessionId": "s"})
 
     replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines() if l.strip()]
     granted = next(r for r in replies if r.get("id") == 99)
     assert granted["result"]["outcome"] == {"outcome": "cancelled"}, (
-        "a tool was authorised after Stop"
+        "a tool was authorised after Stop landed mid-decision"
     )
-
 
 def test_permission_is_granted_normally_when_not_cancelled():
     script = (

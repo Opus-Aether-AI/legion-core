@@ -1510,9 +1510,18 @@ review_executor_unavailable() {
   # matching prose: this check used to rely on wording alone, and when
   # legion-cursor was given a friendlier message the pattern stopped matching --
   # so the fallback silently died at the one executor it most needed to skip.
+  # Named envelope fields only -- never .result, which holds reviewer prose.
+  # Each adapter reports provider unavailability its own way: legion-cursor sets
+  # auth_error, legion-opencode sets opencode_error, legion-claude sets
+  # reason="claude_limit" and status="blocked". Their provider stderr is not
+  # copied into attempt_err, so the envelope is the only place this shows.
   for f in "$out_file" "$err_file"; do
     [[ -n "$f" && -s "$f" ]] || continue
-    if jq -e -s 'any(.[]?; (.auth_error // "") != "")' "$f" >/dev/null 2>&1; then
+    if jq -e -s 'any(.[]?;
+          ((.auth_error // "") != "")
+          or ((.opencode_error // "") != "")
+          or ((.reason // "") | test("limit|quota|rate"))
+          or ((.status // "") == "blocked"))' "$f" >/dev/null 2>&1; then
       return 0
     fi
   done

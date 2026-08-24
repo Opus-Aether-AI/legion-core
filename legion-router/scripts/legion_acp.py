@@ -241,9 +241,27 @@ class AcpClient:
 
     def cancel(self, session_id: str) -> None:
         """Interrupt a running prompt. Safe to call from another thread."""
+        self.cancel_local(session_id)
+        self.notify("session_cancel", {"sessionId": session_id})
+
+    def cancel_local(self, session_id: str) -> None:
+        """Record a cancellation without sending the notification.
+
+        Used when the peer has already been told, or cannot be: the record is
+        what stops a permission being granted, so it must not depend on the
+        wire.
+        """
         with self._cancelled_lock:
             self._cancelled_sessions.add(session_id)
-        self.notify("session_cancel", {"sessionId": session_id})
+
+    def resume(self, session_id: str) -> None:
+        """Clear a cancellation so a later prompt in the session is not blocked.
+
+        Without this the marker outlives its turn and every subsequent
+        permission request in the session is forced to `cancelled`.
+        """
+        with self._cancelled_lock:
+            self._cancelled_sessions.discard(session_id)
 
     def is_cancelled(self, session_id: str) -> bool:
         with self._cancelled_lock:
@@ -254,6 +272,10 @@ class AcpClient:
             raise AcpError(f"{method!r} is a notification; use notify() or cancel()")
         if method not in AGENT_METHODS:
             raise AcpError(f"{method!r} is not an ACP agent method")
+        if method == "session_prompt":
+            session_id = (params or {}).get("sessionId")
+            if isinstance(session_id, str) and session_id:
+                self.resume(session_id)   # a new turn starts uncancelled
         request_id = self._request_id()
         self._send({"jsonrpc": "2.0", "id": request_id,
                     "method": AGENT_METHODS[method], "params": params or {}})
@@ -293,12 +315,18 @@ class AcpClient:
                 # Without this a handler could still return `selected` and
                 # authorise a tool call after the user pressed Stop -- the gate
                 # granting permission for work that was already abandoned.
-                if isinstance(session_id, str) and session_id and self.is_cancelled(session_id):
-                    outcome: dict[str, Any] = {"outcome": "cancelled"}
-                else:
-                    outcome = self.permission_handler(params)
-                self._send({"jsonrpc": "2.0", "id": message.get("id"),
-                            "result": {"outcome": outcome}})
+                outcome: dict[str, Any] = self.permission_handler(params)
+                # Re-check UNDER the lock, and hold it across the send. Checking
+                # first and sending afterwards leaves a window in which a cancel
+                # arrives while the handler is still deciding, and the tool is
+                # then authorised after Stop. The handler runs outside the lock
+                # because it may block; only the decision is serialised.
+                with self._cancelled_lock:
+                    if isinstance(session_id, str) and session_id \
+                            and session_id in self._cancelled_sessions:
+                        outcome = {"outcome": "cancelled"}
+                    self._send({"jsonrpc": "2.0", "id": message.get("id"),
+                                "result": {"outcome": outcome}})
                 continue
             if name == "elicitation_create":
                 # Legion runs unattended. Declining is the honest answer; making
@@ -415,10 +443,7 @@ class AcpAgentServer:
         self.stdout = stdout
         self._write_lock = threading.Lock()
         self._cancel_lock = threading.Lock()
-        self._cancelled: dict[str, int] = {}
-        self._turns: dict[str, int] = {}
-        self._active: dict[str, int] = {}
-        self._replays: list[threading.Timer] = []
+        self._cancelled: set[str] = set()
 
     def _write(self, message: dict[str, Any]) -> None:
         # Workers answer concurrently; interleaved partial writes would corrupt
@@ -485,10 +510,6 @@ class AcpAgentServer:
         self._notify_disconnect()
         for worker in workers:
             worker.join()
-        with self._cancel_lock:
-            pending = list(self._replays)
-        for replay in pending:
-            replay.cancel()
 
     def _notify_disconnect(self) -> None:
         """Give the handler a chance to cancel work whose requester has left."""
@@ -500,81 +521,41 @@ class AcpAgentServer:
             pass
 
     def is_cancelled(self, session_id: str) -> bool:
-        """Is the CURRENT prompt turn for this session cancelled?
+        """Has the current prompt for this session been cancelled?
 
-        Sticky within a turn, because a handler registering its work several
-        hops in must still get a true answer. Retired when the turn ends: a
-        cancel targets the prompt that was running, and leaving it set would
-        make every later prompt in that session start already cancelled.
+        A token, not an event. A handler registering delegated work several hops
+        in -- after routing, preflight and worktree setup -- reads this when it
+        is ready, so there is no window to race and no replay delay to tune. Any
+        fixed delay is wrong for a run slower than the delay.
         """
         with self._cancel_lock:
-            active = self._active.get(session_id)
-            return active is not None and self._cancelled.get(session_id) == active
+            return session_id in self._cancelled
+
+    def begin_prompt(self, session_id: str) -> None:
+        """Start a turn uncancelled, discarding any marker from the last one."""
+        with self._cancel_lock:
+            self._cancelled.discard(session_id)
+
+    def end_prompt(self, session_id: str) -> None:
+        with self._cancel_lock:
+            self._cancelled.discard(session_id)
 
     def _dispatch_notification(self, name: str, params: dict[str, Any]) -> None:
         if name != "session_cancel":
             self._safe_handle(name, params)
             return
-
         session_id = params.get("sessionId")
-        target_turn = None
         if isinstance(session_id, str) and session_id:
             with self._cancel_lock:
-                # Only an ACTIVE prompt can be cancelled. Reading the turn
-                # counter after _end_turn has advanced it would mark the NEXT
-                # prompt cancelled before it had even started.
-                if session_id in self._active:
-                    target_turn = self._active[session_id]
-                    self._cancelled[session_id] = target_turn
-
-        # Deliver now, then once more shortly after.
-        #
-        # entered.set() can only be signalled from the top of the worker, not
-        # from inside the handler, so a thread switch between the two still lets
-        # this cancel arrive before the prompt registered its delegated run.
-        # Replaying closes that window without requiring every handler to poll
-        # is_cancelled -- which remains available, and remains the reliable
-        # answer for a handler that registers several hops in.
+                self._cancelled.add(session_id)
+        # Delivered once. The token above is what a handler actually relies on;
+        # this notification is a courtesy for handlers that can act immediately.
         self._safe_handle(name, params)
-        replay = threading.Timer(
-            0.25, self._replay_cancel, args=(dict(params), session_id, target_turn)
-        )
-        replay.daemon = True
-        replay.start()
-        with self._cancel_lock:
-            self._replays.append(replay)
 
-    def _replay_cancel(self, params: dict[str, Any], session_id: Any, target_turn: Any) -> None:
-        """Redeliver the cancel, but only to the turn it was aimed at.
-
-        Cancellation can unwind fast enough for a NEW prompt to start in the
-        same session before this fires; replaying blindly would cancel work the
-        client never asked to stop.
-        """
-        if target_turn is None:
-            return  # nothing was running when the cancel arrived
+    def _end_prompt_for(self, params: dict[str, Any]) -> None:
+        session_id = params.get("sessionId")
         if isinstance(session_id, str) and session_id:
-            with self._cancel_lock:
-                if self._active.get(session_id) != target_turn:
-                    return  # that turn is over; this cancel no longer applies
-        self._safe_handle("session_cancel", params)
-
-    def _begin_turn(self, params: dict[str, Any]) -> None:
-        session_id = params.get("sessionId")
-        if not isinstance(session_id, str) or not session_id:
-            return
-        with self._cancel_lock:
-            self._turns[session_id] = self._turns.get(session_id, 0) + 1
-            self._active[session_id] = self._turns[session_id]
-            self._cancelled.pop(session_id, None)
-
-    def _end_turn(self, params: dict[str, Any]) -> None:
-        session_id = params.get("sessionId")
-        if not isinstance(session_id, str) or not session_id:
-            return
-        with self._cancel_lock:
-            self._active.pop(session_id, None)
-            self._cancelled.pop(session_id, None)
+            self.end_prompt(session_id)
 
     def _safe_handle(self, name: str, params: dict[str, Any]) -> None:
         try:
@@ -585,18 +566,20 @@ class AcpAgentServer:
     def _dispatch_request(self, name: str, params: dict[str, Any], request_id: Any,
                           entered: threading.Event | None = None) -> None:
         if name == "session_prompt":
-            self._begin_turn(params)
+            session_id = params.get("sessionId")
+            if isinstance(session_id, str) and session_id:
+                self.begin_prompt(session_id)
         if entered is not None:
             entered.set()
         try:
             result = self.handler(name, params)
         except Exception as exc:  # noqa: BLE001 - a handler fault must not kill the session
             if name == "session_prompt":
-                self._end_turn(params)
+                self._end_prompt_for(params)
             self._write({"jsonrpc": "2.0", "id": request_id,
                          "error": {"code": -32603, "message": str(exc)}})
             return
         if name == "session_prompt":
-            self._end_turn(params)
+            self._end_prompt_for(params)
         self._write({"jsonrpc": "2.0", "id": request_id,
                      "result": {} if result is None else result})

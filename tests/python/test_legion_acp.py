@@ -213,13 +213,20 @@ def test_a_chatty_agent_does_not_deadlock_the_bridge():
         client.close()
 
 
-def test_close_reaps_the_child_and_leaves_no_zombie():
+def test_close_reaps_a_peer_that_outlives_stdin_without_hanging():
+    # The earlier version of this test PASSED while waiting out the child's full
+    # 60s sleep: _drain_stderr held a read on stderr, so closing that pipe first
+    # blocked and wait() was never reached. Timing it is what makes the deadlock
+    # visible rather than merely slow.
     client = acp.AcpClient([sys.executable, "-c", "import time; time.sleep(60)"],
                            permission_handler=acp.allow_once)
     client.start()
     proc = client._proc
+    started = time.monotonic()
     client.close()
+    elapsed = time.monotonic() - started
     assert proc.poll() is not None, "child was not reaped"
+    assert elapsed < 20, f"close() blocked for {elapsed:.1f}s on a live peer"
 
 
 # ── server contract ──────────────────────────────────────────────────────
@@ -292,3 +299,50 @@ def test_acp_capability_is_declared_and_currently_unexercised():
                 f"{name} claims ACP without being in the exercised allowlist; add it "
                 f"to enabled_for_acp once a real session has run over the bridge"
             )
+
+
+def test_server_ignores_a_request_only_method_sent_without_an_id():
+    # session/delete arriving as a notification is malformed. Running it would
+    # perform its side effects while answering nobody.
+    seen = []
+    out = io.BytesIO()
+    acp.AcpAgentServer(lambda m, p: seen.append(m), stdin=io.BytesIO(
+        acp.encode({"jsonrpc": "2.0", "method": "session/delete", "params": {}})
+    ), stdout=out).serve_forever()
+    assert seen == [], "a request-only method must not be dispatched without an id"
+    assert out.getvalue() == b""
+
+
+def test_server_reads_cancel_while_a_prompt_handler_is_still_running():
+    """An editor's Stop must land during the prompt, not after it."""
+    prompt_running = threading.Event()
+    release = threading.Event()
+    seen = []
+
+    def handler(method, params):
+        seen.append(method)
+        if method == "session_prompt":
+            prompt_running.set()
+            release.wait(timeout=10)   # stands in for delegated work
+            return {"stopReason": "cancelled"}
+        return {}
+
+    out = io.BytesIO()
+    stdin = io.BytesIO(
+        acp.encode({"jsonrpc": "2.0", "id": 1, "method": "session/prompt", "params": {}})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "s"}})
+    )
+    server = acp.AcpAgentServer(handler, stdin=stdin, stdout=out)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    assert prompt_running.wait(timeout=10), "prompt handler never started"
+    deadline = time.monotonic() + 10
+    while "session_cancel" not in seen and time.monotonic() < deadline:
+        time.sleep(0.05)
+    release.set()
+    thread.join(timeout=15)
+
+    assert "session_cancel" in seen, (
+        "cancel was not read until the prompt finished; Stop would do nothing"
+    )

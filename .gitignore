@@ -26,6 +26,16 @@ node_modules/
 *.swo
 *~
 
+# Legion runtime state. Ignored here and not only in a developer's global
+# ignore file: a fresh clone would otherwise show run artifacts as untracked,
+# and .legion/tasks holds the verbatim task text staged as run evidence, which
+# routinely contains prompts nobody intends to publish. .legion/worktrees can
+# also carry a full seeded node_modules.
+.legion/
+
+# Claude Code local session state
+.claude/
+
 # Local env / secrets — never commit
 .env
 .env.*

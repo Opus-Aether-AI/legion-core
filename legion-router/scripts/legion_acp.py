@@ -255,10 +255,38 @@ class AcpClient:
         )
 
     def close(self) -> None:
-        """Shut the peer down without leaking a zombie or its pipes."""
+        """Shut the peer down without leaking a zombie, its pipes, or the caller.
+
+        Order matters. _drain_stderr is parked inside a read on proc.stderr, so
+        closing that pipe first blocks on the reader's lock and the wait() below
+        is never reached -- a peer that outlives stdin then hangs close()
+        forever. End the process first, which releases the reader, and only then
+        close the pipes.
+        """
         proc = self._proc
         if proc is None:
             return
+        if proc.poll() is None:
+            # stdin alone is a polite request; a peer that ignores it must not
+            # be able to hold the caller hostage.
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()  # reap; kill() alone leaves a zombie until exit
+        else:
+            proc.wait()
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=5)
         for pipe in (proc.stdin, proc.stdout, proc.stderr):
             if pipe is None:
                 continue
@@ -266,11 +294,6 @@ class AcpClient:
                 pipe.close()
             except OSError:
                 pass  # already closed, or the peer went away first
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()  # reap it; kill() alone leaves a zombie until we exit
         self._proc = None
 
 
@@ -290,12 +313,25 @@ class AcpAgentServer:
             stdout = stdout if stdout is not None else sys.stdout.buffer
         self.stdin = stdin
         self.stdout = stdout
+        self._write_lock = threading.Lock()
 
     def _write(self, message: dict[str, Any]) -> None:
-        self.stdout.write(encode(message))
-        self.stdout.flush()
+        # Workers answer concurrently; interleaved partial writes would corrupt
+        # the newline-delimited framing.
+        with self._write_lock:
+            self.stdout.write(encode(message))
+            self.stdout.flush()
 
     def serve_forever(self) -> None:
+        """Read continuously, handling requests off the reader thread.
+
+        A session/prompt handler waits on real delegated work, so handling it
+        inline blocks the loop: a session/cancel sent during that prompt is not
+        even READ until the prompt has finished, and an editor's Stop button
+        does nothing. Requests therefore run on worker threads while this loop
+        stays free to receive cancellation.
+        """
+        workers: list[threading.Thread] = []
         for message in decode_stream(self.stdin):
             request_id = message.get("id")
             wire = str(message.get("method") or "")
@@ -306,25 +342,43 @@ class AcpAgentServer:
             name = next((k for k, v in AGENT_METHODS.items() if v == wire), None)
 
             if request_id is None:
-                # A notification still needs dispatching. session/cancel arrives
-                # this way, so dropping notifications means a client pressing
-                # stop has no effect and Legion keeps burning a metered run.
-                if name is not None:
-                    try:
-                        self.handler(name, message.get("params") or {})
-                    except Exception:  # noqa: BLE001 - a notification has nobody to tell
-                        pass
+                # Only genuine notifications may be dispatched without a reply.
+                # A request-only method arriving without an id is malformed, and
+                # running it would perform its side effects while answering
+                # nobody -- session/delete is not something to do by accident.
+                if name is not None and name in AGENT_NOTIFICATIONS:
+                    self._dispatch_notification(name, message.get("params") or {})
                 continue
 
             if name is None:
                 self._write({"jsonrpc": "2.0", "id": request_id,
                              "error": {"code": -32601, "message": f"unsupported method: {wire}"}})
                 continue
-            try:
-                result = self.handler(name, message.get("params") or {})
-            except Exception as exc:  # noqa: BLE001 - a handler fault must not kill the session
-                self._write({"jsonrpc": "2.0", "id": request_id,
-                             "error": {"code": -32603, "message": str(exc)}})
-                continue
+
+            worker = threading.Thread(
+                target=self._dispatch_request,
+                args=(name, message.get("params") or {}, request_id),
+                daemon=True,
+            )
+            worker.start()
+            workers.append(worker)
+            workers = [w for w in workers if w.is_alive()]
+
+        for worker in workers:
+            worker.join(timeout=30)
+
+    def _dispatch_notification(self, name: str, params: dict[str, Any]) -> None:
+        try:
+            self.handler(name, params)
+        except Exception:  # noqa: BLE001 - a notification has nobody to tell
+            pass
+
+    def _dispatch_request(self, name: str, params: dict[str, Any], request_id: Any) -> None:
+        try:
+            result = self.handler(name, params)
+        except Exception as exc:  # noqa: BLE001 - a handler fault must not kill the session
             self._write({"jsonrpc": "2.0", "id": request_id,
-                         "result": {} if result is None else result})
+                         "error": {"code": -32603, "message": str(exc)}})
+            return
+        self._write({"jsonrpc": "2.0", "id": request_id,
+                     "result": {} if result is None else result})

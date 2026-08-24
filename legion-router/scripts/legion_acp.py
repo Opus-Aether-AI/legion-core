@@ -140,6 +140,8 @@ class AcpClient:
     replaces, because the protocol offered the gate and it was declined.
     """
 
+    STDERR_TAIL_BYTES = 64 * 1024
+
     def __init__(self, argv: list[str], *,
                  permission_handler: Callable[[dict[str, Any]], dict[str, Any]],
                  on_update: Callable[[dict[str, Any]], None] | None = None,
@@ -159,6 +161,7 @@ class AcpClient:
         self._send_lock = threading.Lock()
         self._stderr_thread: threading.Thread | None = None
         self._pgid: int | None = None
+        self._stderr_bytes = b""
         self.stderr_tail: list[str] = []
 
     def _request_id(self) -> int:
@@ -175,14 +178,11 @@ class AcpClient:
             self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, cwd=self.cwd, start_new_session=True,
         )
-        # Remember the group while the leader is alive. After it exits, getpgid
-        # fails and the group is unaddressable -- but detaching the session means
-        # any descendant it spawned is still running in that group, so losing the
-        # id is losing the only handle on them.
-        try:
-            self._pgid = os.getpgid(self._proc.pid)
-        except OSError:
-            self._pgid = None
+        # start_new_session guarantees the new process group id IS the child's
+        # pid, so take it directly. Querying getpgid races a fast launcher that
+        # exits before the call -- and losing the id means losing the only handle
+        # on any descendant still running in that detached group.
+        self._pgid = self._proc.pid
         # stderr MUST be drained. A chatty agent fills the OS pipe buffer (~64 KB),
         # blocks in write(2), stops producing stdout, and the reader below waits
         # forever for a response the peer can no longer send. Keeping a bounded
@@ -191,14 +191,25 @@ class AcpClient:
         self._stderr_thread.start()
 
     def _drain_stderr(self) -> None:
+        """Drain in fixed-size chunks, keeping a byte-bounded tail.
+
+        Iterating by line buffers a whole line before any cap can apply, so one
+        very large or unterminated line from a malformed peer exhausts memory --
+        the cap has to be on bytes read, not lines kept.
+        """
         proc = self._proc
         if proc is None or proc.stderr is None:
             return
-        for line in proc.stderr:
-            text = line.decode("utf-8", "replace").rstrip()
-            self.stderr_tail.append(text)
-            if len(self.stderr_tail) > 200:
-                del self.stderr_tail[0]
+        buffer = b""
+        while True:
+            chunk = proc.stderr.read(8192)
+            if not chunk:
+                break
+            buffer = (buffer + chunk)[-self.STDERR_TAIL_BYTES:]
+            self._stderr_bytes = buffer
+        self.stderr_tail = [
+            line for line in buffer.decode("utf-8", "replace").splitlines() if line.strip()
+        ]
 
     def _send(self, message: dict[str, Any]) -> None:
         if self._proc is None or self._proc.stdin is None:
@@ -374,6 +385,7 @@ class AcpAgentServer:
         self._write_lock = threading.Lock()
         self._cancel_lock = threading.Lock()
         self._cancelled: set[str] = set()
+        self._replays: list[threading.Timer] = []
 
     def _write(self, message: dict[str, Any]) -> None:
         # Workers answer concurrently; interleaved partial writes would corrupt
@@ -440,6 +452,10 @@ class AcpAgentServer:
         self._notify_disconnect()
         for worker in workers:
             worker.join()
+        with self._cancel_lock:
+            pending = list(self._replays)
+        for replay in pending:
+            replay.cancel()
 
     def _notify_disconnect(self) -> None:
         """Give the handler a chance to cancel work whose requester has left."""
@@ -461,11 +477,31 @@ class AcpAgentServer:
             return session_id in self._cancelled
 
     def _dispatch_notification(self, name: str, params: dict[str, Any]) -> None:
-        if name == "session_cancel":
-            session_id = params.get("sessionId")
-            if isinstance(session_id, str) and session_id:
-                with self._cancel_lock:
-                    self._cancelled.add(session_id)
+        if name != "session_cancel":
+            self._safe_handle(name, params)
+            return
+
+        session_id = params.get("sessionId")
+        if isinstance(session_id, str) and session_id:
+            with self._cancel_lock:
+                self._cancelled.add(session_id)
+
+        # Deliver now, then once more shortly after.
+        #
+        # entered.set() can only be signalled from the top of the worker, not
+        # from inside the handler, so a thread switch between the two still lets
+        # this cancel arrive before the prompt registered its delegated run.
+        # Replaying closes that window without requiring every handler to poll
+        # is_cancelled -- which remains available, and remains the reliable
+        # answer for a handler that registers several hops in.
+        self._safe_handle(name, params)
+        replay = threading.Timer(0.25, self._safe_handle, args=(name, dict(params)))
+        replay.daemon = True
+        replay.start()
+        with self._cancel_lock:
+            self._replays.append(replay)
+
+    def _safe_handle(self, name: str, params: dict[str, Any]) -> None:
         try:
             self.handler(name, params)
         except Exception:  # noqa: BLE001 - a notification has nobody to tell

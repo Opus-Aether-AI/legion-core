@@ -433,3 +433,51 @@ def test_close_kills_a_descendant_left_behind_by_an_exited_leader():
         os.unlink(marker)
     except OSError:
         pass
+
+
+def test_cancellation_is_replayed_past_the_registration_window():
+    # entered.set() can only fire at the TOP of the worker, so a thread switch
+    # before the handler body still lets a cancel land too early. The replay is
+    # what closes that window for a handler that does not poll is_cancelled.
+    seen = []
+    server = acp.AcpAgentServer(lambda m, p: seen.append(m),
+                                stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server._dispatch_notification("session_cancel", {"sessionId": "s"})
+    deadline = time.monotonic() + 5
+    while seen.count("session_cancel") < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert seen.count("session_cancel") >= 2, "cancel was delivered only once"
+
+
+def test_stderr_tail_is_bounded_by_bytes_not_lines():
+    # One unterminated line buffers entirely before a line cap can apply, so a
+    # malformed peer could exhaust memory despite the cap looking present.
+    program = (
+        "import sys\n"
+        "sys.stderr.write('x' * 5_000_000)\n"   # a single 5 MB line, no newline
+        "sys.stderr.flush()\n"
+        'sys.stdout.write(\'{"jsonrpc":"2.0","id":1,"result":{}}\' + chr(10))\n'
+        "sys.stdout.flush()\n"
+    )
+    client = acp.AcpClient([sys.executable, "-c", program], permission_handler=acp.allow_once)
+    client.start()
+    try:
+        client.request("session_list")
+        deadline = time.monotonic() + 10
+        while client._proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.5)
+        assert len(client._stderr_bytes) <= acp.AcpClient.STDERR_TAIL_BYTES, (
+            f"stderr tail grew to {len(client._stderr_bytes)} bytes"
+        )
+    finally:
+        client.close()
+
+
+def test_pgid_is_the_child_pid_and_survives_a_fast_leader():
+    # getpgid races a launcher that exits immediately; start_new_session
+    # guarantees pgid == pid, so it is taken directly and cannot be lost.
+    client = acp.AcpClient([sys.executable, "-c", "pass"], permission_handler=acp.allow_once)
+    client.start()
+    assert client._pgid == client._proc.pid
+    client.close()

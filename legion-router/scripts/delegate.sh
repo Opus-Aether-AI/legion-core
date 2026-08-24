@@ -495,8 +495,8 @@ route_preflight() {
   fi
   receipt="$art/route-preflight.json"
   mkdir -p "$art"
-  if [[ "$art" == "$repo/"* && ! -L "$repo/.legion/.gitignore" ]]; then
-    printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+  if [[ "$art" == "$repo/"* ]]; then
+    legion_write_runtime_gitignore "$repo"
   fi
   payload="$(jq -cn \
     --arg schema "legion.route-preflight.v1" --arg run "$RUN_ID" \
@@ -961,8 +961,9 @@ cmd_run() {
     [[ -d "$art" && -d "$wt" ]] || die "run: detached worker setup is missing for '$RUN_ID'"
   else
     mkdir -p "$art"
-    # Keep all legion runtime state out of the target repo's git status / diffs.
-    printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+    # Keep legion runtime state out of the target repo's git status / diffs,
+    # without hiding the repo's own .legion configuration.
+    legion_write_runtime_gitignore "$repo"
     [[ "$dirty_warn" -eq 0 ]] || warn_dirty_source "$repo" "$base"
     note "→ worktree $wt (branch $branch, base $base)"
     with_git_worktree_lock "$repo" \

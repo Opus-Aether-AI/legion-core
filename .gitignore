@@ -37,6 +37,13 @@ node_modules/
 # legion-core.json, the declared Legion baseline per AGENTS.md. A blanket
 # `.legion/` hid both from `git status`, which is why committing a pin needs
 # `git add -f` in the consumer-update workflow.
+#
+# The directory itself must be un-ignored FIRST. Git does not descend into an
+# excluded directory, and a file cannot be re-included once a parent is
+# excluded -- so with the documented global `.legion/` exclusion still in a
+# developer's config, the negations below would never be reached. This line is
+# what makes them effective; repo rules outrank core.excludesFile.
+!.legion/
 .legion/*
 !.legion/sandbox.json
 !.legion/legion-core.json

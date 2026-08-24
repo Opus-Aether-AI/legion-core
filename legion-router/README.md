@@ -101,15 +101,21 @@ Two contract details worth knowing before wiring it:
 - `session/cancel` is a **notification**. Use `client.cancel(session_id)`, which
   is safe to call from another thread; sending it as a request blocks forever on
   a reply that never comes.
-- A turn ends at its **stopReason**, not when the handler returns. `AcpAgentServer`
-  releases a prompt when the handler reports a `stopReason` (or faults). A handler
-  that accepts `session/prompt` and continues asynchronously keeps the turn and
-  must call `end_prompt(session_id)` when the work finishes -- otherwise a client
-  that disconnects mid-run cannot be matched to the run it orphaned. Cancellation
-  is read, not received: `is_cancelled(session_id)` is a token the handler
-  consumes when it is ready, so work registered several hops in (after routing,
-  preflight, worktree setup) cannot miss a cancel that arrived while it was
-  still starting up.
+- A `session/prompt` **response only acknowledges acceptance**. The v2 schema is
+  explicit: it "does not indicate that the agent has finished processing", which
+  is reported through `state_update` session updates instead. So the result on
+  the wire is always `{}` (plus `_meta` if the handler set one). A handler that
+  finishes inline returns `{"stopReason": ...}`; the server consumes that, ends
+  the turn, and emits the idle `state_update` carrying it. One that continues
+  asynchronously returns `{}` and later calls `emit_idle(session_id, reason)`
+  itself -- and must call it, or a client that disconnects mid-run cannot be
+  matched to the run it orphaned.
+- **Cancellation is read, not received.** `is_cancelled(session_id)` is a token
+  the handler consumes when it is ready, so work registered several hops in
+  (after routing, preflight, worktree setup) cannot miss a cancel that arrived
+  while it was still starting up. The permission gate is decided off the read
+  loop for the same reason: a handler that blocks on a person must not be able
+  to hold the only reader, or Stop cannot be answered until it returns.
 
 ## Tune routes from measured outcomes
 

@@ -163,6 +163,8 @@ class AcpClient:
         self._pgid: int | None = None
         self._stderr_bytes = b""
         self._cancelled_lock = threading.Lock()
+        self._pending_permissions: dict[Any, Any] = {}
+        self._permission_workers: list[threading.Thread] = []
         self._cancelled_sessions: set[str] = set()
 
     def _request_id(self) -> int:
@@ -252,6 +254,9 @@ class AcpClient:
         with self._cancelled_lock:
             self._cancelled_sessions.add(session_id)
             self.notify("session_cancel", {"sessionId": session_id})
+        # A gate still waiting on a blocking handler must be released now, not
+        # whenever that handler happens to return.
+        self._cancel_pending_permissions(session_id)
 
     def cancel_local(self, session_id: str) -> None:
         """Record a cancellation without sending the notification.
@@ -275,6 +280,63 @@ class AcpClient:
     def is_cancelled(self, session_id: str) -> bool:
         with self._cancelled_lock:
             return session_id in self._cancelled_sessions
+
+    def _begin_permission(self, request_id: Any, params: dict[str, Any]) -> None:
+        """Register a permission request and decide it off the read loop."""
+        session_id = params.get("sessionId")
+        with self._cancelled_lock:
+            self._pending_permissions[request_id] = session_id
+        # Already cancelled? Answer now; never call the handler at all.
+        if self._answer_permission(request_id, None):
+            return
+
+        def decide() -> None:
+            try:
+                outcome = self.permission_handler(params)
+            except Exception:  # noqa: BLE001 - a gate that faults must not grant
+                outcome = {"outcome": "cancelled"}
+            self._answer_permission(request_id, outcome)
+
+        worker = threading.Thread(target=decide, name="acp-permission", daemon=True)
+        with self._cancelled_lock:
+            if request_id in self._pending_permissions:
+                self._permission_workers.append(worker)
+                worker.start()
+
+    def _answer_permission(self, request_id: Any, outcome: dict[str, Any] | None) -> bool:
+        """Answer a pending permission exactly once.
+
+        Pop, re-check cancellation and send under ONE lock: deciding first and
+        sending afterwards leaves a window for a cancel to arrive in between, and
+        the tool is then authorised after Stop. Passing outcome=None means "only
+        answer if this is already cancelled" -- it never invents an approval.
+        """
+        with self._cancelled_lock:
+            if request_id not in self._pending_permissions:
+                return False
+            session_id = self._pending_permissions[request_id]
+            cancelled = isinstance(session_id, str) and session_id in self._cancelled_sessions
+            if cancelled:
+                outcome = {"outcome": "cancelled"}
+            elif outcome is None:
+                return False
+            del self._pending_permissions[request_id]
+            try:
+                self._send({"jsonrpc": "2.0", "id": request_id,
+                            "result": {"outcome": outcome}})
+            except (OSError, ValueError, AcpError):
+                # The peer is gone. A decision thread outliving close() must not
+                # raise out of a daemon worker where nobody can catch it.
+                return False
+            return True
+
+    def _cancel_pending_permissions(self, session_id: str) -> None:
+        """Answer every permission still waiting on a session that was cancelled."""
+        with self._cancelled_lock:
+            pending = [rid for rid, sid in self._pending_permissions.items()
+                       if sid == session_id]
+        for request_id in pending:
+            self._answer_permission(request_id, {"outcome": "cancelled"})
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         if method in AGENT_NOTIFICATIONS:
@@ -324,25 +386,18 @@ class AcpClient:
                     self.on_update(message.get("params") or {})
                 continue
             if name == "session_request_permission":
-                params = message.get("params") or {}
-                session_id = params.get("sessionId")
                 # ACP v2 requires that once a client cancels, every pending
                 # permission request for that session is answered `cancelled`.
                 # Without this a handler could still return `selected` and
                 # authorise a tool call after the user pressed Stop -- the gate
                 # granting permission for work that was already abandoned.
-                outcome: dict[str, Any] = self.permission_handler(params)
-                # Re-check UNDER the lock, and hold it across the send. Checking
-                # first and sending afterwards leaves a window in which a cancel
-                # arrives while the handler is still deciding, and the tool is
-                # then authorised after Stop. The handler runs outside the lock
-                # because it may block; only the decision is serialised.
-                with self._cancelled_lock:
-                    if isinstance(session_id, str) and session_id \
-                            and session_id in self._cancelled_sessions:
-                        outcome = {"outcome": "cancelled"}
-                    self._send({"jsonrpc": "2.0", "id": message.get("id"),
-                                "result": {"outcome": outcome}})
+                #
+                # Deciding INLINE also meant a handler that blocks (asking a
+                # person, say) held the only reader: Stop could not be answered
+                # until the handler returned, so the agent waiting on this reply
+                # stayed hung through the cancellation. The decision runs off the
+                # pump; the pump keeps reading.
+                self._begin_permission(message.get("id"), message.get("params") or {})
                 continue
             if name == "elicitation_create":
                 # Legion runs unattended. Declining is the honest answer; making
@@ -373,6 +428,9 @@ class AcpClient:
         proc = self._proc
         if proc is None:
             return
+        # Nobody is left to answer, and a worker still deciding must not try.
+        with self._cancelled_lock:
+            self._pending_permissions.clear()
         leader_running = proc.poll() is None
         if leader_running:
             # stdin alone is a polite request; a peer that ignores it must not
@@ -441,6 +499,7 @@ class AcpClient:
                 pass
 
 
+AGENT_TO_CLIENT_UPDATE = CLIENT_METHODS["session_update"]
 _TURN_OVER = object()
 
 
@@ -586,6 +645,21 @@ class AcpAgentServer:
         # this notification is a courtesy for handlers that can act immediately.
         self._safe_handle(name, params)
 
+    def emit_idle(self, session_id: Any, stop_reason: Any = None) -> None:
+        """Report that foreground work has stopped, the way v2 reports it.
+
+        A turn ends with an idle state_update carrying the stopReason -- not
+        with the prompt's JSON-RPC result, which only acknowledges acceptance.
+        An asynchronous handler calls this itself when its work finishes.
+        """
+        if not isinstance(session_id, str) or not session_id:
+            return
+        update: dict[str, Any] = {"sessionUpdate": "state_update", "state": "idle"}
+        if stop_reason is not None:
+            update["stopReason"] = stop_reason
+        self._write({"jsonrpc": "2.0", "method": AGENT_TO_CLIENT_UPDATE,
+                     "params": {"sessionId": session_id, "update": update}})
+
     def _end_prompt_for(self, params: dict[str, Any], result: Any = _TURN_OVER) -> None:
         """Release a turn only once the turn is actually over.
 
@@ -630,6 +704,21 @@ class AcpAgentServer:
                          "error": {"code": -32603, "message": str(exc)}})
             return
         if name == "session_prompt":
+            # v2 PromptResponse ACKNOWLEDGES acceptance and nothing more: the
+            # schema says "This response does not indicate that the agent has
+            # finished processing. Processing and completion are reported
+            # through state_update session updates." Forwarding a handler's
+            # stopReason as the result would be rejected by a schema-validating
+            # client, which would then never learn the turn had ended. Consume
+            # it here and report it the way the protocol does.
+            stop_reason = result.get("stopReason") if isinstance(result, dict) else None
             self._end_prompt_for(params, result)
+            ack: dict[str, Any] = {}
+            if isinstance(result, dict) and isinstance(result.get("_meta"), dict):
+                ack["_meta"] = result["_meta"]      # _meta is allowed on PromptResponse
+            self._write({"jsonrpc": "2.0", "id": request_id, "result": ack})
+            if stop_reason is not None:
+                self.emit_idle(params.get("sessionId"), stop_reason)
+            return
         self._write({"jsonrpc": "2.0", "id": request_id,
                      "result": {} if result is None else result})

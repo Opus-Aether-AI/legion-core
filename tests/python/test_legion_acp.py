@@ -133,6 +133,19 @@ def _client(script: bytes, **kwargs):
     return client
 
 
+def _settle_permissions(client):
+    """Wait for off-pump permission decisions to reach the wire.
+
+    The gate is no longer decided ON the read loop: a handler that blocks held
+    the only reader, so Stop could not be answered until it returned. A worker
+    writes its answer before it exits, so joining is exact -- no polling, no
+    tuned delay.
+    """
+    for worker in list(client._permission_workers):
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "a permission decision never completed"
+
+
 def test_pump_answers_a_permission_callback_instead_of_deadlocking():
     script = (
         acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
@@ -141,6 +154,7 @@ def test_pump_answers_a_permission_callback_instead_of_deadlocking():
     )
     client = _client(script, permission_handler=acp.allow_once)
     result = client.request("session_prompt", {"prompt": "hi"})
+    _settle_permissions(client)
 
     assert result == {"stopReason": "end_turn"}
     replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines() if l.strip()]
@@ -539,6 +553,7 @@ def test_permission_is_refused_when_cancel_lands_while_the_handler_decides():
     client = _client(script, permission_handler=slow_handler)
     holder["client"] = client
     client.request("session_prompt", {"sessionId": "s"})
+    _settle_permissions(client)
 
     replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines() if l.strip()]
     granted = next(r for r in replies if r.get("id") == 99)
@@ -554,6 +569,7 @@ def test_permission_is_granted_normally_when_not_cancelled():
     )
     client = _client(script, permission_handler=acp.allow_once)
     client.request("session_prompt", {"sessionId": "s"})
+    _settle_permissions(client)
     replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines() if l.strip()]
     granted = next(r for r in replies if r.get("id") == 99)
     assert granted["result"]["outcome"]["outcome"] == "selected"
@@ -712,3 +728,106 @@ def test_an_async_handler_can_release_its_own_turn():
     server.end_prompt("s")          # the async work finished
     server._notify_disconnect()
     assert server.is_cancelled("s") is False
+
+
+def test_a_blocking_permission_handler_does_not_wedge_cancellation():
+    # The gate used to be decided ON the read loop, so a handler that blocks --
+    # asking a person, say -- held the only reader: Stop could not be answered
+    # until it returned, and the agent waiting on this reply stayed hung right
+    # through the cancellation.
+    release = threading.Event()
+
+    def blocking_handler(params):
+        release.wait(timeout=5)
+        return acp.allow_once(params)
+
+    script = (
+        acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
+                    "params": dict(_PERMISSION_PARAMS, sessionId="s")})
+        + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
+    )
+    client = _client(script, permission_handler=blocking_handler)
+    try:
+        client.request("session_prompt", {"sessionId": "s"})
+        client.cancel("s")          # Stop, while the handler is still blocked
+
+        replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines()
+                   if l.strip()]
+        answers = [r for r in replies if r.get("id") == 99]
+        assert answers, "Stop could not be answered while the handler blocked"
+        assert answers[0]["result"]["outcome"] == {"outcome": "cancelled"}
+    finally:
+        release.set()
+        _settle_permissions(client)
+
+    # The handler's late `selected` must not become a second, contradictory answer.
+    replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines() if l.strip()]
+    assert len([r for r in replies if r.get("id") == 99]) == 1, (
+        "a permission was answered twice; the late approval could authorise "
+        "work that Stop already cancelled"
+    )
+
+
+def test_a_cancelled_session_never_calls_the_permission_handler_at_all():
+    # A gate for a session that is already cancelled is answered `cancelled`
+    # without consulting the handler -- there is nothing to decide, and asking
+    # a human about work that was already abandoned is worse than pointless.
+    called = []
+
+    def handler(params):
+        called.append(params)
+        return acp.allow_once(params)
+
+    client = acp.AcpClient(["true"], permission_handler=handler)
+    sent = []
+    client._send = sent.append
+    client._cancelled_sessions.add("s")
+    client._begin_permission(99, dict(_PERMISSION_PARAMS, sessionId="s"))
+
+    assert called == [], "the gate was consulted for a session already cancelled"
+    assert sent, "an already-cancelled permission was never answered"
+    assert sent[0]["result"]["outcome"] == {"outcome": "cancelled"}
+    assert client._permission_workers == [], "a decision thread was started anyway"
+
+
+def test_a_prompt_result_only_acknowledges_and_completion_arrives_as_an_update():
+    # ACP v2: "This response does not indicate that the agent has finished
+    # processing. Processing and completion are reported through state_update
+    # session updates." Forwarding a handler's stopReason as the JSON-RPC result
+    # would be rejected by a schema-validating client, which would then never
+    # learn the turn had ended.
+    out = io.BytesIO()
+    server = acp.AcpAgentServer(lambda m, p: {"stopReason": "end_turn"},
+                                stdin=io.BytesIO(b""), stdout=out)
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 7)
+
+    sent = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    response = next(m for m in sent if m.get("id") == 7)
+    assert response["result"] == {}, "stopReason must not ride on the prompt response"
+
+    update = next(m for m in sent if m.get("method") == "session/update")
+    assert update["params"]["sessionId"] == "s"
+    assert update["params"]["update"] == {
+        "sessionUpdate": "state_update", "state": "idle", "stopReason": "end_turn",
+    }
+
+
+def test_an_accepted_prompt_reports_no_completion_yet():
+    out = io.BytesIO()
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=out)
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 7)
+
+    sent = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    assert next(m for m in sent if m.get("id") == 7)["result"] == {}
+    assert not [m for m in sent if m.get("method") == "session/update"], (
+        "accepting a prompt is not the same as finishing it"
+    )
+
+
+def test_meta_survives_on_the_prompt_acknowledgement():
+    out = io.BytesIO()
+    server = acp.AcpAgentServer(lambda m, p: {"stopReason": "end_turn", "_meta": {"k": 1}},
+                                stdin=io.BytesIO(b""), stdout=out)
+    server._dispatch_request("session_prompt", {"sessionId": "s"}, 7)
+    sent = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    assert next(m for m in sent if m.get("id") == 7)["result"] == {"_meta": {"k": 1}}

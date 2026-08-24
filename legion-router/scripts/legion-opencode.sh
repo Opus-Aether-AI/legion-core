@@ -205,7 +205,7 @@ cmd_run() {
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   oc_bin="$(resolve_opencode_bin)" || die "opencode CLI not found. Install opencode or set OPENCODE_BIN (expected \$HOME/.opencode/bin/opencode)."
   mkdir -p "$art"
-  printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+  legion_write_runtime_gitignore "$repo"
 
   note "-> opencode worktree $wt (branch $branch, base $base)"
   if ! git -C "$repo" worktree add -q -b "$branch" "$wt" "$base"; then

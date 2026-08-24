@@ -524,3 +524,59 @@ def test_a_cancel_with_no_running_prompt_marks_nothing():
     server._dispatch_notification("session_cancel", {"sessionId": "s"})
     server._begin_turn({"sessionId": "s"})
     assert server.is_cancelled("s") is False, "a stray cancel poisoned the next prompt"
+
+
+def test_permission_is_refused_after_the_session_was_cancelled():
+    # ACP v2 REQUIRES that once a client cancels, pending permission requests
+    # for that session are answered `cancelled`. Otherwise a handler can still
+    # return `selected` and authorise a tool call after the user pressed Stop.
+    script = (
+        acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
+                    "params": dict(_PERMISSION_PARAMS, sessionId="s")})
+        + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
+    )
+    client = _client(script, permission_handler=acp.allow_once)
+    with client._cancelled_lock:
+        client._cancelled_sessions.add("s")   # as cancel() would have
+
+    client.request("session_prompt", {"sessionId": "s"})
+
+    replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines() if l.strip()]
+    granted = next(r for r in replies if r.get("id") == 99)
+    assert granted["result"]["outcome"] == {"outcome": "cancelled"}, (
+        "a tool was authorised after Stop"
+    )
+
+
+def test_permission_is_granted_normally_when_not_cancelled():
+    script = (
+        acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
+                    "params": dict(_PERMISSION_PARAMS, sessionId="s")})
+        + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
+    )
+    client = _client(script, permission_handler=acp.allow_once)
+    client.request("session_prompt", {"sessionId": "s"})
+    replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines() if l.strip()]
+    granted = next(r for r in replies if r.get("id") == 99)
+    assert granted["result"]["outcome"]["outcome"] == "selected"
+
+
+def test_short_stderr_is_readable_before_the_peer_exits():
+    # read(8192) waits for a full buffer or EOF, so a short diagnostic stayed
+    # invisible exactly when _pump needed it to explain the failure.
+    program = (
+        "import sys, time\n"
+        "sys.stderr.write('boom: short diagnostic\\n'); sys.stderr.flush()\n"
+        "time.sleep(5)\n"
+    )
+    client = acp.AcpClient([sys.executable, "-c", program], permission_handler=acp.allow_once)
+    client.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not client.stderr_tail and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert any("boom" in line for line in client.stderr_tail), (
+            "short stderr was not readable until EOF"
+        )
+    finally:
+        client.close()

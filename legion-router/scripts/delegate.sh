@@ -1522,10 +1522,13 @@ review_executor_unavailable() {
   # prompt path's stdout carries reviewer prose in .result, and matching text
   # there is how a finding gets mistaken for an outage.
   if [[ -n "$out_file" && -s "$out_file" ]]; then
-    if jq -e -R 'fromjson? | select(.type == "error")
-                 | .message // ""
-                 | ascii_downcase
-                 | test("usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated")' \
+    # any(), not a per-line test: `jq -e` exits on the LAST value it emitted, so
+    # a quota error followed by any other error event would end in `false` and
+    # suppress the fallback.
+    if jq -e -R -s 'split("\n") | map(fromjson? // empty)
+                 | any(.[]?; (.type? == "error")
+                       and ((.message? // "") | ascii_downcase
+                            | test("usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated")))' \
          "$out_file" >/dev/null 2>&1; then
       return 0
     fi

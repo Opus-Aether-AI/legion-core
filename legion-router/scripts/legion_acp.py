@@ -162,6 +162,8 @@ class AcpClient:
         self._stderr_thread: threading.Thread | None = None
         self._pgid: int | None = None
         self._stderr_bytes = b""
+        self._cancelled_lock = threading.Lock()
+        self._cancelled_sessions: set[str] = set()
 
     def _request_id(self) -> int:
         with self._id_lock:
@@ -201,7 +203,11 @@ class AcpClient:
             return
         buffer = b""
         while True:
-            chunk = proc.stderr.read(8192)
+            # read1(), not read(): read() waits for a full buffer or EOF, so a
+            # peer that writes a short diagnostic and then leaves stderr open in
+            # a descendant would have it sitting unread precisely when _pump
+            # needs it to explain the failure.
+            chunk = proc.stderr.read1(8192) if hasattr(proc.stderr, "read1") else proc.stderr.read(1)
             if not chunk:
                 break
             buffer = (buffer + chunk)[-self.STDERR_TAIL_BYTES:]
@@ -235,7 +241,13 @@ class AcpClient:
 
     def cancel(self, session_id: str) -> None:
         """Interrupt a running prompt. Safe to call from another thread."""
+        with self._cancelled_lock:
+            self._cancelled_sessions.add(session_id)
         self.notify("session_cancel", {"sessionId": session_id})
+
+    def is_cancelled(self, session_id: str) -> bool:
+        with self._cancelled_lock:
+            return session_id in self._cancelled_sessions
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         if method in AGENT_NOTIFICATIONS:
@@ -274,7 +286,17 @@ class AcpClient:
                     self.on_update(message.get("params") or {})
                 continue
             if name == "session_request_permission":
-                outcome = self.permission_handler(message.get("params") or {})
+                params = message.get("params") or {}
+                session_id = params.get("sessionId")
+                # ACP v2 requires that once a client cancels, every pending
+                # permission request for that session is answered `cancelled`.
+                # Without this a handler could still return `selected` and
+                # authorise a tool call after the user pressed Stop -- the gate
+                # granting permission for work that was already abandoned.
+                if isinstance(session_id, str) and session_id and self.is_cancelled(session_id):
+                    outcome: dict[str, Any] = {"outcome": "cancelled"}
+                else:
+                    outcome = self.permission_handler(params)
                 self._send({"jsonrpc": "2.0", "id": message.get("id"),
                             "result": {"outcome": outcome}})
                 continue

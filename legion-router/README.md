@@ -78,6 +78,30 @@ through `legion-route.py` rather than parsing `models.toml` a second time. If no
 interpreter resolves, the proxy still starts and warns, but every model role
 falls through to its default.
 
+## Agent Client Protocol bridge (staged, not yet wired)
+
+`legion-router/scripts/legion_acp.py` speaks ACP **v2** in both directions: as a
+client that can drive any ACP agent, and as an agent that an editor (Zed,
+JetBrains, Neovim, VS Code) can drive. Nothing calls it yet.
+
+The `acp` key in `executors.toml` is declared for every executor and is `false`
+everywhere. A protocol both sides implement is not the same as a protocol both
+sides implement the same way, so the bespoke adapters stay authoritative until an
+executor has actually completed a session over the bridge. Flipping the flag
+today changes nothing, because no dispatch path reads it.
+
+Two contract details worth knowing before wiring it:
+
+- `session/request_permission` is a **client** method, so the permission gate is
+  Legion's by protocol design. `AcpClient` therefore requires a handler rather
+  than defaulting one, and the reply must be a tagged outcome carrying an
+  `optionId` from the request's own `options` -- an agent that receives an
+  unknown outcome tag must not treat it as approval, so a wrong shape loses the
+  gate silently rather than failing.
+- `session/cancel` is a **notification**. Use `client.cancel(session_id)`, which
+  is safe to call from another thread; sending it as a request blocks forever on
+  a reply that never comes.
+
 ## Tune routes from measured outcomes
 
 Use `legion-report --by archetype` to inspect cost, success, latency, and the

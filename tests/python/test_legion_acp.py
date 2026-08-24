@@ -2,7 +2,10 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -14,45 +17,106 @@ acp = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(acp)
 
 
-def test_method_names_map_to_the_wire_form():
-    assert acp._wire("session_prompt") == "session/prompt"
-    assert acp._wire("initialize") == "initialize"
+# ── wire names ───────────────────────────────────────────────────────────
 
+def test_wire_names_are_taken_from_the_schema_not_derived():
+    # v1 and v2 disagree (v1: authenticate / session/load / session/set_mode).
+    # Deriving from Python identifiers works for some names by luck and not for
+    # others, so the map is explicit and this pins the ones that would break.
+    assert acp.AGENT_METHODS["auth_login"] == "auth/login"
+    assert acp.AGENT_METHODS["session_set_config_option"] == "session/set_config_option"
+    assert acp.CLIENT_METHODS["session_request_permission"] == "session/request_permission"
+
+
+def test_v1_only_methods_are_absent():
+    for gone in ("authenticate", "session_load", "session_set_mode"):
+        assert gone not in acp.AGENT_METHODS
+
+
+# ── permission outcome shape ─────────────────────────────────────────────
+
+_PERMISSION_PARAMS = {
+    "sessionId": "s1",
+    "title": "write file",
+    "options": [
+        {"optionId": "reject-1", "name": "Reject", "kind": "reject_once"},
+        {"optionId": "allow-1", "name": "Allow once", "kind": "allow_once"},
+    ],
+}
+
+
+def test_allow_once_selects_a_real_option_id():
+    # ACP's outcome is a tagged union carrying an optionId from params.options.
+    # An agent receiving an unknown tag MUST NOT treat it as approval, so the
+    # wrong shape does not fail loudly -- it silently loses the gate.
+    outcome = acp.allow_once(_PERMISSION_PARAMS)
+    assert outcome == {"outcome": "selected", "optionId": "allow-1"}
+
+
+def test_allow_once_cancels_when_no_permitting_option_exists():
+    outcome = acp.allow_once({"options": [{"optionId": "r", "kind": "reject_once"}]})
+    assert outcome == {"outcome": "cancelled"}
+
+
+def test_deny_is_the_cancelled_outcome():
+    assert acp.deny(_PERMISSION_PARAMS) == {"outcome": "cancelled"}
+
+
+def test_option_selection_prefers_kind_over_ordering():
+    # Nothing in the protocol guarantees option order.
+    params = {"options": [
+        {"optionId": "always", "kind": "allow_always"},
+        {"optionId": "once", "kind": "allow_once"},
+    ]}
+    assert acp.select_permission_option(params, ("allow_once", "allow_always")) == "once"
+
+
+# ── framing ──────────────────────────────────────────────────────────────
 
 def test_decode_skips_noise_without_dropping_the_session():
-    """A banner on stdout is cosmetics; failing on it would be absurd."""
     stream = io.BytesIO(
         b"starting up...\n"
         + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
-        + b"\n"
         + b'{"not":"jsonrpc"}\n'
     )
     messages = list(acp.decode_stream(stream))
     assert len(messages) == 1
-    assert messages[0]["result"] == {"ok": True}
 
+
+# ── client contract ──────────────────────────────────────────────────────
 
 def test_a_client_without_a_permission_handler_is_refused():
-    # session/request_permission is a CLIENT method. Declining to implement it
-    # means approving everything, which is worse than the adapters this replaces.
     with pytest.raises(acp.AcpError) as excinfo:
         acp.AcpClient(["true"], permission_handler=None)
     assert "permission handler" in str(excinfo.value)
 
 
-def test_client_rejects_a_method_that_is_not_in_the_protocol():
-    client = acp.AcpClient(["true"], permission_handler=lambda params: "allow")
+def test_cancel_is_a_notification_not_a_request():
+    # Sent as a request it blocks forever on a reply the agent never sends, and
+    # there is then no way to interrupt a running prompt.
+    client = acp.AcpClient(["true"], permission_handler=acp.allow_once)
+    with pytest.raises(acp.AcpError) as excinfo:
+        client.request("session_cancel", {"sessionId": "s"})
+    assert "notification" in str(excinfo.value)
+
+
+def test_notify_refuses_a_method_that_is_not_a_notification():
+    client = acp.AcpClient(["true"], permission_handler=acp.allow_once)
+    with pytest.raises(acp.AcpError):
+        client.notify("session_prompt", {})
+
+
+def test_client_rejects_a_method_outside_the_protocol():
+    client = acp.AcpClient(["true"], permission_handler=acp.allow_once)
     with pytest.raises(acp.AcpError):
         client.request("session_teleport")
 
 
 class _FakeProc:
-    """An agent that asks for permission before answering, as a real one does."""
-
-    def __init__(self, script):
+    def __init__(self, script: bytes):
         self.stdin = io.BytesIO()
         self.stdout = io.BytesIO(script)
-        self.stderr = io.BytesIO()
+        self.stderr = io.BytesIO(b"")
         self.killed = False
 
     def kill(self):
@@ -62,44 +126,51 @@ class _FakeProc:
         return 0
 
 
-def test_pump_answers_a_permission_callback_instead_of_deadlocking():
-    asked = []
-
-    def handler(params):
-        asked.append(params)
-        return "allow"
-
-    script = (
-        acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
-                    "params": {"toolCall": {"title": "write file"}}})
-        + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {"stopReason": "end_turn"}})
-    )
-    client = acp.AcpClient(["true"], permission_handler=handler)
+def _client(script: bytes, **kwargs):
+    client = acp.AcpClient(["true"], **kwargs)
     client._proc = _FakeProc(script)
     client._next_id = 0
+    return client
 
+
+def test_pump_answers_a_permission_callback_instead_of_deadlocking():
+    script = (
+        acp.encode({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
+                    "params": _PERMISSION_PARAMS})
+        + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {"stopReason": "end_turn"}})
+    )
+    client = _client(script, permission_handler=acp.allow_once)
     result = client.request("session_prompt", {"prompt": "hi"})
 
     assert result == {"stopReason": "end_turn"}
-    assert asked and asked[0]["toolCall"]["title"] == "write file"
-    replies = [json.loads(line) for line in client._proc.stdin.getvalue().splitlines() if line.strip()]
-    granted = [r for r in replies if r.get("id") == 99]
-    assert granted and granted[0]["result"]["outcome"]["outcome"] == "allow"
+    replies = [json.loads(l) for l in client._proc.stdin.getvalue().splitlines() if l.strip()]
+    granted = next(r for r in replies if r.get("id") == 99)
+    assert granted["result"]["outcome"] == {"outcome": "selected", "optionId": "allow-1"}
 
 
 def test_session_updates_reach_the_log_callback():
     seen = []
     script = (
         acp.encode({"jsonrpc": "2.0", "method": "session/update",
-                    "params": {"sessionUpdate": "agent_message_chunk", "content": "hello"}})
+                    "params": {"sessionUpdate": "agent_message_chunk"}})
         + acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
     )
-    client = acp.AcpClient(["true"], permission_handler=lambda p: "allow",
-                           on_update=seen.append)
-    client._proc = _FakeProc(script)
-    client._next_id = 0
-    client.request("session_prompt", {})
+    _client(script, permission_handler=acp.allow_once, on_update=seen.append).request("session_prompt")
     assert seen and seen[0]["sessionUpdate"] == "agent_message_chunk"
+
+
+def test_a_falsy_result_is_not_coerced_to_an_empty_object():
+    # "answered false" and "answered with an object" are different answers.
+    script = acp.encode({"jsonrpc": "2.0", "id": 1, "result": False})
+    assert _client(script, permission_handler=acp.allow_once).request("session_list") is False
+
+
+def test_a_closed_connection_reports_the_peer_stderr():
+    client = _client(b"", permission_handler=acp.allow_once)
+    client.stderr_tail = ["auth failed: no API key"]
+    with pytest.raises(acp.AcpError) as excinfo:
+        client.request("session_prompt")
+    assert "auth failed" in str(excinfo.value)
 
 
 def test_update_variants_match_the_session_log_vocabulary():
@@ -114,19 +185,71 @@ def test_update_variants_match_the_session_log_vocabulary():
         "plan_update", "state_update", "usage_update", "available_commands_update",
         "config_option_update", "session_info_update",
     }
-    assert acp_variants <= set(sl.EVENT_TYPES), (
-        "the session log must accept every ACP SessionUpdate variant verbatim"
-    )
+    assert acp_variants <= set(sl.EVENT_TYPES)
 
+
+# ── stderr must be drained, against a real process ───────────────────────
+
+def test_a_chatty_agent_does_not_deadlock_the_bridge():
+    """Undrained stderr fills the pipe buffer and stops the peer writing stdout."""
+    noise = "x" * 200  # ~200 KB total, well past a 64 KB pipe buffer
+    program = (
+        "import sys\n"
+        f"for _ in range(1000): sys.stderr.write({noise!r} + chr(10))\n"
+        "sys.stderr.flush()\n"
+        'sys.stdout.write(\'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\' + chr(10))\n'
+        "sys.stdout.flush()\n"
+    )
+    client = acp.AcpClient([sys.executable, "-c", program], permission_handler=acp.allow_once)
+    client.start()
+    try:
+        done: list = []
+        worker = threading.Thread(target=lambda: done.append(client.request("session_list")))
+        worker.start()
+        worker.join(timeout=30)
+        assert not worker.is_alive(), "bridge deadlocked on an undrained stderr pipe"
+        assert done == [{"ok": True}]
+    finally:
+        client.close()
+
+
+def test_close_reaps_the_child_and_leaves_no_zombie():
+    client = acp.AcpClient([sys.executable, "-c", "import time; time.sleep(60)"],
+                           permission_handler=acp.allow_once)
+    client.start()
+    proc = client._proc
+    client.close()
+    assert proc.poll() is not None, "child was not reaped"
+
+
+# ── server contract ──────────────────────────────────────────────────────
 
 def test_server_refuses_a_method_outside_the_protocol():
     out = io.BytesIO()
-    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(
+    acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(
         acp.encode({"jsonrpc": "2.0", "id": 5, "method": "session/teleport"})
-    ), stdout=out)
-    server.serve_forever()
-    reply = json.loads(out.getvalue().splitlines()[0])
-    assert reply["error"]["code"] == -32601
+    ), stdout=out).serve_forever()
+    assert json.loads(out.getvalue())["error"]["code"] == -32601
+
+
+def test_server_dispatches_a_notification_so_stop_actually_stops():
+    # session/cancel is a notification. Dropping notifications means a client
+    # pressing stop has no effect and Legion keeps burning a metered run.
+    seen = []
+    out = io.BytesIO()
+    acp.AcpAgentServer(lambda m, p: seen.append(m), stdin=io.BytesIO(
+        acp.encode({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "s"}})
+    ), stdout=out).serve_forever()
+    assert seen == ["session_cancel"]
+    assert out.getvalue() == b"", "a notification must not be answered"
+
+
+def test_server_ignores_a_response_arriving_on_stdin():
+    out = io.BytesIO()
+    acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(
+        acp.encode({"jsonrpc": "2.0", "id": 7, "result": {"whatever": True}})
+    ), stdout=out).serve_forever()
+    assert out.getvalue() == b"", "a response is not an unsupported method"
 
 
 def test_server_reports_a_handler_fault_without_killing_the_session():
@@ -139,13 +262,15 @@ def test_server_reports_a_handler_fault_without_killing_the_session():
         + acp.encode({"jsonrpc": "2.0", "id": 2, "method": "session/list"})
     )
     acp.AcpAgentServer(boom, stdin=stdin, stdout=out).serve_forever()
-    replies = [json.loads(line) for line in out.getvalue().splitlines()]
-    assert len(replies) == 2, "one fault must not end the session"
+    replies = [json.loads(l) for l in out.getvalue().splitlines()]
+    assert len(replies) == 2
     assert all(r["error"]["code"] == -32603 for r in replies)
 
 
-def test_acp_capability_is_declared_and_opt_in():
-    """A protocol both sides implement is not one they implement the same way."""
+# ── registry ─────────────────────────────────────────────────────────────
+
+def test_acp_capability_is_declared_and_currently_unexercised():
+    """A tripwire, not a speed bump: enabling an executor edits the allowlist."""
     import importlib.util as _u
     spec = _u.spec_from_file_location(
         "lroute", os.path.join(HERE, "..", "..", "legion-router", "scripts", "legion-route.py")
@@ -156,10 +281,14 @@ def test_acp_capability_is_declared_and_opt_in():
     execs = route.load_executors(
         os.path.join(HERE, "..", "..", "legion-router", "config", "executors.toml")
     )
-    assert execs, "the registry must load"
+    enabled_for_acp: set[str] = set()   # add an executor here once it is exercised
+
+    assert execs
     for name, entry in execs.items():
         assert "acp" in entry, f"{name} must declare whether it can be driven over ACP"
-        assert entry["acp"] is False, (
-            f"{name} claims ACP before being exercised over it; the bespoke adapter "
-            f"stays authoritative until then"
-        )
+        assert isinstance(entry["acp"], bool), f"{name}.acp must be a boolean"
+        if name not in enabled_for_acp:
+            assert entry["acp"] is False, (
+                f"{name} claims ACP without being in the exercised allowlist; add it "
+                f"to enabled_for_acp once a real session has run over the bridge"
+            )

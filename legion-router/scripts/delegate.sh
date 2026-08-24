@@ -1360,10 +1360,18 @@ $(cat "$patch")
   # already read-only here and the reviewer never delegates onward, so the
   # same-harness case (a Claude-primary session reviewed by Claude on a
   # different model) is safe and is often the only reviewer left standing.
+  # Shell options are GLOBAL, not function-scoped. This used to re-enable errexit
+  # unconditionally and then `return "$rc"`, so a reviewer that merely failed --
+  # cursor with no API key, say -- killed the whole script mid-walk: no fallback
+  # to the next candidate, no terminal receipt, exit 1 with empty stdout. Restore
+  # whatever the caller had instead of asserting a value.
+  local errexit_was_set=0
+  case "$-" in *e*) errexit_was_set=1 ;; esac
+  set +e
   ( cd "$wt" && LEGION_REVIEW_HANDOFF=1 "$adapter_bin" run --repo "$wt" "${task_args[@]}" ${model:+--model "$model"} --quiet ) \
     </dev/null >"$stream" 2>"$err"
   rc=$?
-  set -e
+  [[ "$errexit_was_set" -eq 0 ]] || set -e
   # Adapters return a JSON envelope; the reviewer's answer is .result (or the
   # last-message file it points at). Either becomes the verdict candidate.
   last="$(jq -r '.result // ""' "$stream" 2>/dev/null)"
@@ -1496,9 +1504,21 @@ review_executor_unavailable() {
   # an out-of-quota reviewer look like an ordinary review failure, which is the
   # bug this fallback exists to fix. Search both streams.
   local f
+  # Structured first. An adapter that reports auth_error in its JSON result has
+  # told us plainly that it could not authenticate, and that is worth more than
+  # matching prose: this check used to rely on wording alone, and when
+  # legion-cursor was given a friendlier message the pattern stopped matching --
+  # so the fallback silently died at the one executor it most needed to skip.
+  for f in "$out_file" "$err_file"; do
+    [[ -n "$f" && -s "$f" ]] || continue
+    if jq -e -s 'any(.[]?; (.auth_error // "") != "")' "$f" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  # Prose fallback, for providers that only say it in a message.
   for f in "$err_file" "$out_file"; do
     [[ -n "$f" && -s "$f" ]] || continue
-    if grep -qiE "usage limit|rate.?limit|quota exceeded|insufficient_quota|429 |authentication required|not authenticated|unauthorized|invalid_api_key|please run .*login|command not found" "$f"; then
+    if grep -qiE "usage limit|rate.?limit|quota exceeded|insufficient_quota|429 |authentication required|not authenticated|unauthorized|invalid_api_key|api[_ ]key.*(unset|missing|required)|please run .*login|command not found" "$f"; then
       return 0
     fi
   done

@@ -375,3 +375,21 @@ def test_provenance_records_a_field_the_archetype_displaced():
 def test_resolve_without_provenance_is_unchanged():
     plain = lr.resolve(table(), "implement-feature", models())
     assert "provenance" not in plain
+
+
+def test_no_role_resolves_to_a_retired_model():
+    """Fable is retired. A role that still names it is not a stale comment --
+    it is a live routing decision, and it was one: the installed CLI went on
+    resolving claude_default to the retired model long after the catalog comment
+    said "retired", so every repo on the machine kept paying its rate (double
+    Opus) at a lower success rate. Retirement has to be checkable, not described.
+    (The concrete id stays out of this file on purpose -- the catalogs are the
+    only place model ids may appear, and that rule caught this docstring.)
+    """
+    catalog = lr.load_models(MODELS_TABLE)
+    offenders = {role: model for role, model in catalog.items()
+                 if "fable" in str(model).lower()}
+    assert not offenders, (
+        f"retired model still routable: {offenders}. Retiring a model means no "
+        f"role resolves to it, in every config that ships."
+    )

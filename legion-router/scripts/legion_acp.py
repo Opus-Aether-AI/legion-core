@@ -267,6 +267,11 @@ class AcpClient:
         """
         with self._cancelled_lock:
             self._cancelled_sessions.add(session_id)
+        # Same obligation as cancel(): a peer's outstanding permission request
+        # must be answered now, not whenever a blocked handler happens to
+        # return. Leaving it to cancel() alone recreated, on this path, exactly
+        # the deadlock the off-pump decision exists to prevent.
+        self._cancel_pending_permissions(session_id)
 
     def resume(self, session_id: str) -> None:
         """Clear a cancellation so a later prompt in the session is not blocked.
@@ -447,10 +452,14 @@ class AcpClient:
                 # mis-correlate with a genuine null-id request.
                 continue
         tail = "; ".join(self.stderr_tail[-3:])
-        raise AcpError(
-            "agent closed the connection before answering"
-            + (f" (stderr: {tail})" if tail else "")
-        )
+        # Distinguish the two ways this ends. "Never answered" and "accepted the
+        # prompt and then died mid-turn" look identical from the pipe, and only
+        # the second tells you the agent was actually reachable and talking.
+        what = ("agent accepted the prompt but closed the connection before "
+                f"reporting the turn idle (session {until_idle!r})"
+                if until_idle is not None and acknowledged
+                else "agent closed the connection before answering")
+        raise AcpError(what + (f" (stderr: {tail})" if tail else ""))
 
     def close(self) -> None:
         """Shut the peer down without leaking a zombie, its pipes, or the caller.
@@ -603,19 +612,29 @@ class AcpAgentServer:
             # and a daemon worker would be abandoned when the process exits --
             # taking a delegated run, its subprocesses and its worktree state
             # with it. Owned work finishes, or is cancelled deliberately.
-            entered = threading.Event()
+            params = message.get("params") or {}
+            if name == "session_prompt":
+                # Register the turn HERE, on the reader thread, before the next
+                # message is read. A cancel arriving immediately after a prompt
+                # would otherwise overtake it -- looking for something to cancel
+                # before the worker had registered anything -- and then
+                # begin_prompt would discard that marker and run the handler
+                # anyway, losing Stop while metered work carried on.
+                #
+                # This used to be a handshake with the worker, bounded by a
+                # five-second wait. A wait that expires silently gives up the
+                # exact ordering it exists to guarantee; doing the registration
+                # on this side means there is no window to lose.
+                session_id = params.get("sessionId")
+                if isinstance(session_id, str) and session_id:
+                    self.begin_prompt(session_id)
             worker = threading.Thread(
                 target=self._dispatch_request,
-                args=(name, message.get("params") or {}, request_id, entered),
+                args=(name, params, request_id),
+                kwargs={"register": False},
                 daemon=False,
             )
             worker.start()
-            # Wait for the handler to actually ENTER before reading the next
-            # message. Otherwise a cancel arriving immediately after a prompt can
-            # overtake it: the handler registers its delegated run after the
-            # cancel has already looked for something to cancel, and Stop is
-            # silently lost while the prompt runs on.
-            entered.wait(timeout=5)
             workers.append(worker)
             workers = [w for w in workers if w.is_alive()]
 
@@ -709,10 +728,13 @@ class AcpAgentServer:
             pass
 
     def _dispatch_request(self, name: str, params: dict[str, Any], request_id: Any,
-                          entered: threading.Event | None = None) -> None:
+                          *, register: bool = True) -> None:
+        """Serve one request. `register` is False when the reader already
+        registered the turn -- begin_prompt discards a cancel marker, so doing it
+        twice would drop a Stop that landed in between."""
+        session_id = params.get("sessionId")
         if name == "session_prompt":
-            session_id = params.get("sessionId")
-            if isinstance(session_id, str) and session_id:
+            if register and isinstance(session_id, str) and session_id:
                 self.begin_prompt(session_id)
             # v2 wants the acknowledgement as soon as the prompt is ACCEPTED,
             # before the work. Sending it afterwards left the editor's request
@@ -720,8 +742,6 @@ class AcpAgentServer:
             # long enough to time out -- and put updates ahead of the
             # acknowledgement they belong to.
             self._write({"jsonrpc": "2.0", "id": request_id, "result": {}})
-            if entered is not None:
-                entered.set()
             try:
                 result = self.handler(name, params)
             except Exception as exc:  # noqa: BLE001 - a fault must not kill the session
@@ -734,8 +754,6 @@ class AcpAgentServer:
             if stop_reason is not None:
                 self.emit_idle(session_id, stop_reason)
             return
-        if entered is not None:
-            entered.set()
         try:
             result = self.handler(name, params)
         except Exception as exc:  # noqa: BLE001 - a handler fault must not kill the session

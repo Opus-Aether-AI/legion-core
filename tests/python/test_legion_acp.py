@@ -945,3 +945,76 @@ def test_a_faulting_handler_reports_through_idle_once_acknowledged():
     assert update["state"] == "idle"
     assert update["stopReason"] == "_error", "underscore is the reserved extension space"
     assert "delegation failed" in update["_meta"]["message"]
+
+
+def test_dying_mid_turn_is_reported_differently_from_never_answering():
+    # From the pipe these look identical, and only one of them tells you the
+    # agent was reachable and talking.
+    accepted_then_died = acp.encode({"jsonrpc": "2.0", "id": 1, "result": {}})
+    client = _client(accepted_then_died, permission_handler=acp.allow_once)
+    with pytest.raises(acp.AcpError, match="before reporting the turn idle"):
+        client.request("session_prompt", {"sessionId": "s"})
+
+    silent = _client(b"", permission_handler=acp.allow_once)
+    with pytest.raises(acp.AcpError, match="before answering"):
+        silent.request("session_new", {})
+
+
+def test_a_cancel_arriving_right_after_a_prompt_is_not_discarded():
+    # The reader registers the turn before reading the next message, so a cancel
+    # queued immediately behind a prompt cannot arrive "before" the turn exists
+    # and be discarded by begin_prompt. This used to rest on a five-second
+    # handshake, and a wait that expires silently gives up the exact ordering it
+    # exists to guarantee.
+    started = threading.Event()
+    finish = threading.Event()
+
+    def handler(_m, _p):
+        started.set()
+        finish.wait(timeout=5)
+        return {}
+
+    stdin = io.BytesIO(
+        acp.encode({"jsonrpc": "2.0", "id": 1, "method": "session/prompt",
+                    "params": {"sessionId": "s"}})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/cancel",
+                      "params": {"sessionId": "s"}})
+    )
+    server = acp.AcpAgentServer(handler, stdin=stdin, stdout=io.BytesIO())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert started.wait(timeout=5), "the prompt handler never ran"
+        # Give the cancel that is queued behind it time to be read and applied.
+        for _ in range(500):
+            if server.is_cancelled("s"):
+                break
+            time.sleep(0.01)
+        assert server.is_cancelled("s"), "a cancel queued behind a prompt was lost"
+    finally:
+        finish.set()
+        thread.join(timeout=5)
+
+
+def test_cancel_local_also_releases_a_blocked_permission():
+    # cancel_local is used when the peer has ALREADY been told. It still owes the
+    # same obligation as cancel(): answer the outstanding gate now, rather than
+    # whenever a blocked handler happens to return.
+    release = threading.Event()
+
+    def blocking_handler(params):
+        release.wait(timeout=5)
+        return acp.allow_once(params)
+
+    client = acp.AcpClient(["true"], permission_handler=blocking_handler)
+    sent = []
+    client._send = sent.append
+    client._begin_permission(99, dict(_PERMISSION_PARAMS, sessionId="s"))
+    try:
+        client.cancel_local("s")
+        answers = [m for m in sent if m.get("id") == 99]
+        assert answers, "cancel_local left the peer's permission unanswered"
+        assert answers[0]["result"]["outcome"] == {"outcome": "cancelled"}
+    finally:
+        release.set()
+        _settle_permissions(client)

@@ -359,3 +359,77 @@ def test_server_signals_disconnect_so_orphaned_work_can_unwind():
     acp.AcpAgentServer(lambda m, p: seen.append((m, p)),
                        stdin=io.BytesIO(b""), stdout=io.BytesIO()).serve_forever()
     assert ("session_cancel", {"reason": "client_disconnected"}) in seen
+
+
+def test_cancel_cannot_overtake_the_prompt_it_means_to_stop():
+    # worker.start() only SCHEDULES. The reader could dispatch the cancel before
+    # the prompt handler registered its run, so Stop found nothing to stop and
+    # the prompt ran on regardless.
+    order = []
+    release = threading.Event()
+
+    def handler(method, params):
+        order.append(method)
+        if method == "session_prompt":
+            release.wait(timeout=10)
+        return {}
+
+    stdin = io.BytesIO(
+        acp.encode({"jsonrpc": "2.0", "id": 1, "method": "session/prompt", "params": {"sessionId": "s"}})
+        + acp.encode({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "s"}})
+    )
+    server = acp.AcpAgentServer(handler, stdin=stdin, stdout=io.BytesIO())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    deadline = time.monotonic() + 10
+    while "session_cancel" not in order and time.monotonic() < deadline:
+        time.sleep(0.02)
+    release.set()
+    thread.join(timeout=15)
+
+    assert order[0] == "session_prompt", (
+        f"cancel overtook the prompt it was meant to stop: {order}"
+    )
+
+
+def test_cancellation_is_sticky_for_a_late_registering_handler():
+    # Ordering alone is not enough when a handler registers its work several
+    # hops in; recording the cancel means the answer survives the race.
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    assert server.is_cancelled("s") is False
+    server._dispatch_notification("session_cancel", {"sessionId": "s"})
+    assert server.is_cancelled("s") is True
+
+
+def test_close_kills_a_descendant_left_behind_by_an_exited_leader():
+    # start_new_session detaches the group. A leader that exits cleanly skipped
+    # every signalling branch, so its descendants survived close() outright.
+    marker = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"acp-orphan-{os.getpid()}")
+    program = (
+        "import os, subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable,'-c','import time,os\\nopen({marker!r},\\'w\\').close()\\ntime.sleep(120)'])\n"
+        "sys.stdout.flush()\n"          # leader exits immediately, child lives on
+    )
+    client = acp.AcpClient([sys.executable, "-c", program], permission_handler=acp.allow_once)
+    client.start()
+    pgid = client._pgid
+    for _ in range(100):                # wait for the grandchild to exist
+        if os.path.exists(marker):
+            break
+        time.sleep(0.05)
+    started = time.monotonic()
+    client.close()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 20, f"close() blocked for {elapsed:.1f}s on a surviving descendant"
+    if pgid is not None:
+        try:
+            os.killpg(pgid, 0)
+            raise AssertionError("the detached group outlived close()")
+        except (ProcessLookupError, PermissionError, OSError):
+            pass  # group is gone, which is the point
+    try:
+        os.unlink(marker)
+    except OSError:
+        pass

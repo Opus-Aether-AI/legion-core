@@ -24,6 +24,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 import threading
 from typing import Any, Callable, Iterator
 
@@ -157,6 +158,7 @@ class AcpClient:
         self._id_lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._stderr_thread: threading.Thread | None = None
+        self._pgid: int | None = None
         self.stderr_tail: list[str] = []
 
     def _request_id(self) -> int:
@@ -173,6 +175,14 @@ class AcpClient:
             self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, cwd=self.cwd, start_new_session=True,
         )
+        # Remember the group while the leader is alive. After it exits, getpgid
+        # fails and the group is unaddressable -- but detaching the session means
+        # any descendant it spawned is still running in that group, so losing the
+        # id is losing the only handle on them.
+        try:
+            self._pgid = os.getpgid(self._proc.pid)
+        except OSError:
+            self._pgid = None
         # stderr MUST be drained. A chatty agent fills the OS pipe buffer (~64 KB),
         # blocks in write(2), stops producing stdout, and the reader below waits
         # forever for a response the peer can no longer send. Keeping a bounded
@@ -277,7 +287,8 @@ class AcpClient:
         proc = self._proc
         if proc is None:
             return
-        if proc.poll() is None:
+        leader_running = proc.poll() is None
+        if leader_running:
             # stdin alone is a polite request; a peer that ignores it must not
             # be able to hold the caller hostage.
             try:
@@ -296,6 +307,11 @@ class AcpClient:
                     proc.wait()  # reap; killing alone leaves a zombie until exit
         else:
             proc.wait()
+        # Sweep the group unconditionally. A leader that exited cleanly skips
+        # every branch above, and its detached descendants would otherwise
+        # outlive close() holding stderr open -- which is also what makes the
+        # drainer join below time out.
+        self._reap_group()
         # Close a stream only once the drainer has let go of it. If a descendant
         # still holds stderr open the thread cannot exit, and closing underneath
         # it would block on the buffered reader's lock -- so leave that one to
@@ -315,6 +331,17 @@ class AcpClient:
             except OSError:
                 pass  # already closed, or the peer went away first
         self._proc = None
+
+    def _reap_group(self) -> None:
+        """Terminate anything left in the peer's process group."""
+        if self._pgid is None:
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(self._pgid, sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                return  # nothing left in the group, or not ours to signal
+            time.sleep(0.2)
 
     @staticmethod
     def _signal_group(proc: subprocess.Popen[bytes], sig: int) -> None:
@@ -345,6 +372,8 @@ class AcpAgentServer:
         self.stdin = stdin
         self.stdout = stdout
         self._write_lock = threading.Lock()
+        self._cancel_lock = threading.Lock()
+        self._cancelled: set[str] = set()
 
     def _write(self, message: dict[str, Any]) -> None:
         # Workers answer concurrently; interleaved partial writes would corrupt
@@ -390,12 +419,19 @@ class AcpAgentServer:
             # and a daemon worker would be abandoned when the process exits --
             # taking a delegated run, its subprocesses and its worktree state
             # with it. Owned work finishes, or is cancelled deliberately.
+            entered = threading.Event()
             worker = threading.Thread(
                 target=self._dispatch_request,
-                args=(name, message.get("params") or {}, request_id),
+                args=(name, message.get("params") or {}, request_id, entered),
                 daemon=False,
             )
             worker.start()
+            # Wait for the handler to actually ENTER before reading the next
+            # message. Otherwise a cancel arriving immediately after a prompt can
+            # overtake it: the handler registers its delegated run after the
+            # cancel has already looked for something to cancel, and Stop is
+            # silently lost while the prompt runs on.
+            entered.wait(timeout=5)
             workers.append(worker)
             workers = [w for w in workers if w.is_alive()]
 
@@ -414,13 +450,31 @@ class AcpAgentServer:
         except Exception:  # noqa: BLE001 - nobody left to report it to
             pass
 
+    def is_cancelled(self, session_id: str) -> bool:
+        """Was this session cancelled? Sticky, so a late handler still sees it.
+
+        Ordering alone is not enough for a handler that registers its work after
+        several hops; recording the cancel means the answer survives the race
+        rather than depending on winning it.
+        """
+        with self._cancel_lock:
+            return session_id in self._cancelled
+
     def _dispatch_notification(self, name: str, params: dict[str, Any]) -> None:
+        if name == "session_cancel":
+            session_id = params.get("sessionId")
+            if isinstance(session_id, str) and session_id:
+                with self._cancel_lock:
+                    self._cancelled.add(session_id)
         try:
             self.handler(name, params)
         except Exception:  # noqa: BLE001 - a notification has nobody to tell
             pass
 
-    def _dispatch_request(self, name: str, params: dict[str, Any], request_id: Any) -> None:
+    def _dispatch_request(self, name: str, params: dict[str, Any], request_id: Any,
+                          entered: threading.Event | None = None) -> None:
+        if entered is not None:
+            entered.set()
         try:
             result = self.handler(name, params)
         except Exception as exc:  # noqa: BLE001 - a handler fault must not kill the session

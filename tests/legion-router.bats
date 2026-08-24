@@ -2470,3 +2470,27 @@ $run_error" ]
     run bash "$helper" "$BATS_TEST_TMPDIR/fd.json"
     [ "$status" -ne 0 ]
 }
+
+@test "delegate review: a substantive opencode failure is not an outage" {
+    # opencode_error carries ANY error, including one raised after a good
+    # request_changes — and the adapter appends it to .result, which stops the
+    # normalizer parsing that rejection. Treating presence as an outage would
+    # skip to a candidate whose approval erases the finding.
+    local helper
+    helper="$BATS_TEST_TMPDIR/probe-oc.sh"
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 /dev/null "$1"\n'
+    } > "$helper"
+
+    printf '{"status":"failed","opencode_error":"tool crashed while writing","result":"[P1] real finding"}\n' \
+      > "$BATS_TEST_TMPDIR/subst.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/subst.json"
+    [ "$status" -ne 0 ]
+
+    printf '{"status":"failed","opencode_error":"provider rate limited"}\n' \
+      > "$BATS_TEST_TMPDIR/avail.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/avail.json"
+    [ "$status" -eq 0 ]
+}

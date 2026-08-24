@@ -444,6 +444,7 @@ class AcpAgentServer:
         self._write_lock = threading.Lock()
         self._cancel_lock = threading.Lock()
         self._cancelled: set[str] = set()
+        self._running: set[str] = set()
 
     def _write(self, message: dict[str, Any]) -> None:
         # Workers answer concurrently; interleaved partial writes would corrupt
@@ -512,13 +513,25 @@ class AcpAgentServer:
             worker.join()
 
     def _notify_disconnect(self) -> None:
-        """Give the handler a chance to cancel work whose requester has left."""
-        if "session_cancel" not in AGENT_METHODS:
-            return
-        try:
-            self.handler("session_cancel", {"reason": "client_disconnected"})
-        except Exception:  # noqa: BLE001 - nobody left to report it to
-            pass
+        """Cancel every prompt still running for a client that has left.
+
+        A disconnect IS a cancellation, and it has to travel by the same route
+        as an explicit one. Announcing it with no sessionId set no token, so a
+        handler following the documented is_cancelled(session_id) contract never
+        saw it and kept burning a delegated run whose requester was gone -- and
+        a handler expecting normal cancel parameters could reject the malformed
+        callback outright, leaving serve_forever waiting on work nothing would
+        stop.
+        """
+        with self._cancel_lock:
+            running = list(self._running)
+            self._cancelled.update(running)
+        for session_id in running:
+            self._safe_handle("session_cancel",
+                              {"sessionId": session_id, "reason": "client_disconnected"})
+        if not running:
+            # Nothing in flight, but a handler may still track its own state.
+            self._safe_handle("session_cancel", {"reason": "client_disconnected"})
 
     def is_cancelled(self, session_id: str) -> bool:
         """Has the current prompt for this session been cancelled?
@@ -535,10 +548,12 @@ class AcpAgentServer:
         """Start a turn uncancelled, discarding any marker from the last one."""
         with self._cancel_lock:
             self._cancelled.discard(session_id)
+            self._running.add(session_id)
 
     def end_prompt(self, session_id: str) -> None:
         with self._cancel_lock:
             self._cancelled.discard(session_id)
+            self._running.discard(session_id)
 
     def _dispatch_notification(self, name: str, params: dict[str, Any]) -> None:
         if name != "session_cancel":

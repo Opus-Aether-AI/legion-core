@@ -1517,9 +1517,15 @@ review_executor_unavailable() {
   # copied into attempt_err, so the envelope is the only place this shows.
   for f in "$out_file" "$err_file"; do
     [[ -n "$f" && -s "$f" ]] || continue
-    if jq -e -s 'any(.[]?;
+    # opencode_error carries ANY error, including one raised after a perfectly
+    # good request_changes -- and the adapter appends it to .result, which stops
+    # the normalizer parsing that rejection. Treating mere presence as an outage
+    # therefore skips to a later candidate whose approval erases the finding.
+    # Match the message, not the field.
+    if jq -e -s --arg avail "usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated|authentication required|invalid_api_key|api[_ ]key" \
+       'any(.[]?;
           ((.auth_error // "") != "")
-          or ((.opencode_error // "") != "")
+          or (((.opencode_error // "") | ascii_downcase) | test($avail))
           or ((.reason // "") | test("limit|quota|rate"))
           or ((.status // "") == "blocked"))' "$f" >/dev/null 2>&1; then
       return 0

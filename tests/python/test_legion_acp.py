@@ -578,3 +578,31 @@ def test_short_stderr_is_readable_before_the_peer_exits():
         )
     finally:
         client.close()
+
+
+def test_disconnect_cancels_in_flight_prompts_through_the_token():
+    # A disconnect IS a cancellation and must travel the same route. Announcing
+    # it without a sessionId set no token, so a handler following the documented
+    # contract never saw it and kept burning a run whose requester had left.
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server.begin_prompt("s")
+    server._notify_disconnect()
+    assert server.is_cancelled("s") is True
+
+
+def test_disconnect_names_the_session_it_cancelled():
+    seen = []
+    server = acp.AcpAgentServer(lambda m, p: seen.append(p),
+                                stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server.begin_prompt("s")
+    server._notify_disconnect()
+    assert any(p.get("sessionId") == "s" and p.get("reason") == "client_disconnected"
+               for p in seen), "a handler expecting normal cancel params got nothing usable"
+
+
+def test_a_finished_prompt_is_not_cancelled_by_a_later_disconnect():
+    server = acp.AcpAgentServer(lambda m, p: {}, stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    server.begin_prompt("s")
+    server.end_prompt("s")
+    server._notify_disconnect()
+    assert server.is_cancelled("s") is False

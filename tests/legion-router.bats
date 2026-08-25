@@ -2525,4 +2525,36 @@ $run_error" ]
       > "$BATS_TEST_TMPDIR/finding.json"
     run bash "$helper" "$BATS_TEST_TMPDIR/empty.err" "$BATS_TEST_TMPDIR/finding.json"
     [ "$status" -ne 0 ]
+@test "delegate run: an executor that COMMITS its work still yields a diff" {
+    # `git diff --cached` alone compares the index to HEAD, so an executor that
+    # commits produces an EMPTY patch: HEAD already holds the work, nothing is
+    # left staged, and the run reports ok having silently lost everything it
+    # did. Agents commit on their own, and a task that says "work on a branch
+    # and commit when you are done" -- which benchmark harnesses state
+    # explicitly -- hits this every single time.
+    local wt base
+    wt="$BATS_TEST_TMPDIR/commit-wt"
+    mkdir -p "$wt"
+    cd "$wt"
+    git init -q .
+    git config user.email t@example.com
+    git config user.name tester
+    echo original > file.txt
+    git add -A
+    git commit -q -m base
+    base="$(git rev-parse HEAD)"
+
+    # the executor works on a branch and commits, exactly as instructed
+    git checkout -q -b work
+    echo changed > file.txt
+    git add -A
+    git commit -q -m "executor commit"
+
+    git add -A
+    run git diff --cached
+    [ -z "$output" ]                      # what the old code saw: nothing
+
+    run git diff --cached "$base"
+    [ -n "$output" ]                      # what the fix sees: the work
+    echo "$output" | grep -q changed
 }

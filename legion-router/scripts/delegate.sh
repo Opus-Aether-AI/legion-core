@@ -1102,16 +1102,26 @@ cmd_run() {
   if ! is_sandcastle_sandbox "$sandbox"; then
     cleanup_generated_diff_noise "$wt"
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
+    # Diff against the BASE, not HEAD. `diff --cached` alone compares the index
+    # to HEAD, so an executor that COMMITS its work produces an empty patch:
+    # HEAD already contains it, nothing is left staged, and the run reports
+    # status ok having silently lost everything it did. Agents commit more and
+    # more often on their own, and a task that asks for a branch and a commit --
+    # which benchmark harnesses do explicitly -- hits this every time.
+    # Comparing to the base captures committed and uncommitted work alike.
+    local diff_from="$base"
+    git -C "$wt" rev-parse --verify --quiet "$diff_from^{commit}" >/dev/null 2>&1 \
+      || diff_from=""
     if [[ "${#scopes[@]}" -gt 0 ]]; then
-      git -C "$wt" diff --cached -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
+      git -C "$wt" diff --cached ${diff_from:+"$diff_from"} -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
     else
-      git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
+      git -C "$wt" diff --cached ${diff_from:+"$diff_from"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
     fi
     if [[ "$diff_rc" -eq 0 ]]; then
       if [[ "${#scopes[@]}" -gt 0 ]]; then
-        summarize_changed_paths "$wt" "$art" --cached "${scopes[@]}" || note "⚠ could not summarize changed paths"
+        summarize_changed_paths "$wt" "$art" --cached ${diff_from:+"$diff_from"} "${scopes[@]}" || note "⚠ could not summarize changed paths"
       else
-        summarize_changed_paths "$wt" "$art" --cached || note "⚠ could not summarize changed paths"
+        summarize_changed_paths "$wt" "$art" --cached ${diff_from:+"$diff_from"} || note "⚠ could not summarize changed paths"
       fi
     fi
   else

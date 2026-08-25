@@ -2525,6 +2525,8 @@ $run_error" ]
       > "$BATS_TEST_TMPDIR/finding.json"
     run bash "$helper" "$BATS_TEST_TMPDIR/empty.err" "$BATS_TEST_TMPDIR/finding.json"
     [ "$status" -ne 0 ]
+}
+
 @test "delegate run: an executor that commits its work is not lost" {
     # The end-to-end version of the case below, through the real code path.
     #

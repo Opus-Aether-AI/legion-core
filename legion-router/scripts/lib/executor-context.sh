@@ -92,3 +92,17 @@ legion_activate_executor_context() {
   # worker must explicitly return through legion-delegate for another handoff.
   unset LEGION_CROSS_HARNESS_HANDOFF
 }
+
+# Legion writes .legion/<repo> runtime state into the TARGET repo, and hides it
+# with a nested ignore so it never shows up in that repo's git status. `*` alone
+# hid too much: .legion also holds repository-OWNED config -- sandbox.json and
+# legion-core.json, the declared Legion baseline -- and a deeper .gitignore beats
+# the repo's own rule, so the nested file has to make the same two exceptions.
+# One writer, because this string previously existed in three places.
+legion_write_runtime_gitignore() {
+  local repo="$1"
+  [[ -n "$repo" && -d "$repo/.legion" ]] || return 0
+  [[ ! -L "$repo/.legion/.gitignore" ]] || return 0
+  printf '%s\n' '*' '!sandbox.json' '!legion-core.json' \
+    > "$repo/.legion/.gitignore" 2>/dev/null || true
+}

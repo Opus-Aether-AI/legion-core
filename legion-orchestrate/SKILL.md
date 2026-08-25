@@ -2,7 +2,7 @@
 name: legion-orchestrate
 kind: procedure
 # disable-model-invocation intentionally false: cross-harness orchestrator entrypoint
-description: Use to deliver a multi-step coding goal with Legion's dynamic multi-model orchestration — decompose the goal, fan out implementation slices to the configured Codex workhorse in parallel, cross-model verify with the independent Fable reviewer, synthesize, and gate. The multi-model version of ultracode/Workflow orchestration. Triggers on "orchestrate with legion", "fan out", "ultracode", "build this with legion", parallel multi-model delivery, or any sizeable feature/refactor you want delivered with codex doing the bulk.
+description: Use to deliver a multi-step coding goal with Legion's dynamic multi-model orchestration — decompose the goal, fan out implementation slices to the configured Codex workhorse in parallel, cross-model verify with the independent reviewer, synthesize, and gate. The multi-model version of ultracode/Workflow orchestration. Triggers on "orchestrate with legion", "fan out", "ultracode", "build this with legion", parallel multi-model delivery, or any sizeable feature/refactor you want delivered with codex doing the bulk.
 ---
 
 # Legion Orchestrate — dynamic multi-model delivery (ultracode for a legion of models)
@@ -69,10 +69,10 @@ for new source or failure evidence; yield on `complete`, `waiting_external`, or
    `status:"inline"` for the active primary. The returned `task_ledger_path`
    is the durable proof of which queued slices started, which were blocked
    before launch, and how every slice terminated.
-4. **Cross-model verify** (independent Fable reviewer) — for each returned diff, get an independent structured verdict:
+4. **Cross-model verify** (independent reviewer) — for each returned diff, get an independent structured verdict:
    ```bash
    legion-run resolves `final-review` through its configured executor; do not
-   invoke the Codex-only `legion-delegate review` command for that archetype.
+   substitute the `legion-delegate review` command for that archetype.
    ```
    Review is pinned to the immutable base/head SHAs recorded in
    `review-input.json`; reconcile its findings against your own. **Always get
@@ -84,7 +84,7 @@ for new source or failure evidence; yield on `complete`, `waiting_external`, or
 
 Go maximally exhaustive:
 - **More parallelism** — decompose finer; fan out widely (`--max-concurrency` up).
-- **Multi-vote verify** — a diff is accepted only if **the independent Fable reviewer and the primary engineer** both approve (run `final-review` + your own review; disagreement → `cross-model-tiebreak`).
+- **Multi-vote verify** — a diff is accepted only if **the independent reviewer and the primary engineer** both approve (run `final-review` + your own review; disagreement → `cross-model-tiebreak`).
 - **Loop-until-dry** — re-run review fan-out until two consecutive passes surface nothing new.
 - Everything metered; use `legion-share` when the configured work-split preference is useful.
 

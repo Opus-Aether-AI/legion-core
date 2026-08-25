@@ -26,6 +26,31 @@ node_modules/
 *.swo
 *~
 
+# Legion runtime state. Ignored here and not only in a developer's global
+# ignore file: a fresh clone would otherwise show run artifacts as untracked,
+# and .legion/tasks holds the verbatim task text staged as run evidence, which
+# routinely contains prompts nobody intends to publish. .legion/worktrees can
+# also carry a full seeded node_modules.
+#
+# Ignore the CONTENTS, not the directory: .legion also holds repository-owned
+# configuration -- sandbox.json, documented in legion-router/README.md, and
+# legion-core.json, the declared Legion baseline per AGENTS.md. A blanket
+# `.legion/` hid both from `git status`, which is why committing a pin needs
+# `git add -f` in the consumer-update workflow.
+#
+# The directory itself must be un-ignored FIRST. Git does not descend into an
+# excluded directory, and a file cannot be re-included once a parent is
+# excluded -- so with the documented global `.legion/` exclusion still in a
+# developer's config, the negations below would never be reached. This line is
+# what makes them effective; repo rules outrank core.excludesFile.
+!.legion/
+.legion/*
+!.legion/sandbox.json
+!.legion/legion-core.json
+
+# Claude Code local session state
+.claude/
+
 # Local env / secrets — never commit
 .env
 .env.*

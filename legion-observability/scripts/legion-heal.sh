@@ -186,8 +186,9 @@ heal_one() {
   # SHIP — commit, push, open PR. Never merge.
   git -C "$wt" add -A
   # Never let legion's own runtime state leak into a heal PR. delegate.sh writes
-  # .legion/.gitignore (`*`), but a .gitignore can't ignore itself, so `add -A`
-  # would otherwise stage it. Drop the whole .legion/ dir from the commit.
+  # .legion/.gitignore, but a .gitignore can't ignore itself, so `add -A` would
+  # otherwise stage it. Drop the whole .legion/ dir from the commit -- a heal PR
+  # has no business editing the repo's .legion configuration either.
   git -C "$wt" reset -q -- .legion 2>/dev/null || true
   git -C "$wt" -c commit.gpgsign=false commit -q -m "fix(heal): $check — ${msg:0:60}" \
     -m "Auto-healed by legion-heal from a legion-doctor finding." \

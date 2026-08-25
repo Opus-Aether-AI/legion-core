@@ -116,9 +116,9 @@ Run `legion-route --list` for the full set. Grouped by role:
 |---|---|---|
 | **Primary orchestrates (self)** | `orchestrate`, `architecture-decision`, `deep-reasoning` | active primary — **refuses to delegate** |
 | **Codex execution path** | `scout`, `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `security-review`, `hard-bug`, `perf-optimization` | `codex_workhorse` / `codex_review` |
-| **Fable merge judgement** | `final-review` | `claude_default` |
+| **Independent merge judgement** | `final-review` | `claude_default` |
 
-So: most coding and hard/critical execution → Codex roles from `models.toml`; final merge judgement → independent Fable; orchestration → you keep it (delegating it is refused).
+So: most coding and hard/critical execution → Codex roles from `models.toml`; final merge judgement → the independent Claude reviewer; orchestration → you keep it (delegating it is refused).
 
 ## Commands
 
@@ -155,8 +155,9 @@ Reasoning effort (via codex `-c model_reasoning_effort`) is chosen by archetype:
 use `low`/`medium` for bounded investigation and mechanical work, `high` for a
 scoped implementation, and `max` only for a declared hard or persistent slice.
 Claude runs at `high` for intent, design, and final merge judgement. `review`
-returns a schema-valid Codex verdict; the final workflow review may also route
-to Fable for independent simplification judgement.
+returns a schema-valid verdict from the first reachable reviewer in
+`[review].order` (routing.toml); the final workflow review may also route to Claude for
+independent simplification judgement.
 
 ## Credit / quota resilience (self-healing)
 

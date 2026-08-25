@@ -495,8 +495,8 @@ route_preflight() {
   fi
   receipt="$art/route-preflight.json"
   mkdir -p "$art"
-  if [[ "$art" == "$repo/"* && ! -L "$repo/.legion/.gitignore" ]]; then
-    printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+  if [[ "$art" == "$repo/"* ]]; then
+    legion_write_runtime_gitignore "$repo"
   fi
   payload="$(jq -cn \
     --arg schema "legion.route-preflight.v1" --arg run "$RUN_ID" \
@@ -768,8 +768,9 @@ dispatch_adapter() {
   # Model priority: explicit --model  >  the archetype's resolved model (ONLY when
   # the archetype routed here — not a forced --executor, whose archetype model may
   # name a model this harness can't run)  >  the executor's own default role. This
-  # lets one executor serve multiple per-archetype models (e.g. the claude executor
-  # runs Opus for frontend-polish but Fable for frontend-review).
+  # lets one executor serve multiple per-archetype models: a role map, not a
+  # single default. (Every Claude role is Opus today, so the mechanism is what
+  # matters here, not the current pins.)
   use_model="$explicit_model"
   [[ -n "$use_model" || -n "$forced_executor" || -z "$model" ]] || use_model="$model"
   [[ -n "$use_model" || -z "$model_ref" ]] || use_model="$(legion_model_ref "$model_ref" 2>/dev/null || true)"
@@ -960,8 +961,9 @@ cmd_run() {
     [[ -d "$art" && -d "$wt" ]] || die "run: detached worker setup is missing for '$RUN_ID'"
   else
     mkdir -p "$art"
-    # Keep all legion runtime state out of the target repo's git status / diffs.
-    printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+    # Keep legion runtime state out of the target repo's git status / diffs,
+    # without hiding the repo's own .legion configuration.
+    legion_write_runtime_gitignore "$repo"
     [[ "$dirty_warn" -eq 0 ]] || warn_dirty_source "$repo" "$base"
     note "→ worktree $wt (branch $branch, base $base)"
     with_git_worktree_lock "$repo" \
@@ -1360,10 +1362,18 @@ $(cat "$patch")
   # already read-only here and the reviewer never delegates onward, so the
   # same-harness case (a Claude-primary session reviewed by Claude on a
   # different model) is safe and is often the only reviewer left standing.
+  # Shell options are GLOBAL, not function-scoped. This used to re-enable errexit
+  # unconditionally and then `return "$rc"`, so a reviewer that merely failed --
+  # cursor with no API key, say -- killed the whole script mid-walk: no fallback
+  # to the next candidate, no terminal receipt, exit 1 with empty stdout. Restore
+  # whatever the caller had instead of asserting a value.
+  local errexit_was_set=0
+  case "$-" in *e*) errexit_was_set=1 ;; esac
+  set +e
   ( cd "$wt" && LEGION_REVIEW_HANDOFF=1 "$adapter_bin" run --repo "$wt" "${task_args[@]}" ${model:+--model "$model"} --quiet ) \
     </dev/null >"$stream" 2>"$err"
   rc=$?
-  set -e
+  [[ "$errexit_was_set" -eq 0 ]] || set -e
   # Adapters return a JSON envelope; the reviewer's answer is .result (or the
   # last-message file it points at). Either becomes the verdict candidate.
   last="$(jq -r '.result // ""' "$stream" 2>/dev/null)"
@@ -1491,17 +1501,74 @@ review_resolve_candidates() {
 review_executor_unavailable() {
   local rc="$1" err_file="$2" out_file="${3:-}"
   [[ "$rc" -ne 0 ]] || return 1
+  # ONE vocabulary for "the provider could not serve this", shared by every
+  # detector below. This list lived in three copies with three different sets of
+  # terms, and each drift silently disabled the fallback for one executor:
+  # cursor's friendlier auth message, then codex's stdout quota event, then
+  # codex's stdout AUTH event, which the quota-only copy did not match. New
+  # terms go here, not into one branch.
+  local unavailable='usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated|authentication required|invalid_api_key|api[_ ]key.*(unset|missing|required|invalid)|please run .*login'
   # Codex reports a spent quota on STDOUT, inside its JSON event stream -- its
   # stderr carries only unrelated MCP OAuth noise. Checking stderr alone made
   # an out-of-quota reviewer look like an ordinary review failure, which is the
   # bug this fallback exists to fix. Search both streams.
   local f
-  for f in "$err_file" "$out_file"; do
+  # Structured first, and safe on stdout: auth_error is a field the ADAPTER sets
+  # about itself, never reviewer content. An adapter that reports auth_error has
+  # told us plainly that it could not authenticate, and that is worth more than
+  # matching prose: this check used to rely on wording alone, and when
+  # legion-cursor was given a friendlier message the pattern stopped matching --
+  # so the fallback silently died at the one executor it most needed to skip.
+  # Named envelope fields only -- never .result, which holds reviewer prose.
+  # Each adapter reports provider unavailability its own way: legion-cursor sets
+  # auth_error, legion-opencode sets opencode_error, legion-claude sets
+  # reason="claude_limit" and status="blocked". Their provider stderr is not
+  # copied into attempt_err, so the envelope is the only place this shows.
+  for f in "$out_file" "$err_file"; do
     [[ -n "$f" && -s "$f" ]] || continue
-    if grep -qiE "usage limit|rate.?limit|quota exceeded|insufficient_quota|429 |authentication required|not authenticated|unauthorized|invalid_api_key|please run .*login|command not found" "$f"; then
+    # opencode_error carries ANY error, including one raised after a perfectly
+    # good request_changes -- and the adapter appends it to .result, which stops
+    # the normalizer parsing that rejection. Treating mere presence as an outage
+    # therefore skips to a later candidate whose approval erases the finding.
+    # Match the message, not the field.
+    if jq -e -s --arg avail "$unavailable" \
+       'any(.[]?;
+          ((.auth_error // "") != "")
+          or (((.opencode_error // "") | ascii_downcase) | test($avail))
+          or ((.reason // "") | test("limit|quota|rate"))
+          or ((.status // "") == "blocked"))' "$f" >/dev/null 2>&1; then
       return 0
     fi
   done
+  # Codex reports a spent quota inside its stdout JSON event stream as
+  # {"type":"error","message":"You've hit your usage limit..."} -- not on stderr
+  # and not as auth_error. Read that FIELD rather than scanning the file: the
+  # prompt path's stdout carries reviewer prose in .result, and matching text
+  # there is how a finding gets mistaken for an outage.
+  if [[ -n "$out_file" && -s "$out_file" ]]; then
+    # any(), not a per-line test: `jq -e` exits on the LAST value it emitted, so
+    # a quota error followed by any other error event would end in `false` and
+    # suppress the fallback.
+    if jq -e -R -s --arg avail "$unavailable" 'split("\n") | map(fromjson? // empty)
+                 | any(.[]?; (.type? == "error")
+                       and ((.message? // "") | ascii_downcase | test($avail)))' \
+         "$out_file" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  # Prose fallback: STDERR ONLY, deliberately.
+  #
+  # stdout carries the adapter envelope, and inside it the reviewer's own text.
+  # A reviewer that writes "API key is required in config.py" as a genuine
+  # finding and exits nonzero would otherwise be classified as unavailable, the
+  # walk would move on, and a later candidate's approval could erase that
+  # rejection -- turning a request_changes into an approve through a regex.
+  # Provider unavailability is reported on stderr; findings are not.
+  if [[ -n "$err_file" && -s "$err_file" ]]; then
+    if grep -qiE "$unavailable|command not found" "$err_file"; then
+      return 0
+    fi
+  fi
   return 1
 }
 

@@ -1847,8 +1847,8 @@ $run_error" ]
 }
 
 @test "delegate review: --archetype gives configured reviewer + structured verdict via --output-schema" {
-  # `delegate review` is the codex structured-verdict flow -> use a codex review
-  # archetype (security-review). Final-review routes to Fable through legion-run.
+  # `delegate review` walks [review].order, and codex is first -> use a codex review
+  # archetype (security-review). Final-review routes to Claude through legion-run.
   # Cross-lineage archetypes (second-opinion/tiebreak)
   # route to Cursor and run via `--executor cursor`, not this codex path.
   local repo; repo="$(make_test_repo arch4)"
@@ -2318,4 +2318,208 @@ $run_error" ]
 
     run "$DELEGATE" run --model test-model-beta --task "still works" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
+}
+
+@test "delegate review: a failing prompt reviewer does not kill the walk" {
+    # Regression: review_invoke_prompt called a bare `set -e` and then returned
+    # the reviewer's exit code. Shell options are GLOBAL, so it undid the
+    # caller's `set +e` and a reviewer that merely failed took the whole script
+    # down mid-walk — exit 1, no next candidate, no terminal receipt, empty
+    # stdout. The walk must terminalize whatever the outcome.
+    local repo; repo="$(make_test_repo review-walk-survives)"
+    export MOCK_CODEX_REVIEW_QUOTA=1
+
+    run "$DELEGATE" review --base HEAD --repo "$repo" --quiet
+
+    [ -n "$output" ]
+    echo "$output" | jq -e '.run_id and .status' >/dev/null
+}
+
+@test "delegate review: an adapter reporting auth_error counts as unavailable" {
+    # Detection used to match prose only. When legion-cursor was given a
+    # friendlier message the pattern stopped matching, so the fallback died at
+    # exactly the executor it most needed to skip. Structured detection reads
+    # the adapter's own auth_error field instead of guessing at wording.
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe.sh"
+    err="$BATS_TEST_TMPDIR/e.err"
+    out="$BATS_TEST_TMPDIR/o.json"
+
+    : > "$err"
+    printf '{"status":"failed","auth_error":"CURSOR_API_KEY is unset"}\n' > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -eq 0 ]
+}
+
+@test "delegate review: a clean adapter result is not treated as unavailable" {
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe-clean.sh"
+    err="$BATS_TEST_TMPDIR/clean.err"
+    out="$BATS_TEST_TMPDIR/clean.json"
+
+    : > "$err"
+    printf '{"status":"ok","result":"looks fine"}\n' > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -ne 0 ]
+}
+
+@test "delegate review: a finding that mentions an API key is not read as unavailable" {
+    # A reviewer writing "API key is required in config.py" as a genuine finding
+    # must not be classified as unavailable — the walk would move on and a later
+    # candidate's approval could erase that rejection.
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe-finding.sh"
+    err="$BATS_TEST_TMPDIR/finding.err"
+    out="$BATS_TEST_TMPDIR/finding.json"
+
+    : > "$err"
+    printf '{"status":"failed","result":"[P1] API key is required in config.py but never set"}\n' > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -ne 0 ]
+}
+
+@test "delegate review: a provider auth failure on stderr still counts as unavailable" {
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe-stderr.sh"
+    err="$BATS_TEST_TMPDIR/provider.err"
+    out="$BATS_TEST_TMPDIR/provider.json"
+
+    printf 'Error: Authentication required. Please run login first.\n' > "$err"
+    printf '{"status":"failed"}\n' > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -eq 0 ]
+}
+
+@test "delegate review: a native codex quota error on stdout still triggers fallback" {
+    # The bug that started this: codex reports a spent quota inside its stdout
+    # JSON event stream, not on stderr and not as auth_error. Confining prose
+    # matching to stderr regressed exactly this case.
+    local helper err out
+    helper="$BATS_TEST_TMPDIR/probe-quota.sh"
+    err="$BATS_TEST_TMPDIR/quota.err"
+    out="$BATS_TEST_TMPDIR/quota.jsonl"
+
+    : > "$err"
+    {
+      printf '{"type":"item.completed","item":{"id":"item_1"}}\n'
+      printf '{"type":"error","message":"You'"'"'ve hit your usage limit. Try again later."}\n'
+    } > "$out"
+
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    run bash "$helper" "$err" "$out"
+    [ "$status" -eq 0 ]
+}
+
+@test "delegate review: a prompt adapter's own failure field triggers fallback" {
+    # Each adapter reports provider unavailability differently — opencode sets
+    # opencode_error, claude sets reason=claude_limit — and their provider
+    # stderr never reaches attempt_err, so the envelope is the only signal.
+    local helper
+    helper="$BATS_TEST_TMPDIR/probe-envelope.sh"
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 /dev/null "$1"\n'
+    } > "$helper"
+
+    printf '{"status":"failed","opencode_error":"provider rate limited"}\n' \
+      > "$BATS_TEST_TMPDIR/oc.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/oc.json"
+    [ "$status" -eq 0 ]
+
+    printf '{"status":"blocked","reason":"claude_limit"}\n' > "$BATS_TEST_TMPDIR/cl.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/cl.json"
+    [ "$status" -eq 0 ]
+
+    # and still not a finding that merely mentions limits
+    printf '{"status":"failed","result":"[P2] the rate limit handling is wrong"}\n' \
+      > "$BATS_TEST_TMPDIR/fd.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/fd.json"
+    [ "$status" -ne 0 ]
+}
+
+@test "delegate review: a substantive opencode failure is not an outage" {
+    # opencode_error carries ANY error, including one raised after a good
+    # request_changes — and the adapter appends it to .result, which stops the
+    # normalizer parsing that rejection. Treating presence as an outage would
+    # skip to a candidate whose approval erases the finding.
+    local helper
+    helper="$BATS_TEST_TMPDIR/probe-oc.sh"
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 /dev/null "$1"\n'
+    } > "$helper"
+
+    printf '{"status":"failed","opencode_error":"tool crashed while writing","result":"[P1] real finding"}\n' \
+      > "$BATS_TEST_TMPDIR/subst.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/subst.json"
+    [ "$status" -ne 0 ]
+
+    printf '{"status":"failed","opencode_error":"provider rate limited"}\n' \
+      > "$BATS_TEST_TMPDIR/avail.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/avail.json"
+    [ "$status" -eq 0 ]
+}
+
+@test "delegate review: one vocabulary covers every unavailability detector" {
+    # The term list lived in three copies that drifted apart three times, each
+    # drift silently disabling the fallback for one executor: cursor's
+    # friendlier auth message, codex's stdout quota event, then codex's stdout
+    # AUTH event, which the quota-only copy did not match. All four detectors
+    # now read one list.
+    local helper
+    helper="$BATS_TEST_TMPDIR/probe-vocab.sh"
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+    : > "$BATS_TEST_TMPDIR/empty.err"
+
+    # native codex auth failure: stdout event, stderr silent
+    printf '{"type":"error","message":"Authentication required. Please run codex login."}\n' \
+      > "$BATS_TEST_TMPDIR/auth.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/empty.err" "$BATS_TEST_TMPDIR/auth.json"
+    [ "$status" -eq 0 ]
+
+    # a reviewer FINDING that says the same words is not an outage: .result is
+    # never scanned, so a rejection cannot be rewritten into an approval.
+    printf '{"status":"ok","result":"config.py fails because the api_key is required"}\n' \
+      > "$BATS_TEST_TMPDIR/finding.json"
+    run bash "$helper" "$BATS_TEST_TMPDIR/empty.err" "$BATS_TEST_TMPDIR/finding.json"
+    [ "$status" -ne 0 ]
 }

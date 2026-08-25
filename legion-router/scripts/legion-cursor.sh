@@ -194,7 +194,7 @@ cmd_run() {
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   agent_bin="$(resolve_cursor_bin)" || die "Cursor Agent CLI not found. Install Cursor CLI or set CURSOR_AGENT_BIN."
   mkdir -p "$art"
-  printf '*\n' > "$repo/.legion/.gitignore" 2>/dev/null || true
+  legion_write_runtime_gitignore "$repo"
 
   note "-> cursor worktree $wt (branch $branch, base $base)"
   if ! git -C "$repo" worktree add -q -b "$branch" "$wt" "$base"; then

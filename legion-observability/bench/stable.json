@@ -320,7 +320,7 @@
       "id": "route.final-review",
       "type": "route",
       "dimension": "routing",
-      "summary": "Final review uses the independent Fable read-only route.",
+      "summary": "Final review uses the independent Claude read-only route.",
       "archetype": "final-review",
       "expect": {
         "executor": "claude",
@@ -428,7 +428,7 @@
       "id": "task.route-cli-final-review",
       "type": "task",
       "dimension": "cli-contract",
-      "summary": "The public route CLI should resolve final-review as independent Fable read-only.",
+      "summary": "The public route CLI should resolve final-review as independent Claude read-only.",
       "target_type": "plugin",
       "target_name": "legion-router",
       "command": [

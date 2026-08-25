@@ -78,6 +78,54 @@ through `legion-route.py` rather than parsing `models.toml` a second time. If no
 interpreter resolves, the proxy still starts and warns, but every model role
 falls through to its default.
 
+## Agent Client Protocol bridge (staged, not yet wired)
+
+`legion-router/scripts/legion_acp.py` speaks ACP **v2** in both directions: as a
+client that can drive any ACP agent, and as an agent that an editor (Zed,
+JetBrains, Neovim, VS Code) can drive. Nothing calls it yet.
+
+The `acp` key in `executors.toml` is declared for every executor and is `false`
+everywhere. A protocol both sides implement is not the same as a protocol both
+sides implement the same way, so the bespoke adapters stay authoritative until an
+executor has actually completed a session over the bridge. Flipping the flag
+today changes nothing, because no dispatch path reads it.
+
+Two contract details worth knowing before wiring it:
+
+- `session/request_permission` is a **client** method, so the permission gate is
+  Legion's by protocol design. `AcpClient` therefore requires a handler rather
+  than defaulting one, and the reply must be a tagged outcome carrying an
+  `optionId` from the request's own `options` -- an agent that receives an
+  unknown outcome tag must not treat it as approval, so a wrong shape loses the
+  gate silently rather than failing.
+- `session/cancel` is a **notification**. Use `client.cancel(session_id)`, which
+  is safe to call from another thread; sending it as a request blocks forever on
+  a reply that never comes.
+- **A prompt is a lifecycle, not a call.** `session/prompt` is acknowledged with
+  `{}` the moment it is ACCEPTED -- the v2 schema says the response "does not
+  indicate that the agent has finished processing" -- and the outcome arrives
+  later on an idle `state_update`. Both sides of the bridge follow that:
+  `AcpAgentServer` acknowledges before running the handler, so a handler that
+  delegates a minutes-long task does not leave the editor's request pending;
+  `AcpClient.request("session_prompt", ...)` keeps pumping past the
+  acknowledgement and returns the idle update, because stopping there would
+  strand the only stdout reader and leave a later `session/request_permission`
+  unanswered -- deadlocking the agent. A handler that finishes inline returns
+  `{"stopReason": ...}`; one that continues asynchronously returns `{}` and calls
+  `emit_idle(session_id, reason)` when it is done. `emit_idle` ends the turn, so
+  a client that disconnects mid-run can still be matched to the run it orphaned.
+  A fault after acknowledgement cannot become a JSON-RPC error, so it is reported
+  as idle with the reserved `_error` stop reason.
+- `session/update` carries `{sessionId, update}`; the `on_update` callback gets
+  the **update**, with the session id alongside it. Handing over the wrapper
+  gives a consumer an object with no `sessionUpdate` key at all.
+- **Cancellation is read, not received.** `is_cancelled(session_id)` is a token
+  the handler consumes when it is ready, so work registered several hops in
+  (after routing, preflight, worktree setup) cannot miss a cancel that arrived
+  while it was still starting up. The permission gate is decided off the read
+  loop for the same reason: a handler that blocks on a person must not be able
+  to hold the only reader, or Stop cannot be answered until it returns.
+
 ## Tune routes from measured outcomes
 
 Use `legion-report --by archetype` to inspect cost, success, latency, and the

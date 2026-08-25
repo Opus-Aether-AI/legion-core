@@ -109,13 +109,15 @@ repos_file_for_repo() {
 @test "cost: codex_review pricing comes from costs.json" {
     run "$LIB/cost.sh" "$CODEX_REVIEW" 100000 5000 0 0
     [ "$status" -eq 0 ]
-    [ "$output" = "0.65" ]
+    # 100k in @ $4.00/M + 5k out @ $20.00/M
+    [ "$output" = "0.5" ]
 }
 
 @test "cost: codex_workhorse pricing comes from costs.json" {
     run "$LIB/cost.sh" "$CODEX_WORKHORSE" 100000 5000 0 0
     [ "$status" -eq 0 ]
-    [ "$output" = "0.325" ]
+    # 100k in @ $2.00/M + 5k out @ $12.00/M
+    [ "$output" = "0.26" ]
 }
 
 @test "cost: the configured minimax matcher uses costs.json pricing" {
@@ -2034,7 +2036,8 @@ $run_error" ]
 @test "cost: negative token counts clamp to 0 (lib safe for any caller)" {
     run "$LIB/cost.sh" "$CODEX_WORKHORSE" -100 100
     [ "$status" -eq 0 ]
-    [ "$output" = "0.0015" ]
+    # input clamps to 0; 100 out @ $12.00/M
+    [ "$output" = "0.0012" ]
 }
 
 @test "delegate: no command prints usage and exits 2" {

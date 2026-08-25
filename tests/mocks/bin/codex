@@ -136,6 +136,15 @@ else
   # resume passes no -s (sandbox default read-only) but still edits the worktree.
   if [[ "$sandbox" == "workspace-write" || "$sandbox" == "danger-full-access" || $resume -eq 1 ]]; then
     printf 'mock-codex-change by %s\n' "$model" >> "$cd_dir/MOCK_CODEX_CHANGE.txt" 2>/dev/null || true
+    # Some agents branch and commit their own work -- benchmark prompts ask for
+    # it explicitly. MOCK_CODEX_COMMITS reproduces that so the diff path can be
+    # tested against an executor that leaves a clean working tree.
+    if [[ "${MOCK_CODEX_COMMITS:-}" == "1" ]]; then
+      git -C "$cd_dir" checkout -q -b mock-agent-branch 2>/dev/null || true
+      git -C "$cd_dir" add -A 2>/dev/null || true
+      git -C "$cd_dir" -c user.email=mock@example.com -c user.name=mock \
+        commit -q -m "mock agent commit" 2>/dev/null || true
+    fi
     if [[ "${MOCK_CODEX_PYCACHE:-}" == "1" ]]; then
       mkdir -p "$cd_dir/__pycache__" "$cd_dir/nested/__pycache__"
       printf 'pyc' > "$cd_dir/__pycache__/mock.cpython-312.pyc"

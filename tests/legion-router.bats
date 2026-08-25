@@ -2526,3 +2526,60 @@ $run_error" ]
     run bash "$helper" "$BATS_TEST_TMPDIR/empty.err" "$BATS_TEST_TMPDIR/finding.json"
     [ "$status" -ne 0 ]
 }
+
+@test "delegate run: an executor that commits its work is not lost" {
+    # The end-to-end version of the case below, through the real code path.
+    #
+    # The first attempt at this fix compared against "$base", and the unit test
+    # passed because it used a concrete sha. The real path never does: --base
+    # defaults to the NAME "HEAD", so an executor that commits moves HEAD and
+    # the comparison measured the work against itself. The run reported ok with
+    # an empty patch. Only a test that goes through `delegate run` catches that,
+    # which is why this one exists alongside the narrower one.
+    local repo; repo="$(make_test_repo commits-repo)"
+    MOCK_CODEX_COMMITS=1 run "$DELEGATE" run --model test-model-beta \
+        --task "make a change and commit it" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    [ -s "$diff" ] || {
+        echo "diff is empty: the executor's committed work was lost" >&2
+        return 1
+    }
+    grep -q "MOCK_CODEX_CHANGE" "$diff"
+}
+
+@test "delegate run: an executor that COMMITS its work still yields a diff" {
+    # `git diff --cached` alone compares the index to HEAD, so an executor that
+    # commits produces an EMPTY patch: HEAD already holds the work, nothing is
+    # left staged, and the run reports ok having silently lost everything it
+    # did. Agents commit on their own, and a task that says "work on a branch
+    # and commit when you are done" -- which benchmark harnesses state
+    # explicitly -- hits this every single time.
+    local wt base
+    wt="$BATS_TEST_TMPDIR/commit-wt"
+    mkdir -p "$wt"
+    cd "$wt"
+    git init -q .
+    git config user.email t@example.com
+    git config user.name tester
+    echo original > file.txt
+    git add -A
+    git commit -q -m base
+    base="$(git rev-parse HEAD)"
+
+    # the executor works on a branch and commits, exactly as instructed
+    git checkout -q -b work
+    echo changed > file.txt
+    git add -A
+    git commit -q -m "executor commit"
+
+    git add -A
+    run git diff --cached
+    [ -z "$output" ]                      # what the old code saw: nothing
+
+    run git diff --cached "$base"
+    [ -n "$output" ]                      # what the fix sees: the work
+    echo "$output" | grep -q changed
+}

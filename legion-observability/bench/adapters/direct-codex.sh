@@ -22,7 +22,21 @@ default_model="$(legion_model_ref codex_workhorse)" || {
   exit 2
 }
 model="${CODEX_MODEL:-$default_model}"
-args=(exec --json -m "$model" -s workspace-write -C "$workspace" --skip-git-repo-check -)
+# Reasoning effort is half of any model comparison and was not expressible here,
+# so a cheap model could only ever be measured at whatever effort Codex defaults
+# to -- which is not how Legion runs it. routing.toml drives the workhorse at
+# `high` and the cheap role at `low`, so comparing the two models without also
+# controlling this measures the pair of settings, not the pair of models.
+args=(exec --json -m "$model" -s workspace-write -C "$workspace" --skip-git-repo-check)
+if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
+  case "$CODEX_REASONING_EFFORT" in
+    low|medium|high|max) ;;
+    *) printf 'direct-codex: bad CODEX_REASONING_EFFORT %s (low|medium|high|max)\n' \
+         "$CODEX_REASONING_EFFORT" >&2; exit 2 ;;
+  esac
+  args+=(-c "model_reasoning_effort=$CODEX_REASONING_EFFORT")
+fi
+args+=(-)
 
 tmp="$(mktemp "${TMPDIR:-/tmp}/direct-codex.XXXXXX")"
 trap 'rm -f "'"$tmp"'"' EXIT

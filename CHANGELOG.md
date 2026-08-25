@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.26.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.25.0...v0.26.0) (2026-08-25)
+
+
+### Added
+
+* **bench:** let the codex bench adapter control reasoning effort ([#179](https://github.com/Opus-Aether-AI/legion-core/issues/179)) ([8d626a8](https://github.com/Opus-Aether-AI/legion-core/commit/8d626a86a506bf7125ef6f31c65f3957f47e2456))
+
+
+### Fixed
+
+* **router:** repair the review fallback and make the ACP bridge correct ([#177](https://github.com/Opus-Aether-AI/legion-core/issues/177)) ([4613893](https://github.com/Opus-Aether-AI/legion-core/commit/461389348a7fb73736e9742ecc2a1d1168774ea2))
+
 ## [0.25.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.24.0...v0.25.0) (2026-08-23)
 
 

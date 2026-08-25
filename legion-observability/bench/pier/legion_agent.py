@@ -21,7 +21,9 @@ codex agent takes under CODEX_FORCE_AUTH_JSON.
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 
@@ -37,6 +39,9 @@ from pier.models.trial.paths import EnvironmentPaths
 # whatever Legion produces has to end up COMMITTED in this tree -- a diff left
 # in a worktree scores zero however good it is.
 REPO = PurePosixPath("/app")
+
+# Where a locally packed legion tarball lands inside the sandbox.
+_LOCAL_TARBALL = "/tmp/legion-local.tgz"
 
 _ALLOWLIST = [
     "https://registry.npmjs.org",            # installing codex + legion
@@ -60,10 +65,14 @@ class LegionAgent(BaseInstalledAgent):
     _SECRETS = PurePosixPath("/tmp/legion-secrets")
     _TASK_FILE = PurePosixPath("/tmp/legion-task.txt")
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, legion_source: str | None = None,
+                 legion_version: str = "latest", **kwargs):
         super().__init__(*args, **kwargs)
         self._last_receipt: dict | None = None
         self._exit_code: int | None = None
+        source = legion_source or os.environ.get("LEGION_SOURCE") or ""
+        self._legion_source = Path(source).expanduser().resolve() if source else None
+        self._legion_version = legion_version
 
     @staticmethod
     def name() -> str:
@@ -105,6 +114,17 @@ class LegionAgent(BaseInstalledAgent):
             "fi; "
             "exit 0"
         )
+        # Which Legion is under test? The IMAGE always installs the PUBLISHED
+        # package -- that is what users get, so it is the honest number for a
+        # public score, and it guarantees node, npm and the CLIs exist.
+        #
+        # LEGION_SOURCE overlays a locally packed build on top, at SETUP rather
+        # than here: install steps become Docker build layers, and a build cannot
+        # see a file uploaded to a container that does not exist yet. A lane that
+        # could only ever measure the released version would not be able to
+        # validate a fix before it ships, and the first bug this lane found was
+        # in unreleased code.
+        legion_pkg = f"@opus-aether-ai/legion-core@{self._legion_version}"
         agent_run = (
             "set -eu; "
             'if ! command -v npm >/dev/null 2>&1 && [ ! -s "$HOME/.nvm/nvm.sh" ]; then '
@@ -115,7 +135,7 @@ class LegionAgent(BaseInstalledAgent):
             '  . "$HOME/.nvm/nvm.sh"; '
             "  command -v node >/dev/null 2>&1 || nvm install --lts; "
             "fi; "
-            "npm install -g @openai/codex@latest @opus-aether-ai/legion-core@latest"
+            f"npm install -g @openai/codex@latest {shlex.quote(legion_pkg)}"
         )
         return AgentInstallSpec(
             agent_name=self.name(),
@@ -128,11 +148,56 @@ class LegionAgent(BaseInstalledAgent):
                 'if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi; '
                 "command -v legion-delegate && command -v codex"
             ),
-            cache_key=f"legion-{self._version or 'latest'}",
+            # Keyed on the published version only, deliberately: the image
+            # contains nothing else. A LEGION_SOURCE build is overlaid after the
+            # image is up, so it never lands in a cached layer and cannot go
+            # stale there.
+            cache_key=f"legion-npm-{self._legion_version}",
+        )
+
+    async def _install_local_legion(self, environment: BaseEnvironment) -> None:
+        """Overlay a locally packed Legion over the published one.
+
+        This runs at SETUP, not install. Install steps become Docker build
+        layers, and a build cannot see a file uploaded to a container that does
+        not exist yet -- npm fails with ENOENT on the tarball and takes the whole
+        image down. Setup execs in the running container, where upload works.
+
+        `npm pack` rather than copying the checkout: it honours the package's own
+        `files` list, so what lands in the sandbox is byte-for-byte what npm
+        would publish, and it leaves behind .git, node_modules and the .legion
+        run store, which together dwarf the package.
+        """
+        if self._legion_source is None:
+            return
+        if not (self._legion_source / "package.json").exists():
+            raise RuntimeError(
+                f"LEGION_SOURCE={self._legion_source} has no package.json; "
+                "point it at a legion-core checkout"
+            )
+        with tempfile.TemporaryDirectory() as staging:
+            packed = subprocess.run(
+                ["npm", "pack", "--silent", "--pack-destination", staging],
+                cwd=self._legion_source, capture_output=True, text=True, check=True,
+            )
+            name = packed.stdout.strip().splitlines()[-1].strip()
+            await environment.upload_file(Path(staging) / name, _LOCAL_TARBALL)
+        if environment.default_user is not None:
+            await self.exec_as_root(
+                environment,
+                command=f"chown {environment.default_user} {_LOCAL_TARBALL}",
+            )
+        await self.exec_as_agent(
+            environment,
+            command=(
+                'if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi; '
+                f"npm install -g {_LOCAL_TARBALL}"
+            ),
         )
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        """Give the sandboxed Codex the host's credentials, and nothing else."""
+        """Overlay a local Legion if asked, then give Codex the credentials."""
+        await self._install_local_legion(environment)
         env = self.build_process_env({"CODEX_HOME": self._CODEX_HOME.as_posix()})
         await self.exec_as_agent(
             environment,

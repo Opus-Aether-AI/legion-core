@@ -2525,6 +2525,29 @@ $run_error" ]
       > "$BATS_TEST_TMPDIR/finding.json"
     run bash "$helper" "$BATS_TEST_TMPDIR/empty.err" "$BATS_TEST_TMPDIR/finding.json"
     [ "$status" -ne 0 ]
+@test "delegate run: an executor that commits its work is not lost" {
+    # The end-to-end version of the case below, through the real code path.
+    #
+    # The first attempt at this fix compared against "$base", and the unit test
+    # passed because it used a concrete sha. The real path never does: --base
+    # defaults to the NAME "HEAD", so an executor that commits moves HEAD and
+    # the comparison measured the work against itself. The run reported ok with
+    # an empty patch. Only a test that goes through `delegate run` catches that,
+    # which is why this one exists alongside the narrower one.
+    local repo; repo="$(make_test_repo commits-repo)"
+    MOCK_CODEX_COMMITS=1 run "$DELEGATE" run --model test-model-beta \
+        --task "make a change and commit it" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    [ -s "$diff" ] || {
+        echo "diff is empty: the executor's committed work was lost" >&2
+        return 1
+    }
+    grep -q "MOCK_CODEX_CHANGE" "$diff"
+}
+
 @test "delegate run: an executor that COMMITS its work still yields a diff" {
     # `git diff --cached` alone compares the index to HEAD, so an executor that
     # commits produces an EMPTY patch: HEAD already holds the work, nothing is

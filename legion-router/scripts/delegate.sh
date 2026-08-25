@@ -970,6 +970,13 @@ cmd_run() {
       git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" \
       || die "worktree add failed"
   fi
+  # Pin the starting point to a CONCRETE commit, now, while the worktree is
+  # still pristine. `--base` defaults to the string "HEAD", which is a moving
+  # target: an executor that commits moves HEAD, and any later comparison
+  # against the name "HEAD" then compares the result to itself and sees nothing.
+  local base_commit
+  base_commit="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+
   # Register for EXIT-trap cleanup so a crash/kill before the inline removal
   # below does not orphan the worktree + branch (WS6 worktree-leak guard).
   LEGION_WT_PATH="$wt"; LEGION_WT_BRANCH="$branch"; LEGION_WT_REPO="$repo"; LEGION_WT_KEEP="$keep"
@@ -1109,9 +1116,10 @@ cmd_run() {
     # more often on their own, and a task that asks for a branch and a commit --
     # which benchmark harnesses do explicitly -- hits this every time.
     # Comparing to the base captures committed and uncommitted work alike.
-    local diff_from="$base"
-    git -C "$wt" rev-parse --verify --quiet "$diff_from^{commit}" >/dev/null 2>&1 \
-      || diff_from=""
+    # Compare against the pinned starting commit. Using "$base" here would be a
+    # no-op in the common case: it defaults to the NAME "HEAD", so an executor
+    # that commits moves HEAD and the diff compares the work to itself.
+    local diff_from="$base_commit"
     if [[ "${#scopes[@]}" -gt 0 ]]; then
       git -C "$wt" diff --cached ${diff_from:+"$diff_from"} -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
     else

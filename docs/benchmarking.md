@@ -432,7 +432,7 @@ git clone https://github.com/datacurve-ai/deep-swe
 PYTHONPATH=legion-observability/bench/pier \
 pier run -p deep-swe/tasks \
   --agent-import-path legion_agent:LegionAgent \
-  -m gpt-5.6-terra --n-tasks 10 --sample-seed 0
+  -m "$(legion-route --model-ref codex_workhorse)" --n-tasks 10 --sample-seed 0
 ```
 
 The image installs the **published** package, which is what users get and so the

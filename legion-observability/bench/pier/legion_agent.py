@@ -11,7 +11,7 @@ Point Pier at it with:
 
     pier run -p deep-swe/tasks \
       --agent-import-path legion_agent:LegionAgent \
-      -m gpt-5.6-terra
+      -m "$(legion-route --model-ref codex_workhorse)"
 
 Auth: Codex runs from the host's ~/.codex/auth.json, uploaded into the sandbox,
 so a ChatGPT-plan account works without an API key -- the same route Pier's own

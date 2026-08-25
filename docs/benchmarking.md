@@ -408,8 +408,63 @@ commands, and candidate publication remains draft-only.
 16. Done: import the external **Aider Polyglot** benchmark (`aider-polyglot-python`,
    34 Exercism exercises) via `bench/tools/import-aider-polyglot.py` — a pinned,
    deterministically reproducible corpus that discriminates on correctness.
-17. Next: add a repository-level **SWE-bench Lite/Verified** adapter (per-instance
-   Docker harness) and extend Polyglot to JS/Go/Rust/Java/C++ as toolchains allow.
+17. Done: add a **DeepSWE** lane (`bench/pier/legion_agent.py`) — 113 original,
+   contamination-free repository tasks across 91 repos and 5 languages, run in
+   per-task Docker sandboxes through the Harbor-compatible
+   [Pier](https://github.com/datacurve-ai/pier) harness. Unlike the corpora
+   above it is **not saturated**: the best model on its public leaderboard
+   scores 74%, so it can rank quality and not merely cost.
+18. Next: extend Polyglot to JS/Go/Rust/Java/C++ as toolchains allow.
+
+## The DeepSWE lane
+
+Pier ships agents for `codex`, `claude-code` and `opencode`, each driving one
+vendor CLI. Benchmarking Legion with those measures the executor Legion routes
+to, which is the one thing Legion is not. `bench/pier/legion_agent.py` runs
+`legion-delegate` inside the sandbox instead, so a score reflects routing,
+isolation and the apply step, and Legion's own cost accounting flows into Pier's
+metrics rather than a second count that could disagree with it.
+
+```bash
+uv tool install datacurve-pier
+git clone https://github.com/datacurve-ai/deep-swe
+
+PYTHONPATH=legion-observability/bench/pier \
+pier run -p deep-swe/tasks \
+  --agent-import-path legion_agent:LegionAgent \
+  -m gpt-5.6-terra --n-tasks 10 --sample-seed 0
+```
+
+The image installs the **published** package, which is what users get and so the
+honest basis for a public score. `LEGION_SOURCE=/path/to/legion-core` overlays a
+locally packed build on top, at setup rather than install, so an unreleased fix
+can be validated before it ships.
+
+Three integration constraints, each of which cost real time to find:
+
+- **Codex's sandbox cannot nest inside Pier's container.** It fails to create its
+  namespace and then reports, accurately, that every shell command is blocked —
+  which scores as a task failure when nothing was ever attempted. The lane runs
+  Legion with `--sandbox danger-full-access` because the container already
+  provides stronger isolation than the flag removes.
+- **ChatGPT-plan auth talks to `chatgpt.com`, not `api.openai.com`.** Pier's own
+  codex agent allowlists only the latter, so a subscription account fails there
+  as a network outage. The lane allowlists both.
+- **Most task images have no node**, and `apt-get install nodejs` fails with
+  exit 100 where it is not in the sources, taking the whole build down.
+
+### What it found immediately
+
+The first real run scored 0 with an empty patch. Legion had spent sixteen
+minutes and reported `status: ok`. Codex had branched and committed its work, as
+the task instructions ask — and `delegate run` compared the index against `HEAD`,
+which by then contained that commit, so the diff was empty and the entire run
+was discarded in silence. Since every DeepSWE instruction asks the agent to
+commit, Legion would have scored ~0% on the whole benchmark for a reason that
+had nothing to do with its ability to solve the tasks.
+
+With the base pinned to a concrete commit, the same task, same model, went from
+reward 0 to **reward 1** — 49/49 fail-to-pass and 51,469/51,469 pass-to-pass.
 
 ## Non-goals
 
@@ -422,4 +477,6 @@ commands, and candidate publication remains draft-only.
 
 - [svineet/harness-bench](https://github.com/svineet/harness-bench) — criterion-level harness workbench with observe/analyze/improve loops.
 - [SWE-bench](https://github.com/swe-bench/SWE-bench) — reproducible repository-level coding issue evaluation; useful model for future live corpus adapters.
+- [DeepSWE](https://deepswe.datacurve.ai/) — 113 contamination-free, behaviourally
+  verified repository tasks; Apache-2.0, run via [Pier](https://github.com/datacurve-ai/pier).
 - [Aider benchmark harness](https://github.com/Aider-AI/aider/blob/main/benchmark/README.md) — durable benchmark run records with pass rates, commit/settings, cost, time, and malformed-output counters.

@@ -73,6 +73,7 @@ class LegionAgent(BaseInstalledAgent):
         source = legion_source or os.environ.get("LEGION_SOURCE") or ""
         self._legion_source = Path(source).expanduser().resolve() if source else None
         self._legion_version = legion_version
+        self._resolved_version_cache: str | None = None
 
     @staticmethod
     def name() -> str:
@@ -124,7 +125,16 @@ class LegionAgent(BaseInstalledAgent):
         # could only ever measure the released version would not be able to
         # validate a fix before it ships, and the first bug this lane found was
         # in unreleased code.
-        legion_pkg = f"@opus-aether-ai/legion-core@{self._legion_version}"
+        # Resolve "latest" to a CONCRETE version. Both the install command and
+        # the cache key below use it, because "latest" is a moving target and a
+        # cache key containing it never changes when the published package does:
+        # Docker then reuses a layer that installed the OLD version, and the run
+        # silently benchmarks something other than what it claims to.
+        #
+        # That is not hypothetical -- it scored this lane 0/10 against a release
+        # whose whole point was the fix, because the image still held the
+        # version from before it.
+        legion_pkg = f"@opus-aether-ai/legion-core@{self._resolved_version()}"
         agent_run = (
             "set -eu; "
             'if ! command -v npm >/dev/null 2>&1 && [ ! -s "$HOME/.nvm/nvm.sh" ]; then '
@@ -148,12 +158,36 @@ class LegionAgent(BaseInstalledAgent):
                 'if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi; '
                 "command -v legion-delegate && command -v codex"
             ),
-            # Keyed on the published version only, deliberately: the image
-            # contains nothing else. A LEGION_SOURCE build is overlaid after the
-            # image is up, so it never lands in a cached layer and cannot go
-            # stale there.
-            cache_key=f"legion-npm-{self._legion_version}",
+            # The RESOLVED version, never "latest". A LEGION_SOURCE build is
+            # overlaid after the image is up, so it never lands in a cached
+            # layer and cannot go stale there.
+            cache_key=f"legion-npm-{self._resolved_version()}",
         )
+
+    def _resolved_version(self) -> str:
+        """Pin "latest" to the version the registry currently serves.
+
+        Cached so one trial cannot resolve a different version than the next
+        within a run, and so the registry is asked once rather than per task.
+        If the registry cannot be reached the literal is returned unchanged --
+        a benchmark should not fail to start over a version lookup, and the
+        install command would resolve the same way anyway.
+        """
+        if self._resolved_version_cache is not None:
+            return self._resolved_version_cache
+        version = self._legion_version
+        if version == "latest":
+            try:
+                out = subprocess.run(
+                    ["npm", "view", "@opus-aether-ai/legion-core", "version"],
+                    capture_output=True, text=True, timeout=60, check=True,
+                ).stdout.strip()
+                if out:
+                    version = out
+            except (subprocess.SubprocessError, OSError):
+                pass
+        self._resolved_version_cache = version
+        return version
 
     async def _install_local_legion(self, environment: BaseEnvironment) -> None:
         """Overlay a locally packed Legion over the published one.

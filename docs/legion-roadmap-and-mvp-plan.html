@@ -1,0 +1,743 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Legion — Definitive Roadmap and Hybrid MVP Specification</title>
+  <style>
+    :root { color-scheme:dark; --bg:#07101d; --surface:#111d31; --surface2:#182841; --line:#2c4263; --text:#eef6ff; --muted:#aec2dc; --cyan:#5dd9ff; --green:#79e3a7; --amber:#ffd171; --violet:#c2a7ff; --red:#ff8d9c; --blue:#79aaff; }
+    * { box-sizing:border-box; } html { background:var(--bg); scroll-behavior:smooth; } body { margin:0; color:var(--text); background:radial-gradient(circle at 14% 0%,#173c67 0,transparent 38rem),var(--bg); font:15px/1.58 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(1240px,calc(100% - 32px)); margin:auto; padding:48px 0 80px; } h1 { max-width:960px; margin:10px 0 14px; font-size:clamp(2.3rem,5vw,4.9rem); line-height:1; letter-spacing:-.055em; } h2 { margin:54px 0 16px; font-size:1.48rem; letter-spacing:-.025em; } h3 { margin:0 0 8px; font-size:.91rem; letter-spacing:.07em; text-transform:uppercase; } h4 { margin:20px 0 8px; font-size:1rem; } p { margin:0 0 14px; color:var(--muted); } code { color:#dceaff; background:#091526; border:1px solid #213653; border-radius:6px; padding:.1rem .3rem; } a { color:var(--cyan); } .eyebrow { color:var(--cyan); font-size:.75rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; } .lede { max-width:880px; color:#d9e7fb; font-size:1.1rem; }
+    .meta,.grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; } .meta { grid-template-columns:repeat(3,minmax(0,1fr)); margin:26px 0; } .card,.panel,.phase { min-width:0; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,rgba(24,40,65,.92),rgba(17,29,49,.92)); } .card { padding:14px; } .panel,.phase { padding:22px; } .label { display:block; color:var(--muted); font-size:.72rem; font-weight:750; letter-spacing:.08em; text-transform:uppercase; } .value { display:block; margin-top:4px; font-weight:750; overflow-wrap:anywhere; }
+    .summary { display:grid; grid-template-columns:1.35fr .65fr; gap:16px; } .decision { border-left:4px solid var(--cyan); } .legend,.chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; } .legend + .panel { margin-top:12px; } .badge,.chip { display:inline-block; border-radius:999px; padding:4px 9px; font-size:.75rem; font-weight:750; } .fact { color:var(--cyan); background:#123b4a; } .decision-b { color:var(--green); background:#193f31; } .assumption { color:var(--amber); background:#493815; } .question { color:var(--violet); background:#34265c; } .risk { color:var(--red); background:#4a1f2a; } .chip { color:#dce9ff; background:#20324d; border:1px solid #385376; }
+    .grid { grid-template-columns:repeat(3,minmax(0,1fr)); } .full { grid-column:1/-1; } .span2 { grid-column:span 2; } .flow { display:grid; grid-template-columns:1fr auto 1fr auto 1fr; align-items:center; gap:10px; padding:20px; overflow:auto; } .node { min-width:180px; padding:15px; border:1px solid var(--line); border-radius:12px; background:var(--surface2); text-align:center; font-weight:750; } .node small { display:block; margin-top:4px; color:var(--muted); font-weight:500; } .arrow { color:var(--cyan); font-size:1.35rem; }
+    table { width:100%; border-collapse:collapse; overflow-wrap:anywhere; } th,td { padding:11px 9px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; } th { color:#dce9ff; font-size:.73rem; letter-spacing:.06em; text-transform:uppercase; } td { color:var(--muted); } tr:last-child td { border-bottom:0; } .table-wrap { overflow-x:auto; } .list { margin:0; padding-left:20px; color:var(--muted); } .list li { margin:7px 0; } .callout { border-left:3px solid var(--amber); } .success { border-left:3px solid var(--green); } .state { display:flex; flex-wrap:wrap; gap:8px; align-items:center; } .state span { border:1px solid var(--line); border-radius:10px; background:var(--surface2); padding:8px 10px; color:#dce8fa; } .state b { color:var(--cyan); }
+    .roadmap { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; } .roadmap a { text-decoration:none; } .roadmap a:focus-visible,summary:focus-visible { outline:2px solid var(--cyan); outline-offset:3px; border-radius:12px; } .roadmap .phase { height:100%; transition:border-color .15s ease; } .roadmap .phase:hover { border-color:var(--cyan); } .phase-num { color:var(--cyan); font-weight:850; font-size:1.45rem; } .phase-title { display:block; margin:4px 0 6px; color:var(--text); font-weight:800; } .phase small { color:var(--muted); }
+    details { border:1px solid var(--line); border-radius:14px; background:rgba(17,29,49,.78); margin:12px 0; } summary { cursor:pointer; padding:16px 18px; color:#e9f2ff; font-weight:800; } details > div { padding:0 18px 18px; } .mono { white-space:pre-wrap; overflow-wrap:anywhere; color:#dce9ff; background:#091526; border:1px solid #203653; border-radius:12px; padding:14px; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+    @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
+    @media (max-width:900px) { .roadmap { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+    @media (max-width:800px) { main { width:min(100% - 24px,1240px); padding-top:28px; } .meta,.grid,.summary,.roadmap { grid-template-columns:1fr; } .span2 { grid-column:auto; } .flow { grid-template-columns:1fr; } .arrow { transform:rotate(90deg); text-align:center; } h2 { margin-top:38px; } .panel,.phase { padding:17px; } th,td { min-width:130px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Definitive product roadmap · HLS + Hybrid MVP LLS</div>
+    <h1>Legion: one shared intelligence, a legion of models</h1>
+    <p class="lede">A gated plan from today’s local orchestration core to a durable shared intelligence that understands authorized organizational context, assembles repo-specific Project Agents, acts through local and cloud capacities, proves every material outcome, and compounds only verified learning.</p>
+    <div class="meta">
+      <div class="card"><span class="label">Version</span><span class="value">v2.5</span></div>
+      <div class="card"><span class="label">Status</span><span class="value">Definitive · accepted architecture</span></div>
+      <div class="card"><span class="label">Last audited</span><span class="value">2026-08-26</span></div>
+      <div class="card"><span class="label">Primary profile</span><span class="value">AI capability or agent</span></div>
+      <div class="card"><span class="label">Supporting profiles</span><span class="value">Integration/API · real-time/data system</span></div>
+      <div class="card"><span class="label">Planning invocations</span><span class="value">Operator-requested: GPT‑5.6‑sol <code>max</code> · Claude Opus 5 <code>xhigh</code>; Phase 0 adds effective-effort attestation</span></div>
+    </div>
+  </header>
+
+  <section class="summary">
+    <article class="panel decision"><h3>Final product decision</h3><p><span class="badge decision-b">Decision</span> Legion is one logical intelligence, not one model or one container. Core owns the outcome, Spec, Durable Goal, Project Agent, work graph, Provider, Capacity, proof, memory, knowledge and learning contracts. Opus, Sol and future models are replaceable reasoning engines reached through Providers; repo and domain abilities remain outside Core. Legion Cloud is the optional durable control and knowledge plane for the same local-first harness.</p></article>
+    <aside class="panel"><h3>Legion promise</h3><p><strong>One orchestrator, a legion of models.</strong> Describe the outcome once; Legion assembles the right specialists, proves the result wherever it runs, and remembers only what evidence supports.</p></aside>
+  </section>
+  <div class="legend"><span class="badge fact">Fact</span><span class="badge decision-b">Decision</span><span class="badge assumption">Assumption</span><span class="badge question">Open decision</span><span class="badge risk">Risk</span></div>
+  <aside class="panel"><h3>How to read this artifact</h3><p>Sections 1–14 are the decision-ready high-level specification (HLS) and phased roadmap. Sections 15–24 are the implementation-ready low-level specification (LLS) for the Phase 2 Hybrid MVP. Section 25 records resolved risks and bounded assumptions; Section 26 closes the loop from numbered HLS invariants to LLS mechanisms and verification. Unless explicitly marked Fact, Assumption, Risk or Open decision, normative requirements and roadmap/LLS directions are accepted Decisions. No architecture-blocking open decision remains.</p></aside>
+
+  <section id="north-star">
+    <h2>1. North star</h2>
+    <div class="panel flow"><div class="node">Confirmed intent<small>goal, constraints, authority, success</small></div><div class="arrow">→</div><div class="node">Legion Intelligence<small>world model, Project Agents, work graph, proof</small></div><div class="arrow">→</div><div class="node">Proven outcome<small>review-ready work plus evidence and learning</small></div></div>
+    <div class="grid">
+      <article class="panel"><h3>The shared intelligence owns</h3><p>Outcome intent, clarification, immutable specs, the authorized world model, work graphs, Project Agent assembly, routing, placement, proof, memory, evaluation and bounded improvement policy. From Phase 6, it may also hold proposal-only Durable Goals.</p></article>
+      <article class="panel"><h3>Models and role instances own</h3><p>Temporary reasoning and tool use for one bounded role. They receive a scoped Context Pack and return typed results; no model or role instance is the permanent brain or a source of truth.</p></article>
+      <article class="panel"><h3>Source systems and people own</h3><p>Git owns code, connected systems own their facts, and people own consequential authority. Legion may create digest-approved drafts; it does not silently merge, deploy, trade, spend or change policy.</p></article>
+      <article class="panel full success"><h3>Final Boss value</h3><p>Legion behaves like one persistent organizational intelligence with many hands: it understands the authorized world, selects Project Agents and abilities, executes across local and cloud capacities, proves outcomes, and uses validated outcomes to improve later work without weakening human authority.</p></article>
+    </div>
+  </section>
+
+  <section id="current-state">
+    <h2>2. Verified current state</h2>
+    <div class="grid">
+      <article class="panel"><h3>Repository fact</h3><p><span class="badge fact">Fact</span> The implementation baseline examined for this roadmap is release <code>0.26.0</code> at <code>4557a83</code>, which matched <code>origin/main</code> on 2026-08-26. The roadmap is a docs-only layer above that release; Phase 0 MUST re-pin the implementation SHA before work starts.</p></article>
+      <article class="panel"><h3>Already strong</h3><p><span class="badge fact">Fact</span> Routing across six executors, worktree and optional VM isolation, fan-out, immutable reviews, validation, evidence, telemetry, benchmarks, convergence, typed self-learning, Legion-owned session events, pluggable heavy-task stages and a staged Agent Client Protocol bridge already exist.</p></article>
+      <article class="panel"><h3>Missing</h3><p><span class="badge fact">Fact</span> Legion has no canonical outcome/Spec ledger, Durable Goal runtime, Provider/Capacity split, Project Agent contract, authenticated cloud control plane, shared trusted memory, Knowledge Ledger/graph, durable cloud Job queue, or hosted Worker coordinator.</p></article>
+      <article class="panel"><h3>Known contradiction</h3><p><span class="badge risk">Risk</span> <code>ENTERPRISE.md</code> currently sells “no Legion server” as a guarantee. Before cloud ships, it must say cloud is optional and customer-hostable while local-only remains fully supported.</p></article>
+      <article class="panel"><h3>Known privacy leaks</h3><p><span class="badge risk">Risk</span> <code>span.task</code> carries task text; provider run directories mix diffs with raw transcripts; task files and unredacted errors sit near sync candidates. Phase 0 classifies every field and establishes the privacy corpus; Phase 1 proves the safe projector in network-disabled shadow mode before any cloud transport exists.</p></article>
+      <article class="panel"><h3>Reuse rule</h3><p><span class="badge decision-b">Decision</span> Deepen current modules. Do not create another router, workflow language, learning engine, control daemon, price table, telemetry stream, or process supervisor.</p></article>
+    </div>
+  </section>
+
+  <section id="invariants">
+    <h2>3. Non-negotiable invariants</h2>
+    <div class="panel table-wrap"><table><thead><tr><th>ID</th><th>Invariant</th><th>How it is proven</th></tr></thead><tbody>
+      <tr><td>I-1</td><td>Every local command MUST work without login or network.</td><td>Network-disabled end-to-end suite in every phase.</td></tr>
+      <tr><td>I-2</td><td>The cloud MUST NOT signal a workstation, mount its filesystem, read its credentials, or apply a local patch.</td><td>Outbound-only worker, firewall tests, local guarded control.</td></tr>
+      <tr><td>I-3</td><td>Provider transcripts, reasoning, tool output, terminal streams, paths, and secrets MUST NOT sync.</td><td>Field allowlist plus red-team projection corpus on client and server.</td></tr>
+      <tr><td>I-4</td><td>Only a user-confirmed immutable spec may enter code-changing execution.</td><td>Spec version + digest bound to the job and attempt.</td></tr>
+      <tr><td>I-5</td><td>Code-changing work MUST stop at <code>review_ready</code>.</td><td>Exact-digest approval required for any later publication or apply.</td></tr>
+      <tr><td>I-6</td><td>Model output is evidence, never success.</td><td>Deterministic validation, acceptance checks, and independent review.</td></tr>
+      <tr><td>I-7</td><td>Terminal attempts are immutable and duplicate requests are safe.</td><td>Idempotency keys, fencing tokens, append-only attempt history.</td></tr>
+      <tr><td>I-8</td><td>Git remains the code source of truth; jobs pin immutable commits.</td><td>Base SHA recorded in attempt and receipt.</td></tr>
+      <tr><td>I-9</td><td>Model-authored prose MUST NOT become trusted memory automatically.</td><td>Existing provenance whitelist, trust flag, and validated-outcome gate.</td></tr>
+      <tr><td>I-10</td><td>Every phase MUST be independently disableable and reversible.</td><td>Feature switch, N‑1 compatibility, rollback drill, local path retained.</td></tr>
+      <tr><td>I-11</td><td>Every knowledge claim MUST carry source, source revision, scope, trust, freshness and sensitivity; conflicting claims remain visible.</td><td>Schema rejection, provenance tests, supersession and conflict fixtures.</td></tr>
+      <tr><td>I-12</td><td>A Project Agent MUST be a versioned, permission-scoped view of Legion—not a free-running model identity.</td><td>Manifest digest pinned to job; context and tool denials tested.</td></tr>
+      <tr><td>I-13</td><td>Legion MUST claim capability only when an authorized ability and an objective validator exist.</td><td>Capability/validator registry gate; unsupported goals ask, block or propose an extension.</td></tr>
+      <tr><td>I-14</td><td>A durable Goal MAY observe evidence and propose bounded work; it MUST NOT create a Job, create another Goal, or use prose-only success criteria.</td><td>Goal transition/property tests, hard budget, evidence cursor and mandatory spec confirmation.</td></tr>
+      <tr><td>I-15</td><td>Exactly one logical orchestrator MUST own the canonical outcome, Spec and work graph; no model, Project Agent, provider or worker may advance that truth independently.</td><td>Single-owner reducers, CAS transition tests and provider-replacement replay.</td></tr>
+      <tr><td>I-16</td><td>Provider identity and Capacity identity MUST remain separate and both MUST be pinned to an Attempt and Receipt.</td><td>Schema denial for conflated/missing identity; local and cloud adapter parity.</td></tr>
+    </tbody></table></div>
+
+    <div class="grid">
+      <article class="panel span2"><h3>Initial production model policy</h3><p><span class="badge decision-b">Decision</span> Legion-managed production work is restricted to <code>claude-opus-5</code> and <code>gpt-5.6-sol</code>, both requesting <code>xhigh</code>, as previously directed. Opus owns clarification, specification, architecture, decomposition, integration decisions and independent final review. Sol authors every candidate-code change, including composition and conflict resolution, under those decisions. Candidate authoring provenance MUST exclude Opus before Opus can satisfy the independent review gate; the initial policy has no automated exception. Every model invocation receipt attests Provider, model, requested/effective effort and fallback state. This planning pass separately requested Sol <code>max</code>; current telemetry cannot prove its effective mapping, so planning invocation parameters do not mutate runtime policy.</p></article>
+      <article class="panel"><h3>Failure policy</h3><p>No silent model or effort downgrade. If the approved Provider/model is unavailable, a Job remains <code>execution_queued</code> with reason <code>waiting_provider</code>; if the approved Capacity is unavailable, the reason is <code>waiting_capacity</code>. At the configured deadline it becomes <code>blocked:provider_unavailable</code> or <code>blocked:capacity_unavailable</code>. A future model requires a versioned policy change and held-out gate.</p></article>
+    </div>
+  </section>
+
+  <section id="architecture">
+    <h2>4. Final system picture</h2>
+    <div class="panel flow"><div class="node">Products and interfaces<small>CLI, Console, API, CI, Aether AI, external UIs</small></div><div class="arrow">→</div><div class="node">Legion Intelligence Plane<small>outcomes/Goals, world model, Project Agents, work graph, proof</small></div><div class="arrow">→</div><div class="node">Ability and execution fabric<small>models, tools, local Workers, customer runners, cloud sandboxes</small></div></div>
+    <div class="grid">
+      <article class="panel"><h3>Legion Core</h3><p>The domain-neutral harness kernel and local runtime. It owns versioned contracts and pure reducers for outcome intents, Specs, Durable Goals, work graphs, Project Agents, Abilities, Providers, Capacities, evidence, knowledge claims and policy. It MUST NOT import Cloud infrastructure.</p></article>
+      <article class="panel"><h3>Legion Cloud Hub</h3><p>An optional modular application that supplies identity, encrypted sessions/specs, durable jobs, Project Agent registry, trusted memory, Knowledge Ledger, policy and audit through published Core contracts. It coordinates work; it is not the coding container.</p></article>
+      <article class="panel"><h3>Project Agent</h3><p>A repository-bound, versioned manifest plus scoped memory, abilities, context and proof policy. Nemesis and Webapp become different Project Agents over the same Legion intelligence. Planner, implementer and reviewer are temporary role instances inside a Job, not separate orchestrators or workers.</p></article>
+      <article class="panel"><h3>Knowledge Fabric</h3><p>One logical, authorized world model over source systems, typed trusted memory and attributed graph claims. It is federated: Git, issues, docs and telemetry remain authoritative; Legion retrieves a bounded task subgraph rather than copying or prompting “everything.”</p></article>
+      <article class="panel"><h3>Ability</h3><p>A typed, permissioned operation supplied by a skill, domain plugin, MCP/ACP adapter or small executable. Every side-effecting ability declares its input/output, authority, validator, timeout and recovery behavior.</p></article>
+      <article class="panel"><h3>Provider</h3><p>Which approved adapter performs a work unit and, for model work, which effective model and effort it attests: Claude Code, Codex, another harness, or a future native adapter.</p></article>
+      <article class="panel"><h3>Capacity</h3><p>Where work runs: a laptop, build box, customer runner, CI lane, or cloud sandbox. Each has its own identity, credentials owner, trust class, capabilities, cost and concurrency.</p></article>
+      <article class="panel"><h3>Context source adapter</h3><p>A read-only adapter for bounded, attributed facts such as code graphs, decisions, issues, incidents, docs or runtime telemetry. Its text is never trusted instruction; “Provider” remains reserved for execution.</p></article>
+      <article class="panel"><h3>Integration capacity</h3><p>Exactly one Capacity hosts composition. Sol authors application and conflict-resolution edits under Opus integration decisions; Opus then independently reviews the integrated candidate. Fan-out may distribute, but composition never does.</p></article>
+      <article class="panel"><h3>Outbound worker</h3><p>A Capacity-side daemon that claims, durably records, verifies and runs Jobs. It is not a Project Agent, a model role or an orchestrator; it may change execution state only through fenced Core transitions.</p></article>
+      <article class="panel"><h3>Outcome intent and Durable Goal</h3><p>An outcome intent is the bounded request captured by a Spec in Phases 0–5. A Durable Goal is the Phase 6 evidence-watching entity; it can emit only a Proposal, and only a human-confirmed Spec can create a Job.</p></article>
+      <article class="panel full callout"><h3>Enforceable dependency direction</h3><p><code>legion-contracts</code> → Core kernel and local adapters → optional repo/domain abilities. Cloud and Worker Runtime adapters depend on the same contracts; Core never depends back on them. “One logical orchestrator” does not require one process: Cloud Hub and Workers apply the same single-owner reducers, and a nested <code>legion-run</code> may coordinate role instances but cannot create a second canonical Job truth. Project-specific manifests and domain plugins live with their project or plugin, never in <code>legion-core</code>.</p></article>
+    </div>
+    <h4>Knowledge and memory are four different layers</h4>
+    <div class="panel table-wrap"><table><thead><tr><th>Layer</th><th>Purpose</th><th>Authority and lifetime</th></tr></thead><tbody>
+      <tr><td>Source systems</td><td>Git, repository instructions, CI, docs, issues, APIs and telemetry.</td><td>Authoritative for their own facts; Legion reads them at a pinned revision.</td></tr>
+      <tr><td>Knowledge Ledger</td><td>Append-only human-confirmed decisions, source-backed facts, preferences, constraints, procedure references and verified outcomes.</td><td>Durable Legion assertion record; corrections supersede, trust never comes from model confidence.</td></tr>
+      <tr><td>Graph projection</td><td>Entities and edges materialized from sources and ledger assertions for traversal.</td><td>No independent authority. Local detailed SQLite and safe cloud Postgres projections are disposable; rebuilding with the same schema and pinned source/Ledger revisions MUST yield the same canonical digest.</td></tr>
+      <tr><td>Context Pack</td><td>Small, permission-correct subset compiled for one Project Agent, spec and stage.</td><td>Per invocation; digest-addressed with provenance, freshness, conflicts, omissions and budget.</td></tr>
+    </tbody></table></div>
+    <div class="grid">
+      <article class="panel"><h3>Working memory</h3><p>Temporary model/attempt context. It remains on the execution capacity and is normally discarded.</p></article>
+      <article class="panel"><h3>Episodic memory</h3><p>Sessions, jobs, attempts, failures and outcomes. It explains what happened but does not automatically define truth or policy.</p></article>
+      <article class="panel"><h3>Semantic memory</h3><p>Active verified Ledger assertions: facts, decisions, constraints and preferences with provenance and decay.</p></article>
+      <article class="panel"><h3>Procedural memory</h3><p>Skills, domain plugins, validators and policies promoted through evidence gates. Project Agents reference them; they do not embed an unreviewed prompt blob.</p></article>
+    </div>
+  </section>
+
+  <section id="roadmap">
+    <h2>5. Phase map</h2>
+    <div class="roadmap">
+      <a href="#phase-0"><article class="phase"><span class="phase-num">0</span><span class="phase-title">Lock the kernel</span><small>Contracts, provider/capacity split, model policy, baselines.</small></article></a>
+      <a href="#phase-1"><article class="phase"><span class="phase-num">1</span><span class="phase-title">Local Project Agent</span><small>One repo specialist, sessions, specs, verified delivery, resumability.</small></article></a>
+      <a href="#phase-2"><article class="phase"><span class="phase-num">2</span><span class="phase-title">Hybrid Cloud MVP</span><small>Cloud sessions, Project Agents, Knowledge Ledger and local worker.</small></article></a>
+      <a href="#phase-3"><article class="phase"><span class="phase-num">3</span><span class="phase-title">Knowledge Fabric</span><small>Federated graph and bounded project views over attributed sources.</small></article></a>
+      <a href="#phase-4"><article class="phase"><span class="phase-num">4</span><span class="phase-title">Distributed capacities</span><small>Many trusted machines, explicit placement, cloud execution.</small></article></a>
+      <a href="#phase-5"><article class="phase"><span class="phase-num">5</span><span class="phase-title">Multi-Project Shared Intelligence</span><small>Project Agent teams, cross-repo goals, policy and proof.</small></article></a>
+      <a href="#phase-6"><article class="phase"><span class="phase-num">6</span><span class="phase-title">Durable Goals</span><small>Evidence-driven pursuit through bounded proposals and confirmed specs.</small></article></a>
+      <a href="#phase-7"><article class="phase"><span class="phase-num">7</span><span class="phase-title">Self-improving policy</span><small>Guidance, routing, placement and context improve behind gates.</small></article></a>
+      <a href="#phase-8"><article class="phase"><span class="phase-num">8</span><span class="phase-title">Final Boss</span><small>One verified intelligence across projects, domains, tools and capacities.</small></article></a>
+    </div>
+    <p><span class="badge decision-b">Promotion rule</span> A phase advances only when its definition of done, privacy gate, held-out comparison, rollback drill, and prior-phase compatibility suite pass. Feature existence alone is not promotion.</p>
+  </section>
+
+  <section id="phase-0">
+    <h2>6. Phase 0 — Lock the kernel</h2>
+    <div class="grid">
+      <article class="panel"><h3>Clear goal</h3><p>Stabilize current contracts and explicitly migrate the initial model policy while splitting provider from capacity.</p></article>
+      <article class="panel"><h3>Why</h3><p>Cloud and multi-machine work cannot safely attach to informal run-state files or an <code>executor</code> field that means both “what” and “where.” The requested production Opus/Sol <code>xhigh</code> policy is a real behavior migration and must be canaried, not hidden inside a “no behavior change” refactor.</p></article>
+      <article class="panel"><h3>Estimated effort</h3><p><span class="badge assumption">Assumption</span> 2–4 engineer-weeks, including compatibility fixtures and baseline measurement.</p></article>
+    </div>
+    <details open><summary>Features and ordered steps</summary><div><ol class="list">
+      <li>Update and pin the implementation baseline; record the exact Legion version on every attempt and receipt.</li>
+      <li>Promote the shapes needed before cloud to JSON Schema: outcome intent, work session, Spec, Project Agent, Ability, Provider, Capacity, Job, Attempt, provider invocation, Receipt, Approval, knowledge assertion/validator, grant, Context Pack and canonical digest. Reserve the Durable Goal contract/runtime for Phase 6.</li>
+      <li>Add <code>capacities.toml</code> with one capacity: <code>local</code>. Keep <code>executor</code> as a compatibility alias for provider.</li>
+      <li>Add <code>provider_id</code>, <code>capacity_id</code>, requested/effective model effort and fallback state to invocation spans/receipts. An Attempt pins its Capacity and provider-set digest; its provider-invocation manifest records each work unit separately because one Job may use both Opus and Sol.</li>
+      <li>Add graph-ready scope, entity, provenance, sensitivity and source-revision fields to memory and context contracts without building a graph database.</li>
+      <li>After contract shadowing is green, migrate to the Opus 5 / Sol <code>xhigh</code> production policy behind a versioned profile and canary flag. Attest effective model/effort and disable unapproved fallback.</li>
+      <li>Make <code>legion.model-policy.v1</code> enforceable for delegated and primary work: define the canonical effort ladder <code>low|medium|high|xhigh|max</code>, require an exact per-harness mapping and effective attestation, fail closed when a requested level is unrepresentable, invert Claude fallback to opt-in, and remove/disable policy-bound routes to unapproved models. Aliasing <code>max</code> to <code>xhigh</code> is not an exact mapping.</li>
+      <li>Preserve review independence through authoring provenance: Sol authors implementation, composition and conflict resolution; Opus authors decisions and reviews the Sol-authored integrated candidate. If Opus appears in candidate-code authoring provenance, the automated independent-review gate fails.</li>
+      <li>Migrate <code>legion-optimize.py</code> and every remaining catalog consumer to the canonical <code>legion-route.py</code> reader; delete direct model-catalog parsing rather than maintaining two readers.</li>
+      <li>Classify every stored field as local-private, cloud-eligible, or forbidden. Remove task text from cloud-safe span projections.</li>
+      <li>Add span retention before any telemetry projection can leave the machine.</li>
+      <li>Rewrite public “no Legion server/cloud” guarantees to the accurate invariant: cloud is optional and customer-hostable; local-only remains complete.</li>
+      <li>Capture golden local runs, latency/cost/token baselines, privacy fixtures, and zero-false-success baselines.</li>
+    </ol></div></details>
+    <details><summary>Non-goals, optimizations, gates</summary><div>
+      <p><strong>Non-goals:</strong> no cloud, network, new planner, UI rewrite, queue or worker fleet. Apart from the separately gated model-policy migration, no execution behavior changes.</p>
+      <p><strong>Optimizations:</strong> validate schemas at boundaries, not on every span append; reuse the single model-catalog reader and current atomic state writers; translate old artifacts only at ingress/egress.</p>
+      <p><strong>Definition of done:</strong> current commands and full suites pass; new schemas have positive/negative/boundary fixtures; golden runs replay compatibly; unknown Provider/model/effort fails before invocation; policy-bound <code>self</code> work refuses a primary whose effective model/effort cannot be attested; fallback is explicit; no live policy-bound route reaches an unapproved model; invocation receipts prove requested/effective model effort and fallback state. A CI/doctor architecture check proves Core/local packages import neither Cloud nor HTTP/OIDC/KMS/Postgres clients. The local adapter and an in-memory contract test adapter pass the transition suite; every later cloud adapter MUST join that same suite before enablement.</p>
+      <p><strong>Rollback:</strong> additive contracts begin in shadow mode. The model policy begins observe-only, then canaries by repository; one profile switch restores the prior static routing. No destructive data migration.</p>
+    </div></details>
+    <article class="panel success"><h3>State after Phase 0</h3><p><strong>Legion is a pinned, contract-stable local execution foundation that knows both who performs work and where it runs.</strong></p><p><strong>Example:</strong> the same bug-fix delegation still returns the same patch and review evidence, now also bound to provider, capacity, Legion version, model policy and a schema-valid receipt.</p></article>
+  </section>
+
+  <section id="phase-1">
+    <h2>7. Phase 1 — Local Project Agent Alpha</h2>
+    <div class="grid">
+      <article class="panel"><h3>Clear goal</h3><p>A user states a software outcome to a repository-specific Project Agent; Legion asks blocking questions, confirms a spec, performs the work locally, proves it, and returns a review-ready candidate from one command.</p></article>
+      <article class="panel"><h3>Why</h3><p>Cloud should amplify a complete product. It must not be used to hide the absence of a first-party work session, spec ledger, planner, or resumable harness lifecycle.</p></article>
+      <article class="panel"><h3>Estimated effort</h3><p><span class="badge assumption">Assumption</span> 5–8 engineer-weeks after Phase 0.</p></article>
+    </div>
+    <details open><summary>Features and ordered steps</summary><div><ol class="list">
+      <li>Add local <code>legion-session</code> and an append-only work-session journal. It stores outcome intent, Spec versions, decisions, stages, evidence digests, approvals and costs—not provider reasoning and not a Durable Goal runtime.</li>
+      <li>Add <code>legion-spec</code> with immutable versions, blocking questions, explicit user confirmation and content digest.</li>
+      <li>Add <code>legion.project-agent.v1</code>, a repo-owned manifest that references existing instructions, allowlisted domain plugins/skills, context sources, proof policy and allowed workflow profiles. Pin its digest to every run.</li>
+      <li>Add deterministic required-field prechecks, then Opus 5 <code>xhigh</code> structured clarification for ambiguous work.</li>
+      <li>Add a first-party planner that emits the existing <code>plan.json</code> and <code>slices.jsonl</code> contracts; no new workflow language.</li>
+      <li>Use Sol <code>xhigh</code> for bounded implementation/test/debug/security/performance slices in existing worktrees.</li>
+      <li>Use Opus <code>xhigh</code> for product/architecture/integration decisions and independent final review. Sol <code>xhigh</code> authors implementation, composition and conflict-resolution edits; candidate authoring provenance containing Opus fails the automated independent-review gate.</li>
+      <li>Keep the integrated candidate in a dedicated worktree until exact-digest local approval. Do not touch the operator checkout.</li>
+      <li>Make the lifecycle resumable from session events and periodic snapshots. Reuse convergence for no-progress detection.</li>
+      <li>Build the entire safe projection/cache/outbox locally in shadow mode with no network transport.</li>
+    </ol></div></details>
+    <details><summary>Non-goals, optimizations, gates</summary><div>
+      <p><strong>Non-goals:</strong> no cloud, team accounts, remote agents, multi-repo job, auto PR/merge/deploy, hidden-reasoning store, unrestricted self-editing, or generic workflow engine.</p>
+      <p><strong>Optimizations:</strong> deterministic search/schema/Git/test selection before model calls; repository context cached by immutable tree SHA; cheapest-failure-first validation; bounded context; unchanged checks skipped by source/evidence fingerprint; existing fan-out capped by measured capacity; reduce call count rather than reasoning quality.</p>
+      <p><strong>Definition of done:</strong> representative feature, bug, refactor and test-hardening tasks complete from one command; ambiguous requests produce questions and no diff; process-kill/resume tests pass at every stage; candidate remains isolated; validation and independent review are mandatory; zero false success; self-learning finalization is attempted on all terminal paths.</p>
+      <p><strong>Rollback:</strong> flags disable sessions, planner and resumability independently; explicit plan/slices mode remains available.</p>
+    </div></details>
+    <article class="panel success"><h3>State after Phase 1</h3><p><strong>Legion is a durable local harness in which each repository can expose a real specialist without training or hosting a separate model.</strong></p><p><strong>Example:</strong> the Nemesis Project Agent loads Nemesis instructions and trading validation abilities, turns “add an RSI strategy” into a confirmed spec, isolated Sol implementation, deterministic backtest gates, independent Opus review and a review-ready patch.</p></article>
+  </section>
+
+  <section id="phase-2">
+    <h2>8. Phase 2 — Hybrid Cloud MVP</h2>
+    <div class="grid">
+      <article class="panel"><h3>Clear goal</h3><p>Give one user a durable shared Legion across devices and repositories: encrypted sessions/specs, one Project Agent per bound repo, a trusted Knowledge Ledger and durable jobs executed through one outbound local worker—while local Legion remains fully useful offline.</p></article>
+      <article class="panel"><h3>Why</h3><p>This delivers continuity and remote initiation without taking on cloud code execution, cloud provider credentials, or an untrusted worker fleet at the same time.</p></article>
+      <article class="panel"><h3>Estimated effort</h3><p><span class="badge assumption">Assumption</span> 8–12 engineer-weeks after Phase 1. Detailed implementation plan begins in Section 15.</p></article>
+    </div>
+    <details open><summary>Features</summary><div><ul class="list">
+      <li>One customer-hostable cloud application and one managed Postgres database.</li>
+      <li>User login, trusted devices, opaque repository bindings, cloud work sessions/messages, immutable spec versions, durable jobs/attempts/events, spec confirmation and audit. Cloud MVP has no patch-apply or publication approval.</li>
+      <li>Project Agent registry with one logical repo-owned <code>legion.project-agent.v1</code> identity/version per logical Repository and agent name, shared by all authorized device bindings. Cloud stores only its safe projection/digest; each Worker verifies the authoritative manifest at the pinned commit.</li>
+      <li>Safe personal/repository memory plus a Knowledge Ledger of typed facts, decisions, preferences, validators and verified outcomes. Every record carries scope, source/revision, trust, freshness, sensitivity, supersession and tombstone state.</li>
+      <li>A bounded Project Context Projection always combines the confirmed Spec, active Project Agent and local repository facts; approved Ledger assertions are an additive source enabled only after their separate gates. The empty-Ledger snapshot is a legal, pinned first-class value.</li>
+      <li>Outbound-only <code>legion-worker</code> using local repositories, existing subscription credentials, approved profiles and current Legion workflows.</li>
+      <li>Long-poll claims, leases, heartbeats, cancellation requests, crash reconciliation, safe incremental progress and immutable terminal result.</li>
+      <li>Minimal UI for conversation, questions, spec confirmation, job start/cancel/status and review-ready result.</li>
+      <li>Cloud stores encrypted user conversation/spec bodies by explicit product choice; it never stores provider transcripts, terminal streams, local paths, repository source or provider credentials.</li>
+      <li><strong>Launch hypothesis:</strong> continuity plus a repository that remembers its approved decisions is explicit MVP value. Cloud auth/binding starts only after the local Project Agent vertical slice is green; cloud Project Agent binding is required for sessions/Jobs; Knowledge Ledger context activates later, only after separate privacy, provenance and learning-lift gates pass.</li>
+    </ul></div></details>
+    <details><summary>Non-goals, optimizations, gates</summary><div>
+      <p><strong>Non-goals:</strong> no federated knowledge graph, graph/vector database, whole-repo ingestion, cloud coding worker, remote sandbox, arbitrary remote shell, inbound workstation access, auto PR/merge/deploy, organizations, billing, object store, Redis, Kafka, Step Functions, microservices, or automatic placement.</p>
+      <p><strong>Optimizations:</strong> Postgres row leases; long polling; batched progress/Ledger events; ETag/revision pulls; SQLite WAL outbox; cache-first project context; manifest/context cache by commit and digest; no token streams; one Job per Worker by default; current bounded fan-out inside the Job. The basic cloud-to-local path never waits for active Ledger context.</p>
+      <p><strong>Definition of done:</strong> a user starts a cloud session on another device, selects a bound Project Agent, answers questions, confirms a digest-bound spec, and an outbound local worker verifies the pinned manifest and executes current Legion. Cloud shows <code>review_ready</code>; two devices converge on approved Ledger state; conflicting/untrusted facts cannot silently enter context; restarts never cause a blind duplicate effect; privacy/model-policy/denial/deletion/rollback gates pass; ordinary local Legion works with network physically disabled.</p>
+      <p><strong>Rollback:</strong> cloud sessions, Project Agents, Jobs, Knowledge Ledger/context and Worker execution flags are independent; disabling all returns Phase 1 while preserving local evidence and unsent outbox records.</p>
+    </div></details>
+    <article class="panel success"><h3>State after Phase 2 — MVP</h3><p><strong>Legion is a usable local-first cloud intelligence: one durable identity and memory, multiple repo specialists, and one trusted outbound local worker.</strong></p><p><strong>Example:</strong> from a phone, the user asks the Nemesis Project Agent to add an RSI strategy; the workstation returns focused questions, receives confirmation, pins the repo and manifest, runs the approved Opus/Sol <code>xhigh</code> production policy locally, and the phone later shows <code>review_ready</code> while code, credentials and raw provider logs never leave the workstation.</p></article>
+  </section>
+
+  <section id="phase-3">
+    <h2>9. Phase 3 — Federated Knowledge Fabric</h2>
+    <div class="grid">
+      <article class="panel"><h3>Clear goal</h3><p>Turn trusted ledger records and live source-backed context into one authorized, federated world model with bounded Project Agent views.</p></article>
+      <article class="panel"><h3>Why</h3><p>A shared intelligence needs relationships among repositories, APIs, decisions, owners, incidents and evidence. It must preserve source authority and permissions rather than copying “everything” into an opaque memory database.</p></article>
+      <article class="panel"><h3>Estimated effort</h3><p><span class="badge assumption">Assumption</span> 6–10 engineer-weeks for the ontology/contracts, project graph, two source adapters and retrieval evaluation.</p></article>
+    </div>
+    <details open><summary>Features, optimizations, gates</summary><div>
+      <ul class="list"><li><code>legion.knowledge-assertion.v1</code> for typed entities, relations and assertions, plus <code>legion.grant.v1</code> for explicit expiring cross-namespace reads; absence is denial.</li><li>A deep Context Broker that plans a query, fetches allowed sources, resolves identities without hiding conflicts and returns a bounded, digestible task subgraph with an inclusion reason for every fact.</li><li>Local Git/<code>rg</code>/repo instructions remain the default source; current code-intel supplies symbols/dependencies; one external docs/issues/observability adapter proves federation.</li><li>Detailed source graph stays in a droppable local SQLite projection. Only allowlisted typed assertions/edges publish to a safe cloud Postgres projection. Project Agents see their repo subgraph plus explicitly granted facts; permission applies in the query.</li><li>Context-source text remains untrusted evidence. Independent sources fetch concurrently under time, byte, fact and token budgets; cache/invalidate by pinned source revision and query digest.</li></ul>
+      <p><strong>Non-goals:</strong> no source-system replacement, full-database copy, global ontology for every domain, writes back to source systems, automatic trust promotion, dedicated graph/vector database without measured need, or semantic retrieval without held-out evidence.</p>
+      <p><strong>Optimizations:</strong> Postgres typed nodes/relations first; incremental indexing; deterministic graph traversal before semantic search; bounded task subgraphs; source-specific invalidation; content digests; concurrent independent fetches; no whole-graph prompt.</p>
+      <p><strong>Definition of done:</strong> two source adapters satisfy one contract; Nemesis and Webapp receive different permission-correct subgraphs; a cross-repo dependency traces to source evidence; stale/conflicting/poisoned facts remain visible or excluded; deleting and rebuilding each graph projection from the same schema and pinned source/Ledger revisions yields the same canonical export digest; source outage degrades clearly; held-out tasks prove retrieval lift before default enablement.</p>
+      <p><strong>Rollback:</strong> every context-source adapter defaults off and has its own kill switch. Disabling all source adapters restores Phase 2 context behavior without changing the Harness interface or persisted jobs.</p>
+    </div></details>
+      <article class="panel success"><h3>State after Phase 3</h3><p><strong>Legion has an authorized world model: one logical graph, federated sources and bounded Project Agent views.</strong></p><p><strong>Example:</strong> Legion knows that a Nemesis strategy schema is consumed by the Webapp, cites the symbols, API contract, owner, ADR and prior incident behind that relationship, and coordinates both agents without exposing unrelated private context.</p></article>
+  </section>
+
+  <section id="phase-4">
+    <h2>10. Phase 4 — Distributed Capacities and Cloud Execution</h2>
+    <div class="grid">
+      <article class="panel"><h3>Clear goal</h3><p>Run the same Legion job contract across many independently identified machines, then add ephemeral cloud capacities for remote slices and complete jobs.</p></article>
+      <article class="panel"><h3>Why</h3><p>Cloud workers should be a second capacity, not a new job system. Identity, trust, leases, evidence and recovery must already work on machines the operator controls.</p></article>
+      <article class="panel"><h3>Estimated effort</h3><p><span class="badge assumption">Assumption</span> 8–14 engineer-weeks, including provider spike and security drills.</p></article>
+    </div>
+    <details open><summary>Features, sequence, optimizations</summary><div><ol class="list">
+      <li>Enroll multiple local/customer-managed capacities with keypair identity, trust class, labels, providers, credentials owner and concurrency.</li>
+      <li>Make placement explicit and deterministic. Measure it in observe mode before any automatic placement.</li>
+      <li>Build one Worker Runtime interface and run the same contract suite against local and remote adapters.</li>
+      <li>Benchmark Vercel Sandbox, Amazon Bedrock AgentCore Runtime (microVM and Instances), AWS Lambda MicroVMs and ECS Fargate against the Worker Runtime contract. Compare startup, isolation, supported duration, filesystem and persistence, egress, credentials, cost and operator burden. Revalidate vendor capabilities and limits at spike start; this shortlist is not an architectural dependency.</li>
+      <li>Ship remote scout/review/test slices first, then bounded implementation, then complete cloud jobs.</li>
+      <li>One Attempt per isolated runtime session/task; no writable workspace is reused across principals. Pin Worker image, commit, Legion version, workflow, canonical Knowledge Ledger revision vector/snapshot digest, model policy and budget.</li>
+      <li>Short-lived Git/model credentials from a secret manager; restricted egress; content-addressed artifacts; draft PR only after digest approval.</li>
+      <li>Prepare capacity profiles for local subscriptions, organization gateways, APIs and future independently owned subscription workers. Pooling policy remains disabled unless provider agreements permit it.</li>
+    </ol>
+      <p><strong>Runtime boundary:</strong> the Cloud Hub schedules Capacities. Any selected Vercel or AWS runtime implements the Worker Runtime adapter; AWS Step Functions may later coordinate outer infrastructure stages. No vendor runtime replaces Legion’s inner work graph, Job state or convergence controller.</p>
+      <p><strong>Non-goals:</strong> no shared writable checkout, persistent general-purpose cloud shell, automatic placement, auto-merge/deploy, forwarding local credential stores, or provider-specific semantics in Core.</p>
+      <p><strong>Optimizations:</strong> prebuilt images/snapshots; shallow/blobless fetch when safe; dependency cache keyed by lockfile/runtime digest; content-addressed artifacts; ready-DAG concurrency; reserved review capacity; no speculative agents.</p>
+      <p><strong>Definition of done:</strong> local and cloud runtimes emit identical contracts; three capacities enforce trust on both sides; remote slices compose without special cases; retries cannot duplicate jobs/artifacts/branches/PRs; runtime/provider kill switches and ambiguous-effect reconciliation pass.</p>
+      <p><strong>Rollback:</strong> disabling remote capacities leaves the Phase 2 local-worker product intact.</p>
+    </div></details>
+    <article class="panel success"><h3>State after Phase 4</h3><p><strong>Legion is a true hybrid execution fabric with local, customer-managed and cloud Capacities under one proof contract.</strong></p><p><strong>Example:</strong> local Opus planning sends four independent Sol test/implementation slices to isolated cloud runtimes, reserves Opus review Capacity, and integrates the verified results on one trusted Capacity.</p></article>
+  </section>
+
+  <section id="phase-5">
+    <h2>11. Phase 5 — Multi-Project Shared Intelligence</h2>
+    <div class="grid">
+      <article class="panel"><h3>Clear goal</h3><p>Let one Legion orchestrator coordinate multiple Project Agents, repositories and connected systems toward one confirmed outcome. Multi-user organization tenancy remains a later track.</p></article>
+      <article class="panel"><h3>Why</h3><p>The highest value is a shared organizational intelligence that can assemble specialists and deliver a coherent proven outcome—not merely faster code generation inside one repository.</p></article>
+      <article class="panel"><h3>Estimated effort</h3><p><span class="badge assumption">Assumption</span> 6–10 engineer-weeks for one-operator multi-project delivery. Organization tenancy/RBAC is a later scale track, triggered by a real second user/team.</p></article>
+    </div>
+    <details open><summary>Features, optimizations, gates</summary><div>
+      <ul class="list"><li>One operator can bind multiple Project Agents and explicitly grant bounded fact kinds between their namespaces; absence of a grant is denial.</li><li>Project Agent composition: Nemesis, Webapp and future specialists receive scoped subgraphs and capability sets under one goal owner.</li><li>Capability Packs for engineering, research and other authorized domains. Each capability declares input/output schemas, effect class, permissions, validators, approvals and recovery.</li><li>Multi-repository work graph pinned to immutable commits; ownership-aware approval routing; stacked draft changes with one integration order.</li><li>Verification kernel for compile/type/lint/tests, user workflow, security, performance, forward/rollback migration, compatibility, infrastructure evidence and independent review.</li><li>Console showing work graph, Project Agents, context sources, providers, capacities, costs, evidence, approvals and recovery actions. Namespace grammar remains organization-capable; multi-user tenancy ships only after real demand and isolation tests.</li></ul>
+      <p><strong>Optimizations:</strong> affected-repository and affected-check selection; cache only evidence with matching immutable fingerprints; parallelize independent repos; stream summaries before artifacts; keep one cloud application until measured scale proves a split.</p>
+      <p><strong>Definition of done:</strong> one operator completes a real cross-repo outcome through two Project Agents; every material claim links to evidence; namespace denial and approval replay/mismatch tests pass; migrations require rollback proof; failed slices cannot publish partial work; recovery and deletion drills pass.</p>
+      <p><strong>Non-goals:</strong> no silent merge/deploy/trade/spend, production credential inheritance, raw transcript warehouse, generic universal competence claim, or replacement for Git/CI/issue/observability systems.</p>
+      <p><strong>Rollback:</strong> multi-project grants and work graphs are feature-gated. Disabling them preserves single-project Phase 4 jobs and memory; a failed cross-repo run publishes nothing and returns to human control.</p>
+    </div></details>
+    <article class="panel success"><h3>State after Phase 5</h3><p><strong>Legion is one shared intelligence across the operator’s projects, delivering through coordinated, permission-scoped Project Agents.</strong></p><p><strong>Example:</strong> a user asks for an RSI strategy and its product UI; Legion confirms risk rules, assigns strategy/backtest work to Nemesis, API/UI work to Webapp, verifies their contract and returns one evidence-backed outcome without placing trading or frontend logic in Core.</p></article>
+  </section>
+
+  <section id="phase-6">
+    <h2>12. Phase 6 — Durable Goals</h2>
+    <div class="grid">
+      <article class="panel"><h3>Clear goal</h3><p>Let Legion hold a broad objective across weeks and wake on new evidence to propose bounded work—without creating an unbounded autonomous executor.</p></article>
+      <article class="panel"><h3>Why</h3><p>Sessions remember conversations and Jobs execute one spec; neither can represent the standing objectives required by a durable shared intelligence.</p></article>
+      <article class="panel"><h3>Estimated effort</h3><p><span class="badge assumption">Assumption</span> 5–8 engineer-weeks plus a 30-day proposal-quality pilot.</p></article>
+    </div>
+    <div class="panel flow"><div class="node">Confirmed Goal<small>scope, runnable criteria, hard budget</small></div><div class="arrow">→</div><div class="node">New evidence crosses cursor<small>deterministic criterion check, dedupe</small></div><div class="arrow">→</div><div class="node">Bounded Proposal<small>human confirms → Spec → Job</small></div></div>
+    <details open><summary>Features, optimizations, gates</summary><div>
+      <ul class="list"><li><code>legion.goal.v1</code>: human-confirmed objective, Project Agent/repo scope, runnable success criteria, evidence cursor, money/call/time/blast-radius budgets and terminal conditions.</li><li>A Goal is a subscription plus a deterministic criterion checker plus a bounded proposer. It emits Proposals, never Jobs; a Proposal still requires immutable Spec confirmation.</li><li>A Goal cannot create another Goal. Prose-only criteria are rejected because they cannot terminate honestly.</li><li>Wake is evidence-driven, not retry/timer-driven. Repeated evidence fingerprints do not wake; budget exhaustion becomes <code>blocked:budget</code>.</li><li>Goal history records criterion state, evidence IDs, proposals, approvals, outcomes and burn-down without provider reasoning.</li></ul>
+      <p><strong>Optimizations:</strong> incremental evidence cursor; cheapest criterion checks first; zero model calls when no criterion fails; proposal dedupe; goal evaluation off the request hot path.</p>
+      <p><strong>Definition of done:</strong> prose-only goal refused; identical evidence yields exactly one proposal; kill/restart yields no duplicate proposal; exhaustion makes zero further model calls; every 30-day pilot proposal links to a failing runnable criterion and evidence ID; goals cannot escape their Project Agent/repo scope.</p>
+      <p><strong>Non-goals:</strong> no goal-spawns-goal, autonomous execution, open-ended “improve everything” goal, schedule that retries unchanged evidence, or standing authority to merge/deploy/trade/spend.</p>
+      <p><strong>Rollback:</strong> <code>LEGION_GOALS=0</code> freezes pursuit and retains inert records; every Phase 5 task flow remains available.</p>
+    </div></details>
+    <article class="panel success"><h3>State after Phase 6</h3><p><strong>Legion holds objectives, not just tasks: it notices evidence, proposes the next bounded move and waits for authority.</strong></p><p><strong>Example:</strong> a goal requires Nemesis/Webapp contract compatibility; a new CI receipt shows drift, so Legion emits one scoped proposal with evidence. Only confirmation turns it into a Spec and Job.</p></article>
+  </section>
+
+  <section id="phase-7">
+    <h2>13. Phase 7 — Production-grade Self-Improving Policy</h2>
+    <div class="grid">
+      <article class="panel"><h3>Clear goal</h3><p>Improve Project Agent guidance, graph/context selection, routing, decomposition, placement and validation order only when held-out evidence proves the change.</p></article>
+      <article class="panel"><h3>Why</h3><p>Legion already learns bounded hints. The next value is closing the other selection and guidance loops without pretending to improve the underlying models.</p></article>
+      <article class="panel"><h3>Estimated effort</h3><p><span class="badge assumption">Assumption</span> 8–14 engineer-weeks plus longitudinal evaluation time.</p></article>
+    </div>
+    <details open><summary>Features, optimizations, gates</summary><div>
+      <ul class="list"><li>One controller shape: observe bounded evidence → propose a versioned candidate → compare with a pinned baseline on a disjoint held-out set → shadow → canary → approve/reject → observe later outcomes → retain/revert.</li><li>Policies for trusted Project Agent guidance, graph/context selection, provider/model routing, decomposition, capability selection, execution placement and validation order.</li><li>Every promotion record pins evidence-window and holdout digests, predeclared quality/cost thresholds, zero-tolerance safety vetoes, approver, expiry/review trigger, prior version and rollback action. Project and time separation prevent the same episodes from proposing and proving a candidate.</li><li>Current context tuner becomes the reference implementation; current optimizer remains observe-only until gated.</li><li>Project Agent manifest and source changes remain suggestions or isolated drafts until maintainer approval and independent review.</li><li>Bad learning can be retired; stale clients cannot reactivate it; regressions auto-revert. Cross-tenant learning remains opt-in if tenancy is later built.</li></ul>
+      <p><strong>Optimizations:</strong> incremental evidence cursors; controllers off the hot path; cached immutable baselines; statistically reliable samples; optimize quality first, then critical-path time, tokens and cost.</p>
+      <p><strong>Definition of done:</strong> every controller demonstrates one accepted and one refused change on disjoint held-out data; the evaluation plan and minimum useful sample are fixed before results are read; any security, authority, privacy or false-success regression vetoes promotion; later regression auto-reverts; confidence and uncertainty are reported honestly; no policy learns from a single episode; README claims match tests.</p>
+      <p><strong>Non-goals:</strong> no model training, hot-path learning, single-episode policy, arbitrary source mutation, unreviewed manifest change or policy change without held-out proof.</p>
+      <p><strong>Rollback:</strong> <code>LEGION_AUTO_POLICY=0</code> returns all controllers to report-only behavior.</p>
+    </div></details>
+    <article class="panel success"><h3>State after Phase 7</h3><p><strong>Legion measurably improves which context, agents, tools and capacities it selects, while proving or reverting every policy change.</strong></p><p><strong>Example:</strong> Legion canaries a Nemesis policy that uses a warm local fixture for performance work and automatically restores the prior route when validation quality regresses.</p></article>
+  </section>
+
+  <section id="phase-8">
+    <h2>14. Phase 8 — Final Boss: Shared Verified Intelligence</h2>
+    <div class="grid">
+      <article class="panel"><h3>Clear goal</h3><p>Maintain one durable, authorized intelligence that understands goals, assembles the right Project Agents and abilities, executes across available systems, proves effects and compounds capability.</p></article>
+      <article class="panel"><h3>Why</h3><p>The hard-to-copy asset is the loop connecting goals, world knowledge, specialization, execution, proof and later outcomes—not a model call or a cloud container.</p></article>
+      <article class="panel"><h3>Timeline</h3><p><span class="badge assumption">Direction</span> Ongoing product maturity, not a one-release project.</p></article>
+    </div>
+    <div class="panel flow"><div class="node">Understand and propose<small>goal, world model, authority, opportunity</small></div><div class="arrow">→</div><div class="node">Assemble, act and prove<small>Project Agents, abilities, capacities, evidence</small></div><div class="arrow">→</div><div class="node">Observe and learn<small>keep, revise, revert, compound</small></div></div>
+    <details open><summary>Features, safeguards and honest ceiling</summary><div>
+      <ul class="list"><li>Long-lived goals and bounded observation of incidents, drift, risks, costs and opportunities.</li><li>The full authorized world model spans projects, systems, decisions, capabilities, evidence and outcomes; Project Agents remain scoped views.</li><li>Dynamic composition of Project Agents, Capability Packs, providers and local/customer/cloud capacities.</li><li>Every external effect has an authority boundary, deterministic validator, evidence receipt, approval rule, later outcome observation and recovery path.</li><li>Repeated unchanged failures shrink scope and freeze. Legion may propose new abilities, but Core remains domain-neutral and underlying model limitations remain real.</li></ul>
+      <p><strong>Non-goals:</strong> no claim of consciousness, AGI or universal competence; no unbounded autonomous backlog, self-merge/deploy/trade/spend, hidden production change, arbitrary source mutation, replacement of human/product authority, or improvement claim based on model confidence.</p>
+      <p><strong>Optimizations:</strong> incremental observation, deterministic criterion checks, bounded subgraphs, cached immutable baselines, evidence dedupe, critical-path scheduling and scope reduction on repeated failure. Improvement never runs in the request hot path.</p>
+      <p><strong>Definition of done:</strong> longitudinal evidence shows reliable outcome improvement; zero unauthorized high-consequence effects and zero false-success receipts; every active fact/lesson has provenance and scope; global freeze and disaster recovery work; one real outcome measurably improves a later related outcome.</p>
+      <p><strong>Rollback:</strong> a global freeze stops Goal wakes, proposal generation, policy canaries and new remote claims, returning Legion to Phase 5 human-directed delivery without deleting evidence.</p>
+    </div></details>
+    <article class="panel success"><h3>State after Phase 8</h3><p><strong>Legion is the Final Boss intelligence and delivery fabric: one orchestrator with a legion of models, Project Agents, tools and machines.</strong></p><p><strong>Example:</strong> Legion relates repeated release failures to a Nemesis/Webapp contract mismatch, proposes a bounded contract-generation ability, assigns both Project Agents, proves it against historical failures, presents digest-approved drafts, observes later releases and retains only learning supported by outcomes.</p></article>
+  </section>
+
+  <section id="mvp-hls">
+    <h2>15. Hybrid MVP detailed plan — scope and user flow</h2>
+    <article class="panel decision"><h3>MVP outcome</h3><p>A user binds a repository-owned Project Agent, starts an encrypted work session on any device, clarifies and confirms an immutable specification, submits a durable job, has one outbound local worker execute the current Legion lifecycle using local credentials and the pinned Project Agent, receives a review-ready result, and continues later with the same approved project knowledge—even though source, credentials and raw execution remain local.</p></article>
+    <div class="panel"><div class="state"><span>Project Agent binding</span><b>→</b><span>session</span><b>→</b><span>questions</span><b>→</b><span>confirmed spec</span><b>→</b><span>pinned context</span><b>→</b><span>local execution</span><b>→</b><span>review_ready</span></div></div>
+    <div class="grid">
+      <article class="panel"><h3>Cloud authority</h3><p>User/device identity, encrypted work sessions/messages/specs, safe Project Agent metadata/digest, durable jobs, Knowledge Ledger revisions, safe results, retention/deletion and audit.</p></article>
+      <article class="panel"><h3>Local authority</h3><p>Repository paths/source, authoritative Project Agent manifest, Git worktrees, provider credentials/processes, detailed evidence, terminal streams, raw transcripts/diffs, patch application and merge choice.</p></article>
+      <article class="panel"><h3>Deployment</h3><p><span class="badge decision-b">Decision</span> One customer-hostable modular cloud application, one managed Postgres, one outbound local worker. Vendor hosting may run the same artifact later.</p></article>
+    </div>
+    <details><summary>MVP explicit non-goals</summary><div><p>No federated knowledge graph, graph/vector database, whole-repo ingestion, remote cloud coding worker, remote sandbox, inbound workstation connection, arbitrary command, automatic patch apply/commit/PR/merge/deploy, organizations/team RBAC/billing, cross-repo job, automatic placement, model outside the policy, raw provider transcript/source/diff upload, Redis/Kafka/Step Functions/object storage, or second router/workflow/learning/control system.</p></div></details>
+  </section>
+
+  <section id="mvp-modules">
+    <h2>16. MVP modules and deep interfaces</h2>
+    <div class="panel table-wrap"><table><thead><tr><th>Module</th><th>Small interface</th><th>Implementation and reuse</th></tr></thead><tbody>
+      <tr><td>Harness</td><td><code>start(confirmed_spec, agent, profile) → job_id</code><br><code>resume(job_id, input) → job_view</code></td><td>Deepen <code>legion-run</code>, convergence and local control. One logical orchestrator owns canonical Job state; profiles remain allowlisted workflows.</td></tr>
+      <tr><td>Project Agent registry</td><td><code>load(binding,commit) → manifest</code><br><code>approve(digest)</code></td><td>Repo-owned <code>.legion/agents/&lt;name&gt;/legion-project-agent.toml</code>. Reuse the existing TOML resolution/schema/error machinery; extend it with Project Agent identity, namespace and policy, while referenced domain plugins retain their existing plan/validate/evaluate loader. Cloud stores only safe metadata/digest.</td></tr>
+      <tr><td>Provider adapter</td><td><code>execute(work_unit) → executor_result</code></td><td>Formalize current <code>legion-delegate</code> and legacy-named executor JSON/diff/receipt contract. Provider says who performs work; Capacity says where it runs.</td></tr>
+      <tr><td>Capacity</td><td><code>claim()</code>, <code>heartbeat()</code>, <code>complete(receipt)</code></td><td>Phase 0 local capacity; Phase 2 cloud-coordinated outbound worker.</td></tr>
+      <tr><td>Spec ledger</td><td><code>assess(input) → draft/questions</code><br><code>confirm(version,digest)</code></td><td>Deterministic precheck + Opus structured output; user alone confirms.</td></tr>
+      <tr><td>Job store</td><td><code>append(event)</code>, <code>load(job)</code>, <code>claim(capacity)</code></td><td>Pure transition rules live in contracts. Core uses files plus a small SQLite cloud-client store; Cloud uses Postgres. Queue stays inside the cloud adapter.</td></tr>
+      <tr><td>Knowledge Ledger</td><td><code>propose(assertion)</code>, <code>promote(assertion,evidence,actor)</code>, <code>snapshot(namespaces,revision_vector)</code></td><td>Small versioned kind/validator registry; device-independent namespaces and append-only assertions with provenance/trust/freshness/sensitivity. Humans promote decisions/preferences/constraints; registered deterministic validators MAY promote only narrow outcome kinds. Model prose never self-promotes.</td></tr>
+      <tr><td>Context broker</td><td><code>build(principal,agent,spec,stage,ledger_snapshot) → context_pack</code></td><td>Reuse learning-context compiler and repository scan. Authorization and namespace filters run before fetch/decrypt/rank; local Project Agent/repository facts always work, while approved Ledger assertions are additive. The snapshot is either a canonical namespace revision vector plus digest or the canonical empty snapshot. Source text is data, never instruction; no whole conversation/repo prompt.</td></tr>
+      <tr><td>Verification kernel</td><td><code>verify(candidate, plan) → receipt</code></td><td>Reuse validation, evaluation, immutable review, artifact manifest, bench and convergence.</td></tr>
+      <tr><td>Approval gate</td><td><code>authorize(action_digest, actor) → receipt</code></td><td>Extend existing <code>legion-control</code> exact-digest audit behavior; keep local authority local.</td></tr>
+      <tr><td>Sync projector</td><td><code>project(local_record) → safe_event | rejection</code></td><td>Field allowlist, bounds, secret/path scans, deterministic digest. No silent redaction that changes meaning.</td></tr>
+    </tbody></table></div>
+    <details open><summary>Repository-owned Project Agent v1 example</summary><div>
+      <p>The manifest lives at <code>.legion/agents/&lt;name&gt;/legion-project-agent.toml</code>. It reuses Legion’s TOML resolution and validation machinery, then references existing domain plugins for plan/validate/evaluate hooks; it does not create a second lifecycle or overload <code>legion-plugin.toml</code>. It may narrow global policy, never widen it.</p>
+      <div class="mono">[agent]
+schema = "legion.project-agent.v1"
+name = "nemesis"
+mission = "Turn confirmed trading specifications into verified Nemesis strategies."
+
+[policy]
+model_policy = "opus-sol-xhigh-v1"
+allowed_profiles = ["legion.heavy_task.v1"]
+allowed_capacities = ["local"]
+default_sandbox = "read-only"
+max_fanout = 4
+
+[knowledge]
+reads = ["personal", "repo:&lt;repository-identity&gt;", "agent:nemesis@&lt;repository-identity&gt;"]
+writes = ["agent:nemesis@&lt;repository-identity&gt;"]
+
+[abilities]
+domain_plugins = ["nemesis-strategy-development"]
+
+[proof]
+required_validators = ["compile", "unit-tests", "backtest-integrity", "no-lookahead-bias", "independent-review"]
+
+[budget]
+on_exhaustion = "block"</div>
+      <p>Instruction bodies, plugin hook paths and commands remain in the repository. Cloud receives only the approved safe projection, policy/capability names and manifest digest. A manifest edited inside a run cannot approve its own wider scope.</p>
+    </div></details>
+    <p><span class="badge decision-b">Reuse</span> State resolver, file lock, learning compiler, convergence, benchmark gate, context tuner, OTLP exporter, price table, control approval, handoff broker protocol, process supervisor, OS-sandbox patterns, executor registry, Sandcastle bridge, intake workflow, run-id helper, task ledger, immutable review snapshot, review schema and improvement reconciliation all remain authoritative implementations.</p>
+  </section>
+
+  <section id="mvp-data">
+    <h2>17. MVP data and storage</h2>
+    <div class="grid">
+      <article class="panel"><h3>Local state</h3><p>Continue current state-root files, Legion-owned session JSONL and locks. Add work sessions/specs, Project Agent cache and cloud cache. Use one private SQLite database only for cloud claims, fencing, outbox, binding metadata and ledger cursors; it does not replace Core state.</p></article>
+      <article class="panel"><h3>Cloud Postgres</h3><p>Stores users/devices, repo bindings, safe Project Agent versions, product sessions/specs, jobs/attempts/results, Knowledge Ledger assertions/revisions, idempotency and audit. Postgres is also the queue; no broker or graph service.</p></article>
+      <article class="panel"><h3>Artifacts</h3><p><span class="badge assumption">Initial limit</span> Small allowlisted artifacts up to 5 MiB may be content-addressed in Postgres. The Cloud lead owns this limit and MUST replace or confirm it from Slice 13 storage/load evidence before an external pilot. Provider transcripts remain local; add object storage only when measured volume proves it necessary.</p></article>
+    </div>
+    <div class="panel table-wrap"><table><thead><tr><th>Table</th><th>Purpose</th><th>Critical constraints</th></tr></thead><tbody>
+      <tr><td><code>users</code>, <code>devices</code>, <code>device_tokens</code></td><td>Personal identity and trusted outbound Workers.</td><td>Short access tokens; rotated hashed refresh tokens; server-side denial is immediate after revocation commits. An offline in-flight Worker cannot be signalled, and any later renewal/upload is denied.</td></tr>
+      <tr><td><code>repositories</code>, <code>repository_bindings</code></td><td>Device-independent opaque repository identity plus the devices authorized to execute it.</td><td>One logical repository per owner/HMAC; each binding links one device to that repository. Cloud stores no local path or remote URL; identity never grants authorization alone.</td></tr>
+      <tr><td><code>project_agents</code>, <code>project_agent_versions</code></td><td>Logical repository specialist identity and approved manifest version.</td><td>Unique repository/name across devices; safe projection only; authoritative manifest remains at pinned commit; widening digest needs approval.</td></tr>
+      <tr><td><code>sessions</code>, <code>session_messages</code></td><td>Private product conversation and work-session state.</td><td>Ordered immutable messages; encrypted content; export/delete; no provider transcript.</td></tr>
+      <tr><td><code>specification_versions</code></td><td>Append-only drafts, questions and confirmed spec.</td><td>Unique session/version and digest; confirmed body immutable; only user confirms.</td></tr>
+      <tr><td><code>jobs</code>, <code>job_attempts</code>, <code>attempt_provider_invocations</code>, <code>job_events</code>, <code>job_results</code></td><td>Durable coordination, execution attestation and safe progress/result.</td><td>Idempotency key; immutable terminal Attempt; fenced Capacity; per-work-unit Provider/model/effort/fallback receipt; pinned SHA/version/policy.</td></tr>
+      <tr><td><code>knowledge_namespaces</code>, <code>knowledge_assertion_kinds</code>, <code>knowledge_validator_registry</code>, <code>knowledge_assertions</code>, <code>knowledge_revisions</code>, <code>knowledge_cursors</code></td><td>Personal/repository/Project-Agent facts, decisions, preferences, constraints, procedure references and verified outcomes.</td><td>Namespaces are device-independent and keyed by owner plus repository identity or Project Agent ID—not binding. Server-assigned monotonic revisions, idempotent events and CAS make cross-device convergence explicit.</td></tr>
+      <tr><td><code>audit_events</code></td><td>Accepted/rejected security and control decisions.</td><td>No message/spec/provider text, path, token or model output.</td></tr>
+      <tr><td><code>idempotency_keys</code></td><td>Safe duplicate mutating requests.</td><td>Same key+digest returns prior result; changed digest returns conflict.</td></tr>
+    </tbody></table></div>
+
+    <details><summary>Required relational keys and indexes</summary><div><div class="table-wrap"><table><thead><tr><th>Table</th><th>Minimum columns</th><th>Keys/indexes</th></tr></thead><tbody>
+      <tr><td><code>devices</code></td><td><code>id, owner_id, name, public_fingerprint, status, last_seen_at, revoked_at</code></td><td>Index <code>(owner_id,status)</code>; revoked device cannot claim/renew/upload.</td></tr>
+      <tr><td><code>device_tokens</code></td><td><code>id, device_id, refresh_token_hash, issued_at, expires_at, rotated_at, revoked_at</code></td><td>Index <code>(device_id,revoked_at,expires_at)</code>; plaintext refresh token never stored.</td></tr>
+      <tr><td><code>repositories</code></td><td><code>id, owner_id, repository_identity_hmac, identity_hmac_key_version, display_name_ciphertext, status, created_at, updated_at</code></td><td>Unique <code>(owner_id,repository_identity_hmac)</code>; no path or remote URL; HMAC keys are deployment secrets with a tested rotation/reindex path.</td></tr>
+      <tr><td><code>repository_bindings</code></td><td><code>id, owner_id, repository_id, device_id, legion_version, model_policy_digest, capabilities, status, created_at, updated_at</code></td><td>Unique <code>(repository_id,device_id)</code>; guarded foreign keys require repository/device to share owner; revoking one binding does not delete the logical repository or its agent knowledge.</td></tr>
+      <tr><td><code>project_agents</code></td><td><code>id, owner_id, repository_id, name, active_version_id, status, created_at, updated_at</code></td><td>Unique <code>(repository_id,name)</code>; guarded foreign key enforces owner; one logical Agent and namespace across all bound devices.</td></tr>
+      <tr><td><code>project_agent_versions</code></td><td><code>id, agent_id, version, manifest_sha256, safe_projection, policy_digest, approved_by, approved_at, created_at</code></td><td>Unique <code>(agent_id,version)</code> and digest; no commands, hook paths, instruction bodies, local paths or secrets.</td></tr>
+      <tr><td><code>sessions</code></td><td><code>id, owner_id, binding_id, project_agent_version_id, title_ciphertext, state, current_specification_version_id, created_at, updated_at, deleted_at</code></td><td>Binding and Project Agent version MUST resolve to the same logical repository and owner; they are immutable after the first Spec draft; current version is a same-Session foreign key.</td></tr>
+      <tr><td><code>session_messages</code></td><td><code>id, session_id, sequence, role, kind, content_ciphertext, client_message_id, created_at</code></td><td>Unique <code>(session_id,sequence)</code> and <code>(session_id,client_message_id)</code>.</td></tr>
+      <tr><td><code>specification_versions</code></td><td><code>id, session_id, version, status, document_ciphertext, document_sha256, model_policy_digest, confirmed_by, confirmed_at, created_at</code></td><td>Unique <code>(session_id,version)</code> and digest; confirmed row immutable.</td></tr>
+      <tr><td><code>jobs</code></td><td><code>id, owner_id, session_id, spec_id, binding_id, agent_version_id, job_kind, profile, profile_digest, change_type, state, state_reason, state_version, waiting_since, waiting_deadline_at, not_before, base_selector_ciphertext, base_sha, legion_version, policy_digest, knowledge_revision_vector, knowledge_snapshot_sha256, priority, retry_of_job_id, cancel_requested_at, terminal_at, created_at, updated_at</code></td><td>Claim index <code>(binding_id,state,not_before,priority DESC,created_at)</code> and guard <code>not_before &lt;= database_now</code>; durable <code>state_reason</code> carries <code>waiting_*</code>/<code>blocked:*</code>; binding/agent MUST equal the Spec’s Session; base/agent/Knowledge snapshot are immutable after pin.</td></tr>
+      <tr><td><code>job_attempts</code></td><td><code>id, job_id, attempt_number, kind, device_id, capacity_id, provider_set_digest, state, fencing_number, lease_token_hash, lease_expires_at, heartbeat_at, leased_at, acknowledged_at, effect_journaled_at, started_at, updated_at, terminal_at, local_run_id, result_digest, failure_code</code></td><td>Unique <code>(job_id,attempt_number)</code>; unique partial index <code>(job_id) WHERE state IN ('leased','acknowledged','running','uploading','expired','reconciling')</code> prevents two active Attempts; Capacity and provider-set digest are immutable after acknowledgement.</td></tr>
+      <tr><td><code>attempt_provider_invocations</code></td><td><code>id, attempt_id, work_unit_id, provider_id, model, requested_effort, effective_effort, fallback_used, fallback_from, receipt_sha256, started_at, terminal_at</code></td><td>Unique <code>(attempt_id,work_unit_id)</code>; append-only terminal receipt; exact policy mapping checked before invocation and again at result ingestion.</td></tr>
+      <tr><td><code>job_events</code></td><td><code>id, job_id, attempt_id, attempt_sequence, server_sequence, event_type, payload, payload_sha256, created_at</code></td><td>Unique <code>(attempt_id,attempt_sequence)</code> and <code>(job_id,server_sequence)</code>.</td></tr>
+      <tr><td><code>job_results</code></td><td><code>attempt_id, job_id, capacity_id, status, safe_summary_ciphertext, run_id, base_sha, result_head_sha, validation, review, usage, provider_receipt_manifest, provider_manifest_sha256, artifact_manifest, result_sha256, created_at</code></td><td>Primary key Attempt; provider manifest covers every nested work unit and requested/effective effort/fallback receipt; unique <code>(job_id,result_sha256)</code>; no raw diff by default.</td></tr>
+      <tr><td><code>knowledge_namespaces/kinds/validators/assertions/revisions/cursors</code></td><td>Namespace <code>id,owner_id,scope_type,repository_id?,project_agent_id?,current_revision</code>; kind <code>name,promotion_authority,validator_id</code>; validator <code>id,version,allowed_kinds,receipt_schema,digest,status</code>; assertion <code>event_id,namespace_id,revision,kind,subject,predicate,object/source/digest,trust,sensitivity,observed_at,expires_at,status,supersedes,evidence</code>; cursor <code>device,acked_revision</code>.</td><td>Unique personal <code>(owner,scope)</code>, repository <code>(owner,scope,repository_id)</code> or agent <code>(owner,scope,project_agent_id)</code> namespace. Repository/Agent IDs are logical and survive device rebind/HMAC rotation; server transaction allocates revisions under CAS and repeated <code>event_id</code> deduplicates.</td></tr>
+      <tr><td><code>audit_events</code></td><td><code>id, owner_id, device_id, action, target_type, target_id, decision, reason, metadata, request_id, created_at</code></td><td>Indexes <code>(owner_id,created_at)</code> and <code>(target_type,target_id,created_at)</code>; metadata forbids decrypted content.</td></tr>
+      <tr><td><code>idempotency_keys</code></td><td><code>owner_id, route, key, request_sha256, response_status, response_envelope_ciphertext, expires_at</code></td><td>Primary key <code>(owner_id,route,key)</code>; cached responses use the same envelope-encryption and retention policy as the source record.</td></tr>
+    </tbody></table></div></div></details>
+
+    <p><strong>Relational integrity rule:</strong> every owner-scoped read or mutation binds the authenticated <code>owner_id</code> in the same parameterized query; device/binding/agent/session/spec/job ownership MUST agree through foreign keys and transition guards. Opaque IDs are locators, never authorization. Database server time is authoritative for leases and retention.</p>
+    <details><summary>Local cloud-client SQLite</summary><div><p>One private database at <code>$LEGION_HOME/cloud/state.sqlite3</code>, mode <code>0600</code> under a <code>0700</code> directory, uses <code>journal_mode=WAL</code>, <code>synchronous=FULL</code>, <code>foreign_keys=ON</code>, a bounded busy timeout and explicit transactions. It contains: <code>outbox(event_id,kind,job_id,attempt_id,payload,digest,state,attempt_count,next_attempt_at,error)</code>; <code>claimed_attempts(attempt_id,job_id,device_id,fencing,lease_token_encrypted,payload_digest,local_run_id,worktree,state,terminal_digest)</code>; <code>bindings(cloud_id,canonical_path,repository_identity,allowed_bases,allowed_profiles,allowed_agents,enabled)</code>; <code>agent_cache(agent_id,version,digest,safe_projection)</code>; and <code>knowledge_cursors(namespace_id,revision,snapshot_digest)</code>. The lease-token encryption key lives in the OS keychain/secret store, never beside the database. Corruption quarantines this database and disables cloud work; ordinary local Legion remains available.</p></div></details>
+
+    <div class="panel table-wrap"><table><thead><tr><th>Data class</th><th>Authoritative location</th><th>Cloud policy</th></tr></thead><tbody>
+      <tr><td>User product conversation and confirmed spec</td><td>Cloud, cached locally when needed</td><td>Encrypted, private, retention-bounded, exportable, deletable.</td></tr>
+      <tr><td>Legion structured session/evidence</td><td>Local and safe cloud projection</td><td>Only allowlisted types/fields and digests.</td></tr>
+      <tr><td>Provider transcript, reasoning, tool output, terminal output</td><td>Machine that produced it</td><td>Never syncs—not even “redacted.”</td></tr>
+      <tr><td>Project Agent manifest</td><td>Pinned repository commit</td><td>Only approved safe metadata and digest sync; no instructions, commands or hook paths.</td></tr>
+      <tr><td>Knowledge Ledger assertions and safe evidence IDs</td><td>Cloud ledger plus verified local cache</td><td>Typed, scoped, attributed assertions; model prose stays proposed; trust requires human/source/validator receipt.</td></tr>
+      <tr><td>Secrets</td><td>OS keychain/secret store</td><td>Never in Postgres, spans, task payloads or artifacts.</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section id="mvp-api">
+    <h2>18. MVP contracts, states and API</h2>
+    <div class="panel table-wrap"><table><thead><tr><th>Contract</th><th>Required meaning</th></tr></thead><tbody>
+      <tr><td><code>legion.model-policy.v1</code></td><td>Allowed models, effort, roles, review independence, no-fallback behavior and digest.</td></tr>
+      <tr><td><code>legion.work-session.v1</code> + <code>legion.work-session-event.v1</code></td><td>Cloud-safe outcome intent, Spec references, decisions, stages, evidence, confirmation, cost and Job transitions. The full local/model-visible stream remains <code>legion.session-event.v2</code> and MUST NOT sync by default.</td></tr>
+      <tr><td><code>legion.project-agent.v1</code></td><td>Repository specialist identity, mission, manifest digest, instruction/capability/plugin references, memory namespace, allowed profiles/capacities, budgets, validators and effect policy. The cloud projection omits executable/local fields.</td></tr>
+      <tr><td><code>legion.spec.v1</code></td><td>Outcome intent, optional Phase 6 <code>durable_goal_id</code>, repo binding, change type, acceptance criteria, constraints, non-goals, profile, assumptions, questions, status, version and digest.</td></tr>
+      <tr><td><code>legion.job.v1</code> / attempt / receipt</td><td>Spec, Project Agent version, Provider/Capacity, base selector/SHA, Legion version, canonical Knowledge Ledger namespace revision vector plus snapshot digest, budget, state and terminal proof.</td></tr>
+      <tr><td><code>legion.executor-result.v1</code></td><td>Provider ID, model, requested/effective effort, fallback state, Capacity ID, status, safe failure class, usage and diff/receipt/artifact digests.</td></tr>
+      <tr><td><code>legion.knowledge-assertion.v1</code></td><td>Namespace, registered kind, subject/predicate/object, source/revision/digest, actor, trust, sensitivity, freshness/expiry, status, supersession and evidence references.</td></tr>
+      <tr><td><code>legion.knowledge-validator.v1</code></td><td>Validator identity/version/digest, allowlisted assertion kinds, receipt schema and deterministic verification rule. Registration is an operator/human control-plane action, never a Worker or model action.</td></tr>
+      <tr><td><code>legion.knowledge-snapshot.v1</code></td><td>Cloud-pinned sorted namespace IDs/revisions plus active assertion IDs/digests/status/trust at that revision. It has no local facts, omissions or query result; canonical empty value is revision vector <code>{}</code> and assertions <code>[]</code>.</td></tr>
+      <tr><td><code>legion.context-pack.v1</code></td><td>Principal, Project Agent, Spec/stage, tree revision, <code>knowledge_snapshot_sha256</code>, included assertion/local-fact digests, provenance, freshness/conflicts/omissions and hard fact/token budget. Its own <code>context_pack_sha256</code> is computed after local facts are selected.</td></tr>
+      <tr><td><code>legion.approval.v1</code></td><td>Actor, authority, exact action/content digest, scope, decision, expiry and audit reference. Approval of one digest never authorizes a changed payload.</td></tr>
+      <tr><td><code>legion.failure.v1</code></td><td>Stage, stable code, class, retryability, safe user message, correlation ID and local-detail reference. Raw provider, command or database errors never cross the safe projection.</td></tr>
+    </tbody></table></div>
+    <details open><summary>Canonical digest contract</summary><div>
+      <p><code>legion.canonical-digest.v1</code> is shared by every local/cloud adapter. Structured input is first schema-validated, Unicode strings are normalized to NFC, timestamps are normalized to RFC 3339 UTC, unsupported numeric values are rejected, and the covered semantic fields are serialized as RFC 8785 JSON Canonicalization Scheme bytes. The digest is lowercase <code>sha256:&lt;hex&gt;</code> over those UTF-8 bytes.</p>
+      <ul class="list"><li>Every schema publishes an explicit covered-field list; transient transport fields, signatures and the digest field itself are excluded.</li><li>TOML Project Agent manifests are parsed into the <code>legion.project-agent.v1</code> semantic object before canonicalization; raw whitespace/comment changes do not change the semantic digest, while any policy/ability/instruction reference does.</li><li>Raw artifacts use SHA-256 over exact bytes and are never confused with structured-object digests.</li><li><code>knowledge_snapshot_sha256</code> covers only the sorted namespace revision vector and sorted active assertion <code>id,digest,status,trust</code> tuples. Its published empty fixture covers <code>{"revisions":{},"assertions":[]}</code>; it never includes local facts.</li><li><code>context_pack_sha256</code> separately covers the Knowledge snapshot digest, tree/source revisions, included local-fact/assertion digests, omissions, conflicts, budgets and stage after local compilation.</li><li>Phase 0 ships cross-language golden fixtures; every adapter MUST reproduce the same canonical bytes and digest before it joins the contract suite.</li></ul>
+    </div></details>
+    <h4>Specification state</h4><div class="panel"><div class="state"><span>draft</span><b>→</b><span>needs_clarification</span><b>→</b><span>new draft version</span><b>→</b><span>confirmed</span></div></div>
+    <h4>Job state summary</h4><div class="panel"><div class="state"><span>submitted</span><b>→</b><span>clarification_queued → clarifying → waiting_for_user</span><b>→</b><span>execution_queued → running</span><b>→</b><span>review_ready / succeeded / failed / blocked / cancelled</span><b>·</b><span>running → cancel_requested / reconciling</span></div></div>
+    <h4>Attempt state summary</h4><div class="panel"><div class="state"><span>leased</span><b>→</b><span>acknowledged</span><b>→</b><span>running → uploading</span><b>→</b><span>completed / failed / blocked / cancelled / released / abandoned</span><b>·</b><span>expired → reconciling</span></div></div>
+    <h4>Knowledge assertion state</h4><div class="panel"><div class="state"><span>proposed</span><b>→</b><span>verified → active</span><b>·</b><span>rejected</span><b>·</b><span>active → retired / superseded / expired</span></div></div>
+    <p><strong>Atomicity rule:</strong> every transition uses compare-and-set (CAS) against Job state version and, when an Attempt exists, Attempt number, device ID and fencing token. Job and Attempt updates commit in one transaction using database server time. Attempt terminality does not always mean Job terminality: a clarification Attempt may complete while the Job waits for the user; a pre-effect Attempt may resume/release while its Job remains queued; only an effect-journaled execute Attempt’s verified terminal result settles the Job (<code>review_ready</code> for code-changing work, <code>succeeded</code> for read-only work). Attempt-only <code>expired</code> is transitional. Reconciliation reads <code>effect_journaled_at</code>: pre-effect reconciliation can only resume to <code>acknowledged</code> or end <code>released|blocked|cancelled|abandoned</code>; effectful reconciliation may resume execution/upload or settle from durable evidence. A terminal execution Job never gains another Attempt; explicit retry creates a new linked Job.</p>
+    <h4>Exhaustive job transitions</h4>
+    <div class="panel table-wrap"><table><thead><tr><th>Current job state</th><th>Actor/guard</th><th>Legal successor</th><th>Recovery</th></tr></thead><tbody>
+      <tr><td><code>submitted</code></td><td>Cloud validates owner, profile and confirmed Spec; Job binding/Project Agent version MUST equal the Spec Session’s immutable binding/agent version.</td><td><code>clarification_queued</code>, <code>execution_queued</code>, <code>blocked</code>, <code>cancelled</code>.</td><td>No Attempt exists; validation/cancel settles directly.</td></tr>
+      <tr><td><code>clarification_queued</code></td><td>Eligible bound worker leases a <code>clarify</code> attempt; job remains queued until acknowledgement.</td><td><code>clarifying</code>, <code>cancelled</code>, <code>blocked</code>.</td><td>A released read-only attempt leaves/requeues the job. An expired attempt first reconciles, then is resumed or released.</td></tr>
+      <tr><td><code>clarifying</code></td><td>Active clarify attempt with current fence.</td><td><code>waiting_for_user</code>, <code>clarification_queued</code> after explicit retry, <code>cancel_requested</code>, <code>blocked</code>.</td><td>Completed clarify attempt and <code>waiting_for_user</code> commit atomically; failed/released attempt may requeue; expired first reconciles and then resumes or releases.</td></tr>
+      <tr><td><code>waiting_for_user</code></td><td>User appends answer, creating a new spec version, or cancels.</td><td><code>clarification_queued</code>, <code>execution_queued</code> after exact confirmation, <code>cancelled</code>.</td><td>Old clarify attempt remains terminal.</td></tr>
+      <tr><td><code>execution_queued</code></td><td>Cloud Hub deadline sweeper and the claim transaction first CAS expired <code>waiting_*</code> deadlines to <code>blocked:provider_unavailable|capacity_unavailable</code>; otherwise an eligible Worker may lease.</td><td><code>running</code> only when the Worker records the first execution effect; or <code>cancelled</code>/<code>blocked</code>.</td><td>A released pre-effect Attempt clears the active lease, sets backoff and leaves the Job queued. Expiry reconciles before resume/release.</td></tr>
+      <tr><td><code>running</code></td><td>Active execute attempt with current device/fence.</td><td><code>review_ready</code> for code change, <code>succeeded</code> for read-only, <code>failed</code>, <code>blocked</code>, <code>cancel_requested</code>, <code>reconciling</code>.</td><td>Lease loss always goes to <code>reconciling</code>, never another worker.</td></tr>
+      <tr><td><code>cancel_requested</code></td><td>Worker observes cancellation; terminal result or lease loss may race under CAS.</td><td><code>cancelled</code>, <code>reconciling</code>, <code>blocked</code>, or the already-committed <code>review_ready|succeeded|failed</code> result.</td><td>A pre-effect Attempt settles <code>cancelled</code>. If an effect-journaled Attempt expires before observing cancel, Job/Attempt enter <code>reconciling</code>; durable evidence settles the result/cancel, while lost evidence becomes <code>blocked:attempt_abandoned</code>.</td></tr>
+      <tr><td><code>reconciling</code></td><td>Only an effect-journaled execution moves the Job itself here; same device resumes or operator evaluates durable evidence/lost Capacity.</td><td><code>running</code>, <code>review_ready</code>, <code>succeeded</code>, <code>failed</code>, <code>blocked</code>, <code>cancelled</code>.</td><td>Lost device/disk becomes <code>blocked:attempt_abandoned</code>; explicit retry creates a new Job. Pre-effect Attempt reconciliation leaves the Job in its queued state.</td></tr>
+      <tr><td><code>review_ready|succeeded|failed|blocked|cancelled</code></td><td>Terminal receipt/result digest committed.</td><td>None.</td><td>Inputs changed or user retry creates a new linked job.</td></tr>
+    </tbody></table></div>
+    <h4>Exhaustive attempt transitions</h4>
+    <div class="panel table-wrap"><table><thead><tr><th>Current attempt state</th><th>Legal successor</th><th>Guard/recovery</th></tr></thead><tbody>
+      <tr><td><code>leased</code></td><td><code>acknowledged</code>, <code>released</code>, <code>blocked</code>, <code>expired</code>, <code>cancelled</code>.</td><td>Worker first commits claim locally; release is terminal and leaves the Job queued; a non-retryable identity/schema/policy denial blocks both records; expiry is transitional to reconciliation.</td></tr>
+      <tr><td><code>acknowledged</code></td><td><code>running</code>, <code>released</code>, <code>blocked</code>, <code>expired</code>, <code>cancelled</code>.</td><td>Preflight and base pin; release before the effect journal leaves the Job queued. Non-retryable drift/policy denial blocks before effects. Expiry reconciles. Starting clarification moves the Attempt to <code>running</code> and the Job to <code>clarifying</code>; the first execute effect atomically moves both to <code>running</code>.</td></tr>
+      <tr><td><code>running</code></td><td><code>uploading</code>, <code>failed</code>, <code>blocked</code>, <code>cancelled</code>, <code>expired</code>.</td><td>Current device/fence and heartbeat. Expiry moves the Job itself to <code>reconciling</code> only for an effect-journaled execute Attempt; a running clarification or other pre-effect Attempt reconciles while its Job remains queued/clarifying.</td></tr>
+      <tr><td><code>uploading</code></td><td><code>completed</code>, <code>failed</code>, <code>blocked</code>, <code>expired</code>.</td><td>Content-addressed retries are allowed; terminal success requires all declared receipts. Exhausted upload budget or a permanent integrity denial blocks with local result retained.</td></tr>
+      <tr><td><code>expired</code></td><td><code>reconciling</code>.</td><td>No new execute attempt. Same device or operator resolves.</td></tr>
+      <tr><td><code>reconciling</code></td><td>Pre-effect: <code>acknowledged</code>, <code>released</code>, <code>blocked</code>, <code>cancelled</code>, <code>abandoned</code>. Effect-journaled: <code>running</code>, <code>uploading</code>, <code>completed</code>, <code>failed</code>, <code>blocked</code>, <code>cancelled</code>, <code>abandoned</code>.</td><td><code>effect_journaled_at</code> selects the branch. Pre-effect may not become <code>completed</code> or <code>failed</code>; resume requires same device, payload/result digest and current fence.</td></tr>
+      <tr><td><code>completed|failed|blocked|cancelled|released|abandoned</code></td><td>None.</td><td>Immutable terminal Attempt. Clarify completion may leave the Job waiting; pre-effect release may leave it queued; only a verified execute result settles the Job.</td></tr>
+    </tbody></table></div>
+
+    <details open><summary>User/session endpoints</summary><div class="mono">POST   /v1/sessions
+GET    /v1/sessions/{id}
+POST   /v1/sessions/{id}/messages
+GET    /v1/sessions/{id}/messages?after=
+POST   /v1/sessions/{id}/specifications
+POST   /v1/specifications/{id}/confirm
+POST   /v1/jobs
+GET    /v1/jobs/{id}
+GET    /v1/jobs/{id}/events?after=
+POST   /v1/jobs/{id}/cancel
+GET    /v1/jobs/{id}/reconciliation
+POST   /v1/jobs/{id}/reconciliation/abandon
+GET    /v1/export
+DELETE /v1/sessions/{id}</div></details>
+    <details><summary>Device, worker and memory endpoints</summary><div class="mono">POST   /v1/device-authorizations
+POST   /v1/device-tokens
+POST   /v1/devices/{id}/revoke
+POST   /v1/repository-bindings
+DELETE /v1/repository-bindings/{id}
+POST   /v1/project-agents
+GET    /v1/project-agents?repository_id=
+POST   /v1/project-agents/{id}/versions/{version}/approve
+DELETE /v1/project-agents/{id}
+POST   /v1/worker/claims                 # long poll
+POST   /v1/worker/attempts/{id}/ack
+POST   /v1/worker/attempts/{id}/heartbeat
+POST   /v1/worker/attempts/{id}/events:batch
+POST   /v1/worker/attempts/{id}/clarification
+POST   /v1/worker/attempts/{id}/result
+POST   /v1/worker/attempts/{id}/resume
+POST   /v1/worker/attempts/{id}/release
+POST   /v1/knowledge/assertions:batch
+GET    /v1/knowledge/snapshot?namespace=&amp;after_revision=
+POST   /v1/knowledge/assertions/{id}/promote
+POST   /v1/knowledge/assertions/{id}/retire
+GET    /v1/knowledge/validators
+POST   /v1/knowledge/validators
+POST   /v1/knowledge/validators/{id}/versions
+POST   /v1/knowledge/validators/{id}/disable</div></details>
+    <p><strong>API boundary:</strong> every endpoint validates a versioned schema with unknown fields rejected, body and page-size limits, parameterized database access and a stable <code>legion.failure.v1</code> response. Every mutating user request requires an idempotency key. Browser mutations require an origin/CSRF check; Worker endpoints require a scoped device token and current device/binding authorization. Human-authority assertion kinds require an authenticated human approval bound to the exact assertion digest; validator-authority kinds are promoted only after the server verifies a receipt against <code>knowledge_validator_registry</code>. Worker device tokens cannot promote decisions, preferences, constraints or register validators. Rate limits apply by deployment, principal, device and route.</p>
+    <p>Cloud input cannot select a local path, executable, hook, shell command, environment variable, arbitrary URL, raw model ID or credential. Jobs select only an approved workflow/profile, opaque binding and approved Project Agent version. The cloud cannot ask a Project Agent to widen its own manifest or treat retrieved text as an instruction.</p>
+  </section>
+
+  <section id="mvp-worker">
+    <h2>19. MVP worker and execution flow</h2>
+    <div class="panel flow"><div class="node">Cloud queue<small>confirmed spec, binding, Project Agent/context/policy digests</small></div><div class="arrow">→</div><div class="node">Outbound local worker<small>claim, persist, verify agent/repo, reconcile</small></div><div class="arrow">→</div><div class="node">Current Legion lifecycle<small>bounded context, plan, fan-out, validate, review</small></div></div>
+    <details open><summary>Execution sequence</summary><div><ol class="list">
+      <li>Local binding validates the repo-owned Project Agent manifest, computes its digest and publishes only user-approved safe metadata. The user creates a cloud session against that approved version.</li>
+      <li>User submits a message. If no confirmed Spec exists, cloud queues a clarification Attempt pinned to the Session’s binding/Project Agent version, policy and either the active canonical Ledger revision vector/snapshot digest or the shared empty-snapshot fixture.</li>
+      <li>Worker claims, commits payload/fencing/lease token to <code>synchronous=FULL</code> SQLite, durably commits, then acknowledges. If acknowledgement fails, the durable local claim is reconciled before any new claim.</li>
+      <li>Worker builds a bounded Context Pack from local Project Agent/repository facts and, only when enabled, approved Ledger assertions. Deterministic completeness runs before Opus. Questions return to the Session; each answer creates a new immutable draft; the user confirms one exact version/digest.</li>
+      <li>Cloud queues execution. Worker verifies device/binding, repository identity, manifest digest at the pinned commit, policy/profile/Legion version, Knowledge snapshot, cancellation and allowed base. Identity/schema/policy/digest drift blocks before effects; cancellation settles without effects. If the approved Provider/model or selected Capacity is temporarily unavailable, the Worker releases pre-effect and atomically sets <code>state_reason=waiting_provider|waiting_capacity</code>, <code>waiting_since</code> and jittered <code>not_before</code>; claim queries cannot return it before that time. Backoff grows to a configured cap but never beyond <code>waiting_deadline_at</code>.</li>
+      <li>Worker resolves and pins the base SHA once, creates a dedicated outer worktree, writes the confirmed spec/context references to private files, and invokes the entire <code>legion-run</code> lifecycle beneath <code>legion-process-supervisor.py</code>. On macOS it applies the run-unique inherited Seatbelt fingerprint and canaries; Linux uses the proven pidfd/process-group path.</li>
+      <li>Existing plan, routing, fan-out, validation, review, evaluation, evidence and learning run locally. Worker emits only bounded state transitions—not token streams.</li>
+      <li>Worker atomically commits terminal result digest plus safe result/outbox event in one SQLite transaction before upload. Cloud verifies artifact receipts and result digest in one terminalization transaction. Code-changing success maps to <code>review_ready</code>.</li>
+      <li>User later reviews/applies locally through existing digest-guarded control. Cloud MVP has no apply endpoint.</li>
+    </ol></div></details>
+    <details><summary>Lease, durable ordering and retry rules</summary><div><ul class="list"><li><span class="badge assumption">Initial tuning</span> Long poll up to 25 seconds, lease 90 seconds and heartbeat 20 seconds. The Worker owner MUST replace or confirm these values from Slice 9 load, pause and crash evidence before live execution.</li><li>Claims use one Postgres transaction with <code>SKIP LOCKED</code>, <code>not_before &lt;= database_now</code> and <code>NOT EXISTS</code> any active <code>leased|acknowledged|running|uploading|expired|reconciling</code> Attempt. Database server time alone decides eligibility/expiry.</li><li>The Cloud Hub runs a bounded deadline sweeper; the claim transaction repeats the same CAS guard so an expired <code>waiting_*</code> Job becomes terminal blocked before it can lease even if the sweeper is delayed.</li><li>Temporary Provider/Capacity waiting uses persisted full-jitter exponential <code>not_before</code> backoff, capped by policy and <code>waiting_deadline_at</code>; release cannot create a tight claim/release loop.</li><li>Heartbeat runs outside the provider child process so a blocked model/tool call cannot silently stop renewal; failure to renew makes the cloud state <code>expired → reconciling</code>.</li><li>Durable order is fixed: cloud lease commit → local SQLite claim commit → cloud acknowledgement → effect journal entry → supervised execution → local evidence commit → local result/outbox commit → artifact upload → cloud terminalization transaction → local acknowledgement/cleanup.</li><li>Attempt updates compare current state, Attempt number, device ID and fencing token.</li><li>Lease loss during execution moves to <code>reconciling</code>; it never launches a second effectful Attempt blindly.</li><li>The same device may resume when local payload/result digest and fencing token match; otherwise the Job blocks for explicit recovery or retry as a new Job.</li><li>Network/408/425/429/5xx retry with full-jitter exponential backoff, honoring a bounded <code>Retry-After</code>, starting near one second and capped at five minutes.</li><li>Auth, schema, policy, digest conflict, non-idempotent 4xx and ambiguous external effects do not auto-retry.</li></ul></div></details>
+    <div class="grid">
+      <article class="panel"><h3>Worker commands</h3><p><code>legion-worker start|once|status|doctor|install-service|uninstall-service</code></p></article>
+      <article class="panel"><h3>Control-plane commands</h3><p><code>legion-cloud login|bind|agent|sync|status</code>; Ledger propose/promote/retire; operator-only <code>validator list|register|rotate|disable</code>; and <code>recovery inspect|abandon</code>. Abandon requires authenticated human authority, exact Job state version, Attempt ID/fence and an operator reason; one CAS makes the Attempt <code>abandoned</code> and Job <code>blocked:attempt_abandoned</code>. Worker tokens cannot call it.</p></article>
+      <article class="panel"><h3>Offline</h3><p>Local work never imports cloud on its hot path. During network loss, an already authorized cloud Job may finish only its isolated local lifecycle and queue safe events; the cloud lease may expire into <code>reconciling</code>. Reconnect resolves that same Attempt before the Worker claims anything new.</p></article>
+    </div>
+  </section>
+
+  <section id="mvp-security">
+    <h2>20. MVP security, privacy and recovery</h2>
+    <div class="grid">
+      <article class="panel"><h3>Authentication</h3><p>Browser OIDC Authorization Code with PKCE, state and nonce; Secure, HttpOnly, SameSite session cookies with CSRF/origin protection; device authorization for CLI/Worker; short access tokens; rotated hashed refresh tokens in the OS keychain/secret store. Worker tokens are scoped to user, device and approved bindings.</p></article>
+      <article class="panel"><h3>Authorization</h3><p>Deny by default. Every object lookup and state change checks authenticated owner, device, binding, Project Agent and action in one guarded query/transition. Opaque IDs and repository identity never grant access. Revocation is checked on claim, heartbeat, event and result upload.</p></article>
+      <article class="panel"><h3>Secret separation</h3><p>Remove cloud tokens/KMS material before provider spawn; build cloud HTTP environment without provider secrets; provider auth stays in its existing local store.</p></article>
+      <article class="panel"><h3>Encrypted content</h3><p>TLS and managed Postgres encryption are mandatory. User message/spec/result text uses envelope encryption before an external pilot: deployment-owned KMS key, versioned key ID, AAD binding owner/table/record, rotation by data-key rewrap, tested KMS-outage behavior and backup expiry.</p></article>
+      <article class="panel"><h3>Safe projection</h3><p>Field allowlist, size bounds, secret/private-key/token/path/control-character scans and user authorization. Rejected items remain local with a visible reason.</p></article>
+      <article class="panel"><h3>Input, output, egress and supply chain</h3><p>Reject unknown schema fields; use parameterized SQL and argument arrays rather than shell interpolation; allowlist Worker egress and context-source hosts; cap request, event and artifact sizes. The UI escapes all content, permits no raw model HTML and ships a restrictive CSP/security headers. Production Worker release artifacts and migration bundles are digest-pinned, signed and verified before use; dependency and secret scans gate release.</p></article>
+      <article class="panel"><h3>Project and knowledge isolation</h3><p>Namespace filtering happens before ranking/decryption. MVP Project Agents read only personal plus their bound repository namespace; cross-project grants do not exist yet. Manifest widening changes the digest and requires explicit approval.</p></article>
+      <article class="panel"><h3>Cancellation</h3><p>Cloud sets <code>cancel_requested</code>. Worker observes it; the full lifecycle already runs under the descendant-aware supervisor. macOS requires the inherited Seatbelt fingerprint plus both supervisor canaries; Linux requires the supported pidfd/process identity path. Any unavailable identity inspection fails closed. Cloud never sends a process signal.</p></article>
+      <article class="panel"><h3>Deletion</h3><p>MVP is one personal/single-tenant deployment, so no cross-user sharing exists. Deletion appends a protected tombstone revision that every device cache/outbox must acknowledge; late uploads for the deleted session are rejected. After dependent jobs settle, cloud deletes message/spec ciphertext, removes it from snapshots and lets encrypted backups expire under documented retention. Audit keeps only non-content identifiers/reasons.</p></article>
+    </div>
+    <div class="panel table-wrap"><table><thead><tr><th>Failure</th><th>Behavior</th><th>Recovery</th></tr></thead><tbody>
+      <tr><td>Cloud unreachable</td><td>Local commands unchanged; safe events queue locally.</td><td>Keep verified cache; retry later.</td></tr>
+      <tr><td>Malformed/stale snapshot</td><td>Reject without replacing current cache.</td><td>Continue on last known good; return current revision.</td></tr>
+      <tr><td>Worker dies</td><td>A pre-effect Attempt expires and can be released; an effectful execution expires into <code>reconciling</code>.</td><td>Same device resumes or uploads stored evidence; another Worker never blindly repeats an ambiguous effect.</td></tr>
+      <tr><td>Provider/model unavailable</td><td>No fallback outside policy; Job stays <code>execution_queued</code> with <code>waiting_provider</code>.</td><td>Wait until its configured deadline, then terminal <code>blocked:provider_unavailable</code>.</td></tr>
+      <tr><td>Capacity unavailable</td><td>Provider policy remains unchanged; Job stays <code>execution_queued</code> with <code>waiting_capacity</code>.</td><td>Wait until its configured deadline, then terminal <code>blocked:capacity_unavailable</code>.</td></tr>
+      <tr><td>Postgres unavailable</td><td>No lease, acknowledgement or terminal transition can commit; no new cloud Job begins effects.</td><td>Local-only Legion remains available; Worker retries safe requests and reconciles durable local claims after recovery.</td></tr>
+      <tr><td>KMS unavailable or ciphertext authentication fails</td><td>Encrypted content is not returned, used for context or executed.</td><td>Fail closed with a safe error; restore KMS/key version or recover from a verified backup—never substitute plaintext or another key.</td></tr>
+      <tr><td>Manifest/base/context drift</td><td>Expected and actual digests differ; no effect begins.</td><td>Pin the old inputs or create a new spec/job against the new versions.</td></tr>
+      <tr><td>Conflicting/stale assertion</td><td>Both remain attributed; stale or unverified claims are excluded or visibly marked.</td><td>Human/source/validator supplies a superseding assertion; never ask a model to choose truth.</td></tr>
+      <tr><td>Artifact upload fails</td><td>Job cannot report success while required receipts are missing.</td><td>Retry content-addressed upload within budget; exhaustion or permanent integrity denial becomes <code>blocked:artifact_upload</code> and retains the local result.</td></tr>
+      <tr><td>Same failure fingerprint repeats</td><td>Convergence yields <code>blocked:no_progress</code>.</td><td>Return to user; do not burn more budget.</td></tr>
+      <tr><td>Revoked device</td><td>Claims/renewals/uploads denied.</td><td>Worker stops at next check; result remains local for operator recovery.</td></tr>
+      <tr><td>Prompt injection or unauthorized context instruction</td><td>Retrieved text remains data; it cannot change policy, tools, scope or approval.</td><td>Exclude or visibly mark the fact, record the source/evidence ID and continue only with the trusted instruction chain.</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section id="mvp-performance">
+    <h2>21. MVP performance and optimization plan</h2>
+    <article class="panel callout"><h3>Optimization principle</h3><p>The two-model <code>xhigh</code> policy is intentionally expensive. Performance comes from eliminating unnecessary model calls and infrastructure work—not reducing reasoning quality or skipping proof.</p></article>
+    <div class="grid">
+      <article class="panel"><h3>Before model calls</h3><ul class="list"><li>Deterministic completeness and schema checks.</li><li>Repository policy/Git/diagnostic discovery.</li><li>Changed-scope and cheapest-failure-first test selection.</li><li>Provider readiness cached by version/config digest.</li></ul></article>
+      <article class="panel"><h3>Context</h3><ul class="list"><li>Latest immutable Spec and unanswered messages—not full chat.</li><li>Bounded active assertions and task-relevant local facts.</li><li>Cache by Project Agent, tree SHA, Spec, policy, Ledger snapshot digest and stage.</li><li>No whole-repo, whole-Ledger or whole-conversation prompt.</li></ul></article>
+      <article class="panel"><h3>Execution</h3><ul class="list"><li>One plan per immutable spec/base/policy.</li><li>Dependency-aware fan-out only for ready independent work.</li><li>Safe dependency caches keyed by lockfile/runtime.</li><li>Skip unchanged validation/review fingerprints.</li></ul></article>
+      <article class="panel"><h3>Cloud path</h3><ul class="list"><li>Long polling, batched progress and ledger events.</li><li>ETag/revision snapshot reads and incremental assertion tails.</li><li>Postgres indexes for claim, agent version and namespace revision paths.</li><li>No token streaming or synchronous upload on local hot path.</li></ul></article>
+      <article class="panel"><h3>Storage</h3><ul class="list"><li>Append-only bounded files locally.</li><li>Content-addressed artifacts and dedupe.</li><li>Retention from day one.</li><li>No object store/broker until measured need.</li></ul></article>
+      <article class="panel"><h3>Operations</h3><ul class="list"><li>Backpressure by worker/account.</li><li>Reserve capacity for independent review later.</li><li>Measure queue, startup, model, validation and approval separately.</li><li>Never optimize aggregate latency by hiding failed gates.</li></ul></article>
+    </div>
+    <article class="panel"><h3>Measurement protocol</h3><p>Every result records the exact command, seed, corpus/digest, baseline artifact, Git/Legion/agent/model-policy versions, hardware/OS, region, database class, cold/warm state, durability mode, data sizes, Worker count and concurrency. Microbenchmarks use at least 10 untimed warm-ups and 1,000 timed operations before reporting p99, with uncertainty reported. End-to-end comparisons use at least 30 paired case-runs at the same commit/agent/model/policy; every exclusion and infrastructure failure is reported, and p99 is omitted until the sample supports it. Stable deterministic suites repeat three times. Report only supported quantiles, plus queue, model, validation, upload, tokens and cost separately. The MVP technical lead owns the initial budgets below: local budgets MUST be replaced or confirmed by Phase 0 baselines, and cloud/Worker budgets by Slices 5, 9 and 13 before external pilot. Each report states the load envelope; these latency hypotheses are not throughput promises.</p></article>
+    <div class="panel table-wrap"><table><thead><tr><th>Operation</th><th>Initial budget</th></tr></thead><tbody>
+      <tr><td>Offline Legion startup regression caused by cloud integration</td><td>&lt; 50 ms p95</td></tr>
+      <tr><td>State resolution</td><td>&lt; 50 ms p95</td></tr>
+      <tr><td>Span/session append under configured durability</td><td>&lt; 5 ms p95</td></tr>
+      <tr><td>Cached local Context Pack compile; no network</td><td>&lt; 150 ms p95</td></tr>
+      <tr><td>Authenticated API, excluding long poll/artifact</td><td>&lt; 300 ms p95; &lt; 400 ms p99</td></tr>
+      <tr><td>Job submit to queued</td><td>&lt; 200 ms p95</td></tr>
+      <tr><td>Healthy worker claim latency</td><td>&lt; 3 s p95</td></tr>
+      <tr><td>Progress visible after local transition</td><td>&lt; 2 s p95</td></tr>
+      <tr><td>Snapshot pull plus cold compile</td><td>&lt; 500 ms p95; &lt; 1 MiB</td></tr>
+      <tr><td>Outbox starts after reconnect</td><td>&lt; 5 s p95</td></tr>
+      <tr><td>Idle Worker on recorded reference OS/hardware</td><td>&lt; 100 MiB RSS; negligible CPU</td></tr>
+      <tr><td>Cloud-to-local control overhead, excluding queue/model/tests</td><td>&lt; 5 s p95</td></tr>
+      <tr><td>Duplicate/false execution under crash suite</td><td>0</td></tr>
+      <tr><td>Unauthorized assertions in a compiled Project Agent context</td><td>0</td></tr>
+      <tr><td>Model token/cost regression vs identical local accepted task</td><td>≤ 5% unless quality gate records an approved trade-off</td></tr>
+    </tbody></table></div>
+    <p><strong>Capacity gate:</strong> Slice 13 MUST publish the tested ceiling for connected Workers, queued Jobs, active Jobs, event rate, database size and artifact volume while all correctness/privacy gates remain green. Until then, the MVP claims single-user functionality and latency only—not a throughput or fleet-size SLO.</p>
+  </section>
+
+  <section id="mvp-verification">
+    <h2>22. MVP testing, evaluation and release gates</h2>
+    <div class="grid">
+      <article class="panel"><h3>Contract tests</h3><p>Every schema gets valid, invalid, boundary, unknown-field and version fixtures. Local/cloud adapters run the same fixtures. N and N‑1 compatibility is tested.</p></article>
+      <article class="panel"><h3>Privacy corpus</h3><p>Secrets, keys, tokens, absolute paths, source, prompt injection, terminal output and transcript fragments. Gate: zero forbidden-field uploads.</p></article>
+      <article class="panel"><h3>Spec evaluation</h3><p>Complete/incomplete real briefs with known missing fields. Gate: no known-incomplete spec executes; structured output validates after at most one repair or blocks safely.</p></article>
+      <article class="panel"><h3>Delivery parity</h3><p>Run representative tasks locally and through cloud-to-local worker. Gate: same deterministic pass/review-ready result and zero false success.</p></article>
+      <article class="panel"><h3>API and authorization</h3><p>IDOR/owner mismatch, CSRF/origin, replay, expired/revoked tokens, rate limits, unknown fields, oversized bodies, SQL/command injection and SSRF/egress cases. Gate: every denial is fail-closed, stable and content-safe.</p></article>
+      <article class="panel"><h3>Bad paths</h3><p>Duplicate submit, concurrent claim, lease loss, database clock skew, restart, offline completion, cancellation race, device revoke, Postgres/KMS outage, ciphertext failure, stale snapshot, digest conflict, privacy rejection, macOS Seatbelt/audit-token canaries and Linux process-identity failure.</p></article>
+      <article class="panel"><h3>Agent and knowledge isolation</h3><p>Invalid/drifted/widened manifests; stale/conflicting/poisoned assertions; Agent A context must contain zero unauthorized Agent B facts. Model prose cannot promote itself.</p></article>
+      <article class="panel"><h3>Learning lift</h3><p>Held-out repeated-project tasks with and without the Knowledge Ledger. Enable active context only when it improves selection without quality, privacy or cross-project leakage regression.</p></article>
+    </div>
+    <details open><summary>MVP end-to-end Nemesis acceptance story</summary><div><ol class="list"><li>Network-disabled ordinary local Legion and the local Nemesis Project Agent pass unchanged.</li><li>User approves the manifest’s safe projection/digest, then creates a cloud session and incomplete strategy request.</li><li>Worker compiles an authorized context, returns focused questions and performs zero code-changing invocation.</li><li>User answer creates a new Spec version; exact version/digest is confirmed.</li><li>Outbound Worker durably claims the Job, verifies repo/manifest/context/policy digests, pins the commit and executes current Legion.</li><li>Nemesis validators, deterministic tests and independent review pass; main checkout remains unchanged.</li><li>Cloud shows <code>review_ready</code> with safe evidence.</li><li>Restart/network-loss reconciles the same Attempt without blind duplicate effects.</li><li>Second device receives the same approved Knowledge Ledger revision vector/snapshot digest; a later task correctly reuses one confirmed constraint.</li><li>Captured traffic/database contain no Provider transcript, local path, source, terminal stream, secret, instruction body, command or raw diff.</li></ol></div></details>
+  </section>
+
+  <section id="mvp-slices">
+    <h2>23. MVP ordered implementation slices</h2>
+    <div class="panel table-wrap"><table><thead><tr><th>#</th><th>Tracer-bullet slice</th><th>Depends on</th><th>Definition of done</th></tr></thead><tbody>
+      <tr><td>0</td><td>Pin baseline; publish pure contracts; provider/capacity split; strict model/effort/fallback enforcement; privacy classes and retention.</td><td>—</td><td>Current suites pass; only approved effective models/effort route; primary attestation and compatibility fixtures green.</td></tr>
+      <tr><td>1</td><td>Repo-owned Project Agent loader/checker, domain-plugin references, namespace and bounded local context.</td><td>0</td><td>Nemesis and Webapp manifests validate; widening fails closed; no cross-agent fact leakage.</td></tr>
+      <tr><td>2</td><td>Local work-session/spec ledger, result projection and immutable confirmation.</td><td>0</td><td>Session survives restart; changed spec creates a version; confirmed record immutable.</td></tr>
+      <tr><td>3</td><td>First-party clarification/planning vertical slice over current <code>legion-run</code> and Project Agent.</td><td>1,2</td><td>Incomplete task asks questions/no diff; clear task reaches isolated review-ready candidate.</td></tr>
+      <tr><td>4</td><td>Local safe projector, privacy corpus, cloud cache and crash-safe outbox in network-disabled shadow mode.</td><td>2</td><td>Zero prohibited projection; outbox/cache survive corruption/restart.</td></tr>
+      <tr><td>5</td><td>Cloud Hub skeleton, Postgres, personal login/devices and opaque repository binding.</td><td>3</td><td>The local Project Agent vertical slice is already green; revoked/other device is denied; cloud stores no local path; binding authorization passes.</td></tr>
+      <tr><td>6</td><td>Cloud Project Agent registry: safe metadata, digest approval and local authoritative-manifest verification.</td><td>1,5</td><td>Cloud cannot store/inject commands; drift/widening blocks; binding preview is user-approved.</td></tr>
+      <tr><td>7</td><td>Cloud sessions/messages/spec versions pinned to binding/Project Agent version, plus minimal clarification/confirmation UI.</td><td>2,5,6</td><td>Encrypted durable Session; mismatched Job binding/agent is denied; user-confirmed digest; export/delete works.</td></tr>
+      <tr><td>8</td><td>Knowledge Ledger, operator-managed validator registry, single-writer promotion, revision snapshots, Project Context Projection and verified local cache.</td><td>4,5,6</td><td>Register/rotate/disable works under human authority; two devices converge; stale/conflict/tombstone/offline tests pass; Worker/model cannot self-promote.</td></tr>
+      <tr><td>9</td><td>Durable jobs, attempts, idempotency, leases, cancellation and reconciliation.</td><td>5,7</td><td>Concurrent claim/duplicate/restart/lease bad paths have deterministic outcomes.</td></tr>
+      <tr><td>10</td><td>Outbound clarification Worker with durable claim, heartbeat, bounded local-first Context Pack and safe events.</td><td>4,6,9</td><td>Remote clarification uses the crash-safe projector/outbox, works with the canonical empty Ledger snapshot, survives restart and returns only authorized facts.</td></tr>
+      <tr><td>11</td><td>Local execution: pinned SHA/agent/context/profile/policy, outer worktree, current lifecycle and safe result.</td><td>3,10</td><td>Confirmed job reaches review-ready; checkout untouched; only approved models appear.</td></tr>
+      <tr><td>12</td><td>Cancellation, same-device resume, startup reconciliation and outbox replay.</td><td>4,11</td><td>Crash at every boundary uses the Slice 4 outbox/projector and prevents blind duplicate effects and false success.</td></tr>
+      <tr><td>13</td><td>Metrics, alerts, audit, performance/load tests, retention, backup/restore, kill switches, N‑1 compatibility and runbooks.</td><td>8,12</td><td>All release gates, capacity ceilings and recovery drills pass; pilot operator can diagnose/recover a stuck Job.</td></tr>
+    </tbody></table></div>
+    <p><span class="badge decision-b">Sequence</span> Slices 1 and 2 may begin after Slice 0; Slice 4 may overlap Slice 3 only after Slice 2. Slice 3 proves the complete local Project Agent flow and gates Cloud Hub Slice 5. After that gate, independent cloud slices follow the dependency table. Integration remains serialized through contract fixtures and one authoritative branch.</p>
+  </section>
+
+  <section id="mvp-rollout">
+    <h2>24. MVP rollout, rollback and operations</h2>
+    <div class="grid">
+      <article class="panel"><h3>Rollout stages</h3><ol class="list"><li>Contracts + local Project Agent; cloud disabled.</li><li>Safe projection/cache/outbox shadow.</li><li>Internal auth, agent binding, sessions/specs.</li><li>Clarification-only live worker.</li><li>Mocked execution with crash injection.</li><li>One live Nemesis repository/device.</li><li>Knowledge Ledger read-only context, then verified assertion publication.</li><li>Two-device personal pilot.</li></ol></article>
+      <article class="panel"><h3>Feature switches</h3><p><code>sessions</code>, <code>project_agents</code>, <code>cloud_sync</code>, <code>cloud_sessions</code>, <code>cloud_clarification</code>, <code>cloud_jobs</code>, <code>worker_execute</code>, <code>knowledge_ledger</code> and <code>cloud_context</code> switch independently.</p></article>
+      <article class="panel"><h3>Kill switches</h3><p>Stop execution claims, all claims, result ingestion, assertion publication, context injection, one agent/device/binding, or one provider/capacity. None disables ordinary local Legion.</p></article>
+      <article class="panel"><h3>Rollback</h3><p>Client disables cloud and keeps local state/cache/outbox. Worker drains but retains worktree/result. Cloud migrations use expand/contract and N‑1 API compatibility. No rollback deletes local work.</p></article>
+      <article class="panel"><h3>Alerts</h3><p>Model-policy violation, old queued job with healthy worker, long reconciliation, old terminal outbox, digest mismatch, repeated doctor failure, privacy rejection spike and database/API failure.</p></article>
+      <article class="panel"><h3>Retention</h3><p><span class="badge assumption">Default</span> Jobs/artifacts 30 days, audit 180 days, assertions until retired/deleted/expired under their kind policy. Product and Security own this assumption and MUST approve or replace it before real user data; ship retention and knowledge decay first.</p></article>
+    </div>
+  </section>
+
+  <section id="risks">
+    <h2>25. Highest risks and decisions</h2>
+    <div class="panel table-wrap"><table><thead><tr><th>Risk/decision</th><th>Resolved direction</th><th>Gate</th></tr></thead><tbody>
+      <tr><td>Transcript/privacy leak</td><td>Provider transcript never syncs. Allowlist projection; classify every field; no silent “redact and upload.”</td><td>Zero forbidden-field privacy corpus before network.</td></tr>
+      <tr><td>Broken object authorization or forged worker state</td><td>Owner/device/binding authorization in every guarded query and fenced transition; opaque IDs are not authority.</td><td>IDOR, replay, revocation, cross-device and state-forgery adversarial suite.</td></tr>
+      <tr><td>Hostable or vendor SaaS</td><td><span class="badge decision-b">Decision</span> Hostable-first single-tenant artifact; vendor runs the same artifact. Namespace grammar is tenancy-ready, but multi-user organizations wait for a real second user/team and isolation design.</td><td>Rewrite enterprise promise in Phase 0; do not promise tenancy in MVP.</td></tr>
+      <tr><td>Owning a model/provider</td><td><span class="badge decision-b">Decision</span> Not on the critical roadmap. Legion owns the contracts and proof stack, not model training. A native provider is reconsidered only after measured portability/cost/quality need.</td><td>No implementation issue without a held-out business/technical case.</td></tr>
+      <tr><td>Confirmed spec body in cloud</td><td><span class="badge decision-b">Decision</span> Yes, encrypted and user-controlled, because cross-device continuation requires it.</td><td>Export/delete/encryption and access-control tests.</td></tr>
+      <tr><td>Execution capacity definition</td><td><span class="badge decision-b">Decision</span> Independently identified place to run, with credentials owner, trust, capabilities, cost and concurrency—separate from provider.</td><td>Phase 0 contract and Phase 4 trust matrix.</td></tr>
+      <tr><td>Scope explosion</td><td>One cloud application, Postgres queue, no broker/vector/object store/microservices until measured need.</td><td>Every phase independently useful and revertible.</td></tr>
+      <tr><td>Project Agent self-widening</td><td>Manifest may narrow global policy but cannot widen namespaces, capacities, budget or effects without a new digest and explicit approval.</td><td>Adversarial manifest/drift fixtures and cloud command-injection denial.</td></tr>
+      <tr><td>Knowledge poisoning/staleness</td><td>Small registered assertion kinds; source/revision/trust/freshness/sensitivity; model prose remains proposed; expired/stale/conflicting claims remain attributed.</td><td>Zero unauthorized context facts; deterministic rebuild digest; poisoning/decay tests.</td></tr>
+      <tr><td>Graph infrastructure</td><td>Ledger is authoritative; local SQLite/cloud Postgres graph projections are disposable and rebuildable. No graph/vector database until measured failure.</td><td>Same schema plus pinned source/Ledger revisions produces the same projection digest; held-out retrieval lift.</td></tr>
+      <tr><td>Unbounded Goals</td><td>A Durable Goal emits Proposals only, cannot create Goals, requires runnable criteria and hard budgets; every effect still requires a confirmed Spec.</td><td>Dedupe/budget/depth/scope property tests and 30-day proposal audit.</td></tr>
+      <tr><td>Model policy is only prose</td><td>An enforced <code>legion.model-policy.v1</code> digest binds delegated and primary work; route-time exact effort mapping, effective attestation, fallback opt-in and approved-model routing are mandatory.</td><td>Injected nonconforming primary/model/effort/fallback cases all fail before invocation.</td></tr>
+      <tr><td>Distributed integration conflict</td><td>One integration Capacity per Job; Sol authors composition/conflict-resolution edits under Opus decisions; Opus independently reviews; composition never distributes.</td><td>Authoring-provenance, Git conflict, review-independence and partial-publication tests.</td></tr>
+      <tr><td>Cloud credentials</td><td>Local subscriptions remain on owned Capacities; cloud Capacities use short-lived approved credentials. Future account profiles stay isolated and policy-gated.</td><td>No credential in snapshot/payload/artifact; provider agreement before pooling.</td></tr>
+      <tr><td>Overclaiming self-improvement</td><td>Claim only what disjoint held-out baselines and later outcomes prove. Source improvement stays review-only.</td><td>Pinned promotion record, README/test parity, safety veto and auto-revert on policy regression.</td></tr>
+    </tbody></table></div>
+    <h4>Bounded assumption register</h4>
+    <div class="panel table-wrap"><table><thead><tr><th>ID</th><th>Assumption</th><th>Owner</th><th>Expiry or decision trigger</th></tr></thead><tbody>
+      <tr><td>A-1</td><td>Phase effort ranges are planning estimates, not commitments.</td><td>Engineering lead</td><td>Re-estimate at each phase entry after the prior phase’s measured throughput and risks.</td></tr>
+      <tr><td>A-2</td><td>25 s long poll, 90 s lease and 20 s heartbeat are safe initial tuning.</td><td>Worker owner</td><td>Confirm or replace before Slice 10 from Slice 9 load, pause, clock and crash tests.</td></tr>
+      <tr><td>A-3</td><td>Postgres can hold allowlisted artifacts up to 5 MiB for MVP.</td><td>Cloud lead</td><td>Confirm or add object storage before external pilot from Slice 13 volume, backup and restore evidence.</td></tr>
+      <tr><td>A-4</td><td>The Section 21 latency/cost budgets are useful initial targets.</td><td>MVP technical lead</td><td>Replace local values in Phase 0 and cloud/Worker values in Slices 5, 9 and 13.</td></tr>
+      <tr><td>A-5</td><td>30-day Job/artifact and 180-day audit retention are acceptable defaults.</td><td>Product + Security</td><td>Approve or replace before any real user data; re-evaluate on legal, privacy or recovery requirements.</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section id="traceability">
+    <h2>26. Traceability and document provenance</h2>
+    <div class="panel table-wrap"><table><thead><tr><th>HLS requirement or decision</th><th>LLS mechanism or delivery slice</th><th>Verification evidence</th></tr></thead><tbody>
+      <tr><td><code>I-1</code> Local operation without login/network</td><td><a href="#mvp-hls">§15 local authority</a>, <a href="#mvp-worker">§19 offline flow</a>, <a href="#mvp-rollout">§24 cloud-off switches</a>; Slices 4 and 12.</td><td>Network-disabled end-to-end suite in every release stage.</td></tr>
+      <tr><td><code>I-2</code> Outbound-only Cloud/Worker boundary</td><td><a href="#mvp-hls">§15 boundary</a>, <a href="#mvp-worker">§19 claim flow</a>, <a href="#mvp-security">§20 cancellation</a>; Slices 9–12.</td><td>Firewall/egress tests; no cloud signal, path, credential or apply capability.</td></tr>
+      <tr><td><code>I-3</code> Forbidden execution data never syncs</td><td><a href="#mvp-modules">§16 Sync projector</a>, <a href="#mvp-data">§17 data policy</a>, <a href="#mvp-security">§20 safe projection</a>; Slice 4.</td><td>Client/server privacy corpus and captured-traffic gate: zero forbidden fields.</td></tr>
+      <tr><td><code>I-4</code> Confirmed immutable Spec before effects</td><td><a href="#mvp-api">§18 Spec contract/states</a>, <a href="#mvp-worker">§19 preflight</a>; Slices 2, 7 and 11.</td><td>Incomplete/changed/unconfirmed Spec cases make no code-changing invocation.</td></tr>
+      <tr><td><code>I-5</code> Code changes stop at <code>review_ready</code></td><td><a href="#mvp-hls">§15 local authority</a>, <a href="#mvp-worker">§19 result mapping</a>; Slice 11.</td><td>No cloud apply endpoint; exact-digest local approval tests.</td></tr>
+      <tr><td><code>I-6</code> Model output is not success</td><td><a href="#mvp-modules">§16 Verification kernel</a>, <a href="#mvp-verification">§22 release gates</a>; Slices 3, 11 and 13.</td><td>Deterministic acceptance evidence, independent review and zero-false-success gate.</td></tr>
+      <tr><td><code>I-7</code> Immutable terminal Attempts and safe duplicates</td><td><a href="#mvp-data">§17 idempotency/keys</a>, <a href="#mvp-api">§18 CAS transitions</a>, <a href="#mvp-worker">§19 durable ordering</a>; Slices 9 and 12.</td><td>Duplicate, concurrent claim and crash-at-every-boundary tests.</td></tr>
+      <tr><td><code>I-8</code> Git remains code authority</td><td><a href="#mvp-hls">§15 local authority</a>, <a href="#mvp-worker">§19 pinned base/worktree</a>; Slices 1 and 11.</td><td>Base SHA/manifest digest receipts; operator checkout remains unchanged.</td></tr>
+      <tr><td><code>I-9</code> Model prose cannot become trusted memory</td><td><a href="#mvp-modules">§16 Ledger promotion</a>, <a href="#mvp-api">§18 assertion contract</a>; Slice 8.</td><td>Promotion authority tests; model self-promotion always denied.</td></tr>
+      <tr><td><code>I-10</code> Every phase is disableable/reversible</td><td>Per-phase rollback clauses and <a href="#mvp-rollout">§24 feature/kill switches</a>; Slice 13.</td><td>N‑1, rollback, backup/restore and global/cloud-off drills.</td></tr>
+      <tr><td><code>I-11</code> Attributed, scoped, fresh knowledge</td><td><a href="#mvp-modules">§16 Ledger/Context broker</a>, <a href="#mvp-data">§17 assertions/revisions</a>, <a href="#mvp-api">§18 contracts</a>; Slice 8.</td><td>Schema, ACL, provenance, stale/conflict, supersession and tombstone fixtures.</td></tr>
+      <tr><td><code>I-12</code> Versioned permission-scoped Project Agent</td><td><a href="#mvp-modules">§16 repo manifest</a>, <a href="#mvp-data">§17 safe version</a>, <a href="#mvp-worker">§19 digest preflight</a>; Slices 1, 6 and 11.</td><td>Nemesis/Webapp drift, widening, command-injection and cross-agent isolation tests.</td></tr>
+      <tr><td><code>I-13</code> Capability requires Ability + validator</td><td><a href="#mvp-modules">§16 manifest and Verification kernel</a>; Phase 5 Capability Packs; Slices 1, 3 and 11.</td><td>Unsupported/unauthorized capability blocks; required-validator omission fails.</td></tr>
+      <tr><td><code>I-14</code> Durable Goals are Proposal-only</td><td><a href="#phase-6">Phase 6 <code>legion.goal.v1</code></a>, deliberately outside the Hybrid MVP LLS.</td><td>Criterion, dedupe, budget, restart, scope and no-Job/no-child-Goal property tests plus 30-day audit.</td></tr>
+      <tr><td><code>I-15</code> One logical orchestrator</td><td><a href="#mvp-modules">§16 Harness owner</a>, <a href="#mvp-api">§18 pure/CAS transitions</a>; Slices 0, 9 and 11.</td><td>Single-owner state tests; replacing Provider or Capacity does not fork canonical truth.</td></tr>
+      <tr><td><code>I-16</code> Provider/Capacity split</td><td><a href="#mvp-modules">§16 separate interfaces</a>, <a href="#mvp-data">§17 Attempt/Provider invocation records</a>, <a href="#mvp-api">§18 pinned receipts</a>; Slices 0 and 11.</td><td>Missing/conflated identity rejected; each model work unit attests requested/effective effort and fallback state; same transition suite across local/cloud adapters.</td></tr>
+      <tr><td>Production model policy</td><td><a href="#invariants">§3 policy</a> and enforced <code>legion.model-policy.v1</code> digest: Opus 5 + Sol, both requested at <code>xhigh</code>. Planning runs separately requested Sol <code>max</code> and Opus <code>xhigh</code>; current receipts prove request parameters, not effective provider mapping.</td><td>Phase 0 adds exact per-harness mapping plus effective model/effort/fallback attestation; no unsupported level, fallback or unapproved route reaches invocation.</td></tr>
+      <tr><td>Repo-owned Project Agents before cloud</td><td><a href="#phase-1">Phase 1</a> completes first; Slices 1–3 gate Cloud Hub Slice 5.</td><td>Local one-command Project Agent acceptance is green before any live Cloud stage.</td></tr>
+      <tr><td>Hybrid MVP: Cloud Hub + Postgres + Ledger + outbound Worker</td><td><a href="#phase-2">Phase 2</a> and <a href="#mvp-hls">§§15–24 LLS</a>; Slices 5–13.</td><td>Two-device Nemesis story, privacy/denial/deletion/recovery gates and cloud-off parity.</td></tr>
+      <tr><td>No cloud execution in the Hybrid MVP</td><td><a href="#phase-2">Phase 2 non-goals</a>, <a href="#mvp-hls">§15 local authority</a> and <a href="#mvp-api">§18 API boundary</a>: Cloud coordinates; the bound outbound local Worker is the only execution Capacity.</td><td>Cloud process has no Provider credentials, model invocation, execute/apply endpoint or Worker Runtime adapter; an end-to-end test asserts every model span carries the enrolled local <code>capacity_id</code>.</td></tr>
+      <tr><td>Federated disposable graph projections in Phase 3</td><td><a href="#phase-3">Phase 3</a>: authoritative sources/Ledger → disposable local/cloud projections → bounded Context Pack.</td><td>Same pinned inputs/schema rebuild to the same digest; permission and retrieval-lift gates.</td></tr>
+      <tr><td>Multi-project Project Agent composition</td><td><a href="#phase-5">Phase 5</a>: one orchestrator, scoped Agent composition, grants and one integration order.</td><td>Two-Agent cross-repo outcome, namespace denial and no-partial-publication tests.</td></tr>
+      <tr><td>Evidence-gated self-improvement</td><td><a href="#phase-7">Phase 7</a>: disjoint holdout, shadow, canary, approval, later outcome and auto-revert.</td><td>Accepted/refused candidates, safety veto, longitudinal lift and rollback evidence.</td></tr>
+      <tr><td>Final Boss is shared verified intelligence</td><td><a href="#phase-8">Phase 8</a>: authorized world model, Project Agent composition, proof and outcome-backed learning.</td><td>A real verified outcome improves a later related outcome with zero unauthorized effect or false success.</td></tr>
+    </tbody></table></div>
+    <div class="grid">
+      <article class="panel"><h3>Independent analysis</h3><p>Operator invocation receipts show GPT‑5.6‑sol was requested at <code>max</code> for the audit and Claude Opus 5 was requested at <code>xhigh</code> through Legion run <code>20260826-120141-2cae2ccabac9913f98e889a1</code> with fallback disabled. Current <code>legion.span.v1</code> attests the effective model but not effective effort/fallback; Phase 0 closes that provenance gap.</p></article>
+      <article class="panel"><h3>Synthesis decisions</h3><p>The primary preserved the original proof/state machine, placed Project Agents before cloud, selected a Knowledge Ledger for MVP and disposable federated graph projections for Phase 3, split planning effort from production policy, added enforceable model-policy repairs and made durable Goals a separate proposal-only phase.</p></article>
+      <article class="panel"><h3>Selected abilities</h3><p>This v2.5 audit used the spec framework, system architecture, OWASP security and technical documentation abilities. They sharpened contracts and gates; they did not reopen accepted architecture.</p></article>
+      <article class="panel"><h3>Mutable vendor evidence</h3><p>Phase 4’s shortlist was rechecked on 2026-08-26 against official <a href="https://vercel.com/docs/sandbox">Vercel Sandbox</a>, <a href="https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html">Amazon Bedrock AgentCore Runtime</a>, <a href="https://docs.aws.amazon.com/lambda/latest/dg/microvms-launching.html">AWS Lambda MicroVMs</a> and <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">ECS/Fargate</a> documentation. The implementation spike MUST revalidate limits, regions and pricing.</p></article>
+      <article class="panel full"><h3>v2.5 audit delta</h3><p>v2.5 names the waiting-deadline sweeper/claim actor, removes residual per-binding Agent wording and adds an active-Attempt exclusion to claims. v2.4’s device-independent Repository/Agent identity, operator recovery, effect-scoped reconciliation, projector dependencies and persisted backoff remain intact; no accepted direction changed.</p></article>
+    </div>
+  </section>
+</main>
+</body>
+</html>

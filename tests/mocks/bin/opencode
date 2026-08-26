@@ -41,6 +41,15 @@ fi
 # Write a change unless running the non-writing plan agent (mirrors read-only).
 if [[ "$agent" != "plan" || "${MOCK_OPENCODE_WRITE_IN_PLAN:-0}" == "1" ]]; then
   printf 'mock-opencode-change by %s\n' "$model" >> MOCK_OPENCODE_CHANGE.txt
+  # Some agents branch and commit their own work. MOCK_OPENCODE_COMMITS
+  # reproduces that so the adapter's diff can be tested against an executor
+  # that leaves a clean working tree behind.
+  if [[ "${MOCK_OPENCODE_COMMITS:-0}" == "1" ]]; then
+    git checkout -q -b mock-opencode-branch 2>/dev/null || true
+    git add -A 2>/dev/null || true
+    git -c user.email=mock@example.com -c user.name=mock \
+      commit -q -m "mock opencode commit" 2>/dev/null || true
+  fi
 fi
 
 # Experimental plan mode writes its plan under .opencode/plans/ (output, not an edit).

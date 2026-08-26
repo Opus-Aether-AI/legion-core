@@ -137,6 +137,7 @@ cmd_run() {
   local task="" model="${LEGION_CURSOR_MODEL:-${CURSOR_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 agent_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
+  local base_commit=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -207,6 +208,9 @@ cmd_run() {
   [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
     running "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
     "$base" "$archetype"
+  # Pinned while the worktree is still pristine: the executor may commit,
+  # and after that HEAD is no longer the starting point.
+  base_commit="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
 
   local out_file="$art/cursor.out.json"
   local err_file="$art/cursor.err"
@@ -259,7 +263,13 @@ cmd_run() {
   cost="$(cost_from_output "$out_file" "$actual_model" "$usage")"
   result="$(result_text "$out_file")"
   git -C "$wt" add -A 2>/dev/null || diff_rc=1
-  git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  # Diff against the worktree's STARTING commit, not HEAD. `diff --cached` alone
+  # compares the index to HEAD, so an executor that COMMITS its work yields an
+  # empty patch -- HEAD already holds it, nothing is staged, and the run reports
+  # ok having lost everything. legion-pi-hermes already pins a base sha for this
+  # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
+  # had actually been done.
+  git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
   [[ "$rc" -ne 0 ]] && status="failed"
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
   if [[ "$sandbox" == "read-only" && -s "$art/diff.patch" && "$status" == "ok" ]]; then

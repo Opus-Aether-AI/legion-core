@@ -184,6 +184,7 @@ cmd_run() {
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
   local effort="" append_sys="" skip_perms=0
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
+  local base_commit=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
   local read_only_violation=0
 
@@ -300,6 +301,9 @@ cmd_run() {
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       running "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
+    # Pinned while the worktree is still pristine: the executor may commit,
+    # and after that HEAD is no longer the starting point.
+    base_commit="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
     note "→ claude worktree $wt (branch $branch, base $base)"
   else
     note "⚠ worktree add failed"
@@ -330,7 +334,13 @@ cmd_run() {
 
   if [[ -n "$wt" ]]; then
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
-    git -C "$wt" diff --cached >"$diff_path" 2>/dev/null || diff_rc=1
+    # Diff against the worktree's STARTING commit, not HEAD. `diff --cached` alone
+    # compares the index to HEAD, so an executor that COMMITS its work yields an
+    # empty patch -- HEAD already holds it, nothing is staged, and the run reports
+    # ok having lost everything. legion-pi-hermes already pins a base sha for this
+    # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
+    # had actually been done.
+    git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
     [[ "$diff_rc" -ne 0 ]] && note "⚠ could not capture a diff from $wt"
     if [[ "$sandbox" == "read-only" && -s "$diff_path" ]]; then
       read_only_violation=1

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.26.0...v0.26.1) (2026-08-26)
+
+
+### Fixed
+
+* **bench:** pin the published version in the agent image, never "latest" ([#182](https://github.com/Opus-Aether-AI/legion-core/issues/182)) ([f430352](https://github.com/Opus-Aether-AI/legion-core/commit/f4303523b87d9cba3e131fc95078abac4e5b704c))
+* **router:** diff against the worktree base in every adapter, not just codex ([#185](https://github.com/Opus-Aether-AI/legion-core/issues/185)) ([15d9e93](https://github.com/Opus-Aether-AI/legion-core/commit/15d9e9353fa0bd0179dd7a6c2809346a0f983762))
+
 ## [0.26.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.25.0...v0.26.0) (2026-08-25)
 
 

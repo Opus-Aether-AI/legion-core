@@ -1,8 +1,10 @@
 # legion-orchestrate
 
-Legion's dynamic **multi-model** orchestrator: the active primary decomposes
-work, configured executor roles implement parallel slices, and an independent
-review role verifies the result.
+Legion's dynamic **multi-model** execution workflow: the active primary
+decomposes work, configured executor roles run parallel slices, and an
+independent review role verifies the result. Current executors are
+coding-focused, while the workflow's routing, evidence, and gate contracts are
+domain-neutral.
 
 > Decompose → fan out → cross-model verify → synthesize → gate.
 

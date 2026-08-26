@@ -1,6 +1,6 @@
 # Keeping legion-core and legion-code in sync
 
-`legion-core` owns the engine and its nine `legion-*` plugins. `legion-code`
+`legion-core` owns the execution layer and its ten `legion-*` plugins. `legion-code`
 owns the broader coding-agent marketplace. They are separate installed
 dependencies: `legion-code` does not vendor or duplicate core plugin sources in
 its marketplace.

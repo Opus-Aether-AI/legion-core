@@ -5,8 +5,10 @@ This is the canonical, harness-neutral policy for every agent working in
 instruction files may add an overlay, but must not duplicate or override this
 policy.
 
-`legion-core` is the reusable, model-agnostic orchestration core behind Legion:
-routing, delegation, observability, setup bridges, and harness guidance.
+`legion-core` is Legion's reusable, model-agnostic execution layer: it routes
+units of work to capable executors, isolates execution, retains evidence,
+meters outcomes, and feeds learning loops. Coding is its leading application,
+not its definition.
 
 ## Scope
 
@@ -19,7 +21,7 @@ routing, delegation, observability, setup bridges, and harness guidance.
 <!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=4a1ef5458c3b1ca4 -->
 ## Legion workflow
 
-Legion is the mandatory default operating mode for coding tasks in this
+Legion is the mandatory default operating mode for work in this
 repository, regardless of which compatible harness is active. “Default” means
 enter the appropriate Legion mode; it does not mean every tiny action must be
 delegated.
@@ -27,8 +29,8 @@ delegated.
 - If `LEGION_ACTIVE=1`, `LEGION_DEPTH` is positive, or the working directory is
   under `.legion/worktrees/`, this process is already a delegated executor:
   implement the assigned slice directly unless it needs a bounded, explicit
-  cross-harness handoff. Use only `legion-delegate run --executor <different
-  coding harness>` for that handoff; Legion keeps task scanning, isolation,
+  cross-executor handoff. Use only `legion-delegate run --executor <different
+  executor>` for that handoff; Legion keeps task scanning, isolation,
   telemetry, and `LEGION_MAX_DEPTH` (default `2`) intact. Do not invoke raw
   harness CLIs or implicit/same-harness nested delegation. Return to the parent
   if the slice needs re-planning.
@@ -41,8 +43,8 @@ delegated.
   plan, deterministic validation, independent review, and retained evidence.
 - Use `legion-orchestrate` or `legion-fanout` for dependency-aware parallel
   slices; use `legion-delegate` for scoped delegation and independent review.
-- Do not call raw `claude`, `codex`, `agent`, or `opencode` processes for
-  delegated coding work. Go through Legion so isolation, routing, telemetry,
+- Do not call raw `claude`, `codex`, `agent`, `dsh`, `hermes`, `pi`, or
+  `opencode` processes for delegated work. Go through Legion so isolation, routing, telemetry,
   and review contracts remain active.
 - Inline work is allowed only when the active Legion harness-mode guidance
   selects it. It still follows this repository's tests and health gates.
@@ -64,7 +66,7 @@ delegated.
 - `legion-router`: scoped delegation across Claude, Codex, Cursor, opencode,
   Hermes, Pi, and DeepSeek Harness with routing policy, isolated worktrees,
   and telemetry.
-- `legion-orchestrate`: decompose a larger coding goal, fan out parallel slices,
+- `legion-orchestrate`: decompose a larger goal, fan out parallel slices,
   cross-verify, then synthesize.
 - `legion-run`: execute substantial tasks through the plan, route, fan-out,
   validation, review, evidence, learning, and heal lifecycle.

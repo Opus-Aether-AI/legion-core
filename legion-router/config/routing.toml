@@ -109,7 +109,7 @@ executor = "claude"
 model_ref = "claude_default"
 sandbox = "read-only"
 reasoning_effort = "high"
-note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Signed off on Claude Code. NOTE: with Fable retired this is the SAME model that did the polish, so it is a second look rather than an independent lens; route to the Cursor or Codex review roles when independence matters."
+note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Signed off on Claude Code. This is the SAME model that did the polish, so it is a second look rather than an independent lens; route to the Cursor or Codex review roles when independence matters."
 
 [archetypes.write-tests]
 executor = "codex"

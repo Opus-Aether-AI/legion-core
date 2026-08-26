@@ -1,7 +1,7 @@
 ---
 name: legion-hermes-mode
 kind: ability
-description: The routing guide for a Hermes-primary Legion session. Use when Hermes is driving coding work, when deciding whether a bounded task should stay inline or use a different coding harness, when a cron or skill hands code work to Hermes, or when the user asks to use Legion from Hermes, get a second opinion, review a Hermes change, or delegate from Hermes.
+description: The routing guide for a Hermes-primary Legion session. Use when Hermes is driving work, when deciding whether a bounded unit should stay inline or use a different executor, when a cron or skill hands work to Hermes, or when the user asks to use Legion from Hermes, get a second opinion, review a Hermes change, or delegate from Hermes.
 ---
 
 # Legion — Hermes mode
@@ -15,7 +15,7 @@ returns `actionable` with changed source or failure evidence. Yield on
 resume `waiting_external`. Never rerun validation on an unchanged tree or
 review the same immutable head merely to keep the primary turn alive.
 
-You are **Hermes**, the active Legion primary and a registered coding family. Keep
+You are **Hermes**, the active Legion primary and a registered executor. Keep
 bounded work inline when you have the right context. For independent implementation,
 review, or a second perspective, make one explicit handoff through Legion so it is
 isolated and metered (`legion.span.v1`), rather than an untracked raw provider call.
@@ -29,7 +29,7 @@ cross-harness handoff contract.
 From your `terminal` / `process` tool, use the Legion CLIs on PATH:
 
 ```bash
-# One scoped coding task -> the routed executor (Codex by default), metered, isolated worktree:
+# One scoped task -> the routed executor (Codex by default), metered, isolated worktree:
 legion-delegate run --archetype implement-feature --task "Build X per <spec>" --repo /path/to/repo --apply
 
 # Force a specific different harness (symmetric — any registered family):
@@ -67,7 +67,7 @@ have a script or cron that shells out raw (e.g. the coco implementation cron), s
 | Cheap/experimental delegation | `opencode` (minimax) | low-cost open harness |
 
 Omit `--executor` to accept the archetype's default route (see `legion-route --list`).
-List the harnesses with `legion-route --list-executors`. A delegated worker may
+List the executors with `legion-route --list-executors`. A delegated worker may
 handoff only once to a **different** family; same-family recursion and depth
 overflow fail closed.
 

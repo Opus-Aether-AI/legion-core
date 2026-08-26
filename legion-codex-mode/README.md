@@ -1,7 +1,9 @@
 # legion-codex-mode
 
-The **Codex-primary** routing brain for Legion — the mirror image of [`legion-router`](../legion-router)
-(which is the Claude-primary brain).
+The **Codex-primary** routing guide for Legion. Legion's execution contract is
+model-agnostic: route a scoped unit to a capable executor, isolate it, retain
+evidence, meter it, and learn from the outcome. Coding is the current executor
+application; this guide explains Codex's role within it.
 
 When you run Legion under **Codex CLI**, the configured Codex workhorse is primary and does most of the
 work. This skill tells you the few cases where it's worth handing a task **up to Claude**

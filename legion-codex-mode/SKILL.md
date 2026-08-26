@@ -1,7 +1,7 @@
 ---
 name: legion-codex-mode
 kind: ability
-description: The routing brain for a Codex-CLI-primary Legion session — the configured Codex workhorse does most of the work, and this tells you WHEN to call Claude (via `legion-claude`) instead of doing it yourself, and how Legion's MCPs/skills/bridged-commands work on Codex. Use when running Legion under Codex CLI, when a task smells like deep architecture / polished frontend / final cross-model review, when you're stuck after a couple attempts, or when the user says "ask claude", "get claude to", "second opinion from claude", or "use legion on codex". The mirror image of legion-router (which is the Claude-primary brain).
+description: The routing guide for a Codex-CLI-primary Legion session. It explains when to retain work inline, when to use a configured executor such as Claude through `legion-claude`, and how Legion's MCPs, skills, and bridged commands work on Codex. Use when running Legion under Codex CLI, when work needs architecture judgement, polished frontend, or independent review, or when the user asks for Legion on Codex.
 ---
 
 # Legion — Codex mode (you are the primary, Claude is on call)

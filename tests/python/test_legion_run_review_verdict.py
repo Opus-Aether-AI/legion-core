@@ -1,6 +1,6 @@
 """The review gate must read a verdict a reviewer would plausibly write.
 
-Regression: on 2026-08-21 a Fable review returned ``verdict: "approve"`` with a full findings
+Regression: on 2026-08-21 a retired Claude review returned ``verdict: "approve"`` with a full findings
 list, exit code 0, and legion-run recorded the stage as failed with "invalid terminal verdict:
 expected a structured verdict object". The verdict was valid. It was wrapped in a ```json fence,
 which ``_review_verdict_value`` did not unwrap, so the string never became an object and schema

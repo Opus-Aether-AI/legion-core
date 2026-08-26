@@ -1,9 +1,9 @@
 # Hermes as a symmetric Legion primary
 
-Hermes is a registered Legion coding family as well as a primary. It can work
-inline when it has the needed context, and can make a single explicit handoff to
-any **different** registered coding family for independent implementation or
-review. Every delegated run remains metered (`legion.span.v1`) instead of
+Hermes is a registered Legion executor as well as a primary. It can work inline
+when it has the needed context, and can make a single explicit handoff to any
+**different** registered executor for independent implementation or review.
+Every delegated run remains metered (`legion.span.v1`) instead of
 shelling out raw and off-book.
 
 Two pieces make this work:

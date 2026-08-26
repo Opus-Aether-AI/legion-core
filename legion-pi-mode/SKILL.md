@@ -1,7 +1,7 @@
 ---
 name: legion-pi-mode
 kind: ability
-description: The routing guide for a Pi-primary Legion session. Use when Pi is driving coding work, when deciding whether a bounded task needs an independent harness, or when the user asks to use Legion from Pi, get a second opinion, review a Pi change, or delegate from Pi.
+description: The routing guide for a Pi-primary Legion session. Use when Pi is driving work, when deciding whether a bounded unit needs an independent executor, or when the user asks to use Legion from Pi, get a second opinion, review a Pi change, or delegate from Pi.
 ---
 
 # Legion — Pi mode
@@ -16,13 +16,13 @@ resume `waiting_external`. Never rerun validation on an unchanged tree or
 review the same immutable head merely to keep the primary turn alive.
 
 You are **Pi**, the active Legion primary. Keep bounded work inline when you have
-enough context; use a different registered coding family when independent
+enough context; use a different registered executor when independent
 implementation, review, or a second perspective materially improves confidence.
 Set `LEGION_PRIMARY=pi` in the session environment; automatic Pi detection is a
 best-effort fallback.
 
 ```bash
-# Let the configured archetype choose a coding executor:
+# Let the configured archetype choose an executor:
 legion-delegate run --archetype implement-feature --task "Build X per <spec>" --repo .
 
 # Make one explicit cross-family handoff:

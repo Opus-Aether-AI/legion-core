@@ -2,10 +2,10 @@
 name: legion-orchestrate
 kind: procedure
 # disable-model-invocation intentionally false: cross-harness orchestrator entrypoint
-description: Use to deliver a multi-step coding goal with Legion's dynamic multi-model orchestration — decompose the goal, fan out implementation slices to the configured Codex workhorse in parallel, cross-model verify with the independent reviewer, synthesize, and gate. The multi-model version of ultracode/Workflow orchestration. Triggers on "orchestrate with legion", "fan out", "ultracode", "build this with legion", parallel multi-model delivery, or any sizeable feature/refactor you want delivered with codex doing the bulk.
+description: Use to deliver a multi-step goal with Legion's dynamic multi-model orchestration. Decompose the goal, fan out scoped slices to configured executors, retain evidence, cross-model verify where available, synthesize, and gate. Today's executor adapters are coding-focused. Triggers on "orchestrate with legion", "fan out", "ultracode", "build this with legion", parallel multi-model delivery, or any sizeable feature/refactor.
 ---
 
-# Legion Orchestrate — dynamic multi-model delivery (ultracode for a legion of models)
+# Legion Orchestrate: dynamic multi-model execution
 
 The Claude "ultracode" loop (decompose → fan out → adversarially verify → synthesize → gate), but **executor-aware**: the active primary conducts, configured harnesses handle work that fits their strengths, and an independent reviewer provides the final judgement. Every handoff is metered.
 

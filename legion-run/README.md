@@ -20,7 +20,7 @@ Use it for substantial work that needs an auditable execution contract:
 
 ## The Simple Idea
 
-`legion-run` turns a coding task into a repeatable operating loop:
+`legion-run` turns a substantial unit of work into a repeatable operating loop. Today's executor adapters are coding-focused, but the lifecycle contract is not:
 
 1. check the environment;
 2. load prior lessons;

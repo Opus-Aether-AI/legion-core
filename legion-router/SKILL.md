@@ -1,10 +1,10 @@
 ---
 name: legion-router
 kind: ability
-description: Use when a primary harness should hand a scoped task to a configured Codex, Claude, Cursor, opencode, Pi, or Hermes executor — implementation, independent code generation, cross-model review, second opinions, or tie-breaks. Drives Legion executor adapters in isolated worktrees with metered telemetry. For a whole multi-step goal, use legion-orchestrate.
+description: Use when a primary session should hand a scoped unit of work to a configured Claude, Codex, Cursor, opencode, DeepSeek, Hermes, or Pi executor. Today's executors support implementation, independent code generation, cross-model review, second opinions, and tie-breaks. Legion runs them in isolated worktrees with metered telemetry. For a whole multi-step goal, use legion-orchestrate.
 ---
 
-# Legion Router — delegate to a legion of models
+# Legion Router: route work to configured executors
 
 ## Primary-session convergence
 
@@ -187,7 +187,7 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
 - `executor=self` is returned to the primary for inline work. A delegated worker
   normally implements its assigned slice directly. It may make one explicit
   `legion-delegate run --executor <different-harness>` handoff to Claude, Codex,
-  Cursor, opencode, Pi, or Hermes; Legion preserves the parent trace, creates a fresh
+  Cursor, opencode, DeepSeek, Pi, or Hermes; Legion preserves the parent trace, creates a fresh
   worktree, and enforces `LEGION_MAX_DEPTH` (default `2`). Implicit routes,
   same-harness nesting, direct adapter calls, and depth-limit bypasses fail closed.
   Pi and Hermes cross the filesystem boundary through an authenticated,

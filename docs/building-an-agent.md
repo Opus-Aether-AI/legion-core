@@ -2,15 +2,15 @@
 
 [← back to README](../README.md)
 
-legion-core is the spine; your agent is the body. The core never knows your
-domain — it knows how to delegate work to models, measure it, and heal it. You
-add the domain knowledge, surfaces, and policy on top.
+legion-core is the execution layer; your agent supplies the domain. The core
+routes work, isolates execution, retains evidence, measures outcomes, and
+learns from them. You add domain knowledge, surfaces, and policy on top.
 
 ## The split
 
 | legion-core owns | your agent owns |
 |---|---|
-| Delegation (`legion-delegate`, `legion-claude`, `legion-cursor`, `legion-opencode`, `legion-pi`, `legion-hermes`) | Domain skills, agents, slash commands |
+| Delegation (`legion-delegate`, `legion-claude`, `legion-cursor`, `legion-opencode`, `legion-deepseek`, `legion-pi`, `legion-hermes`) | Domain skills, agents, slash commands |
 | Orchestration (`legion-orchestrate`) | The product surface (CLI, app, MCP) |
 | Telemetry, doctor, self-learn, heal | Domain validators / evals |
 | Routing + cost tables | Which models/archetypes your work prefers |

@@ -2,14 +2,14 @@
 name: legion-run
 kind: procedure
 # disable-model-invocation intentionally false: this skill invokes the user's configured Legion executor stack.
-description: Use to execute a substantial coding task through `legion-run`'s enforced heavy-task lifecycle. Triggers on "legion run", "run this with Legion", "use legion-run", "full lifecycle", "plan and execute", "plan/validate commands", "domain plugin", "validated self-learning", or requests that need doctor, prior hints, planning, route/fan-out/apply, review, validation, evaluation, HTML evidence, share accounting, learning, and heal planning.
+description: Use to execute a substantial task through `legion-run`'s enforced heavy-task lifecycle. Triggers on "legion run", "run this with Legion", "use legion-run", "full lifecycle", "plan and execute", "plan/validate commands", "domain plugin", "validated self-learning", or requests that need doctor, prior hints, planning, route/fan-out/apply, review, validation, evaluation, HTML evidence, share accounting, learning, and heal planning.
 ---
 
 # Legion Run - validated heavy-task execution
 
-Use this skill when the user wants Legion to **run** a coding task end to end,
+Use this skill when the user wants Legion to **run** a substantial task end to end,
 not only decompose it. `legion-run` is the fixed execution contract for serious
-work: doctor, self-learn hints, plan, route, fan-out/apply, deterministic
+work. Coding is the supported executor application today: doctor, self-learn hints, plan, route, fan-out/apply, deterministic
 validation, final review, evaluation, observability HTML, share accounting, self-learn, and
 heal planning.
 

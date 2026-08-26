@@ -1,7 +1,7 @@
 ---
 name: legion-opencode-mode
 kind: ability
-description: The decision guide for an opencode-primary Legion session — you are opencode doing most of the work yourself, and this tells you WHICH kind of task is worth handing to another model and to WHOM (Claude for deep architecture and polished frontend with the impeccable skill, a workhorse model for bulk implementation, a different model for a second opinion) versus keeping it inline. Use when running Legion under opencode, when a task smells like deep architecture / polished frontend / final cross-model review, when you're stuck after a couple attempts, or when the user says "ask claude", "get a second opinion", or "use legion on opencode". The opencode counterpart of legion-codex-mode.
+description: The decision guide for an opencode-primary Legion session. It identifies when a scoped unit of work should go to another executor and when it should stay inline. Today's examples include deep architecture, polished frontend, bulk implementation, and independent review. Use when running Legion under opencode, when a task needs a second opinion, or when the user says "ask claude" or "use legion on opencode".
 ---
 
 # Legion — opencode mode (you are the primary; the other harnesses are on call)
@@ -10,7 +10,7 @@ You are **opencode** running a Legion session. You do **most of the work yoursel
 Legion makes every other harness reachable through **one metered command**:
 
 ```bash
-legion-delegate run --executor <claude|codex|cursor> --task "…" --repo .
+legion-delegate run --executor <claude|codex|cursor|opencode|deepseek|hermes|pi> --task "…" --repo .
 ```
 
 Each call runs the target headless and emits a `legion.span.v1` span so the work shows

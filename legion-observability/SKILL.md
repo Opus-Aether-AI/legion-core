@@ -1,12 +1,12 @@
 ---
 name: legion-observability
 kind: ability
-description: Use for "how much did that cost", "which model is winning", "is legion set up right", or "did this harness change improve" — Legion telemetry, `legion.span.v1` traces, bench, doctor, self-learn, and review-only improve answers.
+description: Use for "how much did that cost", "which executor is winning", "is Legion set up right", or "did this execution-layer change improve". Covers Legion telemetry, `legion.span.v1` traces, bench, doctor, self-learn, and review-only improve answers.
 ---
 
 # Legion Observability — see everything
 
-Every Legion executor (the configured Claude, Codex, Cursor, and other provider roles) emits one **`legion.span.v1`** JSONL record per unit of work to `$LEGION_TELEMETRY_DIR` (default `~/.legion/projects/<repo-id>/spans/`; inspect with `legion-state --repo .`). This plugin turns that stream into answers.
+Every Legion executor (`claude`, `codex`, `cursor`, `opencode`, `deepseek`, `hermes`, or `pi`) emits one **`legion.span.v1`** JSONL record per unit of work to `$LEGION_TELEMETRY_DIR` (default `~/.legion/projects/<repo-id>/spans/`; inspect with `legion-state --repo .`). This plugin turns that stream into answers.
 
 ## Tools
 

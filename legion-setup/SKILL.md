@@ -2,7 +2,7 @@
 name: legion-setup
 kind: procedure
 disable-model-invocation: true
-description: Install or update the Legion multi-model marketplace. Use when the user pastes the Legion GitHub repo link, says "install legion", "set up legion", "add legion", "update legion", "upgrade legion", or "refresh legion", or wants Legion on Codex, Cursor, opencode, Pi, or Hermes. First run installs marketplace plugins, shared skills and CLIs, plus the selected harness bridges; daily refresh is opt-in. The harness subcommands wire supported MCP, skill, agent, and delegation surfaces.
+description: Install or update the Legion model-agnostic execution-layer marketplace. Use when the user pastes the Legion GitHub repo link, says "install legion", "set up legion", "add legion", "update legion", "upgrade legion", or "refresh legion", or wants Legion on Claude, Codex, Cursor, opencode, DeepSeek, Pi, or Hermes. First run installs marketplace plugins, shared skills and CLIs, plus selected executor bridges; daily refresh is opt-in.
 ---
 
 # Legion Setup — install & update in one skill
@@ -102,7 +102,9 @@ legion-setup hermes verify
 
 The installer manages only Legion-owned symlinks in `~/.agents/skills` plus that
 single Hermes discovery link; it never replaces a real user skill directory.
-Use `legion-route --list-executors` to see all registered coding families.
+Use `legion-route --list-executors` to see all registered executors. DeepSeek
+Harness needs a user-authored dsh profile before it can run; it ships no
+headless preset.
 
 ## Make Legion the repository default
 

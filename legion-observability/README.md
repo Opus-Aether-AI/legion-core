@@ -1,8 +1,8 @@
 # legion-observability
 
-See everything Legion's multi-model runs do — per-executor **cost, success rate, and latency** — verify the install is wired correctly, and turn failures into measured harness improvement experiments.
+See everything Legion's multi-model runs do: per-executor **cost, success rate, and latency**. Verify the install and turn failures into measured execution-layer improvement experiments.
 
-> One orchestrator, a legion of models — and one telemetry stream for all of them.
+> One execution layer, configured executors, and one telemetry stream.
 
 ## Tools
 

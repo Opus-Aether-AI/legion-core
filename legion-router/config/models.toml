@@ -9,8 +9,7 @@
 # entered the catalog with the DeepSeek Harness executor -- an executor needs a
 # model role, so adding the harness necessarily widened this allowlist. It is
 # reachable only by asking for that executor: no archetype routes to it.
-# Fable is retired from
-# the catalog; every Claude role now runs Opus on CLAUDE CODE (the `claude`
+# Every Claude role runs Opus on CLAUDE CODE (the `claude`
 # executor), never piped through Cursor.
 #
 # NOTE: this collapses the frontend polish/review split, which existed so a

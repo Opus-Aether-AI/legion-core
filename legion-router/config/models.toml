@@ -5,7 +5,11 @@
 # tasks in one line; add roles as new tiers/providers show up. Routing should
 # reference these role keys, never a raw model ID, so a model swap lives here.
 #
-# Catalog policy: Anthropic Opus, OpenAI GPT-5.6, xAI Grok. Fable is retired from
+# Catalog policy: Anthropic Opus, OpenAI GPT-5.6, xAI Grok, DeepSeek. DeepSeek
+# entered the catalog with the DeepSeek Harness executor -- an executor needs a
+# model role, so adding the harness necessarily widened this allowlist. It is
+# reachable only by asking for that executor: no archetype routes to it.
+# Fable is retired from
 # the catalog; every Claude role now runs Opus on CLAUDE CODE (the `claude`
 # executor), never piped through Cursor.
 #
@@ -43,5 +47,10 @@ opencode_default    = "openai/gpt-5.6-terra"   # OpenCode via OpenAI oauth (mode
 opencode_review     = "openai/gpt-5.6-sol"     # reviewer fallback when codex has no quota
 
 # ── symmetric harness defaults (explicit targets; no default archetype routes) ──
+# DeepSeek Harness. dsh is a developer preview that publishes no headless
+# model-name contract, so this is the vendor's own current coding model and
+# is expected to move; it is a ROLE like every other entry, so changing it
+# here is the only edit required.
+deepseek_default    = "deepseek-v3.2"
 hermes_default      = "gpt-5.6-terra"
 pi_default          = "gpt-5.6-terra"

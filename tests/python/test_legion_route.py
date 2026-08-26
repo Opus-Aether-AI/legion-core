@@ -243,7 +243,11 @@ def test_main_requires_archetype_or_list():
 # The former "Opus is scoped to FRONTEND only" rule is gone with Fable -- there is
 # no second Claude model left to scope it against. Cross-model independence for
 # frontend review now comes from the Cursor (Grok) or Codex roles.
-_ALLOWED_FAMILIES = ("claude-opus", "gpt-", "grok-", "composer")
+# "deepseek" joined the allowlist with the DeepSeek Harness executor: an
+# executor needs a model role, so the harness could not be added without it.
+# The forbidden list below is untouched -- this widened the policy by one
+# family that was absent from it, not one that was deliberately excluded.
+_ALLOWED_FAMILIES = ("claude-opus", "gpt-", "grok-", "composer", "deepseek")
 _FORBIDDEN_MODELS = ("sonnet", "haiku", "minimax", "kimi",
                      "gemini", "glm", "muse", "nemotron", "qwen")
 

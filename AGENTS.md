@@ -62,7 +62,8 @@ delegated.
 ## Plugin map
 
 - `legion-router`: scoped delegation across Claude, Codex, Cursor, opencode,
-  Hermes, and Pi with routing policy, isolated worktrees, and telemetry.
+  Hermes, Pi, and DeepSeek Harness with routing policy, isolated worktrees,
+  and telemetry.
 - `legion-orchestrate`: decompose a larger coding goal, fan out parallel slices,
   cross-verify, then synthesize.
 - `legion-run`: execute substantial tasks through the plan, route, fan-out,

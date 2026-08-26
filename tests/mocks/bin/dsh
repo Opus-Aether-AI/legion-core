@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Mock DeepSeek Harness CLI.
+#
+# dsh has no `run` subcommand: its CLI registers only `plugin` and `web`, and a
+# headless turn is reached by booting a profile that loads
+# @deepseek-ai/dsh-headless, with the task forwarded as the profile app's
+# positional argument. That shape is what this mock reproduces:
+#
+#   dsh --profile <name> <task>
+#
+# It prints plain assistant text, because that is all the real headless bundle
+# promises -- "prints the final assistant text, and exits". There is deliberately
+# no JSON envelope and no usage block here, so a future adapter change that
+# starts claiming metered tokens from this path will have to change the mock
+# first, which is the point.
+
+set -euo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'dsh %s\n' "$*" >> "$MOCK_CALL_LOG"
+[[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'dsh active=%s executor=%s depth=%s run=%s\n' \
+  "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
+
+profile=""
+task=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile) profile="$2"; shift 2 ;;
+    --profile=*) profile="${1#--profile=}"; shift ;;
+    --) shift ;;
+    *) [[ -n "$task" ]] || task="$1"; shift ;;
+  esac
+done
+
+if [[ "${MOCK_DSH_FAIL:-0}" == "1" ]]; then
+  printf 'mock dsh forced failure\n' >&2
+  exit 5
+fi
+
+# A profile that does not exist is how a real dsh fails here, and it is the most
+# likely misconfiguration: dsh ships no headless preset.
+if [[ "${MOCK_DSH_NO_PROFILE:-0}" == "1" ]]; then
+  printf 'dsh: profile not found: %s\n' "$profile" >&2
+  exit 1
+fi
+
+# Silence with a zero exit -- the adapter must not call that a success.
+[[ "${MOCK_DSH_EMPTY:-0}" != "1" ]] || exit 0
+
+if [[ "${MOCK_DSH_NO_WRITE:-0}" != "1" ]]; then
+  printf 'mock-dsh-change by profile %s\n' "${profile:-none}" >> MOCK_DSH_CHANGE.txt
+  if [[ "${MOCK_DSH_COMMITS:-0}" == "1" ]]; then
+    git checkout -q -b mock-dsh-branch 2>/dev/null || true
+    git add -A 2>/dev/null || true
+    git -c user.email=mock@example.com -c user.name=mock \
+      commit -q -m "mock dsh commit" 2>/dev/null || true
+  fi
+fi
+
+printf 'Mock dsh completed the task under profile %s.\n' "${profile:-none}"

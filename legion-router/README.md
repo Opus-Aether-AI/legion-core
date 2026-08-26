@@ -78,6 +78,53 @@ through `legion-route.py` rather than parsing `models.toml` a second time. If no
 interpreter resolves, the proxy still starts and warns, but every model role
 falls through to its default.
 
+## DeepSeek Harness (`deepseek`, needs a profile you author)
+
+`legion-deepseek` delegates to DeepSeek Harness the way every `contract = "diff"`
+executor works: isolated worktree in, diff out, span metered.
+
+The invocation is unusual because `dsh` is unusual. Its CLI registers only
+`plugin` and `web` -- there is no `dsh run`. Headless execution lives in the
+`@deepseek-ai/dsh-headless` bundle, which its own package describes as "a direct
+core Agent/Session runner over dsh-base with no Host, HTTP, or browser layer",
+and a bundle is reached the way every dsh app is reached:
+
+```bash
+dsh --profile <name> [args...]     # args go to the profile's app
+```
+
+So the adapter runs `dsh --profile "$LEGION_DSH_PROFILE" <task>` in the worktree.
+
+**dsh ships no headless preset.** Its presets are `code`, `cordis`, `minimal`
+and `standard`, none of which load that bundle, so this executor does not work
+out of the box: you have to author a profile that loads
+`@deepseek-ai/dsh-headless` and point `LEGION_DSH_PROFILE` at it (default:
+`legion-headless`). `legion-doctor` says so directly rather than passing on the
+presence of the binary and failing at dispatch.
+
+| variable | meaning |
+|---|---|
+| `DSH_BIN` | path to `dsh` (default: `dsh` on PATH) |
+| `LEGION_DSH_PROFILE` | profile that loads the headless bundle |
+| `DEEPSEEK_API_KEY` | provider credential; doctor warns when unset |
+
+Two capabilities are declared honestly rather than optimistically:
+
+- **`review = "none"`.** dsh publishes no structured verdict path, so it stays
+  out of `[review].order`. A reviewer that cannot emit a schema-valid verdict is
+  indistinguishable from one that rejected the change, which is how a fallback
+  turns a missing review into a blocked merge.
+- **Usage is not metered.** dsh at `0.1.1-rc.2` is a developer preview with no
+  headless output contract -- no JSON envelope, and although a `dsh-token-meter`
+  package exists it exposes nothing through this path. The adapter reports zero
+  and means "not reported"; a plausible-looking number would flow into cost
+  totals and routing decisions that are supposed to be evidence-based.
+
+`read-only` has no dsh equivalent either: there is no documented flag that
+withholds the write and bash tools. Rather than pass a flag that does not exist,
+a read-only run that changed any file is rejected after the fact. That backstop
+exists for other adapters too, but here it is the only line of defence.
+
 ## Agent Client Protocol bridge (staged, not yet wired)
 
 `legion-router/scripts/legion_acp.py` speaks ACP **v2** in both directions: as a

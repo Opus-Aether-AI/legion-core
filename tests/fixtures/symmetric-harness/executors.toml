@@ -22,6 +22,12 @@ adapter = "legion-opencode"
 contract = "diff"
 model_ref = "opencode_default"
 
+[executors.deepseek]
+kind = "primary coding"
+adapter = "legion-deepseek"
+contract = "diff"
+model_ref = "deepseek_default"
+
 [executors.hermes]
 kind = "primary coding"
 adapter = "legion-hermes"

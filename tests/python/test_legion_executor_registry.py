@@ -27,7 +27,7 @@ _router_spec.loader.exec_module(router)
 ROOT = Path(HERE).parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "symmetric-harness"
 MOCK_BIN = ROOT / "tests" / "mocks" / "bin"
-ALL_HARNESSES = ("claude", "codex", "cursor", "opencode", "hermes", "pi")
+ALL_HARNESSES = ("claude", "codex", "cursor", "opencode", "hermes", "pi", "deepseek")
 
 
 def path_without(binary: str) -> str:
@@ -230,10 +230,15 @@ def test_router_and_observability_share_executor_family_normalization():
 
 
 def test_cross_harness_preflight_allows_every_different_source_target_pair():
-    """The full 6x5 matrix allows one explicit, different-family handoff."""
+    """Every ordered different-family pair allows one explicit handoff.
+
+    Sized from ALL_HARNESSES rather than hardcoded: this was "the full 6x5
+    matrix" until a seventh harness arrived, and a literal count turns adding
+    one into an unrelated-looking failure.
+    """
     context = ROOT / "legion-router" / "scripts" / "lib" / "executor-context.sh"
     matrix = list(permutations(ALL_HARNESSES, 2))
-    assert len(matrix) == 30
+    assert len(matrix) == len(ALL_HARNESSES) * (len(ALL_HARNESSES) - 1)
     assert {(source, target) for source, target in matrix} == {
         (source, target)
         for source in ALL_HARNESSES

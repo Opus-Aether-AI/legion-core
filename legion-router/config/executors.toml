@@ -90,6 +90,19 @@ model_ref = "opencode_default"
 
 # Hermes and Pi use first-class diff adapters. Both create Legion-owned
 # worktrees and terminal artifacts; unsupported sandbox modes fail closed.
+[executors.deepseek]
+acp = false
+task_file = true
+# review = "none": dsh publishes no structured verdict path, so it must not sit
+# in the review fallback order where a reviewer that cannot produce a schema-
+# valid verdict looks like a reviewer that rejected the change.
+review = "none"
+review_model_ref = ""
+kind = "primary coding"
+adapter = "legion-deepseek"
+contract = "diff"
+model_ref = "deepseek_default"
+
 [executors.hermes]
 acp = false
 task_file = true

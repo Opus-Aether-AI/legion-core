@@ -408,6 +408,31 @@ check_cursor() {
   fi
 }
 
+check_deepseek() {
+  # DeepSeek Harness is an optional executor and, unlike the others, needs TWO
+  # things: the dsh binary AND a profile that loads @deepseek-ai/dsh-headless.
+  # dsh ships no such preset (its presets are code, cordis, minimal, standard),
+  # and without one `dsh --profile <name>` boots an app that cannot take a task,
+  # so reporting only "binary present" would be the kind of PASS that fails at
+  # dispatch. Absent entirely is silence, not a warning: an executor nobody
+  # asked for should not add noise to a healthy report.
+  local bin="${DSH_BIN:-}"
+  [[ -n "$bin" && -x "$bin" ]] || bin="$(command -v dsh 2>/dev/null || true)"
+  [[ -n "$bin" ]] || return 0
+  local profile="${LEGION_DSH_PROFILE:-${DSH_PROFILE:-legion-headless}}"
+  local home="${DSH_HOME:-$HOME/.dsh}"
+  if [[ -d "$home/profiles/$profile" || -f "$home/profiles/$profile.yml" \
+        || -f "$home/profiles/$profile.yaml" ]]; then
+    if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+      warn "dsh present with profile '$profile' but DEEPSEEK_API_KEY is unset — deepseek delegation will fail at the first model call"
+    else
+      pass "dsh present + headless profile '$profile' + credentials"
+    fi
+  else
+    warn "dsh present but no '$profile' profile — dsh ships no headless preset, so delegation has no app to boot. Author one that loads @deepseek-ai/dsh-headless, or set LEGION_DSH_PROFILE."
+  fi
+}
+
 check_opencode() {
   # opencode is an optional executor; pin $HOME/.opencode/bin first (a stray
   # OpenWork build on PATH is a different binary — see legion-opencode.sh).
@@ -703,6 +728,7 @@ run_one() {
     telemetry-schema)   check_telemetry_schema ;;
     codex)              check_codex ;;
     opencode)           check_opencode ;;
+    deepseek)           check_deepseek ;;
     cursor)             check_cursor ;;
     route-smoke)        check_route_smoke ;;
     delegate-smoke)     check_delegate_smoke ;;
@@ -720,7 +746,7 @@ run_one() {
 if [[ -n "$ONLY" ]]; then
   run_one "$ONLY"
 else
-  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs telemetry-schema codex opencode cursor router; do
+  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs telemetry-schema codex opencode cursor deepseek router; do
     run_one "$c"
   done
   if [[ "$STRICT_DEMO" == "1" ]]; then

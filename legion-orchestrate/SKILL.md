@@ -7,7 +7,11 @@ description: Use to deliver a multi-step goal with Legion's dynamic multi-model 
 
 # Legion Orchestrate: dynamic multi-model execution
 
-The Claude "ultracode" loop (decompose → fan out → adversarially verify → synthesize → gate), but **executor-aware**: the active primary conducts, configured harnesses handle work that fits their strengths, and an independent reviewer provides the final judgement. Every handoff is metered.
+The Legion execution loop (decompose → fan out → adversarially verify →
+synthesize → gate) is **executor-aware**: the active primary conducts,
+configured roles handle work that fits their declared capabilities, and an
+available configured reviewer provides final judgement. Every handoff records
+evidence; usage is reported only where the provider publishes a usable contract.
 
 ## Preflight
 
@@ -23,11 +27,10 @@ Treat the self-learning hints as workflow guardrails for this run. They are the
 durable memory from prior failures and reviews; do not mine broad session logs
 here unless the user explicitly asks Legion to learn from past sessions.
 
-Router failure is only blocking when the current Claude process or
-`~/.claude/settings.json` forces `ANTHROPIC_BASE_URL` to the local `:8082`
-proxy. If it fails in that mode, remove the global proxy env or start/fix
-`legion-router` before orchestration; otherwise Claude API calls can fail before
-fan-out even begins. Do not run broad session/log greps as preflight.
+Router failure is blocking only when the active execution path requires the
+local `:8082` proxy. Resolve that configured transport before orchestration;
+otherwise do not make proxy health a universal preflight blocker. Do not run
+broad session/log greps as preflight.
 
 ## The loop
 
@@ -58,8 +61,8 @@ to the primary session and record a `legion-converge` checkpoint. Continue only
 for new source or failure evidence; yield on `complete`, `waiting_external`, or
 `blocked`.
 
-1. **Decompose** (Opus) — break the goal into **dependency-aware slices**. Independent slices can run in parallel; dependent ones are sequenced.
-2. **Classify** — tag each slice with a routing archetype (`legion-route --list`): implementation → `implement-feature`/`write-tests`/`fix-bug`/`refactor-module`/… (configured Codex workhorse); genuine design/judgement → `deep-reasoning`/`architecture-decision` (stays on Claude).
+1. **Decompose** — break the goal into **dependency-aware slices**. Independent slices can run in parallel; dependent ones are sequenced.
+2. **Classify** — tag each slice with a routing archetype (`legion-route --list`). The installed policy maps each archetype to an executor and model role; `self` stays with whichever harness is primary.
 3. **Fan out** (parallel) — write the independent slices as JSONL and run them at once:
    ```bash
    legion-fanout --slices slices.jsonl --repo . --max-concurrency 4
@@ -77,7 +80,7 @@ for new source or failure evidence; yield on `complete`, `waiting_external`, or
    Review is pinned to the immutable base/head SHAs recorded in
    `review-input.json`; reconcile its findings against your own. **Always get
    the configured reviewer sign-off before merge.**
-5. **Synthesize** (Claude) — apply the verified diffs (`legion-delegate apply --run <id>`), resolve conflicts, integrate.
+5. **Synthesize** — apply the verified diffs (`legion-delegate apply --run <id>`), resolve conflicts, and integrate in the active primary session.
 6. **Gate** — run `/review-gate` (or `/opus-commands:ultra-review` for big diffs) before done.
 
 ## Ultracode mode — `LEGION_ULTRACODE=1`
@@ -93,7 +96,8 @@ Go maximally exhaustive:
 - The Codex share target defaults to `0.5`, but it is advisory unless a repository explicitly runs `legion-share gate`.
 - Configure it in `routing.toml [targets].codex_share`, with `LEGION_TARGET_CODEX_SHARE`, or per command via `--target`.
 - `legion-share next` is a recommendation; task fit and user intent take precedence.
-- **Log your own slices** so the split has a denominator: `legion-trace emit --executor opus --model "$(legion-route --model-ref claude_orchestrator)" --status ok`.
+- **Log your own slices** so the split has a denominator, using the active
+  primary and its configured model role.
 - `legion-share` shows the live ratio against the configured preference.
 
 ## Verify every delegated diff

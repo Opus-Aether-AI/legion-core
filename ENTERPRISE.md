@@ -1,11 +1,11 @@
 # Legion — Enterprise
 
-Legion is the open-source (Apache-2.0), model-agnostic execution layer for AI
-agents. It routes scoped work to configured executors, runs it in isolation,
-retains evidence, meters outcomes, and feeds learning loops. Its current
-executors are coding-focused, so implementation and review are the leading use
-case today. Enterprise runs Legion inside your environment, on your models,
-gated by your standards.
+Legion is a source-available, model-agnostic execution layer for AI agents. It
+routes scoped work to configured executors, runs it in isolation, retains
+evidence, meters outcomes, and feeds learning loops. Its current executors are
+coding-focused, so implementation and review are the leading use case today.
+Enterprise runs Legion inside your environment, on your models, gated by your
+standards.
 
 > Legion is an execution layer, not another cloud. It adds no place for your
 > code to go that it does not already go, and its coding workflows retain the
@@ -52,9 +52,13 @@ timing, outcome — and exports as **OpenTelemetry (OTLP)** into your existing o
 agent did and what it cost. A multi-agent run stitches into one trace tree.
 
 ### 5. Read the engine before it touches a repo.
-The core is **Apache-2.0 on GitHub** — no black box. Your security team can audit exactly what it
-does, vendor a **pinned release**, and run it air-gapped from source. Vulnerability reporting and
-handling policy: [`SECURITY.md`](SECURITY.md).
+The core is public and auditable on GitHub — no black box. It is licensed under
+[**BSL 1.1**](LICENSE), converting to Apache-2.0 on **2030-08-27**. Your security team can
+audit exactly what it does, vendor a **pinned release**, and run it air-gapped
+from source. Internal and production use are permitted; offering Legion's
+routing, delegation, execution, or observability functionality to third parties
+as a hosted, managed, or embedded service requires a commercial licence.
+Vulnerability reporting and handling policy: [`SECURITY.md`](SECURITY.md).
 
 ---
 
@@ -63,7 +67,7 @@ handling policy: [`SECURITY.md`](SECURITY.md).
 | Pillar | How Legion serves it |
 |---|---|
 | **Operational excellence** | Every run is a metered `legion.span.v1` trace exported to OTLP; `legion-doctor` health-gates the toolchain; self-healing opens (never merges) remediation PRs. |
-| **Security** | Runs locally (no Legion cloud, no vendor middleman); your own model accounts under your data terms; isolated git worktrees; sandboxed executors; agent PRs pass your Sonar/security gates; Apache-2.0 auditable core. |
+| **Security** | Runs locally (no Legion cloud, no vendor middleman); your own model accounts under your data terms; isolated git worktrees; sandboxed executors; agent PRs pass your Sonar/security gates; public, auditable BSL 1.1 core, converting to Apache-2.0 on 2030-08-27. |
 | **Reliability** | Built for long-running/overnight agents: worktree isolation + observability + self-healing keep multi-hour runs from drifting. Deterministic orchestration, not a single unbounded agent. |
 | **Performance efficiency** | `routing.toml` sends each task to the cheapest **capable** model, escalating only hard work; parallel fan-out across worktrees. |
 | **Cost optimization** | Spend is metered per task on one dollar scale across providers; routing policy enforces cost ceilings; `legion-report` shows the bill by model. |

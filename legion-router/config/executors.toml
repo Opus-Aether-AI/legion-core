@@ -47,8 +47,8 @@
 acp = false
 task_file = true
 review = "prompt"
-# Every Claude role is Opus, so this is now the SAME model as
-# the primary -- a second pass, not an independent opinion. That is why claude
+# Every Claude role currently resolves to the same model, so a Claude-sourced
+# review is a second pass, not an independent opinion. That is why claude
 # stays LAST in [review].order: it is the reviewer of last resort, for when codex,
 # cursor and opencode are all unavailable. Genuine cross-model review comes from
 # those, not from here.

@@ -40,8 +40,8 @@ def default_log_root(env: dict[str, str] | None = None) -> str:
     """Harness-neutral GLOBAL log/telemetry root for the cross-repo tools
     (router, console, activity, aggregate).
 
-    Legion began Claude-primary and wrote under ~/.claude/logs/legion — a Claude
-    Code directory. To be harness-generic without stranding an existing install's
+    Early installations wrote under ~/.claude/logs/legion — a harness-specific
+    directory. To be harness-generic without stranding an existing install's
     history, resolve in this order:
       $LEGION_LOG_ROOT  ->  $XDG_STATE_HOME/legion  ->  an EXISTING
       ~/.claude/logs/legion (back-compat)  ->  $LEGION_HOME/logs (default

@@ -78,10 +78,12 @@ delegated.
   blocks with `legion-init`, wire Codex/Cursor/opencode bridges, and verify
   Pi shared-skill readiness plus Hermes's managed native discovery link.
 - `legion-codex-mode`: Codex-primary routing guidance for choosing inline work
-  versus Claude delegation.
+  versus a configured role-driven handoff.
 - `legion-opencode-mode`: opencode-primary routing and delegation guidance.
 - `legion-hermes-mode`: symmetric primary/coding guidance for Hermes-driven work.
 - `legion-pi-mode`: symmetric primary/coding guidance for Pi-driven work.
+- `legion-deepseek-mode`: symmetric primary/coding guidance and adapter limits
+  for DeepSeek Harness-driven work.
 
 ## Editing rules
 

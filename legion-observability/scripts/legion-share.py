@@ -133,7 +133,7 @@ def _out_tokens(s):
 
 def is_synthetic_opus_baseline(s):
     # A delegate run emits a synthetic "what the PRIMARY would have cost" span.
-    # Harness-generic: a Claude primary carries the historical
+    # Harness-generic: the historical `claude` primary value carries the
     # `synthetic_opus_baseline` marker; any primary also carries the generic
     # `synthetic_primary_baseline`. Accept either so old and new spans both filter.
     artifacts = s.get("artifacts") or {}

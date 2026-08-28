@@ -719,6 +719,11 @@ def _case_state_env(logs: str) -> dict[str, str]:
         "LEGION_REPOS_FILE": os.path.join(root, "repos.jsonl"),
         "LEGION_BENCH_DIR": os.path.join(root, "bench"),
         "LEGION_REPORTS_DIR": os.path.join(root, "reports"),
+        # A task case must not read or mutate the caller's durable learning
+        # stores.  In particular, active global laws would otherwise become
+        # extra outcomes in a deterministic fixture.
+        "LEGION_PROJECT_LEARNING_DIR": os.path.join(root, "learning"),
+        "LEGION_GLOBAL_LEARNING_DIR": os.path.join(root, "global-learning"),
     }
 
 

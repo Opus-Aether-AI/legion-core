@@ -27,6 +27,8 @@ ACTIVE_DEFAULT_FILES = [
     "docs/benchmarking.md",
     "legion-codex-mode/README.md",
     "legion-codex-mode/SKILL.md",
+    "legion-deepseek-mode/README.md",
+    "legion-deepseek-mode/SKILL.md",
     "legion-observability/README.md",
     "legion-observability/bench/adapters/cursor-agent.sh",
     "legion-observability/bench/adapters/direct-claude.sh",

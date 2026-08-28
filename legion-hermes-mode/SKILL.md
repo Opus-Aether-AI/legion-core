@@ -20,22 +20,19 @@ bounded work inline when you have the right context. For independent implementat
 review, or a second perspective, make one explicit handoff through Legion so it is
 isolated and metered (`legion.span.v1`), rather than an untracked raw provider call.
 
-This is the Hermes counterpart of the Codex, opencode, and Pi primary-mode skills:
-you orchestrate and can code; Legion gives every registered family the same bounded
-cross-harness handoff contract.
+This is one of the primary-mode skills: you orchestrate and can code; Legion
+gives every registered family the same bounded cross-harness handoff contract.
 
 ## The rule: delegate coding through Legion, never raw
 
 From your `terminal` / `process` tool, use the Legion CLIs on PATH:
 
 ```bash
-# One scoped task -> the routed executor (Codex by default), metered, isolated worktree:
+# One scoped task -> the configured role, metered, isolated worktree:
 legion-delegate run --archetype implement-feature --task "Build X per <spec>" --repo /path/to/repo --apply
 
-# Force a specific different harness (symmetric — any registered family):
-legion-delegate run --executor claude --task "Design the data model for X: tradeoffs + a recommendation" --repo /path/to/repo
-legion-delegate run --executor codex  --archetype fix-bug --task "Fix the flaky retry in <file>" --repo /path/to/repo --apply
-legion-delegate run --executor pi --task "Independently review this bounded change" --repo /path/to/repo
+# Force a specific different harness only when deliberately overriding policy:
+legion-delegate run --executor codex --task "Fix the flaky retry in <file>" --repo /path/to/repo --apply
 
 # Independent review of a committed diff before you act on it:
 legion-delegate run --executor codex --archetype final-review \
@@ -57,16 +54,19 @@ have a script or cron that shells out raw (e.g. the coco implementation cron), s
 
 ## When to keep work or delegate
 
-| Need | Executor | Why |
-|---|---|---|
-| Bounded implementation with enough context | `self` | Hermes can complete it inline as the active primary |
-| Bulk implementation / mechanical edits / boilerplate | `codex` (default) | throughput at flat subscription cost |
-| Deep architecture / system design / hard tradeoffs | `claude` | strongest open-ended reasoner |
-| Polished / complex frontend (UX, a11y, responsive) | `claude` | Opus + the `impeccable` skill |
-| Final adversarial review before you act | `codex` or `claude` | cross-model verification |
-| Cheap/experimental delegation | `opencode` (minimax) | low-cost open harness |
+| Need | Archetype | Current role | Why |
+|---|---|---|---|
+| Bounded implementation with enough context | `self` | `self` | Hermes can complete it inline as the active primary. |
+| Bulk implementation / mechanical edits / boilerplate | `implement-feature` / `bulk-mechanical-edit` | `codex_workhorse` | Current bounded implementation route. |
+| Deep architecture / system design / hard tradeoffs | `architecture-decision` / `deep-reasoning` | `self` | Keep primary-owned judgement inline. |
+| Polished / complex frontend | `frontend-polish` | `claude_opus` | Current separate visual/a11y route. |
+| Final adversarial review | `final-review` | `claude_default` | Current independent merge-judgement route. |
+| Different-lineage opinion | `second-opinion-review` | `cursor_default` | Current independent perspective route. |
+| Security review | `security-review` | `codex_review` | Current structured review role. |
 
-Omit `--executor` to accept the archetype's default route (see `legion-route --list`).
+These are current registry and routing facts, not a fixed hierarchy among
+harnesses. Omit `--executor` to accept the configured archetype route (see
+`legion-route --list`).
 List the executors with `legion-route --list-executors`. A delegated worker may
 handoff only once to a **different** family; same-family recursion and depth
 overflow fail closed.
@@ -83,7 +83,7 @@ PR from a strong but unfamiliar contributor. `--apply` lands the diff; omit it t
 
 Every `legion-delegate` / `legion-fanout` / `legion-run` call emits telemetry, so:
 
-- `legion-share` shows the codex-vs-primary work split,
+- `legion-share` shows the configured work split,
 - `legion-report` / the Console show cost, latency, and per-model breakdown,
 - runs land under your Legion state root (harness-neutral; no writes into `~/.claude`).
 

@@ -356,8 +356,8 @@ LEGION_PRIMARY_BASELINE_EMITTED=0
 
 # Synthetic "what the PRIMARY would have cost inline" span, so share accounting
 # can see the delegated-vs-primary split. Harness-generic: the primary is
-# whoever is driving the session (legion_primary). Back-compat: a Claude primary
-# still emits the historical `opus-baseline` label + `synthetic_opus_baseline`
+# whoever is driving the session (legion_primary). Back-compat: the `claude`
+# primary value still emits the historical `opus-baseline` label + `synthetic_opus_baseline`
 # marker that legion-share / legion-aggregate and their tests key on; other
 # primaries emit `<primary>-baseline`. Toggle: LEGION_AUTO_PRIMARY_BASELINE
 # (legacy alias LEGION_AUTO_OPUS_BASELINE), default on.
@@ -377,7 +377,7 @@ emit_primary_baseline_span() {
   [[ "$delegated_family" == "$primary" ]] && return 0
 
   LEGION_PRIMARY_BASELINE_EMITTED=1
-  # Historical label for a Claude primary is "opus-baseline"; keep it so existing
+  # Historical label for the `claude` primary value is "opus-baseline"; keep it so existing
   # reports/tests/spans stay valid. Generalize for any other primary.
   local label; case "$primary" in claude) label="opus-baseline" ;; *) label="${primary}-baseline" ;; esac
   mkdir -p "$LEGION_TELEMETRY_DIR"
@@ -1378,8 +1378,7 @@ $(cat "$patch")
   fi
   # Grant the read-only review approval for this call only. The sandbox is
   # already read-only here and the reviewer never delegates onward, so the
-  # same-harness case (a Claude-primary session reviewed by Claude on a
-  # different model) is safe and is often the only reviewer left standing.
+  # same-harness review is safe and is often the only reviewer left standing.
   # Shell options are GLOBAL, not function-scoped. This used to re-enable errexit
   # unconditionally and then `return "$rc"`, so a reviewer that merely failed --
   # cursor with no API key, say -- killed the whole script mid-walk: no fallback

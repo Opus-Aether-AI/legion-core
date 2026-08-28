@@ -9,6 +9,7 @@ setup() {
     legion-codex-mode/SKILL.md \
     legion-opencode-mode/SKILL.md \
     legion-hermes-mode/SKILL.md \
+    legion-deepseek-mode/SKILL.md \
     legion-pi-mode/SKILL.md \
     legion-router/SKILL.md
   do

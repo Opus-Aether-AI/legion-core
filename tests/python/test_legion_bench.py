@@ -541,6 +541,33 @@ def test_task_case_runs_fixture_command_and_validators(tmp_path):
     assert all(item["ok"] for item in result["details"]["validators"])
 
 
+def test_task_case_isolates_inherited_learning_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEGION_PROJECT_LEARNING_DIR", "/outer/project-learning")
+    monkeypatch.setenv("LEGION_GLOBAL_LEARNING_DIR", "/outer/global-learning")
+    script = (
+        "import json, os; "
+        "print(json.dumps({'project': os.environ['LEGION_PROJECT_LEARNING_DIR'], "
+        "'global': os.environ['LEGION_GLOBAL_LEARNING_DIR']}))"
+    )
+
+    result = bench.run_task_case(
+        {
+            "id": "task.isolated-learning-state",
+            "type": "task",
+            "command": ["python3", "-c", script],
+        },
+        str(tmp_path),
+        str(tmp_path / "run"),
+    )
+
+    payload = json.loads(result["details"]["stdout"])
+    logs = os.path.join(result["details"]["workspace"], "logs")
+    assert payload == {
+        "project": os.path.join(logs, "learning"),
+        "global": os.path.join(logs, "global-learning"),
+    }
+
+
 def test_task_case_validates_jsonl_contains(tmp_path):
     run_dir = tmp_path / "run"
     script = (

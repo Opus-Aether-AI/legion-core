@@ -27,7 +27,7 @@ Requires `curl`, `jq`, `git`.
 
 ## Update (every time after)
 
-Just ask Claude to **"update legion"**, or:
+Ask the active harness to **"update legion"**, or:
 
 ```bash
 legion-setup update             # pulls latest + re-syncs everything
@@ -35,11 +35,10 @@ legion-setup update             # pulls latest + re-syncs everything
 
 ## Run Legion on Codex CLI
 
-Legion is model-agnostic and runs natively on Codex CLI: both harnesses speak
-MCP, both read skills from `~/.agents/skills`, and `legion-claude` lets a
-Codex-primary session call Claude when it is worth it (with automatic configured
-Codex fallback when the Claude limit is hit). One command wires the marketplace
-into Codex:
+Legion is model-agnostic and runs natively on Codex CLI. Codex reads skills from
+`~/.agents/skills`; routing remains role-driven, including any current
+`legion-claude` fallback behavior configured by the runtime. One command wires
+the marketplace into Codex:
 
 ```bash
 legion-setup codex              # all: register MCPs + verify skill mirror + verify legion-claude

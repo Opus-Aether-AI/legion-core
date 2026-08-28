@@ -3,7 +3,7 @@
   "owner": {
     "name": "legion-core"
   },
-  "version": "0.26.0",
+  "version": "0.27.0",
   "metadata": {
     "description": "Legion Core — the model-agnostic execution layer for AI agents. Ships scoped delegation, multi-model fan-out, telemetry and cost reporting, doctor/self-learn/heal loops, and cross-harness setup for Claude Code, Codex, Cursor, opencode, DeepSeek Harness, Hermes, and Pi.",
     "repository": "https://github.com/Opus-Aether-AI/legion-core"

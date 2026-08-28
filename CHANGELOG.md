@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.27.0...v0.27.1) (2026-08-28)
+
+
+### Fixed
+
+* keep exactly one licence file in the repository root ([#190](https://github.com/Opus-Aether-AI/legion-core/issues/190)) ([07d7163](https://github.com/Opus-Aether-AI/legion-core/commit/07d716375ea3b68db88424c165c067d29ed186ea))
+
 ## [0.27.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.26.0...v0.27.0) (2026-08-28)
 
 

@@ -1,10 +1,10 @@
 ---
 name: legion-router
 kind: ability
-description: Use when a primary harness should hand a scoped task to a configured Codex, Claude, Cursor, opencode, Pi, or Hermes executor — implementation, independent code generation, cross-model review, second opinions, or tie-breaks. Drives Legion executor adapters in isolated worktrees with metered telemetry. For a whole multi-step goal, use legion-orchestrate.
+description: Use when a primary session should hand a scoped unit of work to a configured executor role. Registered executors include Claude, Codex, Cursor, opencode, DeepSeek Harness, Hermes, and Pi; their capabilities are declared in executors.toml. Legion runs them in isolated worktrees and records evidence. For a whole multi-step goal, use legion-orchestrate.
 ---
 
-# Legion Router — delegate to a legion of models
+# Legion Router: route work to configured executors
 
 ## Primary-session convergence
 
@@ -28,9 +28,10 @@ Legion is a team. Play each configured role to its strength:
 
 - **Active primary = orchestrate** — plan, decompose, decide, verify, and
   integrate. The primary is the conductor, not automatically the bulk coder.
-- **Configured executor roles = implementation + review** — route implementation,
-  tests, refactors, bulk edits, migrations, and independent verification by
-  archetype. Concrete model IDs resolve from `config/models.toml`.
+- **Configured executor roles = declared capabilities** — route implementation,
+  tests, refactors, bulk edits, migrations, and only those reviews supported by
+  the executor's declared capability. Concrete model IDs resolve from
+  `config/models.toml`.
 
 The share target is an advisory routing preference, not a hard workflow rule.
 It defaults to `0.5` in `routing.toml [targets].codex_share` and can be changed
@@ -118,7 +119,9 @@ Run `legion-route --list` for the full set. Grouped by role:
 | **Codex execution path** | `scout`, `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration`, `security-review`, `hard-bug`, `perf-optimization` | `codex_workhorse` / `codex_review` |
 | **Independent merge judgement** | `final-review` | `claude_default` |
 
-So: most coding and hard/critical execution → Codex roles from `models.toml`; final merge judgement → the independent Claude reviewer; orchestration → you keep it (delegating it is refused).
+The listed archetype-to-role mappings are current configuration facts. The
+active primary remains responsible for orchestration; delegation does not imply
+a permanent hierarchy among harnesses.
 
 ## Commands
 
@@ -187,7 +190,7 @@ Read `diff_path`, sanity-check it does exactly what you asked and nothing else, 
 - `executor=self` is returned to the primary for inline work. A delegated worker
   normally implements its assigned slice directly. It may make one explicit
   `legion-delegate run --executor <different-harness>` handoff to Claude, Codex,
-  Cursor, opencode, Pi, or Hermes; Legion preserves the parent trace, creates a fresh
+  Cursor, opencode, DeepSeek, Pi, or Hermes; Legion preserves the parent trace, creates a fresh
   worktree, and enforces `LEGION_MAX_DEPTH` (default `2`). Implicit routes,
   same-harness nesting, direct adapter calls, and depth-limit bypasses fail closed.
   Pi and Hermes cross the filesystem boundary through an authenticated,

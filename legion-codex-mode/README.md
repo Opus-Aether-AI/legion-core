@@ -1,24 +1,26 @@
 # legion-codex-mode
 
-The **Codex-primary** routing brain for Legion — the mirror image of [`legion-router`](../legion-router)
-(which is the Claude-primary brain).
+The **Codex-primary** routing guide for Legion. Legion's execution contract is
+model-agnostic: route a scoped unit to a capable executor, isolate it, retain
+evidence, meter it, and learn from the outcome. Coding is the current executor
+application; this guide explains Codex's role within it.
 
-When you run Legion under **Codex CLI**, the configured Codex workhorse is primary and does most of the
-work. This skill tells you the few cases where it's worth handing a task **up to Claude**
-via [`legion-claude`](../legion-router/scripts/legion-claude.sh):
+When you run Legion under **Codex CLI**, Codex is the active primary. This
+skill tells you when to keep work inline and when to use the configured role
+for an archetype:
 
-- deep architecture / system design,
-- **polished or complex frontend** (Opus + the `impeccable` skill is the best combo),
-- final adversarial / cross-model review of your own diff,
-- tie-breaks between plausible designs,
-- when you're stuck after a couple honest attempts.
+- `self` for primary-owned judgement,
+- `claude_opus` for the current `frontend-polish` route,
+- `claude_default` for the current `final-review` route,
+- `codex_review` or `cursor_default` where their review archetypes apply.
 
-`legion-claude` is **metered** and **auto-falls-back to the configured Codex model** when the Claude usage
-limit is hit, so reaching for Claude never blocks you.
+Those role mappings are current configuration facts, not an architectural
+preference for any harness. Use `legion-route --list` to inspect the policy
+installed with the runtime.
 
-It also maps what already works natively on Codex after `legion-setup codex` — registered
-MCPs, the mirrored skill set, and the bridged `legion-cmd-*` / `legion-agent-*` skills — so
-you don't reach for Claude when the capability is already at your fingertips.
+It also maps what already works natively on Codex after `legion-setup codex`:
+registered MCPs, the mirrored skill set, and the bridged `legion-cmd-*` /
+`legion-agent-*` skills.
 
 ## Setup
 

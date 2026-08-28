@@ -1,0 +1,20 @@
+{
+  "name": "legion-deepseek-mode",
+  "description": "The routing guide for a DeepSeek Harness-primary Legion session. It keeps the active primary inline where it has context and routes bounded work by configured archetype and model role. Documents the required user-authored dsh headless profile, its no-review contract, and zero usage meaning not reported.",
+  "version": "0.1.0",
+  "author": {
+    "name": "legion-core"
+  },
+  "homepage": "https://github.com/Opus-Aether-AI/legion-core/tree/main/legion-deepseek-mode",
+  "license": "UNLICENSED",
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "multi-model",
+    "delegation",
+    "legion-delegate",
+    "routing",
+    "primary-harness",
+    "legion"
+  ]
+}

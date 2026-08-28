@@ -1,7 +1,7 @@
 ---
 name: legion-pi-mode
 kind: ability
-description: The routing guide for a Pi-primary Legion session. Use when Pi is driving coding work, when deciding whether a bounded task needs an independent harness, or when the user asks to use Legion from Pi, get a second opinion, review a Pi change, or delegate from Pi.
+description: The routing guide for a Pi-primary Legion session. Use when Pi is driving work, when deciding whether a bounded unit needs an independent executor, or when the user asks to use Legion from Pi, get a second opinion, review a Pi change, or delegate from Pi.
 ---
 
 # Legion — Pi mode
@@ -16,19 +16,18 @@ resume `waiting_external`. Never rerun validation on an unchanged tree or
 review the same immutable head merely to keep the primary turn alive.
 
 You are **Pi**, the active Legion primary. Keep bounded work inline when you have
-enough context; use a different registered coding family when independent
+enough context; use the configured role for an archetype when independent
 implementation, review, or a second perspective materially improves confidence.
 Set `LEGION_PRIMARY=pi` in the session environment; automatic Pi detection is a
 best-effort fallback.
 
 ```bash
-# Let the configured archetype choose a coding executor:
+# Let the configured archetype choose an executor:
 legion-delegate run --archetype implement-feature --task "Build X per <spec>" --repo .
 
-# Make one explicit cross-family handoff:
-legion-delegate run --executor codex --task "Implement the bounded fix in <file>" --repo .
-legion-delegate run --executor claude --task "Review this design and recommend one option" --repo .
-legion-delegate run --executor cursor --archetype final-review \
+# Use configured roles for implementation and review:
+legion-delegate run --archetype fix-bug --task "Implement the bounded fix in <file>" --repo .
+legion-delegate review --archetype final-review \
   --task "Review the committed diff origin/main...HEAD; report only actionable findings and do not edit files." \
   --base HEAD --repo .
 ```
@@ -36,6 +35,12 @@ legion-delegate run --executor cursor --archetype final-review \
 Use `legion-route --list-executors` to see the registered families. A delegated
 worker may hand off once only through `legion-delegate run --executor
 <different-harness>`; same-family recursion and the depth limit are rejected.
+
+The current routes include `codex_workhorse` for bounded implementation,
+`claude_default` for `final-review`, `cursor_default` for a distinct-lineage
+second opinion, and `codex_review` for structured security review. These are
+configuration facts, not a permanent primary/secondary hierarchy; inspect
+`legion-route --list` for the installed policy.
 
 Give every delegate a standalone brief: target files, required behavior,
 acceptance checks, and the smallest permitted scope. Inspect its result or diff

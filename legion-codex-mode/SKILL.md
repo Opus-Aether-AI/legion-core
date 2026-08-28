@@ -1,19 +1,19 @@
 ---
 name: legion-codex-mode
 kind: ability
-description: The routing brain for a Codex-CLI-primary Legion session — the configured Codex workhorse does most of the work, and this tells you WHEN to call Claude (via `legion-claude`) instead of doing it yourself, and how Legion's MCPs/skills/bridged-commands work on Codex. Use when running Legion under Codex CLI, when a task smells like deep architecture / polished frontend / final cross-model review, when you're stuck after a couple attempts, or when the user says "ask claude", "get claude to", "second opinion from claude", or "use legion on codex". The mirror image of legion-router (which is the Claude-primary brain).
+description: The routing guide for a Codex-primary Legion session. It explains when to retain work inline, when to use the configured role for an archetype, and how Legion's MCPs, skills, and bridged commands work on Codex. Use when running Legion under Codex CLI, when work needs architecture judgement, polished frontend, or independent review, or when the user asks for Legion on Codex.
 ---
 
-# Legion — Codex mode (you are the primary, Claude is on call)
+# Legion — Codex mode
 
-You are **Codex** running a Legion session. You do **most of the work yourself**.
-Legion gives you one extra lever: when a task is genuinely better on Claude, hand it up
-with **`legion-claude`** — metered, and with **automatic Codex fallback if the Claude
-limit is hit**, so reaching for Claude never blocks you.
+You are **Codex**, the active primary for this session. Keep work inline when
+you have the necessary context. When a scoped task benefits from a different
+perspective or capability, route it through the configured archetype. The
+secondary is the role configured for that archetype, not a fixed on-call
+harness.
 
-This is the mirror of `legion-router` (the Claude-primary brain). There, Opus orchestrates
-and delegates *down* to GPT. Here, **you** orchestrate and delegate *up* to Claude — only
-for the few archetypes where it clearly wins.
+`legion-router` is the shared, harness-agnostic router. Every primary mode uses
+the same registry, routing policy, worktree, evidence, and review contracts.
 
 ## Default: do it yourself
 
@@ -24,66 +24,56 @@ local self-learning memory when available:
 legion-self-learn hints --entity skill:legion-codex-mode
 ```
 
-The configured Codex workhorse is strong. Implement features, write tests, fix bugs, refactor, do bulk edits,
-write docs, debug — all inline, no delegation. Delegation has overhead; spend it only
-where Claude's strength changes the outcome.
+Implement features, write tests, fix bugs, refactor, do bulk edits, write docs,
+and debug inline when that is the best fit. Delegation has overhead; use it
+when the configured role changes the outcome.
 
-## When to call Claude (`legion-claude run`)
+## Choose the configured role
 
-| Situation | Call Claude? | Why |
-|---|---|---|
-| Deep architecture / system design with many tradeoffs | ✅ yes | Opus is the strongest reasoner for open-ended design |
-| **Polished / complex frontend** (UX, a11y, responsive, design-system) | ✅ yes | **Opus + the `impeccable` skill is the best frontend combo** — reach for it on anything user-facing and visual |
-| Final adversarial review of your own diff before merge | ✅ yes | cross-model verification catches what your own lens misses |
-| You're stuck / uncertain after ~2 honest attempts | ✅ yes | a fresh, stronger perspective beats grinding |
-| Tie-break between two plausible designs | ✅ yes | an independent judge breaks the symmetry |
-| Routine implement / test / refactor / bulk edit | ❌ no | you've got it — inline |
-| Tiny one-tool-call edit | ❌ no | overhead isn't worth it |
+| Need | Archetype | Current role | Decision |
+|---|---|---|---|
+| Architecture or high-judgement decision | `architecture-decision` / `deep-reasoning` | `self` | Keep it with the active primary. |
+| Polished frontend pass | `frontend-polish` | `claude_opus` | Delegate only when the visual/a11y pass is worth a separate worker. |
+| Final merge judgement | `final-review` | `claude_default` | Use the configured independent review role. |
+| Security review or hard bug | `security-review` / `hard-bug` | `codex_review` | Use the configured Codex review role. |
+| Different-lineage opinion | `second-opinion-review` | `cursor_default` | Use when an independent lens matters. |
+| Bounded implementation | `implement-feature` / `fix-bug` | `codex_workhorse` | Keep inline when you already have the context; otherwise use the route. |
 
-Rule of thumb: **delegate up for judgement, design, polish, and verification — not for volume.**
+These are current routing facts from `routing.toml` and `models.toml`, not a
+claim that any harness is structurally primary or secondary. Inspect them with
+`legion-route --list` before relying on a deployment-specific route.
 
-## How to call Claude
+## How to delegate
 
 ```bash
-# Hand a scoped task to Claude; metered; auto-falls back to the configured Codex model on Claude limit.
-legion-claude run --task "Design the module boundary for X: options, tradeoffs, a recommendation" --repo .
+# Let policy choose the executor and role for a bounded implementation.
+legion-delegate run --archetype implement-feature --task "Build the export API route per <spec>" --repo . --apply
 
-# Force a specific Claude model only when you intentionally override models.toml:
-legion-claude run --task "..." --model "$(legion-route --model-ref claude_default)" --repo .
+# Ask for the current frontend-polish role without encoding a harness assumption.
+legion-delegate run --archetype frontend-polish --task "Polish the settings page: spacing, a11y, responsive, motion" --repo .
 
-# Frontend polish with Opus + impeccable (describe the surface + the bar):
-legion-claude run --task "Polish the settings page: spacing, a11y, responsive, motion — impeccable pass" --repo .
-
-# If you'd rather be blocked than silently fall back to GPT:
-legion-claude run --task "..." --no-fallback           # -> status: blocked (no GPT fallback)
-
-# Read the task from stdin (for long/multi-line briefs):
-printf '%s' "$LONG_BRIEF" | legion-claude run --repo .
+# Obtain the current final-review role's verdict for an immutable diff.
+legion-delegate review --archetype final-review --base origin/main --head HEAD --repo .
 ```
 
-`legion-claude` runs `claude -p` headless, returns Claude's result + a `legion.span.v1`
-span (so the work shows in the dashboard with cost), and **on a usage-limit / unavailable
-error it automatically completes the task on the configured Codex model** and reports `fell_back: true` with
-the reason. You stay productive whether or not Claude has headroom.
+Use `legion-delegate run --executor <name>` only when deliberately overriding
+policy. The executor list is discoverable with `legion-route --list-executors`.
 
 ## Scope it like a brief to a fresh engineer
 
-Claude starts with **no access to your Codex conversation**. Name the files, state the
-exact change or question, give acceptance criteria, and say "minimal change, nothing
-unrelated." Then **verify what comes back** before applying — treat it like a PR from a
-strong but unfamiliar contributor.
+The delegated worker starts with **no access to your Codex conversation**. Name
+the files, state the exact change or question, give acceptance criteria, and say
+"minimal change, nothing unrelated." Then **verify what comes back** before
+applying — treat it like a PR from a strong but unfamiliar contributor.
 
 ## Credit-aware
 
-You're on Codex because you're conserving Claude. So:
+- Default to doing the work yourself; delegate only for a high-leverage route.
+- `LEGION_LOW_CREDIT=<executor>` steers routing away from a depleted provider.
+- Delegation records a span using the executor's published usage contract. A
+  zero usage value can mean "not reported" for an executor without one.
 
-- Default to doing the work yourself; call Claude for the high-leverage cases above.
-- `LEGION_LOW_CREDIT=claude` makes `legion-claude` **skip Claude entirely** and go straight
-  to the configured Codex workhorse — set it when you know your Claude limit is spent and don't want the round-trip.
-- Every `legion-claude` call is metered into the same telemetry as the rest of Legion, so
-  the Console shows exactly how much Claude you've used.
-
-## What works natively on Codex (so you don't reach for Claude needlessly)
+## What works natively on Codex
 
 Legion is wired into Codex by `legion-setup codex` (run it once / on update):
 
@@ -95,8 +85,8 @@ Legion is wired into Codex by `legion-setup codex` (run it once / on update):
   `legion-cmd-review-gate`) and `legion-agent-<name>`. Their guidance triggers when you
   describe the matching task — you don't type a slash command.
 
-So most capability is already at your fingertips on Codex. Save `legion-claude` for the
-judgement / design / polish / final-review calls where Opus genuinely changes the result.
+Most capability is already available in Codex. Use the routing policy whenever
+an archetype needs a distinct configured role.
 
 ## One-time wiring
 

@@ -23,7 +23,7 @@
     "model-agnostic",
     "legion"
   ],
-  "license": "Apache-2.0",
+  "license": "BUSL-1.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Opus-Aether-AI/legion-core.git"
@@ -85,6 +85,7 @@
     "legion-run/",
     "legion-setup/",
     "legion-codex-mode/",
+    "legion-deepseek-mode/",
     "legion-opencode-mode/",
     "legion-hermes-mode/",
     "legion-pi-mode/",

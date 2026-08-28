@@ -61,10 +61,9 @@ matched this review.
 Core's final review prompt includes a generic instruction to focus on
 unnecessary complexity, and routing mentions a simplification pass. That is
 useful defense in depth, but the full tiered `simplicity-first` doctrine is a
-catalog capability supplied by `legion-code`; duplicating that doctrine in
-Core would create a second authority. The correct cross-repository contract is
-for the catalog's Ultra Review scheduler to select the lens and for Core to
-execute the resulting review faithfully.
+optional catalog capability; duplicating that doctrine in Core would create a
+second authority. The correct boundary is for an integrating catalog to select
+the lens and for Core to execute the resulting review faithfully.
 
 The review deliberately did **not** classify the four stage-specific context
 compilations as duplicate work. They compile different frozen boundaries and

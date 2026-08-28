@@ -9,9 +9,11 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/Opus-Aether-AI/legion-core?label=license&color=6e5494"></a>
 </p>
 
-> **legion-core** is the model-agnostic execution layer for AI coding agents: scoped routing and delegation, isolated worktrees, evidence, observability, and learning loops.
+> **legion-core** is the model-agnostic execution layer for AI agents: scoped routing and delegation, isolated worktrees, evidence, observability, and learning loops.
 
-It is the reusable core behind Legion agents, not a domain agent itself. Use it directly for disciplined coding work or build a domain plugin on its execution contract.
+Its kernel routes a unit of work to a capable executor, runs it in an isolated environment, meters it, retains evidence, and learns from the outcome. Coding is the best-developed application today, not the definition of the layer. The current executors are coding executors, while the routing, span, archetype, evidence, and review contracts are domain-neutral.
+
+It is the reusable core behind Legion agents, not a domain agent itself. Use it for disciplined implementation and review work today, or build a domain plugin on the same execution contract.
 
 ## Install and update
 
@@ -40,10 +42,11 @@ source clone to `origin/main`; disable cron when maintaining a frozen snapshot.
 `minimal` installs router and observability; pass a plugin name to install just
 that plugin.
 
-## Harness support
+## Executors and harness support
 
-Legion supports Claude Code, Codex CLI, Cursor Agent, opencode, Pi, Hermes, and
-generic `AGENTS.md`-aware harnesses. The installer sets up shared skills under
+Legion has seven registered executors: `claude`, `codex`, `cursor`, `opencode`,
+`deepseek`, `hermes`, and `pi`. They are the coding executors available today.
+The installer sets up shared skills under
 `~/.agents/skills` and CLI links under `~/.agents/bin`; then wire the native
 harness bridges you use:
 
@@ -54,6 +57,10 @@ legion-setup opencode
 legion-setup pi verify
 legion-setup hermes
 ```
+
+DeepSeek Harness is available through `deepseek`, but it requires a profile you
+author. DeepSeek Harness ships no headless preset, so set `LEGION_DSH_PROFILE`
+to a valid profile before using that executor.
 
 Each command has a read-only `verify` form. Codex gets MCP registration and a
 skill mirror; Cursor gets MCP and command/agent bridges; opencode gets its MCP
@@ -76,18 +83,19 @@ unmanaged byte. Its policy also tells delegated children to implement directly,
 preventing recursive Legion calls. `--check` and `--dry-run` remain read-only;
 use `--remove` for an exact rollback. `legion-setup init` is the same entrypoint.
 
-## The ten plugins
+## The eleven plugins
 
 | Plugin | Purpose |
 |---|---|
-| `legion-router` | Routes scoped work to configured executors and captures metered, reviewable diffs. |
+| `legion-router` | Routes scoped work to configured executors and captures metered evidence; today's diff-producing executors return reviewable diffs. |
 | `legion-observability` | Doctor, spans, reports, benchmarks, evidence-linked learning, and heal planning. |
 | `legion-orchestrate` | Decomposition, parallel fan-out, cross-review, synthesis, and gates. |
 | `legion-run` | Evidence-backed lifecycle for substantial tasks. |
 | `legion-setup` | Marketplace installation, updates, and harness bridges. |
-| `legion-codex-mode` | Codex-primary routing guidance, including when to ask Claude. |
+| `legion-codex-mode` | Codex-primary routing guidance using configured archetypes and roles. |
 | `legion-opencode-mode` | opencode-primary routing and delegation guidance. |
 | `legion-hermes-mode` | Hermes-primary symmetric routing and metered delegation guidance. |
+| `legion-deepseek-mode` | DeepSeek Harness-primary routing guidance and adapter limits. |
 | `legion-pi-mode` | Pi-primary routing and symmetric delegation guidance. |
 | `legion-code-intel` | Optional TypeScript and Pyright diagnostic artifacts. |
 
@@ -146,8 +154,11 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for current follow-ups and [AGENTS.md](A
 - [Build an agent on Legion Core](docs/building-an-agent.md)
 - [Self-learning and heal loop](docs/self-learning.md)
 - [Benchmarking](docs/benchmarking.md)
-- [Sync with Legion Code](docs/sync-with-legion-code.md)
 
 ## License
 
-[Apache-2.0](LICENSE). Enterprise support and pilots: [ENTERPRISE.md](ENTERPRISE.md).
+[Business Source License 1.1 (BSL 1.1)](LICENSE), converting to Apache-2.0 on
+2030-08-27. Internal and production use are permitted; a commercial licence is
+required only to offer Legion's routing, delegation, execution, or observability
+functionality to third parties as a hosted, managed, or embedded service.
+Enterprise support and pilots: [ENTERPRISE.md](ENTERPRISE.md).

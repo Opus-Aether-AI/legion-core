@@ -10,6 +10,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -33,6 +34,7 @@ SPAN_SCHEMA = "legion.span.v1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
 import legion_file_lock  # noqa: E402
+import legion_executor_registry  # noqa: E402
 
 DEFAULT_LOG_ROOT = ""
 DEFAULT_BENCH_ROOT = ""
@@ -493,6 +495,40 @@ def _validate_jsonl_contains(path: str, expected: dict[str, Any]) -> bool:
     return False
 
 
+def _registry_executor_coverage(
+    path: str,
+    registry_path: str,
+    capability: str,
+) -> tuple[bool, str]:
+    try:
+        executors = legion_executor_registry.load_executor_registry(registry_path)
+    except (OSError, ValueError) as exc:
+        return False, f"registry={registry_path}; error={exc}"
+    names = sorted(
+        name
+        for name, config in executors.items()
+        if isinstance(name, str)
+        and legion_executor_registry.has_executor_capability(config, capability)
+    )
+    text = _read_text(path)
+    missing = [
+        name
+        for name in names
+        if re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])",
+            text,
+            flags=re.IGNORECASE,
+        )
+        is None
+    ]
+    ok = bool(names) and not missing
+    detail = (
+        f"{path}: capability={capability}; registry={registry_path}; "
+        f"expected={','.join(names) or '<none>'}; missing={','.join(missing) or '<none>'}"
+    )
+    return ok, detail
+
+
 def run_task_validators(
     validators: list[Any],
     *,
@@ -518,6 +554,12 @@ def run_task_validators(
             path = _text(_render(validator.get("path"), context))
             needle = _text(_render(validator.get("text"), context))
             results.append(_validator_result(kind, needle in _read_text(path), f"{path}: {needle}"))
+        elif kind == "file_mentions_registry_executors":
+            path = _text(_render(validator.get("path"), context))
+            registry_path = _text(_render(validator.get("registry"), context))
+            capability = _text(validator.get("capability")) or "coding"
+            ok, detail = _registry_executor_coverage(path, registry_path, capability)
+            results.append(_validator_result(kind, ok, detail))
         elif kind == "json_file_field_equals":
             path = _text(_render(validator.get("path"), context))
             field = _text(validator.get("field"))
@@ -719,6 +761,11 @@ def _case_state_env(logs: str) -> dict[str, str]:
         "LEGION_REPOS_FILE": os.path.join(root, "repos.jsonl"),
         "LEGION_BENCH_DIR": os.path.join(root, "bench"),
         "LEGION_REPORTS_DIR": os.path.join(root, "reports"),
+        # A task case must not read or mutate the caller's durable learning
+        # stores.  In particular, active global laws would otherwise become
+        # extra outcomes in a deterministic fixture.
+        "LEGION_PROJECT_LEARNING_DIR": os.path.join(root, "learning"),
+        "LEGION_GLOBAL_LEARNING_DIR": os.path.join(root, "global-learning"),
     }
 
 

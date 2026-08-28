@@ -83,8 +83,8 @@ if [[ ! -f "$_run_id_lib" ]]; then
 fi
 # shellcheck disable=SC1090
 source "$_run_id_lib"
-# The harness driving this fan-out (Claude by default) — `self` slices come back
-# for it to run inline. Harness-generic: not hardcoded to Opus.
+# The harness driving this fan-out — `self` slices come back for it to run
+# inline. The resolver's fallback is a compatibility default only.
 FANOUT_PRIMARY="$("$LEGION_ROUTE" --primary 2>/dev/null || echo primary)"
 _state_lib="$_self/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then

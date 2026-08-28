@@ -9,7 +9,7 @@
 #   1. $LEGION_PRIMARY, if set (authoritative — the per-harness `-mode` setup
 #      skills export this so a session's primary is unambiguous).
 #   2. best-effort auto-detect from the harness's own env markers.
-#   3. `claude` (back-compat default — legion began Claude-primary).
+#   3. `claude` (back-compat default for installations without an explicit marker).
 #
 # Usage:  source .../lib/primary.sh; p="$(legion_primary)"
 

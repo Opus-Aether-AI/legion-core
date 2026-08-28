@@ -1,8 +1,11 @@
 # legion-router
 
-Legion's multi-model brain. Any supported primary harness can delegate scoped
-work to configured executors and receive a reviewable, metered diff. An optional
-Anthropic-compatible sidecar keeps proxied and out-of-band spend in one stream.
+Legion's routing and delegation layer. It routes scoped units of work to
+configured executors, runs them in isolation, and records evidence and metered
+outcomes. The seven current executors are `claude`, `codex`, `cursor`,
+`opencode`, `deepseek`, `hermes`, and `pi`. They are coding executors today,
+so a delegated result is normally a reviewable diff. The routing, span,
+archetype, and evidence contracts are not limited to coding.
 
 > One orchestrator, a legion of models.
 
@@ -14,6 +17,7 @@ Anthropic-compatible sidecar keeps proxied and out-of-band spend in one stream.
 | `legion-claude` | `scripts/legion-claude.sh` | Delegate to Claude headless in an isolated worktree, capture a patch, and optionally fall back through the configured Codex route. |
 | `legion-cursor` | `scripts/legion-cursor.sh` | Delegate a task to Cursor Agent headless (`agent -p`) in an isolated worktree; capture diff + result + usage; emit a telemetry span with `executor=cursor`. |
 | `legion-opencode` | `scripts/legion-opencode.sh` | Delegate to opencode headless in an isolated worktree and normalize its event stream into the Legion result/span contract. |
+| `legion-deepseek` | `scripts/legion-deepseek.sh` | Delegate through a user-authored DeepSeek Harness profile in an isolated worktree. DeepSeek Harness ships no headless preset. |
 | `legion-pi` | `scripts/legion-pi.sh` | Delegate through Pi's official `-p --mode json --no-session` stream inside a filesystem write sandbox; validate the final settled `agent_end`, meter every `message_end` plus compaction call exactly once, and return a patch captured with parent-owned Git metadata. |
 | `legion-hermes` | `scripts/legion-hermes.sh` | Delegate through Hermes `--oneshot` inside a filesystem write sandbox; parse its complete `--usage-file` JSON document while preserving stdout as opaque final text. |
 | `legion-intake` | `scripts/legion-intake.sh` | GitHub issue intake wrapper. Runs a compatible Legion worker (`delegate`, `cursor`, or `custom`) in explore or implement mode, comments assessment results, and opens review PRs for implementation diffs. |
@@ -69,7 +73,9 @@ narrowly normalizes Codex's built-in `[P0]`–`[P3]` or explicit `No findings`
 formats; any other prose remains an invalid, fail-closed verdict. `approve` and
 `comment` cannot carry medium-or-higher findings.
 
-Requires the CLI for each executor you use, plus `jq` and `git`. Pi and Hermes
+Requires the CLI for each executor you use, plus `jq` and `git`. DeepSeek
+Harness additionally requires a user-authored dsh profile; it does not work out
+of the box. Pi and Hermes
 children also require `sandbox-exec` (included with macOS) or Bubblewrap
 (`bwrap`, install the `bubblewrap` package on Linux); their adapters fail closed
 when neither boundary exists. The proxy additionally needs `bun`, and a
@@ -308,7 +314,7 @@ legion-router/
   `LEGION_EXECUTOR_NAME`, `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized
   repository policy uses that context to prevent accidental recursive delegation.
   A worker can explicitly use `legion-delegate run --executor <different-harness>`
-  for one cross-harness handoff (Claude, Codex, Cursor, opencode, Pi, or Hermes). The handoff
+  for one cross-executor handoff (Claude, Codex, Cursor, opencode, DeepSeek, Pi, or Hermes). The handoff
   retains task scanning, a fresh isolated worktree, parent trace linkage, and a
   default maximum depth of `2` (`LEGION_MAX_DEPTH`). Implicit, same-harness, and
   direct-adapter nested calls remain blocked. A sandboxed Pi or Hermes worker's

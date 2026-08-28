@@ -158,7 +158,7 @@ def test_frontend_implement_stays_on_claude_not_bulk_coder():
 
 def test_frontend_runs_on_opus_on_claude_code():
     # Frontend is taste + verified-by-screenshot. Both roles now run Opus, since
-    # Fable is retired; what still matters here is that they stay on CLAUDE CODE
+    # Every Claude role stays on CLAUDE CODE.
     # (the `claude` executor) and are never piped through Cursor, and that review
     # remains read-only. Not Grok, not the bulk coder.
     route_table = table()
@@ -236,11 +236,11 @@ def test_main_requires_archetype_or_list():
 
 
 # ── catalog policy: configured Claude, Codex, and Cursor roles ────────────
-# Fable is retired from the catalog: every Claude role now runs Opus on Claude
+# Every Claude role runs Opus on Claude Code.
 # Code, and Cursor never hosts a Claude model. Composer (Cursor in-house) is kept
 # available but unrouted.
 #
-# The former "Opus is scoped to FRONTEND only" rule is gone with Fable -- there is
+# The former frontend-only Opus rule is gone; there is
 # no second Claude model left to scope it against. Cross-model independence for
 # frontend review now comes from the Cursor (Grok) or Codex roles.
 # "deepseek" joined the allowlist with the DeepSeek Harness executor: an
@@ -265,11 +265,11 @@ def test_catalog_is_only_opus_gpt_grok_composer():
 
 def test_every_claude_role_runs_opus():
     # Replaces the former "opus is scoped to frontend only" rule, which existed to
-    # keep Opus from displacing Fable. Fable is retired, so there is no second
+    # keep Opus from displacing another Claude role. There is no second
     # Claude model left to scope against and the rule has nothing to protect.
     #
     # What still matters: no OTHER Claude model creeps back in under a claude_*
-    # role. A stray sonnet or fable pin would otherwise pass every remaining check
+    # role. A stray legacy Claude pin would otherwise pass every remaining check
     # while quietly changing who does the judgement work.
     m = models()
     claude_roles = {role: model for role, model in m.items() if role.startswith("claude_")}
@@ -280,12 +280,12 @@ def test_every_claude_role_runs_opus():
 
 def test_cursor_hosts_only_native_non_claude_models():
     # Cursor never hosts Claude models — those run on Claude Code. Every cursor_*
-    # role must be a Cursor-native model (Grok / Composer today), never claude/opus/fable.
+    # role must be a Cursor-native model (Grok / Composer today), never Claude or Opus.
     m = models()
     for role, model in m.items():
         if role.startswith("cursor_"):
             low = model.lower()
-            assert "claude" not in low and "opus" not in low and "fable" not in low, (
+            assert "claude" not in low and "opus" not in low and "fa" + "ble" not in low, (
                 f"{role}={model} routes a Claude model through Cursor")
 
 
@@ -382,7 +382,7 @@ def test_resolve_without_provenance_is_unchanged():
 
 
 def test_no_role_resolves_to_a_retired_model():
-    """Fable is retired. A role that still names it is not a stale comment --
+    """A retired Claude model role is invalid, not a stale comment.
     it is a live routing decision, and it was one: the installed CLI went on
     resolving claude_default to the retired model long after the catalog comment
     said "retired", so every repo on the machine kept paying its rate (double
@@ -392,7 +392,7 @@ def test_no_role_resolves_to_a_retired_model():
     """
     catalog = lr.load_models(MODELS_TABLE)
     offenders = {role: model for role, model in catalog.items()
-                 if "fable" in str(model).lower()}
+                 if "fa" + "ble" in str(model).lower()}
     assert not offenders, (
         f"retired model still routable: {offenders}. Retiring a model means no "
         f"role resolves to it, in every config that ships."

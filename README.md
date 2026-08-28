@@ -157,8 +157,8 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for current follow-ups and [AGENTS.md](A
 
 ## License
 
-[Business Source License 1.1 (BSL 1.1)](LICENSE), converting to Apache-2.0 on
-2030-08-27. Internal and production use are permitted; a commercial licence is
+[Business Source License 1.1 (BSL 1.1)](LICENSE), converting to
+[Apache-2.0](docs/licenses/apache-2.0.txt) on 2030-08-27. Internal and production use are permitted; a commercial licence is
 required only to offer Legion's routing, delegation, execution, or observability
 functionality to third parties as a hosted, managed, or embedded service.
 Enterprise support and pilots: [ENTERPRISE.md](ENTERPRISE.md).

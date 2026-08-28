@@ -33,7 +33,7 @@ CLAUDE_END = "<!-- legion:init:v1:claude:end -->"
 AGENTS_BODY = """\
 ## Legion workflow
 
-Legion is the mandatory default operating mode for coding tasks in this
+Legion is the mandatory default operating mode for work in this
 repository, regardless of which compatible harness is active. “Default” means
 enter the appropriate Legion mode; it does not mean every tiny action must be
 delegated.
@@ -41,8 +41,8 @@ delegated.
 - If `LEGION_ACTIVE=1`, `LEGION_DEPTH` is positive, or the working directory is
   under `.legion/worktrees/`, this process is already a delegated executor:
   implement the assigned slice directly unless it needs a bounded, explicit
-  cross-harness handoff. Use only `legion-delegate run --executor <different
-  coding harness>` for that handoff; Legion keeps task scanning, isolation,
+  cross-executor handoff. Use only `legion-delegate run --executor <different
+  executor>` for that handoff; Legion keeps task scanning, isolation,
   telemetry, and `LEGION_MAX_DEPTH` (default `2`) intact. Do not invoke raw
   harness CLIs or implicit/same-harness nested delegation. Return to the parent
   if the slice needs re-planning.
@@ -55,8 +55,8 @@ delegated.
   plan, deterministic validation, independent review, and retained evidence.
 - Use `legion-orchestrate` or `legion-fanout` for dependency-aware parallel
   slices; use `legion-delegate` for scoped delegation and independent review.
-- Do not call raw `claude`, `codex`, `agent`, or `opencode` processes for
-  delegated coding work. Go through Legion so isolation, routing, telemetry,
+- Do not call raw `claude`, `codex`, `agent`, `dsh`, `hermes`, `pi`, or
+  `opencode` processes for delegated work. Go through Legion so isolation, routing, telemetry,
   and review contracts remain active.
 - Inline work is allowed only when the active Legion harness-mode guidance
   selects it. It still follows this repository's tests and health gates.

@@ -32,9 +32,13 @@ cases:
     expect: legion-setup
     why: install/update marketplace + cross-harness is the setup skill
 
-  - prompt: "Codex-primary routing brain: decide when to call Claude from a Codex CLI session"
+  - prompt: "Codex CLI is the active Legion primary: decide what stays inline and when to route a bounded task by configured archetype and model role"
     expect: legion-codex-mode
-    why: Codex-primary routing brain is the legion-codex-mode skill
+    why: Codex-primary role-driven routing is the legion-codex-mode skill
+
+  - prompt: "DeepSeek Harness is the active Legion primary: explain the required dsh headless profile, no-review contract, and usage not reported semantics"
+    expect: legion-deepseek-mode
+    why: DeepSeek-primary adapter limits and routing belong to legion-deepseek-mode
 
   - prompt: "opencode-primary session: which tasks are worth handing to another model versus keeping them inline in opencode"
     expect: legion-opencode-mode

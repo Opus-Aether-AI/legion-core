@@ -138,8 +138,36 @@ def test_load_suite_extends_core_cases():
     ids = {case["id"] for case in suite["cases"]}
 
     assert "eval.plugin.observability" in ids
+    assert "eval.plugin.deepseek-mode" in ids
+    assert "eval.entity.skill-deepseek-mode" in ids
     assert "route.perf-optimization" in ids
     assert len(suite["cases"]) >= 43
+
+
+def test_stable_metadata_cases_derive_executor_coverage_from_registry():
+    repo = os.path.abspath(os.path.join(HERE, "..", ".."))
+    suite = bench.load_suite(repo, "stable")
+    cases = {case["id"]: case for case in suite["cases"]}
+
+    for case_id in (
+        "task.router-plugin-intake-metadata",
+        "task.marketplace-intake-metadata",
+    ):
+        validators = cases[case_id]["validators"]
+        registry_validators = [
+            validator
+            for validator in validators
+            if validator.get("type") == "file_mentions_registry_executors"
+        ]
+        assert registry_validators == [
+            {
+                "type": "file_mentions_registry_executors",
+                "path": validators[-1]["path"],
+                "registry": "{repo}/legion-router/config/executors.toml",
+                "capability": "coding",
+            }
+        ]
+        assert "Claude, Codex, Cursor, OpenCode, Hermes, and Pi" not in json.dumps(validators)
 
 
 def test_resolve_suite_path_prefers_packaged_json_over_matching_directory():
@@ -593,6 +621,49 @@ def test_task_case_validates_jsonl_contains(tmp_path):
     )
 
     assert result["ok"] is True
+
+
+def test_task_case_validates_file_mentions_registry_executors(tmp_path):
+    registry = tmp_path / "executors.toml"
+    registry.write_text(
+        """
+[executors.codex]
+kind = "primary coding"
+
+[executors.deepseek]
+kind = "primary coding"
+
+[executors.observer]
+kind = "primary"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    complete = tmp_path / "complete.txt"
+    complete.write_text("Delegation supports Codex and DeepSeek Harness.\n", encoding="utf-8")
+    incomplete = tmp_path / "incomplete.txt"
+    incomplete.write_text("Delegation supports Codex.\n", encoding="utf-8")
+    validators = [
+        {
+            "type": "file_mentions_registry_executors",
+            "path": str(path),
+            "registry": str(registry),
+            "capability": "coding",
+        }
+        for path in (complete, incomplete)
+    ]
+
+    results = bench.run_task_validators(
+        validators,
+        context={},
+        stdout="",
+        stderr="",
+    )
+
+    assert results[0]["ok"] is True
+    assert results[1]["ok"] is False
+    assert "missing=deepseek" in results[1]["detail"]
+    assert "observer" not in results[0]["detail"]
 
 
 def test_task_case_validates_command_validator(tmp_path):

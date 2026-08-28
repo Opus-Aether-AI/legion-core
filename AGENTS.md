@@ -18,7 +18,7 @@ not its definition.
   do not add domain-specific plugins, skills, or copy here.
 
 <!-- legion:init:v1:agents:start -->
-<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=4a1ef5458c3b1ca4 -->
+<!-- legion:init:v1:padding-before=0;padding-after=0;created=0;eol=lf;sha256=2fe4ba45cfa2b4f0 -->
 ## Legion workflow
 
 Legion is the mandatory default operating mode for work in this

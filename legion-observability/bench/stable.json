@@ -52,9 +52,21 @@
       "dimension": "triggering",
       "summary": "Codex-primary routing prompts should route to legion-codex-mode.",
       "scope": "plugin",
-      "prompt": "I am running Legion under Codex CLI and need to know when to call Claude for deep architecture or final review.",
+      "prompt": "I am running Legion under Codex CLI as the active primary and need to decide what stays inline versus routing a bounded task by configured archetype and model role.",
       "expect_type": "plugin",
       "expect": "legion-codex-mode",
+      "expect_not": "legion-router",
+      "required": true
+    },
+    {
+      "id": "eval.plugin.deepseek-mode",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "DeepSeek-primary routing prompts should route to legion-deepseek-mode.",
+      "scope": "plugin",
+      "prompt": "DeepSeek Harness is the active Legion primary; explain the required dsh headless profile, its no-review contract, and why zero usage means not reported.",
+      "expect_type": "plugin",
+      "expect": "legion-deepseek-mode",
       "expect_not": "legion-router",
       "required": true
     },
@@ -119,9 +131,20 @@
       "dimension": "triggering",
       "summary": "Entity trigger should find the Codex-mode skill.",
       "scope": "entity",
-      "prompt": "Under Codex CLI decide when GPT should call Claude for architecture, frontend polish, final review, or a tie break.",
+      "prompt": "Under Codex CLI, map Codex-native MCPs and bridged commands, then decide whether architecture judgement, frontend polish, or independent review stays inline or uses a configured role.",
       "expect_type": "skill",
       "expect": "legion-codex-mode",
+      "required": true
+    },
+    {
+      "id": "eval.entity.skill-deepseek-mode",
+      "type": "eval",
+      "dimension": "triggering",
+      "summary": "Entity trigger should find the DeepSeek-mode skill.",
+      "scope": "entity",
+      "prompt": "DeepSeek Harness is driving Legion; explain its required dsh headless profile, no-review limitation, and usage-not-reported contract.",
+      "expect_type": "skill",
+      "expect": "legion-deepseek-mode",
       "required": true
     },
     {
@@ -593,9 +616,10 @@
           "text": "generic GitHub issue intake via `legion-intake`"
         },
         {
-          "type": "file_contains",
+          "type": "file_mentions_registry_executors",
           "path": "{workspace}/router-plugin.txt",
-          "text": "Claude, Codex, Cursor, OpenCode, Hermes, and Pi"
+          "registry": "{repo}/legion-router/config/executors.toml",
+          "capability": "coding"
         }
       ],
       "required": true
@@ -619,9 +643,10 @@
           "text": "delegate, cursor, or a compatible custom worker"
         },
         {
-          "type": "file_contains",
+          "type": "file_mentions_registry_executors",
           "path": "{workspace}/marketplace-router.txt",
-          "text": "Claude, Codex, Cursor, OpenCode, Hermes, and Pi"
+          "registry": "{repo}/legion-router/config/executors.toml",
+          "capability": "coding"
         }
       ],
       "required": true

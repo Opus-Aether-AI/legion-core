@@ -1,7 +1,7 @@
 {
   "name": "legion-router",
-  "description": "Legion's registry-driven router: scoped delegation across Claude, Codex, Cursor, opencode, DeepSeek Harness, Hermes, and Pi. Adapters return an isolated-worktree diff and evidence; usage is reported only where the provider publishes a usable contract. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake`, the loopback :8082 metering proxy, and the shared cost table.",
-  "version": "0.8.1",
+  "description": "Legion's registry-driven router: scoped delegation across Claude, Codex, Cursor, opencode, DeepSeek Harness, Hermes, and Pi. Adapters return an isolated-worktree diff and evidence; usage is reported only where the provider publishes a usable contract. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, and the shared cost table.",
+  "version": "0.8.2",
   "author": {
     "name": "legion-core"
   },

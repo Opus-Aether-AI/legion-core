@@ -5,39 +5,57 @@
 # tasks in one line; add roles as new tiers/providers show up. Routing should
 # reference these role keys, never a raw model ID, so a model swap lives here.
 #
-# Catalog policy: Anthropic Opus, OpenAI GPT-5.6, xAI Grok, DeepSeek. DeepSeek
-# entered the catalog with the DeepSeek Harness executor -- an executor needs a
-# model role, so adding the harness necessarily widened this allowlist. It is
-# reachable only by asking for that executor: no archetype routes to it.
-# Every Claude role runs Opus on CLAUDE CODE (the `claude`
-# executor), never piped through Cursor.
+# Catalog policy: Anthropic Opus + Fable, OpenAI GPT-5.6 + GPT-6, xAI Grok,
+# DeepSeek. DeepSeek entered the catalog with the DeepSeek Harness executor -- an
+# executor needs a model role, so adding the harness necessarily widened this
+# allowlist. It is reachable only by asking for that executor: no archetype
+# routes to it. Every Claude role runs on CLAUDE CODE (the `claude` executor),
+# never piped through Cursor.
 #
-# NOTE: this collapses the frontend polish/review split, which existed so a
-# DIFFERENT Claude model reviewed the polish. Cross-model independence for
-# frontend now has to come from the Cursor (Grok) or Codex roles instead. Cursor hosts ONLY its
-# native non-Claude models (Grok + Composer, kept available). (sonnet / haiku
-# removed; Kimi deferred until it's routable via Cursor.)
-# EFFORT: the Claude roles run at `high` for judgement. GPT-5.6 is tiered: low/medium
+# TIERS. The catalog is deliberately two-tier, because the frontier models cost
+# 2x Opus 5 and 5x gpt-5.6-terra on output:
+#
+#   frontier   Fable 5.1 / GPT-6 Astra. Reserved for the hard end -- deep bugs,
+#              perf work, adversarial security review, frontend craft. Routed by
+#              a small, named set of archetypes, never by the bulk lanes.
+#   workhorse  Opus 5 / gpt-5.6-terra / Grok 4.6. Carries the volume: scoped
+#              implementation, tests, refactors, routine review.
+#   cheap      gpt-5.6-luna. Bounded, mechanical, reversible work only.
+#
+# Adding a frontier role is cheap; ROUTING one is not. Move an archetype to the
+# frontier tier only with a measured reason, and record it in routing.toml's note.
+#
+# The frontend polish/review split is REAL again: `frontend-polish` runs on
+# claude_frontier (Fable 5.1) and `frontend-review` on claude_default (Opus 5),
+# so the reviewer is a genuinely different model from the author. Cursor hosts
+# ONLY its native non-Claude models (Grok + Composer, kept available).
+#
+# EFFORT: Claude roles run at `high` for judgement. GPT-5.6 is tiered: low/medium
 # for bounded work, high for scoped implementation, max only for hard or
-# persistent slices. Grok tops out at `high`.
+# persistent slices. Astra accepts low..xhigh on Chat Completions and `max` on the
+# Responses API -- Codex CLI uses Responses, so `max` is reachable (verified
+# against codex-cli 0.153.4). Grok tops out at `high`.
 # The effort per archetype lives in routing.toml.
 
 [models]
+# ── FRONTIER tier — the hard end only; see the tier note above ──────────
+claude_frontier     = "claude-fable-5-1"  # frontend polish + opt-in high-stakes final review
+codex_frontier      = "gpt-6-astra"       # hard bugs, perf work, adversarial security review
+
 # ── Anthropic Claude on CLAUDE CODE (the `claude` executor / self) ──
 claude_orchestrator = "claude-opus-5"    # self: orchestration / architecture / deep reasoning (run at high)
 claude_default      = "claude-opus-5"    # generic Claude / reverse-delegate target / frontend review
-claude_opus         = "claude-opus-5"    # FRONTEND polish only — Opus on Claude Code (run at high thinking)
 
-# ── OpenAI GPT-5.6 (Codex) — run at max ────────────────────────────
+# ── OpenAI GPT-5.6 (Codex) — the workhorse lane ────────────────────
 codex_workhorse     = "gpt-5.6-terra"    # persistent scoped implementation
-codex_review        = "gpt-5.6-sol"      # technical second opinion / hard execution
+codex_review        = "gpt-5.6-sol"      # routine technical second opinion; the default codex reviewer
 codex_cheap         = "gpt-5.6-luna"     # bounded search, boilerplate, mechanical edits
 codex_default       = "gpt-5.6-terra"    # generic Codex
 
 # ── Cursor harness roles (Cursor-native models ONLY; effort encoded in the id) ──
 # Grok 4.6 for independent second-opinion / tie-break (a different lineage than
 # the configured Claude and Codex roles). Cursor never hosts Claude models — those run on
-# Claude Code (claude_opus / claude_default above).
+# Claude Code (claude_frontier / claude_default above).
 cursor_default      = "cursor-grok-4.6-high"          # Grok's ceiling (no xhigh)
 cursor_composer     = "composer-2.5"                  # Cursor in-house; kept available but UNROUTED (no archetype)
 

@@ -20,7 +20,9 @@ setup() {
     export LEGION_COSTS_FILE="$REPO_ROOT/legion-router/config/costs.json"
     CODEX_WORKHORSE="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
     CODEX_REVIEW="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_review)"
-    CLAUDE_OPUS="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref claude_opus)"
+    CODEX_FRONTIER="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_frontier)"
+    CLAUDE_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref claude_default)"
+    CLAUDE_FRONTIER="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref claude_frontier)"
     MINIMAX_MATCH="$(jq -r '.models[] | select(.match == "minimax") | .match' "$LEGION_COSTS_FILE")"
 }
 
@@ -100,10 +102,21 @@ repos_file_for_repo() {
 }
 
 # ── cost lib ─────────────────────────────────────────────────────────
-@test "cost: claude_opus pricing comes from costs.json" {
-    run "$LIB/cost.sh" "$CLAUDE_OPUS" 1000000 500000 0 0
+@test "cost: claude_default pricing comes from costs.json" {
+    run "$LIB/cost.sh" "$CLAUDE_DEFAULT" 1000000 500000 0 0
     [ "$status" -eq 0 ]
+    # 1M in @ $5.00/M + 500k out @ $25.00/M
     [ "$output" = "17.5" ]
+}
+
+@test "cost: the frontier Claude role is priced above the default one" {
+    # The tier split is a COST decision, so the price gap is the thing to pin:
+    # if these ever match, either the catalog collapsed back to one tier or a
+    # costs.json row is missing and the frontier model is being under-billed.
+    run "$LIB/cost.sh" "$CLAUDE_FRONTIER" 1000000 500000 0 0
+    [ "$status" -eq 0 ]
+    # 1M in @ $10.00/M + 500k out @ $50.00/M
+    [ "$output" = "35" ]
 }
 
 @test "cost: codex_review pricing comes from costs.json" {
@@ -1857,8 +1870,9 @@ $run_error" ]
   local base_sha; base_sha="$(git -C "$repo" rev-parse HEAD)"
   run "$DELEGATE" review --archetype security-review --base HEAD --repo "$repo" --quiet
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e --arg model "$CODEX_REVIEW" '.model == $model and .verdict.verdict == "approve" and (.verdict.summary | type == "string")'
-  assert_mock_called codex "exec -s read-only review --base $base_sha -m $CODEX_REVIEW"
+  # security-review routes to the FRONTIER codex role, not the routine review one.
+  echo "$output" | jq -e --arg model "$CODEX_FRONTIER" '.model == $model and .verdict.verdict == "approve" and (.verdict.summary | type == "string")'
+  assert_mock_called codex "exec -s read-only review --base $base_sha -m $CODEX_FRONTIER"
   assert_mock_called codex "output-schema"
 }
 

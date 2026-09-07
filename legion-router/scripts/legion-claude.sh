@@ -88,6 +88,36 @@ has_low_claude_credit() {
   printf '%s' "${LEGION_LOW_CREDIT:-}" | grep -qi 'claude'
 }
 
+# True when the failure is "this Claude model would not or could not take the job"
+# rather than "the job failed" — the two cases a same-vendor model chain exists to
+# survive:
+#
+#   refusal          Fable 5.1 can decline a request outright (HTTP 200, a refusal
+#                    stop reason). Retrying the SAME model is pointless; a sibling
+#                    Claude model usually takes it.
+#   model unreachable the account cannot run this model id at all.
+#
+# Read STRUCTURED fields from the JSON envelope, never the free-text `.result`.
+# A delegated task whose subject IS refusals or model names — reviewing this very
+# file, say — would otherwise match its own prose and silently reroute itself.
+# stderr is matched textually because it carries no envelope, but only for the
+# narrow model-identity patterns, not for the word "refusal" alone.
+claude_model_declined() {
+  local out_file="$1" err_file="$2"
+  if [[ -s "$out_file" ]] && jq -e '
+        (.stop_reason? // .subtype? // "" | tostring | ascii_downcase | test("refus"))
+        or ((.error?.type? // "" | tostring | ascii_downcase)
+             | test("model_not_found|invalid_model|unsupported_model|permission_error"))
+        or ((.error?.message? // "" | tostring | ascii_downcase)
+             | test("model .*(not found|not available|not enabled)|does not have access to (the )?model"))
+      ' "$out_file" >/dev/null 2>&1; then
+    return 0
+  fi
+  [[ -s "$err_file" ]] && grep -qiE \
+    'model_not_found|invalid_model|unsupported_model|unknown model|model .*(not found|is not available|not enabled)|does not have access to (the )?model' \
+    "$err_file"
+}
+
 is_limit_text() {
   printf '%s' "$1" | grep -qiE 'usage limit|rate.?limit|quota|exceeded|too many requests|overloaded|capacity|reached your'
 }
@@ -178,7 +208,9 @@ run_fallback() {
 
 cmd_run() {
   local default_model="" default_fallback_model=""
+  local attempt_model="" claude_chain_note=""
   local task="" model="${LEGION_CLAUDE_MODEL:-${CLAUDE_MODEL:-}}" repo="$PWD" fallback_model="${LEGION_CLAUDE_FALLBACK_MODEL:-${CODEX_MODEL:-}}"
+  local fallback_models="${LEGION_CLAUDE_FALLBACK_MODELS:-}"
   local allow_fallback=1 tmpdir="" out_file="" err_file="" artifacts="{}"
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
@@ -201,6 +233,10 @@ cmd_run() {
       --quiet) QUIET=1; shift ;;
       --no-fallback) allow_fallback=0; shift ;;
       --fallback-model) fallback_model="$2"; shift 2 ;;
+      # Same-vendor Claude alternates, comma-separated, tried in order BEFORE the
+      # cross-executor --fallback-model. Distinct flags because they are different
+      # escapes: this one keeps the lineage, that one leaves it.
+      --fallback-models) fallback_models="$2"; shift 2 ;;
       --effort) effort="$2"; shift 2 ;;                       # reasoning effort passthrough
       --append-system-prompt) append_sys="$2"; shift 2 ;;     # extra system prompt passthrough
       --dangerously-skip-permissions) skip_perms=1; shift ;;  # autonomous headless runs (opt-in)
@@ -316,21 +352,42 @@ cmd_run() {
     return 1
   fi
 
-  local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
-  [[ "$sandbox" == "read-only" ]] && claude_cmd+=(--permission-mode plan)
-  [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
-  [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
-  [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
-  note "→ ${claude_cmd[*]}"
+  # Same-vendor model chain: the routed model first, then the archetype's
+  # fallback_refs. Only a refusal or an unreachable model advances it — a real
+  # failure stops on the model that produced it, so the chain is never burned
+  # hiding a genuine error. The loop wraps ONLY the CLI invocation: worktree diff
+  # capture and result parsing below run once, against whichever model answered.
+  local -a claude_model_chain=("$model")
+  if [[ -n "$fallback_models" ]]; then
+    local _fb_model
+    while IFS= read -r _fb_model; do
+      [[ -n "$_fb_model" ]] || continue
+      [[ " ${claude_model_chain[*]} " == *" $_fb_model "* ]] && continue   # dedup
+      claude_model_chain+=("$_fb_model")
+    done < <(printf '%s' "$fallback_models" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  fi
+
   start_ms="$(date +%s000)"
-  set +e
-  printf '%s' "$task" | (
-    legion_activate_executor_context "$RUN_ID" claude
-    cd "${wt:-$repo}"
-    "${claude_cmd[@]}"
-  ) >"$out_file" 2>"$err_file"
-  rc=${PIPESTATUS[1]}
-  set -e
+  for attempt_model in "${claude_model_chain[@]}"; do
+    model="$attempt_model"
+    local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
+    [[ "$sandbox" == "read-only" ]] && claude_cmd+=(--permission-mode plan)
+    [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
+    [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
+    [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
+    note "→ ${claude_cmd[*]}"
+    set +e
+    printf '%s' "$task" | (
+      legion_activate_executor_context "$RUN_ID" claude
+      cd "${wt:-$repo}"
+      "${claude_cmd[@]}"
+    ) >"$out_file" 2>"$err_file"
+    rc=${PIPESTATUS[1]}
+    set -e
+    claude_model_declined "$out_file" "$err_file" || break
+    claude_chain_note="${claude_chain_note}${claude_chain_note:+; }$model declined/unavailable"
+    note "⚠ $model declined the task or is unreachable — trying the next Claude model"
+  done
 
   if [[ -n "$wt" ]]; then
     git -C "$wt" add -A 2>/dev/null || diff_rc=1

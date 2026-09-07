@@ -129,11 +129,17 @@ def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
     for entry in costs.get("models", []):
         match = _string(entry.get("match")).lower()
         if match and match in model_name:
+            long_context = _dict(entry.get("long_context"))
             return {
                 "input": _num(entry.get("input")),
                 "output": _num(entry.get("output")),
                 "cache_read": _num(entry.get("cache_read")),
                 "cache_write": _num(entry.get("cache_write")),
+                # SCHEMA v3 long-context tier. 0.0 threshold means "no tier",
+                # which keeps every v2 row priced exactly as before.
+                "lc_threshold": _num(long_context.get("threshold_input_tokens")),
+                "lc_input_multiplier": _num(long_context.get("input_multiplier")) or 1.0,
+                "lc_output_multiplier": _num(long_context.get("output_multiplier")) or 1.0,
             }
     default = _dict(costs.get("default"))
     return {
@@ -141,6 +147,9 @@ def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
         "output": _num(default.get("output")),
         "cache_read": _num(default.get("cache_read")),
         "cache_write": _num(default.get("cache_write")),
+        "lc_threshold": 0.0,
+        "lc_input_multiplier": 1.0,
+        "lc_output_multiplier": 1.0,
     }
 
 
@@ -154,10 +163,16 @@ def cost_for(model: Any, usage: Any, costs: dict[str, Any]) -> float:
     billed_in = max(0, input_tokens - cached_tokens)
     billed_out = output_tokens + reasoning_tokens
     rates = _rates_for(model, costs)
+    # SCHEMA v3: above the threshold the whole prompt reprices. The prompt is
+    # billed_in + cached_tokens, matching cost.sh's input + cache_read + cache_write.
+    threshold = rates["lc_threshold"]
+    over = threshold > 0 and (billed_in + cached_tokens) > threshold
+    in_mult = rates["lc_input_multiplier"] if over else 1.0
+    out_mult = rates["lc_output_multiplier"] if over else 1.0
     total = (
-        billed_in * rates["input"]
-        + billed_out * rates["output"]
-        + cached_tokens * rates["cache_read"]
+        billed_in * rates["input"] * in_mult
+        + billed_out * rates["output"] * out_mult
+        + cached_tokens * rates["cache_read"] * in_mult
     )
     return total / 1_000_000.0
 

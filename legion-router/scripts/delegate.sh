@@ -220,6 +220,28 @@ is_quota_error() {
   [[ -f "$1" ]] && grep -qiE 'rate.?limit|quota|usage limit|429|too many requests|insufficient_quota|overloaded|capacity|exceeded your' "$1"
 }
 
+# True if the failure is "this account cannot run THIS model" rather than "the run
+# failed". A frontier model is the reason this exists: GPT-6 Astra ships disabled by
+# default on Enterprise workspaces and an admin must enable it, so a correct config
+# plus an un-enabled workspace produces a hard failure that looks nothing like a
+# quota error -- and the fallback chain, which exists precisely to survive an
+# unreachable model, would be skipped. Deliberately narrow: only errors that name
+# the MODEL as the problem, never a generic 4xx, because misclassifying a real run
+# failure as retryable burns the chain and hides the cause.
+#
+# Searches BOTH streams. Codex reports some conditions inside its stdout JSON event
+# stream, and a stderr-only check has silently missed the case before (see the
+# reachability probe below, which had to be widened for exactly this reason).
+is_model_unavailable_error() {
+  local dir="$1" pattern
+  pattern='model[_ ]not[_ ]found|unknown model|model .* (does not exist|is not available|not enabled|is not enabled)|does not have access to (the )?model|not authorized to (use|access) .*model|model_not_enabled|unsupported_model|invalid_model|no access to model'
+  local f
+  for f in "$dir/codex.err" "$dir/stream.jsonl" "$dir/last-message.txt"; do
+    [[ -f "$f" ]] && grep -qiE "$pattern" "$f" && return 0
+  done
+  return 1
+}
+
 # Benign optional-MCP infrastructure noise to remove from the signal-only stderr
 # artifact. Every pattern is deliberately limited to Codex's MCP client logger plus
 # an authentication or connection failure; do not add broad ERROR/MCP patterns here.
@@ -817,6 +839,13 @@ dispatch_adapter() {
       ;;
     prompt)   # prompt executors (claude): task/model/repo + effort passthrough
       [[ -n "$effort" ]] && aargs+=(--effort "$effort")
+      # An archetype's fallback_refs are SAME-VENDOR alternates (frontend-polish:
+      # Fable 5.1 -> Opus 5). The adapter's own --fallback-model is the
+      # cross-executor escape to codex, which is the wrong first move for a craft
+      # archetype: handing frontend polish to a codex model loses the reason the
+      # archetype exists. Try the vendor's own chain first, then let the adapter
+      # cross over if that is exhausted too.
+      [[ -n "${r_fallback:-}" ]] && aargs+=(--fallback-models "$r_fallback")
       ;;
     *) die "executor '$ex' has an unknown contract '$contract' in executors.toml." ;;
   esac
@@ -1069,7 +1098,11 @@ cmd_run() {
       note "⚠ $attempt hit quota/rate-limit — trying next fallback model"
       continue
     fi
-    break    # non-quota failure: stop, don't burn the fallback chain
+    if is_model_unavailable_error "$art"; then
+      note "⚠ $attempt is not reachable for this account (not enabled / unknown) — trying next fallback model"
+      continue
+    fi
+    break    # a real run failure: stop, don't burn the fallback chain
   done
   model="$used_model"
   printf '%s\n' "$used_model" > "$art/model.txt"   # persisted so `resume` inherits it (M2)

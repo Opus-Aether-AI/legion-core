@@ -10,7 +10,7 @@ skill tells you when to keep work inline and when to use the configured role
 for an archetype:
 
 - `self` for primary-owned judgement,
-- `claude_opus` for the current `frontend-polish` route,
+- `claude_frontier` for the current `frontend-polish` route,
 - `claude_default` for the current `final-review` route,
 - `codex_review` or `cursor_default` where their review archetypes apply.
 

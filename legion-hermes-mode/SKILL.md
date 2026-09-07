@@ -59,10 +59,10 @@ have a script or cron that shells out raw (e.g. the coco implementation cron), s
 | Bounded implementation with enough context | `self` | `self` | Hermes can complete it inline as the active primary. |
 | Bulk implementation / mechanical edits / boilerplate | `implement-feature` / `bulk-mechanical-edit` | `codex_workhorse` | Current bounded implementation route. |
 | Deep architecture / system design / hard tradeoffs | `architecture-decision` / `deep-reasoning` | `self` | Keep primary-owned judgement inline. |
-| Polished / complex frontend | `frontend-polish` | `claude_opus` | Current separate visual/a11y route. |
-| Final adversarial review | `final-review` | `claude_default` | Current independent merge-judgement route. |
+| Polished / complex frontend | `frontend-polish` | `claude_frontier` | Frontier Claude role; `frontend-review` then checks it on `claude_default`, so author and reviewer differ. |
+| Final adversarial review | `final-review` | `claude_default` | Current independent merge-judgement route; `final-review-frontier` is the opt-in high-stakes variant. |
 | Different-lineage opinion | `second-opinion-review` | `cursor_default` | Current independent perspective route. |
-| Security review | `security-review` | `codex_review` | Current structured review role. |
+| Security review | `security-review` | `codex_frontier` | Frontier codex role at max, read-only by policy. |
 
 These are current registry and routing facts, not a fixed hierarchy among
 harnesses. Omit `--executor` to accept the configured archetype route (see

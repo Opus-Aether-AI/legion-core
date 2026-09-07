@@ -47,12 +47,12 @@
 acp = false
 task_file = true
 review = "prompt"
-# Every Claude role currently resolves to the same model, so a Claude-sourced
-# review is a second pass, not an independent opinion. That is why claude
-# stays LAST in [review].order: it is the reviewer of last resort, for when codex,
-# cursor and opencode are all unavailable. Genuine cross-model review comes from
-# those, not from here.
-review_model_ref = "claude_opus"
+# Claude reviews on claude_default (Opus 5), which is a DIFFERENT model from the
+# frontier role that authors frontend-polish (Fable 5.1) — so a Claude-sourced
+# review is now a real second lens within the lineage rather than the same model
+# twice. It is still same-VENDOR, so claude stays LAST in [review].order: genuine
+# cross-vendor review comes from codex, cursor and opencode first.
+review_model_ref = "claude_default"
 kind = "primary coding"
 adapter = "legion-claude"
 contract = "diff"

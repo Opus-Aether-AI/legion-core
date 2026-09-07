@@ -33,7 +33,7 @@ when the configured role changes the outcome.
 | Need | Archetype | Current role | Decision |
 |---|---|---|---|
 | Architecture or high-judgement decision | `architecture-decision` / `deep-reasoning` | `self` | Keep it with the active primary. |
-| Polished frontend pass | `frontend-polish` | `claude_opus` | Delegate only when the visual/a11y pass is worth a separate worker. |
+| Polished frontend pass | `frontend-polish` | `claude_frontier` | Delegate only when the visual/a11y pass is worth a separate worker. |
 | Final merge judgement | `final-review` | `claude_default` | Use the configured independent review role. |
 | Security review or hard bug | `security-review` / `hard-bug` | `codex_review` | Use the configured Codex review role. |
 | Different-lineage opinion | `second-opinion-review` | `cursor_default` | Use when an independent lens matters. |

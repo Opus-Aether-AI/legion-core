@@ -12,7 +12,8 @@ for an archetype:
 - `self` for primary-owned judgement,
 - `claude_frontier` for the current `frontend-polish` route,
 - `claude_default` for the current `final-review` route,
-- `codex_review` or `cursor_default` where their review archetypes apply.
+- `codex_frontier` for `security-review` / `hard-bug`, `codex_review` for routine
+  review, or `cursor_default` where their review archetypes apply.
 
 Those role mappings are current configuration facts, not an architectural
 preference for any harness. Use `legion-route --list` to inspect the policy

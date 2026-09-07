@@ -39,7 +39,7 @@ legion-self-learn hints --entity skill:legion-opencode-mode
 | Final adversarial review | `final-review` | `claude_default` | Current independent merge-judgement route. |
 | Large, well-specified implementation | `implement-feature` / `bulk-mechanical-edit` | `codex_workhorse` | Current bounded implementation route. |
 | Independent second opinion / tie-break | `second-opinion-review` / `cross-model-tiebreak` | `cursor_default` | Current distinct-lineage route. |
-| Security review | `security-review` | `codex_review` | Current structured review role. |
+| Security review | `security-review` | `codex_frontier` | Current structured review role. |
 | Routine edit with enough context | `self` | `self` | Inline work avoids handoff overhead. |
 
 These are current configuration facts. The role and executor may change with

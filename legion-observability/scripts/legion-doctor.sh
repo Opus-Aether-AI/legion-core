@@ -284,7 +284,11 @@ check_model_catalog() {
       if [[ -z "$hit" || "$hit" == "$generic" ]]; then
         mnames="${mnames:+$mnames, }$mid"; mbad=1
       fi
-    done < <(grep -oE '=[[:space:]]*"[^"]+"' "$mt" | grep -oE '"[^"]+"' | tr -d '"' | sort -u)
+      # Comments are stripped first: a quoted model id inside a trailing `#`
+      # comment is documentation, not a catalog entry, and flagging it would
+      # report a pricing gap that does not exist. The Python equivalent in
+      # tests/python/test_cost_table_parity.py strips the same way.
+    done < <(sed 's/#.*$//' "$mt" | grep -oE '=[[:space:]]*"[^"]+"' | grep -oE '"[^"]+"' | tr -d '"' | sort -u)
     if [[ "$mbad" -eq 0 ]]; then
       pass "every catalogued model has a specific costs.json row"
     else

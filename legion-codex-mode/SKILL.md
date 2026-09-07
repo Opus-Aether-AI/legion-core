@@ -35,7 +35,7 @@ when the configured role changes the outcome.
 | Architecture or high-judgement decision | `architecture-decision` / `deep-reasoning` | `self` | Keep it with the active primary. |
 | Polished frontend pass | `frontend-polish` | `claude_frontier` | Delegate only when the visual/a11y pass is worth a separate worker. |
 | Final merge judgement | `final-review` | `claude_default` | Use the configured independent review role. |
-| Security review or hard bug | `security-review` / `hard-bug` | `codex_review` | Use the configured Codex review role. |
+| Security review or hard bug | `security-review` / `hard-bug` | `codex_frontier` | Use the configured frontier Codex role; `codex_review` remains the routine reviewer. |
 | Different-lineage opinion | `second-opinion-review` | `cursor_default` | Use when an independent lens matters. |
 | Bounded implementation | `implement-feature` / `fix-bug` | `codex_workhorse` | Keep inline when you already have the context; otherwise use the route. |
 

@@ -233,12 +233,37 @@ is_quota_error() {
 # stream, and a stderr-only check has silently missed the case before (see the
 # reachability probe below, which had to be widened for exactly this reason).
 is_model_unavailable_error() {
-  local dir="$1" pattern
-  pattern='model[_ ]not[_ ]found|unknown model|model .* (does not exist|is not available|not enabled|is not enabled)|does not have access to (the )?model|not authorized to (use|access) .*model|model_not_enabled|unsupported_model|invalid_model|no access to model'
-  local f
-  for f in "$dir/codex.err" "$dir/stream.jsonl" "$dir/last-message.txt"; do
-    [[ -f "$f" ]] && grep -qiE "$pattern" "$f" && return 0
-  done
+  local dir="$1"
+  # Machine-emitted identity tokens ONLY. No free-form phrasing like
+  # "model ... does not exist": stdout carries the agent's own words, and a run in
+  # an ML repo whose transcript says "model checkpoint does not exist" would
+  # otherwise be misread as an unreachable model — the chain would advance, the
+  # task would rerun at full cost, and the real error would be buried. A missed
+  # detection costs one hard stop; a false one hides a genuine failure.
+  local tokens='model_not_found|model_not_enabled|unsupported_model|invalid_model|not_found_error'
+
+  # stderr has no envelope and is not the model talking, so match it textually.
+  [[ -f "$dir/codex.err" ]] && grep -qiE "$tokens" "$dir/codex.err" && return 0
+
+  # stdout is a JSON event stream in which agent messages and reasoning are
+  # ordinary items. Read it STRUCTURALLY and consider only error-shaped events,
+  # never message text. Malformed lines are skipped rather than fatal.
+  # Slurped and reduced to ONE boolean on purpose: `jq -e` takes its exit status
+  # from the LAST value it emits, so a per-line filter that matched on an early
+  # event and emitted false for a later one would report "no match".
+  if [[ -f "$dir/stream.jsonl" ]] && command -v jq >/dev/null 2>&1; then
+    jq -R -s -e '
+      [ split("\n")[] | fromjson? // empty
+        | .. | objects
+        | select((.type? // "" | tostring | ascii_downcase | test("error"))
+                 or (.error? != null))
+        | [ (.error?.code? // ""), (.error?.type? // ""), (.error?.message? // ""),
+            (.code? // ""), (.message? // "") ]
+        | map(tostring) | join(" ") | ascii_downcase
+        | test("model_not_found|model_not_enabled|unsupported_model|invalid_model|not_found_error")
+      ] | any
+    ' "$dir/stream.jsonl" >/dev/null 2>&1 && return 0
+  fi
   return 1
 }
 
@@ -817,8 +842,9 @@ dispatch_adapter() {
   # deliberately resolve a different one -- substituting an adapter is a
   # supported extension point -- and a foreign adapter has not agreed to any of
   # this, so it keeps the argv path.
-  local supports_task_file="false" sibling="$_self_dir/../bin/$adapter"
+  local supports_task_file="false" is_own_adapter=0 sibling="$_self_dir/../bin/$adapter"
   if [[ -x "$sibling" ]] && [[ "$adapter_bin" -ef "$sibling" ]]; then
+    is_own_adapter=1
     supports_task_file="$(jq -r '.task_file // false' <<<"$info")"
   fi
   if [[ "$supports_task_file" == "true" ]]; then
@@ -837,18 +863,47 @@ dispatch_adapter() {
       [[ "$do_apply" == "1" ]] && aargs+=(--apply)
       [[ "$keep" == "1" ]] && aargs+=(--keep)
       ;;
-    prompt)   # prompt executors (claude): task/model/repo + effort passthrough
-      [[ -n "$effort" ]] && aargs+=(--effort "$effort")
-      # An archetype's fallback_refs are SAME-VENDOR alternates (frontend-polish:
-      # Fable 5.1 -> Opus 5). The adapter's own --fallback-model is the
-      # cross-executor escape to codex, which is the wrong first move for a craft
-      # archetype: handing frontend polish to a codex model loses the reason the
-      # archetype exists. Try the vendor's own chain first, then let the adapter
-      # cross over if that is exhausted too.
-      [[ -n "${r_fallback:-}" ]] && aargs+=(--fallback-models "$r_fallback")
+    prompt)   # prompt executors: task/model/repo only; capabilities are added below
       ;;
     *) die "executor '$ex' has an unknown contract '$contract' in executors.toml." ;;
   esac
+
+  # ── Adapter capabilities, independent of I/O contract ──────────────────
+  # These used to live in the `prompt)` branch, which no registered executor
+  # reaches: claude declares contract = "diff". The effect was silent — an
+  # archetype could configure reasoning_effort = "max" and the adapter would run
+  # at its default, with nothing in the logs to say the level had been dropped.
+  # Capability is a property of the ADAPTER, so it is declared per executor in
+  # executors.toml and read here.
+  #
+  # is_own_adapter gates both for the same reason it gates --task-file: PATH may
+  # resolve an adapter from an older install that has never heard of a flag, and
+  # an unknown arg is fatal there. During a rollout the router is newer than the
+  # installed adapter, so passing blindly would take the executor down exactly
+  # when it is being upgraded.
+  local wants_effort wants_chain
+  wants_effort="$(jq -r '.effort // false' <<<"$info")"
+  wants_chain="$(jq -r '.model_chain // false' <<<"$info")"
+  if [[ -n "$effort" && "$wants_effort" == "true" ]]; then
+    if [[ "$is_own_adapter" -eq 1 ]]; then
+      aargs+=(--effort "$effort")
+    else
+      note "⚠ adapter for '$ex' is not this install's; running at its default effort, not '$effort'"
+    fi
+  fi
+  # An archetype's fallback_refs are SAME-VENDOR alternates (the frontier Claude
+  # role falling back to the default one). The adapter's own --fallback-model is
+  # the cross-executor escape to codex, which is the wrong FIRST move for a craft
+  # archetype: handing frontend polish to a codex model loses the reason the
+  # archetype exists. Try the vendor's own chain first, then let the adapter cross
+  # over if that is exhausted too.
+  if [[ -n "${r_fallback:-}" && "$wants_chain" == "true" ]]; then
+    if [[ "$is_own_adapter" -eq 1 ]]; then
+      aargs+=(--fallback-models "$r_fallback")
+    else
+      note "⚠ adapter for '$ex' predates --fallback-models; the same-vendor model chain is skipped"
+    fi
+  fi
   note "→ dispatch to $ex via $adapter${use_model:+ -m $use_model}"
   exec "$adapter_bin" "${aargs[@]}"
 }
@@ -924,6 +979,22 @@ cmd_run() {
   # --executor forces a specific harness (symmetric reverse-delegate: any primary
   # can hand work to any other harness). Apply it BEFORE the low-credit bias and the
   # dispatch below so both see the final resolved target.
+  # Drop the archetype's fallback chain when the forced executor REDIRECTS the
+  # route, for the same reason line ~822 drops the archetype's model: fallback_refs
+  # name models in the archetype's executor family, and a different harness may not
+  # be able to run any of them. Left in place, `--archetype hard-bug --executor
+  # claude` hands the Claude adapter a codex model to retry on, and `--archetype
+  # frontend-polish --executor codex` appends a Claude model to the codex chain.
+  # Harmless while every fallback list was empty; this change is what populates them.
+  #
+  # Only on a MISMATCH, though. fanout pre-resolves a route and then passes
+  # --executor naming that same executor, so a blanket clear would throw away a
+  # fallback the caller deliberately resolved. Compared before r_exec is
+  # overwritten, since afterwards the two are equal by construction.
+  if [[ -n "$forced_executor" && -n "$r_exec" && "$forced_executor" != "$r_exec" ]]; then
+    [[ -z "$r_fallback" ]] || note "⚠ --executor $forced_executor overrides the archetype's executor ($r_exec); dropping its fallback chain"
+    r_fallback=""
+  fi
   [[ -n "$forced_executor" ]] && r_exec="$forced_executor"
   # Non-native adapters resolve their own configured default through the
   # executor registry. Do the same for the native Codex path so an explicit
@@ -1557,7 +1628,14 @@ review_executor_unavailable() {
   # cursor's friendlier auth message, then codex's stdout quota event, then
   # codex's stdout AUTH event, which the quota-only copy did not match. New
   # terms go here, not into one branch.
-  local unavailable='usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated|authentication required|invalid_api_key|api[_ ]key.*(unset|missing|required|invalid)|please run .*login'
+  # model_not_found and friends belong here for the same reason quota does: a
+  # reviewer whose MODEL the account cannot run has not reviewed anything, but
+  # without these terms it reads as a reviewer that ran and rejected the change.
+  # A frontier model makes this live — GPT-6 ships disabled by default on
+  # Enterprise workspaces, so the configured reviewer can be unreachable on a
+  # correctly-configured install. Machine-emitted tokens only, never prose: this
+  # vocabulary is matched against stdout, which carries reviewer content.
+  local unavailable='usage limit|rate.?limit|quota|insufficient_quota|429|unauthorized|not authenticated|authentication required|invalid_api_key|api[_ ]key.*(unset|missing|required|invalid)|please run .*login|model_not_found|model_not_enabled|unsupported_model|invalid_model|not_found_error'
   # Codex reports a spent quota on STDOUT, inside its JSON event stream -- its
   # stderr carries only unrelated MCP OAuth noise. Checking stderr alone made
   # an out-of-quota reviewer look like an ordinary review failure, which is the

@@ -440,13 +440,24 @@ def test_no_role_resolves_to_a_retired_model():
     (The concrete id stays out of this file on purpose -- the catalogs are the
     only place model ids may appear, and that rule caught this docstring.)
     """
-    retired = {"claude-fa" + "ble-5"}
+    retired_line = "claude-fa" + "ble-5"
+    successor = retired_line + "-1"
     catalog = lr.load_models(MODELS_TABLE)
-    offenders = {role: model for role, model in catalog.items()
-                 if str(model).strip().lower() in retired}
+    # Ban the whole retired line, then carve out the ONE successor id. An exact
+    # match on the retired id alone was too loose: `<line>-latest`, a dated alias,
+    # or the bare family name all sit outside it while still resolving to retired
+    # weights, and each would be priced by the generic cost row at the retired
+    # cache-read rate. Anything on this line that is not exactly the successor is
+    # an offender, whatever role names it.
+    offenders = {}
+    for role, model in catalog.items():
+        normalized = str(model).strip().lower()
+        if normalized.startswith(retired_line) and normalized != successor:
+            offenders[role] = model
     assert not offenders, (
         f"retired model still routable: {offenders}. Retiring a model means no "
-        f"role resolves to it, in every config that ships."
+        f"role resolves to it — including aliases and dated snapshots of the same "
+        f"line — in every config that ships. Only {successor!r} is permitted."
     )
 
 

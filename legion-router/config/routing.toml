@@ -228,7 +228,7 @@ model_ref = "codex_frontier"
 sandbox = "read-only"
 reasoning_effort = "max"
 fallback_refs = ["codex_review"]
-note = "Adversarial security review — the FRONTIER codex role at max (auth/secrets/input surfaces). Astra is assessed at the Critical cybersecurity capability level, which is exactly why it is the best reviewer here AND why this archetype stays read-only: it may find zero-days, so it must never hold a write handle. Falls back to codex_review when the frontier model is unavailable."
+note = "Adversarial security review — the FRONTIER codex role at max (auth/secrets/input surfaces). The frontier model is assessed at the Critical cybersecurity capability level, which is exactly why it is the best reviewer here AND why this archetype stays read-only: it may find exploitable defects, so it must never hold a write handle. fallback_refs applies on the `legion-delegate run` path; `legion-delegate review` instead walks [review].order to the NEXT EXECUTOR, since a reviewer's independence comes from its lineage rather than its model tier."
 
 [archetypes.hard-bug]
 executor = "codex"

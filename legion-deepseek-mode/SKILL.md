@@ -41,7 +41,7 @@ documented headless flag that disables write tools.
 | Architecture / high-judgement decision | `architecture-decision` / `deep-reasoning` | `self` | Keep primary-owned judgement inline. |
 | Final merge judgement | `final-review` | `claude_default` | Use the current configured review route. |
 | Different-lineage opinion | `second-opinion-review` | `cursor_default` | Use when a distinct perspective matters. |
-| Structured security review | `security-review` | `codex_review` | Do not send this to DeepSeek: it cannot review. |
+| Structured security review | `security-review` | `codex_frontier` | Do not send this to DeepSeek: it cannot review. |
 
 The mapping is a current configuration fact from `routing.toml`,
 `executors.toml`, and `models.toml`. Inspect `legion-route --list` and

@@ -364,18 +364,51 @@ def test_hard_and_security_review_use_codex_frontier_but_final_review_stays_defa
     assert lr.resolve(t, "final-review-frontier", m)["sandbox"] == "read-only"
 
 
-def test_bulk_lanes_reach_the_frontier_only_through_fallback():
-    """The bulk lanes may NAME a frontier role, but only as a quota fallback.
+def test_migration_uses_sol_precision_lane_with_terra_fallback():
+    """High-rework migrations use Sol without repricing routine implementation."""
+    t, m = table(), models()
+    route = lr.resolve(t, "migration", m)
 
-    This is the line between "escalates when it must" and "quietly became the
-    default": a frontier model as `model_ref` on a high-volume archetype is the
-    single most expensive mistake available in this file.
+    assert route["executor"] == "codex"
+    assert route["model_ref"] == "codex_precision"
+    assert route["model"] == m["codex_precision"]
+    assert route["model"] not in {m["codex_workhorse"], m["codex_frontier"]}
+    assert route["sandbox"] == "workspace-write"
+    assert route["reasoning_effort"] == "high"
+    assert route["fallback"] == [m["codex_workhorse"]]
+
+
+def test_bulk_lanes_step_through_precision_before_frontier_fallback():
+    """Bulk lanes stay on Terra and do not jump straight to the priciest tier.
+
+    This is the line between "escalates when it must" and "quietly became
+    premium": normal volume starts on Terra, tries Sol when Terra is unavailable,
+    and reaches Astra only after both GPT-5.6 roles decline the job.
     """
     t, m = table(), models()
     for a in ("implement-feature", "parallel-codegen"):
         r = lr.resolve(t, a, m)
         assert r["model"] == m["codex_workhorse"], f"{a} must run on the workhorse"
-        assert m["codex_frontier"] in r["fallback"], f"{a} should escalate to the frontier on quota"
+        assert r["fallback_refs"] == ["codex_precision", "codex_frontier"]
+        assert r["fallback"] == [m["codex_precision"], m["codex_frontier"]]
+
+
+def test_frontier_implementation_falls_back_through_sol_before_terra():
+    t, m = table(), models()
+
+    hard_bug = lr.resolve(t, "hard-bug", m)
+    assert hard_bug["fallback_refs"] == ["codex_precision"]
+    assert hard_bug["fallback"] == [m["codex_precision"]]
+
+    perf = lr.resolve(t, "perf-optimization", m)
+    assert perf["fallback_refs"] == ["codex_precision", "codex_workhorse"]
+    assert perf["fallback"] == [m["codex_precision"], m["codex_workhorse"]]
+
+    # Security fallback retains review semantics even while both roles currently
+    # resolve to Sol; the two can diverge independently in a future model update.
+    security = lr.resolve(t, "security-review", m)
+    assert security["fallback_refs"] == ["codex_review"]
+    assert security["fallback"] == [m["codex_review"]]
 
 
 def test_cheap_bulk_uses_cheapest_gpt_tier():

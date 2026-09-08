@@ -329,11 +329,11 @@
       "id": "route.migration",
       "type": "route",
       "dimension": "routing",
-      "summary": "Migrations use configured Codex workspace-write.",
+      "summary": "High-rework-risk migrations use the Sol precision role with Codex workspace-write.",
       "archetype": "migration",
       "expect": {
         "executor": "codex",
-        "model_ref": "codex_workhorse",
+        "model_ref": "codex_precision",
         "sandbox": "workspace-write",
         "reasoning_effort": "high"
       },

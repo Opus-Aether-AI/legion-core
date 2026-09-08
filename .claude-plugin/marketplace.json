@@ -13,7 +13,7 @@
       "name": "legion-router",
       "source": "./legion-router",
       "description": "Legion's registry-driven router: scoped delegation across Claude, Codex, Cursor, opencode, DeepSeek Harness, Hermes, and Pi. Adapters return an isolated-worktree diff and evidence; usage is reported only where the provider publishes a usable contract. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, and the shared cost table.",
-      "version": "0.9.0",
+      "version": "0.9.1",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",
@@ -37,7 +37,7 @@
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic repeated gates, legion-self-learn evidence/proposals, review-only legion-improve draft PRs, legion-trace, legion-otel-export, and legion-doctor verification.",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -132,7 +132,7 @@
       "name": "legion-codex-mode",
       "source": "./legion-codex-mode",
       "description": "The Codex-primary routing guide for Legion. Keeps the active primary inline where it has context and routes bounded work by configured archetype and model role, rather than treating another harness as the default secondary. Also maps Codex-native MCPs, mirrored skills, and bridged commands/agents.",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "category": "agent-orchestration",
       "keywords": [
         "codex",

@@ -12,12 +12,15 @@
 # routes to it. Every Claude role runs on CLAUDE CODE (the `claude` executor),
 # never piped through Cursor.
 #
-# TIERS. The catalog is deliberately two-tier, because the frontier models cost
-# 2x Opus 5 and 5x gpt-5.6-terra on output:
+# TIERS. The catalog separates capability from volume so a stronger model can
+# be selected when avoiding rework matters more than its higher per-token rate:
 #
 #   frontier   Fable 5.1 / GPT-6 Astra. Reserved for the hard end -- deep bugs,
 #              perf work, adversarial security review, frontend craft. Routed by
 #              a small, named set of archetypes, never by the bulk lanes.
+#   precision  gpt-5.6-sol. Costs 2x Terra on input and 1.67x on output, so it
+#              can be cheaper end to end when one careful pass avoids a second
+#              implementation/review cycle. Used for high-rework-risk work.
 #   workhorse  Opus 5 / gpt-5.6-terra / Grok 4.6. Carries the volume: scoped
 #              implementation, tests, refactors, routine review.
 #   cheap      gpt-5.6-luna. Bounded, mechanical, reversible work only.
@@ -45,6 +48,9 @@ codex_frontier      = "gpt-6-astra"       # hard bugs, perf work, adversarial se
 # ── Anthropic Claude on CLAUDE CODE (the `claude` executor / self) ──
 claude_orchestrator = "claude-opus-5"    # self: orchestration / architecture / deep reasoning (run at high)
 claude_default      = "claude-opus-5"    # generic Claude / reverse-delegate target / frontend review
+
+# ── OpenAI GPT-5.6 Sol (Codex) — precision implementation lane ─────
+codex_precision     = "gpt-5.6-sol"      # high-rework-risk implementation where fewer passes can lower total cost
 
 # ── OpenAI GPT-5.6 (Codex) — the workhorse lane ────────────────────
 codex_workhorse     = "gpt-5.6-terra"    # persistent scoped implementation

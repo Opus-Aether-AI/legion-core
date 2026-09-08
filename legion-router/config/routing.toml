@@ -27,13 +27,18 @@
 # Each harness translates the level to its own mechanism (codex
 # `-c model_reasoning_effort`; cursor via the model id; claude `--effort`).
 #
-# TIER POLICY. models.toml is two-tier and the split is a COST decision, not a
-# quality one: the frontier roles (claude_frontier / codex_frontier) bill roughly
-# 2x claude_default and 5x codex_workhorse on output. Exactly five archetypes route to them —
+# TIER POLICY. The split is a TOTAL-COST decision, not a claim that the cheapest
+# token always produces the cheapest accepted result. The frontier roles
+# (claude_frontier / codex_frontier) bill roughly 2x claude_default and 5x
+# codex_workhorse on output. The Codex precision role (Sol) sits between Terra
+# and Astra: 2x Terra on input and 1.67x on output, so it wins only when its
+# stronger pass avoids enough rework. Exactly five archetypes route to frontier —
 # frontend-polish, hard-bug, perf-optimization, security-review, and the opt-in
 # final-review-frontier — because those are low-volume and high-judgement-per-call.
-# The bulk lanes (implement-feature, parallel-codegen) name a frontier role only in
-# `fallback_refs`, so it is reached on quota exhaustion, never by default.
+# Migration is the controlled precision lane because cross-surface mistakes are
+# expensive; routine codemods remain bulk-mechanical-edit. The bulk lanes
+# (implement-feature, parallel-codegen) step through precision before frontier in
+# `fallback_refs`, so neither premium tier is reached by default.
 # Moving another archetype to a frontier role needs a measured reason recorded here.
 #
 # `self` archetypes stay with the PRIMARY harness (whoever is driving the session,
@@ -84,8 +89,8 @@ executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "high"
-fallback_refs = ["codex_frontier"]
-note = "A fully-specced, bounded feature slice. The bulk lane stays on the workhorse: the frontier role is 5x its output price and terra already completes this shape. Escalate only hard or persistent work to max, or to hard-bug."
+fallback_refs = ["codex_precision", "codex_frontier"]
+note = "A fully-specced, bounded feature slice. The bulk lane stays on Terra: try Sol only when Terra is unavailable, then Astra after both GPT-5.6 roles decline. Escalate semantically high-rework work to migration or hard-bug instead of silently repricing this lane."
 
 [archetypes.scout]
 executor = "codex"
@@ -157,8 +162,8 @@ executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "max"
-fallback_refs = ["codex_frontier"]
-note = "Independent, fully-specified modules generated while the primary coordinates. Workhorse by default — parallel slices multiply cost, so the frontier role is the quota fallback, not the default."
+fallback_refs = ["codex_precision", "codex_frontier"]
+note = "Independent, fully-specified modules generated while the primary coordinates. Parallel slices multiply cost, so Terra remains the default; quota fallback climbs through Sol before Astra instead of jumping directly to the priciest tier."
 
 [archetypes.cheap-bulk]
 executor = "codex"
@@ -186,11 +191,11 @@ note = "Scaffolding, config, repetitive plumbing — require a narrow file scope
 
 [archetypes.migration]
 executor = "codex"
-model_ref = "codex_workhorse"
+model_ref = "codex_precision"
 sandbox = "workspace-write"
 reasoning_effort = "high"
-fallback_refs = []
-note = "Codemod / dependency / API migration across the codebase."
+fallback_refs = ["codex_workhorse"]
+note = "Cross-surface dependency/API migration where a wrong first pass creates expensive rework. Sol is 2x Terra on input and 1.67x on output, so this lane tests the total-cost hypothesis that one stronger pass can beat two workhorse passes; routine mechanical codemods stay on bulk-mechanical-edit. Fall back to Terra when Sol is unavailable."
 
 # ── Cross-model judgement; max is reserved for hard execution ──────────
 [archetypes.final-review]
@@ -235,13 +240,13 @@ executor = "codex"
 model_ref = "codex_frontier"
 sandbox = "workspace-write"
 reasoning_effort = "max"
-fallback_refs = ["codex_review"]
-note = "A deep/tricky bug needing the strongest coder — the FRONTIER codex role at max. This is where the 2.5x price over codex_review earns its keep; routine bugs belong on fix-bug."
+fallback_refs = ["codex_precision"]
+note = "A deep/tricky bug needing the strongest coder — the FRONTIER codex role at max. Fall back to the Sol implementation role when Astra is unavailable; routine bugs belong on fix-bug."
 
 [archetypes.perf-optimization]
 executor = "codex"
 model_ref = "codex_frontier"
 sandbox = "workspace-write"
 reasoning_effort = "max"
-fallback_refs = ["codex_workhorse"]
-note = "Latency/throughput optimization with measured tradeoffs — frontier role, low call volume, high judgement per call."
+fallback_refs = ["codex_precision", "codex_workhorse"]
+note = "Latency/throughput optimization with measured tradeoffs — frontier role, low call volume, high judgement per call. If Astra is unavailable, preserve judgement by trying Sol before the Terra workhorse."

@@ -138,6 +138,7 @@ _make_good() {
 case "$1" in
   implement-feature) printf '%s\n' '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}' ;;
   final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"test-model-claude","sandbox":"read-only","resolved":true}' ;;
+  --executor-info) printf '%s\n' '{"kind":"primary coding","review":"prompt"}' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -164,6 +165,64 @@ EOF
   [[ "$output" == *"tomllib unavailable"* ]]
 }
 
+_review_route_fixture() {
+  fake="$BATS_TEST_TMPDIR/fake-configured-review"
+  mkdir -p "$fake"
+  export TEST_REVIEW_EXECUTOR=codex TEST_REVIEW_SANDBOX=read-only TEST_REVIEW_CAPABILITY=native
+  cat > "$fake/legion-route" <<'EOF'
+#!/bin/sh
+case "$1" in
+  implement-feature)
+    printf '%s\n' '{"executor":"codex","model":"test-model","sandbox":"workspace-write","resolved":true}' ;;
+  final-review)
+    jq -n --arg executor "$TEST_REVIEW_EXECUTOR" --arg sandbox "$TEST_REVIEW_SANDBOX" \
+      '{executor:$executor,model:"configured-review-model",sandbox:$sandbox,resolved:true}' ;;
+  --executor-info)
+    [ "$2" != unknown ] || { echo "unknown executor" >&2; exit 2; }
+    jq -n --arg review "$TEST_REVIEW_CAPABILITY" '{kind:"primary coding",review:$review}' ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "$fake/legion-route"
+}
+
+@test "doctor: route-smoke accepts a configured independent Codex reviewer" {
+  _review_route_fixture
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS"* ]]
+}
+
+@test "doctor: route-smoke accepts another registered prompt reviewer" {
+  _review_route_fixture
+  export TEST_REVIEW_EXECUTOR=cursor TEST_REVIEW_CAPABILITY=prompt
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 0 ]
+}
+
+@test "doctor: route-smoke rejects self-review and a writable reviewer" {
+  _review_route_fixture
+  export TEST_REVIEW_EXECUTOR=self
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"independent read-only reviewer"* ]]
+  export TEST_REVIEW_EXECUTOR=codex TEST_REVIEW_SANDBOX=workspace-write
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+}
+
+@test "doctor: route-smoke rejects unknown executors and missing review capability" {
+  _review_route_fixture
+  export TEST_REVIEW_EXECUTOR=unknown
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unknown executor"* ]]
+  export TEST_REVIEW_EXECUTOR=codex TEST_REVIEW_CAPABILITY=none
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not support code review"* ]]
+}
+
 @test "doctor: state-root auto-resolves when LEGION_STATE_ROOT is missing" {
   HOME="$BATS_TEST_TMPDIR/home" \
     LEGION_STATE_ROOT= LEGION_TELEMETRY_DIR= LEGION_REGISTRY_DIR= \
@@ -181,6 +240,7 @@ EOF
 case "$1" in
   implement-feature) printf '%s\n' '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}' ;;
   final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"test-model-claude","sandbox":"read-only","resolved":true}' ;;
+  --executor-info) printf '%s\n' '{"kind":"primary coding","review":"prompt"}' ;;
   *) exit 2 ;;
 esac
 EOF

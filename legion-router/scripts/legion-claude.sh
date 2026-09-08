@@ -88,6 +88,49 @@ has_low_claude_credit() {
   printf '%s' "${LEGION_LOW_CREDIT:-}" | grep -qi 'claude'
 }
 
+# True when the failure is "this Claude model would not or could not take the job"
+# rather than "the job failed" — the two cases a same-vendor model chain exists to
+# survive:
+#
+#   refusal          Fable 5.1 can decline a request outright (HTTP 200, a refusal
+#                    stop reason). Retrying the SAME model is pointless; a sibling
+#                    Claude model usually takes it.
+#   model unreachable the account cannot run this model id at all.
+#
+# The CLI puts the explanation in `.result` — the model's own prose — so that text
+# has to be read, but only AFTER two structural gates that a delegated task cannot
+# forge from its own output. Without them, a task whose subject is refusals or
+# model ids (reviewing this very file, say) would match its own words and silently
+# reroute itself.
+claude_model_declined() {
+  local out_file="$1" err_file="$2"
+  [[ -s "$out_file" ]] || return 1
+  # Two STRUCTURAL gates before any text is considered, because the only text
+  # available is `.result` — the model's own prose. A run whose subject is model
+  # ids or refusals (reviewing this very file, say) must not reroute itself.
+  #
+  #   is_error         a successful run is never a decline, whatever it says
+  #   terminal_reason  "api_error" means the CLI never got a usable turn; an
+  #                    ordinary task failure carries a different reason
+  #
+  # The envelope shape is taken from the real CLI, not inferred: an unrouteable
+  # model returns type=result, subtype=success, is_error=true,
+  # terminal_reason=api_error, stop_reason=stop_sequence, with the explanation in
+  # `.result`. Note subtype is "success" and stop_reason is unremarkable — keying
+  # on either of those would miss every case this exists for.
+  jq -e '
+      (.is_error? == true)
+      and ((.terminal_reason? // "" | tostring | ascii_downcase) == "api_error")
+      and ((.result? // "" | tostring | ascii_downcase)
+            | test("issue with the selected model|model_not_found|not_found_error|invalid_model|unsupported_model|may not exist or you may not have access|does not have access to (the )?model|refus(e|ed|al)"))
+    ' "$out_file" >/dev/null 2>&1 && return 0
+  # stderr carries no envelope, so it is matched textually — but only on
+  # machine-emitted identity tokens, never on a bare word like "refusal".
+  [[ -s "$err_file" ]] && grep -qiE \
+    'model_not_found|not_found_error|invalid_model|unsupported_model|unknown model' \
+    "$err_file"
+}
+
 is_limit_text() {
   printf '%s' "$1" | grep -qiE 'usage limit|rate.?limit|quota|exceeded|too many requests|overloaded|capacity|reached your'
 }
@@ -178,7 +221,9 @@ run_fallback() {
 
 cmd_run() {
   local default_model="" default_fallback_model=""
+  local attempt_model="" claude_chain_note=""
   local task="" model="${LEGION_CLAUDE_MODEL:-${CLAUDE_MODEL:-}}" repo="$PWD" fallback_model="${LEGION_CLAUDE_FALLBACK_MODEL:-${CODEX_MODEL:-}}"
+  local fallback_models="${LEGION_CLAUDE_FALLBACK_MODELS:-}"
   local allow_fallback=1 tmpdir="" out_file="" err_file="" artifacts="{}"
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
@@ -201,6 +246,10 @@ cmd_run() {
       --quiet) QUIET=1; shift ;;
       --no-fallback) allow_fallback=0; shift ;;
       --fallback-model) fallback_model="$2"; shift 2 ;;
+      # Same-vendor Claude alternates, comma-separated, tried in order BEFORE the
+      # cross-executor --fallback-model. Distinct flags because they are different
+      # escapes: this one keeps the lineage, that one leaves it.
+      --fallback-models) fallback_models="$2"; shift 2 ;;
       --effort) effort="$2"; shift 2 ;;                       # reasoning effort passthrough
       --append-system-prompt) append_sys="$2"; shift 2 ;;     # extra system prompt passthrough
       --dangerously-skip-permissions) skip_perms=1; shift ;;  # autonomous headless runs (opt-in)
@@ -316,21 +365,75 @@ cmd_run() {
     return 1
   fi
 
-  local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
-  [[ "$sandbox" == "read-only" ]] && claude_cmd+=(--permission-mode plan)
-  [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
-  [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
-  [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
-  note "→ ${claude_cmd[*]}"
+  # Same-vendor model chain: the routed model first, then the archetype's
+  # fallback_refs. Only a refusal or an unreachable model advances it — a real
+  # failure stops on the model that produced it, so the chain is never burned
+  # hiding a genuine error. The loop wraps ONLY the CLI invocation: worktree diff
+  # capture and result parsing below run once, against whichever model answered.
+  local -a claude_model_chain=("$model")
+  if [[ -n "$fallback_models" ]]; then
+    local _fb_model
+    while IFS= read -r _fb_model; do
+      [[ -n "$_fb_model" ]] || continue
+      [[ " ${claude_model_chain[*]} " == *" $_fb_model "* ]] && continue   # dedup
+      claude_model_chain+=("$_fb_model")
+      # printf '%s\n', not '%s': without the trailing newline the final field is
+      # unterminated, `read` returns false on it, and the loop body never runs for
+      # the LAST model. A single-entry chain — which is every archetype with one
+      # fallback_ref — would silently degrade to no chain at all.
+    done < <(printf '%s\n' "$fallback_models" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  fi
+
   start_ms="$(date +%s000)"
-  set +e
-  printf '%s' "$task" | (
-    legion_activate_executor_context "$RUN_ID" claude
-    cd "${wt:-$repo}"
-    "${claude_cmd[@]}"
-  ) >"$out_file" 2>"$err_file"
-  rc=${PIPESTATUS[1]}
-  set -e
+  local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0 chain_cost=0
+  for attempt_model in "${claude_model_chain[@]}"; do
+    chain_idx=$(( chain_idx + 1 ))
+    model="$attempt_model"
+    local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
+    [[ "$sandbox" == "read-only" ]] && claude_cmd+=(--permission-mode plan)
+    [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
+    [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
+    [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
+    note "→ ${claude_cmd[*]}"
+    set +e
+    printf '%s' "$task" | (
+      legion_activate_executor_context "$RUN_ID" claude
+      cd "${wt:-$repo}"
+      "${claude_cmd[@]}"
+    ) >"$out_file" 2>"$err_file"
+    rc=${PIPESTATUS[1]}
+    set -e
+    if ! claude_model_declined "$out_file" "$err_file"; then
+      declined_final=0
+      break
+    fi
+    # Every model so far has declined. If this was the last one, the chain is
+    # exhausted and the run must NOT report success: a refusal comes back as a
+    # well-formed 200 with rc 0 and is_error false, so without this flag the
+    # refusal text would be handed back as the result of a "successful" run.
+    declined_final=1
+    # A decline still burns input tokens — the prompt was sent and read. Only the
+    # LAST attempt's stdout survives (each iteration overwrites out_file), so bank
+    # this attempt's cost now or it disappears from the record entirely. On a large
+    # prompt at frontier rates that is real money silently unaccounted for, in a
+    # system whose whole point is honest cost attribution.
+    local _declined_usage _declined_cost
+    _declined_usage="$(usage_json "$out_file")"
+    _declined_cost="$(cost_from_usage "$model" "$_declined_usage" 2>/dev/null || printf '0')"
+    chain_cost="$(awk -v a="$chain_cost" -v b="$_declined_cost" 'BEGIN{printf "%.6f", a + b}')"
+    claude_chain_note="${claude_chain_note}${claude_chain_note:+; }$model"
+    if [[ "$chain_idx" -lt "$chain_len" ]]; then
+      note "⚠ $model declined the task or is unreachable — trying the next Claude model"
+    else
+      note "⚠ $model declined the task or is unreachable — no Claude models left in the chain"
+    fi
+  done
+  # Which models were skipped, and why, has to survive into the record. Only the
+  # LAST attempt's stdout is kept (each iteration overwrites it), so without this
+  # a run that quietly cost two model calls is indistinguishable from one that
+  # cost a single call on the second model. Same limitation as the codex fallback
+  # loop in delegate.sh, which also reports only its final attempt's usage.
+  [[ -n "$claude_chain_note" ]] && note "model chain: declined by $claude_chain_note → answered by $model"
 
   if [[ -n "$wt" ]]; then
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
@@ -362,8 +465,9 @@ cmd_run() {
       wt_report="(removed; rerun with --keep to retain the worktree)"
     fi
     artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" \
-      --arg wt "$wt_report" --arg diff "$diff_path" \
-      '{stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff}')"
+      --arg wt "$wt_report" --arg diff "$diff_path" --arg declined "$claude_chain_note" \
+      '{stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff}
+       + (if $declined == "" then {} else {declined_models:$declined} end)')"
     export LEGION_CLAUDE_WORKTREE="$wt_report" LEGION_CLAUDE_DIFF="$diff_path"
   fi
   end_ms="$(date +%s000)"
@@ -378,6 +482,14 @@ cmd_run() {
       cost="$(jq -r '.total_cost_usd' "$out_file")"
     else
       cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || printf '0')"
+    fi
+    # Add what the declined attempts already burned. Both figures the CLI can give
+    # us — total_cost_usd and the usage-derived one — describe the LAST attempt
+    # only, because out_file was overwritten each time round the chain. `usage`
+    # stays the answering model's, since mixing token counts across models would
+    # make the per-model rollups meaningless; only the dollars aggregate.
+    if [[ "$chain_cost" != "0" ]]; then
+      cost="$(awk -v a="$cost" -v b="$chain_cost" 'BEGIN{printf "%.6f", a + b}')"
     fi
   fi
 
@@ -400,7 +512,10 @@ cmd_run() {
     return 1
   fi
 
-  if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" ]]; then
+  # declined_final gates the success path: a refusal returns rc 0, valid JSON and
+  # is_error false, so an exhausted chain would otherwise report ok and hand back
+  # the refusal text as the run's result.
+  if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" && "$declined_final" -eq 0 ]]; then
     status="ok"
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
@@ -411,7 +526,12 @@ cmd_run() {
     return 0
   fi
 
-  if { [[ "$is_error" == "true" ]] || [[ "$rc" -ne 0 ]]; } && is_limit_text "$combined_text"; then
+  if [[ "$declined_final" -eq 1 ]]; then
+    # Distinct from claude_error: nothing went wrong mechanically, every model
+    # in the chain declined or was unreachable. Downstream can tell "the work
+    # failed" from "this vendor would not take the work".
+    reason="claude_declined"
+  elif { [[ "$is_error" == "true" ]] || [[ "$rc" -ne 0 ]]; } && is_limit_text "$combined_text"; then
     reason="claude_limit"
   else
     reason="claude_error"

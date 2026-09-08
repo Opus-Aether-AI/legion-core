@@ -27,6 +27,15 @@
 # Each harness translates the level to its own mechanism (codex
 # `-c model_reasoning_effort`; cursor via the model id; claude `--effort`).
 #
+# TIER POLICY. models.toml is two-tier and the split is a COST decision, not a
+# quality one: the frontier roles (claude_frontier / codex_frontier) bill roughly
+# 2x claude_default and 5x codex_workhorse on output. Exactly five archetypes route to them —
+# frontend-polish, hard-bug, perf-optimization, security-review, and the opt-in
+# final-review-frontier — because those are low-volume and high-judgement-per-call.
+# The bulk lanes (implement-feature, parallel-codegen) name a frontier role only in
+# `fallback_refs`, so it is reached on quota exhaustion, never by default.
+# Moving another archetype to a frontier role needs a measured reason recorded here.
+#
 # `self` archetypes stay with the PRIMARY harness (whoever is driving the session,
 # resolved by `legion-route --primary`). Their `model_ref` is a catalog default;
 # each non-Claude primary runs its own configured inline model.
@@ -75,8 +84,8 @@ executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "high"
-fallback_refs = []
-note = "A fully-specced, bounded feature slice. Escalate only hard or persistent work to max."
+fallback_refs = ["codex_frontier"]
+note = "A fully-specced, bounded feature slice. The bulk lane stays on the workhorse: the frontier role is 5x its output price and terra already completes this shape. Escalate only hard or persistent work to max, or to hard-bug."
 
 [archetypes.scout]
 executor = "codex"
@@ -98,18 +107,18 @@ note = "Layout / component structure / design intent stays with the primary (imp
 
 [archetypes.frontend-polish]
 executor = "claude"
-model_ref = "claude_opus"
+model_ref = "claude_frontier"
 sandbox = "workspace-write"
 reasoning_effort = "high"
-fallback_refs = []
-note = "The polish / a11y / responsive / motion pass runs on OPUS via Claude Code (Opus + impeccable = the best frontend craft combo), verified by screenshot. Claude models run on Claude Code, never Cursor."
+fallback_refs = ["claude_default"]
+note = "The polish / a11y / responsive / motion pass runs on the FRONTIER Claude role via Claude Code (Fable 5.1 + impeccable = the best frontend craft combo), verified by screenshot. Claude models run on Claude Code, never Cursor."
 
 [archetypes.frontend-review]
 executor = "claude"
 model_ref = "claude_default"
 sandbox = "read-only"
 reasoning_effort = "high"
-note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Signed off on Claude Code. This is the SAME model that did the polish, so it is a second look rather than an independent lens; route to the Cursor or Codex review roles when independence matters."
+note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Signed off on Claude Code. This is a DIFFERENT model from the one that did the polish (claude_default = Opus 5 vs claude_frontier = Fable 5.1), so it is a genuine second lens within the Claude lineage; route to the Cursor or Codex review roles when cross-VENDOR independence matters."
 
 [archetypes.write-tests]
 executor = "codex"
@@ -148,8 +157,8 @@ executor = "codex"
 model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "max"
-fallback_refs = []
-note = "Independent, fully-specified modules generated while the primary coordinates."
+fallback_refs = ["codex_frontier"]
+note = "Independent, fully-specified modules generated while the primary coordinates. Workhorse by default — parallel slices multiply cost, so the frontier role is the quota fallback, not the default."
 
 [archetypes.cheap-bulk]
 executor = "codex"
@@ -189,7 +198,15 @@ executor = "claude"
 model_ref = "claude_default"
 sandbox = "read-only"
 reasoning_effort = "high"
-note = "Final merge judgement and simplification pass — the primary reviews Codex output from an independent lens."
+note = "Final merge judgement and simplification pass — the primary reviews Codex output from an independent lens. Stays on the workhorse Claude role because it fires on EVERY run; reach for final-review-frontier when the merge is high-stakes."
+
+[archetypes.final-review-frontier]
+executor = "claude"
+model_ref = "claude_frontier"
+sandbox = "read-only"
+reasoning_effort = "max"
+fallback_refs = ["claude_default"]
+note = "Opt-in high-stakes merge gate: the same job as final-review on the FRONTIER Claude role at max. Never a default route — ask for it by archetype when the cost of a bad merge exceeds the cost of the review (releases, migrations, security-adjacent merges)."
 
 [archetypes.second-opinion-review]
 executor = "cursor"
@@ -207,23 +224,24 @@ note = "Break a tie between two plausible approaches with an independent Grok ve
 
 [archetypes.security-review]
 executor = "codex"
-model_ref = "codex_review"
+model_ref = "codex_frontier"
 sandbox = "read-only"
 reasoning_effort = "max"
-note = "Adversarial security review — use the codex_review ref at max (auth/secrets/input surfaces)."
+fallback_refs = ["codex_review"]
+note = "Adversarial security review — the FRONTIER codex role at max (auth/secrets/input surfaces). The frontier model is assessed at the Critical cybersecurity capability level, which is exactly why it is the best reviewer here AND why this archetype stays read-only: it may find exploitable defects, so it must never hold a write handle. fallback_refs applies on the `legion-delegate run` path; `legion-delegate review` instead walks [review].order to the NEXT EXECUTOR, since a reviewer's independence comes from its lineage rather than its model tier."
 
 [archetypes.hard-bug]
 executor = "codex"
-model_ref = "codex_review"
+model_ref = "codex_frontier"
 sandbox = "workspace-write"
 reasoning_effort = "max"
-fallback_refs = []
-note = "A deep/tricky bug needing the strongest coder — use the codex_review ref at max."
+fallback_refs = ["codex_review"]
+note = "A deep/tricky bug needing the strongest coder — the FRONTIER codex role at max. This is where the 2.5x price over codex_review earns its keep; routine bugs belong on fix-bug."
 
 [archetypes.perf-optimization]
 executor = "codex"
-model_ref = "codex_workhorse"
+model_ref = "codex_frontier"
 sandbox = "workspace-write"
 reasoning_effort = "max"
-fallback_refs = []
-note = "Latency/throughput optimization with measured tradeoffs."
+fallback_refs = ["codex_workhorse"]
+note = "Latency/throughput optimization with measured tradeoffs — frontier role, low call volume, high judgement per call."

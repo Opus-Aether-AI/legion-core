@@ -182,7 +182,8 @@ let minimaxFailCount = 0;
 let minimaxCircuitOpenUntil = 0;
 
 // ── Per-model cost (single source of truth: ../config/costs.json) ───
-interface CostRow { match: string; input: number; output: number; cache_read: number; cache_write: number }
+interface LongContextTier { threshold_input_tokens: number; input_multiplier?: number; output_multiplier?: number }
+interface CostRow { match: string; input: number; output: number; cache_read: number; cache_write: number; long_context?: LongContextTier }
 interface CostTable { models: CostRow[]; default: Omit<CostRow, "match"> }
 let COST_TABLE: CostTable | null = null;
 try {
@@ -196,8 +197,17 @@ function costForModel(model: string, input: number, output: number, cacheRead = 
 	if (!COST_TABLE) return 0;
 	const m = model.toLowerCase();
 	const p = COST_TABLE.models.find((r) => m.includes(r.match)) ?? COST_TABLE.default;
-	const usd = (input / 1e6) * (p.input ?? 0) + (output / 1e6) * (p.output ?? 0)
-		+ (cacheRead / 1e6) * (p.cache_read ?? 0) + (cacheWrite / 1e6) * (p.cache_write ?? 0);
+	// SCHEMA v3 long-context tier: above the threshold the whole prompt reprices.
+	// Rows without the block keep v2 behaviour (both multipliers are 1).
+	const lc = (p as CostRow).long_context;
+	const prompt = input + cacheRead + cacheWrite;
+	const overThreshold = lc != null && prompt > lc.threshold_input_tokens;
+	const inMult = overThreshold ? (lc.input_multiplier ?? 1) : 1;
+	const outMult = overThreshold ? (lc.output_multiplier ?? 1) : 1;
+	const usd = (input / 1e6) * (p.input ?? 0) * inMult
+		+ (cacheRead / 1e6) * (p.cache_read ?? 0) * inMult
+		+ (cacheWrite / 1e6) * (p.cache_write ?? 0) * inMult
+		+ (output / 1e6) * (p.output ?? 0) * outMult;
 	return Math.round(usd * 1e6) / 1e6;
 }
 
@@ -912,6 +922,7 @@ async function deepHealthCheck(): Promise<Record<string, unknown>> {
 
 // ── Exports for testing ─────────────────────────────────────────────
 export {
+	costForModel,
 	isMiniMaxModel,
 	isOllamaModel,
 	resolveModel,

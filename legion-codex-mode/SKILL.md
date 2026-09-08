@@ -37,7 +37,7 @@ when the configured role changes the outcome.
 | Final merge judgement | `final-review` | `claude_default` | Use the configured independent review role. |
 | Security review or hard bug | `security-review` / `hard-bug` | `codex_frontier` | Use the configured frontier Codex role; `codex_review` remains the routine reviewer. |
 | Different-lineage opinion | `second-opinion-review` | `cursor_default` | Use when an independent lens matters. |
-| High-rework-risk migration | `migration` | `codex_precision` | Use Sol when one stronger pass can plausibly avoid a second Terra implementation/review cycle; measure total cost per accepted result. |
+| High-rework-risk migration | `migration` | `codex_precision` | Scoped Sol pilot: observe cost/success/latency, but require paired acceptance evidence before moving more volume. |
 | Bounded implementation | `implement-feature` / `fix-bug` | `codex_workhorse` | Keep inline when you already have the context; otherwise use the route. |
 
 These are current routing facts from `routing.toml` and `models.toml`, not a

@@ -138,7 +138,7 @@ _make_good() {
 case "$1" in
   implement-feature) printf '%s\n' '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}' ;;
   final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"test-model-claude","sandbox":"read-only","resolved":true}' ;;
-  --executor-info) printf '%s\n' '{"kind":"primary coding","review":"prompt"}' ;;
+  --executor-info) printf '%s\n' '{"kind":"primary coding","review":"prompt","review_model_ref":"claude_default"}' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -169,17 +169,21 @@ _review_route_fixture() {
   fake="$BATS_TEST_TMPDIR/fake-configured-review"
   mkdir -p "$fake"
   export TEST_REVIEW_EXECUTOR=codex TEST_REVIEW_SANDBOX=read-only TEST_REVIEW_CAPABILITY=native
+  export TEST_REVIEW_MODEL=configured-review-model TEST_REVIEW_MODEL_REF=configured-review-ref
+  export TEST_REVIEW_DECLARED_REF=configured-review-ref
   cat > "$fake/legion-route" <<'EOF'
 #!/bin/sh
 case "$1" in
   implement-feature)
     printf '%s\n' '{"executor":"codex","model":"test-model","sandbox":"workspace-write","resolved":true}' ;;
   final-review)
-    jq -n --arg executor "$TEST_REVIEW_EXECUTOR" --arg sandbox "$TEST_REVIEW_SANDBOX" \
-      '{executor:$executor,model:"configured-review-model",sandbox:$sandbox,resolved:true}' ;;
+    jq -n --arg executor "$TEST_REVIEW_EXECUTOR" --arg model "$TEST_REVIEW_MODEL" \
+      --arg model_ref "$TEST_REVIEW_MODEL_REF" --arg sandbox "$TEST_REVIEW_SANDBOX" \
+      '{executor:$executor,model_ref:$model_ref,model:$model,sandbox:$sandbox,resolved:true}' ;;
   --executor-info)
     [ "$2" != unknown ] || { echo "unknown executor" >&2; exit 2; }
-    jq -n --arg review "$TEST_REVIEW_CAPABILITY" '{kind:"primary coding",review:$review}' ;;
+    jq -n --arg review "$TEST_REVIEW_CAPABILITY" --arg review_model_ref "$TEST_REVIEW_DECLARED_REF" \
+      '{kind:"primary coding",review:$review,review_model_ref:$review_model_ref}' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -223,6 +227,22 @@ EOF
   [[ "$output" == *"does not support code review"* ]]
 }
 
+@test "doctor: route-smoke rejects a review model outside the executor contract" {
+  _review_route_fixture
+  export TEST_REVIEW_MODEL_REF=wrong-review-ref
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not match executor"* ]]
+}
+
+@test "doctor: route-smoke rejects the same executor and model as implementation" {
+  _review_route_fixture
+  export TEST_REVIEW_MODEL=test-model
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"same executor and model"* ]]
+}
+
 @test "doctor: state-root auto-resolves when LEGION_STATE_ROOT is missing" {
   HOME="$BATS_TEST_TMPDIR/home" \
     LEGION_STATE_ROOT= LEGION_TELEMETRY_DIR= LEGION_REGISTRY_DIR= \
@@ -240,7 +260,7 @@ EOF
 case "$1" in
   implement-feature) printf '%s\n' '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}' ;;
   final-review) printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"test-model-claude","sandbox":"read-only","resolved":true}' ;;
-  --executor-info) printf '%s\n' '{"kind":"primary coding","review":"prompt"}' ;;
+  --executor-info) printf '%s\n' '{"kind":"primary coding","review":"prompt","review_model_ref":"claude_default"}' ;;
   *) exit 2 ;;
 esac
 EOF

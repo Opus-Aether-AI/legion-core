@@ -555,7 +555,8 @@ PY
 check_route_smoke() {
   local route; route="$(resolve_legion_cmd legion-route "$LEGION_ROOT/legion-router/bin/legion-route")" || {
     fail "legion-route not found" "plugin:legion-router"; return; }
-  local arch out err rc reviewer executor bad=0
+  local arch out err rc reviewer executor model model_ref review_model_ref
+  local implement_executor="" implement_model="" bad=0
   for arch in implement-feature final-review; do
     err="$(mktemp)"
     out="$("$route" "$arch" 2>"$err")"; rc=$?
@@ -573,6 +574,8 @@ check_route_smoke() {
     fi
     case "$arch" in
       implement-feature)
+        implement_executor="$(jq -r '.executor' <<<"$out")"
+        implement_model="$(jq -r '.model' <<<"$out")"
         jq -e '.executor == "codex" and .sandbox == "workspace-write"' <<<"$out" >/dev/null 2>&1 || {
           fail "legion-route implement-feature resolved to unexpected route: $out" "plugin:legion-router"
           bad=1
@@ -584,12 +587,23 @@ check_route_smoke() {
           bad=1
         else
           executor="$(jq -r '.executor' <<<"$out")"
+          model="$(jq -r '.model' <<<"$out")"
+          model_ref="$(jq -r '.model_ref // empty' <<<"$out")"
           if ! reviewer="$("$route" --executor-info "$executor" 2>"$err")"; then
             fail "legion-route final-review executor lookup failed: $(tr '\n' ' ' < "$err")" "plugin:legion-router"
             bad=1
           elif ! jq -e '(.review == "native" or .review == "prompt") and (.kind | split(" ") | index("coding") != null)' <<<"$reviewer" >/dev/null 2>&1; then
             fail "legion-route final-review executor does not support code review: $executor" "plugin:legion-router"
             bad=1
+          else
+            review_model_ref="$(jq -r '.review_model_ref // .model_ref // empty' <<<"$reviewer")"
+            if [[ -z "$model_ref" || -z "$review_model_ref" || "$model_ref" != "$review_model_ref" ]]; then
+              fail "legion-route final-review model_ref '$model_ref' does not match executor '$executor' review model '$review_model_ref'" "plugin:legion-router"
+              bad=1
+            elif [[ "$executor" == "$implement_executor" && "$model" == "$implement_model" ]]; then
+              fail "legion-route final-review uses the same executor and model as implementation: $executor/$model" "plugin:legion-router"
+              bad=1
+            fi
           fi
         fi
         ;;

@@ -217,6 +217,22 @@ EOF
   [[ "$output" == *"PASS"* ]]
 }
 
+@test "doctor: route-smoke treats a valid capabilities array as authoritative" {
+  _review_route_fixture
+  export TEST_REVIEW_KIND='primary coding' TEST_REVIEW_CAPABILITIES_JSON='["primary"]'
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not support code review"* ]]
+}
+
+@test "doctor: route-smoke falls back from an invalid capabilities array to kind" {
+  _review_route_fixture
+  export TEST_REVIEW_KIND=primary TEST_REVIEW_CAPABILITIES_JSON='["coding",7]'
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not support code review"* ]]
+}
+
 @test "doctor: route-smoke falls back from an empty review model override" {
   _review_route_fixture
   export TEST_REVIEW_DECLARED_REF=

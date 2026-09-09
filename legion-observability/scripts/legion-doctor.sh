@@ -593,11 +593,15 @@ check_route_smoke() {
             fail "legion-route final-review executor lookup failed: $(tr '\n' ' ' < "$err")" "plugin:legion-router"
             bad=1
           elif ! jq -e '
+            def executor_capabilities:
+              if (.capabilities | type == "array") and all(.capabilities[]; type == "string" and length > 0)
+              then .capabilities
+              elif (.kind | type == "string")
+              then (.kind | split(" ") | map(select(length > 0)))
+              else []
+              end;
             (.review == "native" or .review == "prompt") and
-            (
-              (.capabilities? | if type == "array" then index("coding") != null else false end) or
-              (.kind? | if type == "string" then (split(" ") | index("coding") != null) else false end)
-            )
+            (executor_capabilities | index("coding") != null)
           ' <<<"$reviewer" >/dev/null 2>&1; then
             fail "legion-route final-review executor does not support code review: $executor" "plugin:legion-router"
             bad=1

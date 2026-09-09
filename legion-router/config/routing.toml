@@ -27,13 +27,19 @@
 # Each harness translates the level to its own mechanism (codex
 # `-c model_reasoning_effort`; cursor via the model id; claude `--effort`).
 #
-# TIER POLICY. models.toml is two-tier and the split is a COST decision, not a
-# quality one: the frontier roles (claude_frontier / codex_frontier) bill roughly
-# 2x claude_default and 5x codex_workhorse on output. Exactly five archetypes route to them —
+# TIER POLICY. The split is a TOTAL-COST decision, not a claim that the cheapest
+# token always produces the cheapest accepted result. The frontier roles
+# (claude_frontier / codex_frontier) bill roughly 2x claude_default and 5x
+# codex_workhorse on output. The Codex precision role (Sol) sits between Terra
+# and Astra: 2x Terra on input and 1.67x on output, so it wins only when its
+# stronger pass avoids enough rework. Exactly five archetypes route to frontier —
 # frontend-polish, hard-bug, perf-optimization, security-review, and the opt-in
 # final-review-frontier — because those are low-volume and high-judgement-per-call.
-# The bulk lanes (implement-feature, parallel-codegen) name a frontier role only in
-# `fallback_refs`, so it is reached on quota exhaustion, never by default.
+# Migration is the scoped precision pilot because cross-surface mistakes are
+# expensive; routine codemods remain bulk-mechanical-edit. Current telemetry can
+# compare cost, executor success, and latency by archetype, but it cannot prove
+# avoided rework or human acceptance. Require paired acceptance evidence before
+# moving more volume to the precision tier.
 # Moving another archetype to a frontier role needs a measured reason recorded here.
 #
 # `self` archetypes stay with the PRIMARY harness (whoever is driving the session,
@@ -85,7 +91,7 @@ model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "high"
 fallback_refs = ["codex_frontier"]
-note = "A fully-specced, bounded feature slice. The bulk lane stays on the workhorse: the frontier role is 5x its output price and terra already completes this shape. Escalate only hard or persistent work to max, or to hard-bug."
+note = "A fully-specced, bounded feature slice. The bulk lane stays on the workhorse: the frontier role is 5x its output price and Terra already completes this shape. Escalate only hard or persistent work to max, or to hard-bug."
 
 [archetypes.scout]
 executor = "codex"
@@ -186,11 +192,11 @@ note = "Scaffolding, config, repetitive plumbing — require a narrow file scope
 
 [archetypes.migration]
 executor = "codex"
-model_ref = "codex_workhorse"
+model_ref = "codex_precision"
 sandbox = "workspace-write"
 reasoning_effort = "high"
-fallback_refs = []
-note = "Codemod / dependency / API migration across the codebase."
+fallback_refs = ["codex_workhorse"]
+note = "Cross-surface dependency/API migration where a wrong first pass creates expensive rework. Sol is 2x Terra on input and 1.67x on output, so this scoped pilot observes whether its cost, executor success, and latency justify a paired acceptance evaluation; it does not by itself prove avoided rework. Routine mechanical codemods stay on bulk-mechanical-edit. Fall back to Terra when Sol is quota-limited or unavailable."
 
 # ── Cross-model judgement; max is reserved for hard execution ──────────
 [archetypes.final-review]

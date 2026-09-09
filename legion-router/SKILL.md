@@ -116,7 +116,8 @@ Run `legion-route --list` for the full set. Grouped by role:
 | Role | Archetypes | → model |
 |---|---|---|
 | **Primary orchestrates (self)** | `orchestrate`, `architecture-decision`, `deep-reasoning` | active primary — **refuses to delegate** |
-| **Codex execution path** | `scout`, `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate`, `migration` | `codex_workhorse` / `codex_cheap` |
+| **Codex execution path** | `scout`, `implement-feature`, `write-tests`, `fix-bug`, `refactor-module`, `bulk-mechanical-edit`, `parallel-codegen`, `cheap-bulk`, `docs-edit`, `boilerplate` | `codex_workhorse` / `codex_cheap` |
+| **Precision implementation** | `migration` | `codex_precision` (Sol) — scoped pilot for high-rework work; observe cost/success/latency, then require paired acceptance evidence before moving more volume |
 | **Frontier tier (low volume, high judgement)** | `hard-bug`, `perf-optimization`, `security-review` | `codex_frontier` |
 | **Frontend craft** | `frontend-polish` → `frontend-review` | `claude_frontier` then `claude_default` — author and reviewer are different models |
 | **Independent merge judgement** | `final-review`, opt-in `final-review-frontier` | `claude_default` / `claude_frontier` |

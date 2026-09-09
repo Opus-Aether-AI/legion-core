@@ -364,6 +364,31 @@ def test_hard_and_security_review_use_codex_frontier_but_final_review_stays_defa
     assert lr.resolve(t, "final-review-frontier", m)["sandbox"] == "read-only"
 
 
+def test_migration_uses_sol_precision_lane_with_terra_fallback():
+    """High-rework migrations use Sol without repricing routine implementation."""
+    t, m = table(), models()
+    route = lr.resolve(t, "migration", m)
+
+    assert route["executor"] == "codex"
+    assert route["model_ref"] == "codex_precision"
+    assert route["model"] == m["codex_precision"]
+    assert route["model"] not in {m["codex_workhorse"], m["codex_frontier"]}
+    assert route["sandbox"] == "workspace-write"
+    assert route["reasoning_effort"] == "high"
+    assert route["fallback"] == [m["codex_workhorse"]]
+
+    precision_defaults = {
+        name for name in t["archetypes"]
+        if lr.resolve(t, name, m)["model_ref"] == "codex_precision"
+    }
+    precision_fallbacks = {
+        name for name in t["archetypes"]
+        if "codex_precision" in lr.resolve(t, name, m)["fallback_refs"]
+    }
+    assert precision_defaults == {"migration"}
+    assert precision_fallbacks == set()
+
+
 def test_bulk_lanes_reach_the_frontier_only_through_fallback():
     """The bulk lanes may NAME a frontier role, but only as a quota fallback.
 

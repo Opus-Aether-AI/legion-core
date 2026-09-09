@@ -37,6 +37,7 @@ when the configured role changes the outcome.
 | Final merge judgement | `final-review` | `claude_default` | Use the configured independent review role. |
 | Security review or hard bug | `security-review` / `hard-bug` | `codex_frontier` | Use the configured frontier Codex role; `codex_review` remains the routine reviewer. |
 | Different-lineage opinion | `second-opinion-review` | `cursor_default` | Use when an independent lens matters. |
+| High-rework-risk migration | `migration` | `codex_precision` | Scoped Sol pilot: observe cost/success/latency, but require paired acceptance evidence before moving more volume. |
 | Bounded implementation | `implement-feature` / `fix-bug` | `codex_workhorse` | Keep inline when you already have the context; otherwise use the route. |
 
 These are current routing facts from `routing.toml` and `models.toml`, not a
@@ -48,6 +49,9 @@ claim that any harness is structurally primary or secondary. Inspect them with
 ```bash
 # Let policy choose the executor and role for a bounded implementation.
 legion-delegate run --archetype implement-feature --task "Build the export API route per <spec>" --repo . --apply
+
+# Sol precision lane for coupled migrations where rework dominates token price.
+legion-delegate run --archetype migration --task "Migrate the API contract and all callers; preserve compatibility and run the focused gates" --repo . --apply
 
 # Ask for the current frontend-polish role without encoding a harness assumption.
 legion-delegate run --archetype frontend-polish --task "Polish the settings page: spacing, a11y, responsive, motion" --repo .

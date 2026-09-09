@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.28.0...v0.29.0) (2026-09-09)
+
+
+### Added
+
+* **router:** add a Sol precision implementation lane ([#198](https://github.com/Opus-Aether-AI/legion-core/issues/198)) ([950adb7](https://github.com/Opus-Aether-AI/legion-core/commit/950adb71baf87e22a3c4f8811ffa67ed7d1c61b6))
+
 ## [0.28.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.27.1...v0.28.0) (2026-09-08)
 
 

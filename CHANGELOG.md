@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.29.0...v0.29.1) (2026-09-09)
+
+
+### Fixed
+
+* **observability:** validate configured independent reviewers ([2e947e3](https://github.com/Opus-Aether-AI/legion-core/commit/2e947e398fef8581c37eaca1bed201db3487b81e))
+
 ## [0.29.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.28.0...v0.29.0) (2026-09-09)
 
 

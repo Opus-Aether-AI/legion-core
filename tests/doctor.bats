@@ -171,6 +171,7 @@ _review_route_fixture() {
   export TEST_REVIEW_EXECUTOR=codex TEST_REVIEW_SANDBOX=read-only TEST_REVIEW_CAPABILITY=native
   export TEST_REVIEW_MODEL=configured-review-model TEST_REVIEW_MODEL_REF=configured-review-ref
   export TEST_REVIEW_DECLARED_REF=configured-review-ref TEST_REVIEW_FALLBACK_REF=configured-review-ref
+  export TEST_REVIEW_KIND='primary coding' TEST_REVIEW_CAPABILITIES_JSON=null
   cat > "$fake/legion-route" <<'EOF'
 #!/bin/sh
 case "$1" in
@@ -183,8 +184,11 @@ case "$1" in
   --executor-info)
     [ "$2" != unknown ] || { echo "unknown executor" >&2; exit 2; }
     jq -n --arg review "$TEST_REVIEW_CAPABILITY" --arg review_model_ref "$TEST_REVIEW_DECLARED_REF" \
-      --arg model_ref "$TEST_REVIEW_FALLBACK_REF" \
-      '{kind:"primary coding",review:$review,review_model_ref:$review_model_ref,model_ref:$model_ref}' ;;
+      --arg model_ref "$TEST_REVIEW_FALLBACK_REF" --arg kind "$TEST_REVIEW_KIND" \
+      --argjson capabilities "$TEST_REVIEW_CAPABILITIES_JSON" \
+      '{review:$review,review_model_ref:$review_model_ref,model_ref:$model_ref} +
+       (if $kind == "" then {} else {kind:$kind} end) +
+       (if $capabilities == null then {} else {capabilities:$capabilities} end)' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -203,6 +207,14 @@ EOF
   export TEST_REVIEW_EXECUTOR=cursor TEST_REVIEW_CAPABILITY=prompt
   PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
   [ "$status" -eq 0 ]
+}
+
+@test "doctor: route-smoke accepts the capabilities-array registry form" {
+  _review_route_fixture
+  export TEST_REVIEW_KIND= TEST_REVIEW_CAPABILITIES_JSON='["primary","coding"]'
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS"* ]]
 }
 
 @test "doctor: route-smoke falls back from an empty review model override" {

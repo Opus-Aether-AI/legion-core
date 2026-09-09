@@ -35,11 +35,11 @@ legion-self-learn hints --entity skill:legion-opencode-mode
 | Situation | Archetype | Current role | Why |
 |---|---|---|---|
 | Deep architecture / system design | `architecture-decision` / `deep-reasoning` | `self` | Keep primary-owned judgement with the active harness. |
-| Polished / complex frontend | `frontend-polish` | `claude_opus` | Current route for a separate visual/a11y pass. |
+| Polished / complex frontend | `frontend-polish` | `claude_frontier` | Current route for a separate visual/a11y pass; `frontend-review` re-checks it on `claude_default`. |
 | Final adversarial review | `final-review` | `claude_default` | Current independent merge-judgement route. |
 | Large, well-specified implementation | `implement-feature` / `bulk-mechanical-edit` | `codex_workhorse` | Current bounded implementation route. |
 | Independent second opinion / tie-break | `second-opinion-review` / `cross-model-tiebreak` | `cursor_default` | Current distinct-lineage route. |
-| Security review | `security-review` | `codex_review` | Current structured review role. |
+| Security review | `security-review` | `codex_frontier` | Current structured review role. |
 | Routine edit with enough context | `self` | `self` | Inline work avoids handoff overhead. |
 
 These are current configuration facts. The role and executor may change with

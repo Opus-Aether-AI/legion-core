@@ -38,7 +38,7 @@ worker may hand off once only through `legion-delegate run --executor
 
 The current routes include `codex_workhorse` for bounded implementation,
 `claude_default` for `final-review`, `cursor_default` for a distinct-lineage
-second opinion, and `codex_review` for structured security review. These are
+second opinion, and `codex_frontier` for structured security review. These are
 configuration facts, not a permanent primary/secondary hierarchy; inspect
 `legion-route --list` for the installed policy.
 

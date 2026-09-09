@@ -242,6 +242,81 @@ check_costs() {
   fi
 }
 
+# Model-catalog preflight. Without this, a mistyped model_ref, a model with no
+# price row, or a CLI too old to run a routed model all surface the same way:
+# deep inside a delegated run, after the worktree and the spend. Three cheap
+# static checks catch all three at the gate.
+check_model_catalog() {
+  local rt; rt="$(find "$LEGION_ROOT" -path '*/legion-router/config/routing.toml' -not -path '*/.git/*' 2>/dev/null | head -1)"
+  local mt; mt="$(find "$LEGION_ROOT" -path '*/legion-router/config/models.toml' -not -path '*/.git/*' 2>/dev/null | head -1)"
+  local cf; cf="$(find "$LEGION_ROOT" -path '*/legion-router/config/costs.json' -not -path '*/.git/*' 2>/dev/null | head -1)"
+  if [[ -z "$rt" || -z "$mt" ]]; then
+    warn "model catalog not present (legion-router engine not vendored here — checked in legion-core)"
+    return 0
+  fi
+
+  # 1. Every model_ref and fallback_ref named by routing.toml exists in models.toml.
+  local role bad=0 missing="" seen=0
+  while IFS= read -r role; do
+    [[ -n "$role" ]] || continue
+    seen=$((seen + 1))
+    grep -qE "^[[:space:]]*${role}[[:space:]]*=" "$mt" || { missing="${missing:+$missing, }$role"; bad=1; }
+  done < <(grep -oE '^(model_ref|fallback_refs)[[:space:]]*=.*' "$rt" | grep -oE '"[a-z0-9_]+"' | tr -d '"' | sort -u)
+  if [[ "$bad" -eq 0 ]]; then
+    pass "every routing.toml model_ref resolves in models.toml ($seen roles)"
+  else
+    fail "routing.toml names model roles missing from models.toml: $missing" \
+         "Add the role to legion-router/config/models.toml or correct the ref in routing.toml."
+  fi
+
+  # 2. Every catalogued model matches a SPECIFIC cost row, not the trailing
+  #    catch-all. A new model silently landing on a generic prefix row (a frontier
+  #    model priced by the bare `gpt-` entry) under-reports its cost by several
+  #    multiples, and every cost-aware decision downstream inherits that error.
+  if [[ -n "$cf" ]]; then
+    local generic; generic="$(jq -r '.models[-1].match // ""' "$cf")"
+    local mid mbad=0 mnames=""
+    while IFS= read -r mid; do
+      [[ -n "$mid" ]] || continue
+      local hit
+      hit="$(jq -r --arg m "$(printf '%s' "$mid" | tr '[:upper:]' '[:lower:]')" \
+        '[.models[] | select(.match as $mm | $m | contains($mm))] | first | .match // ""' "$cf")"
+      if [[ -z "$hit" || "$hit" == "$generic" ]]; then
+        mnames="${mnames:+$mnames, }$mid"; mbad=1
+      fi
+      # Comments are stripped first: a quoted model id inside a trailing `#`
+      # comment is documentation, not a catalog entry, and flagging it would
+      # report a pricing gap that does not exist. The Python equivalent in
+      # tests/python/test_cost_table_parity.py strips the same way.
+    done < <(sed 's/#.*$//' "$mt" | grep -oE '=[[:space:]]*"[^"]+"' | grep -oE '"[^"]+"' | tr -d '"' | sort -u)
+    if [[ "$mbad" -eq 0 ]]; then
+      pass "every catalogued model has a specific costs.json row"
+    else
+      warn "models priced only by the catch-all cost row (cost will be wrong): $mnames"
+    fi
+  fi
+
+  # 3. A routed model the local CLI is too old to run. GPT-6 needs Codex >= 0.153.1
+  #    for API support and >= 0.153.4 for the bundled picker; anything older fails
+  #    at run time with an unknown-model error.
+  if grep -qE '=[[:space:]]*"gpt-6' "$mt"; then
+    if ! command -v codex >/dev/null 2>&1; then
+      warn "catalog routes a gpt-6 model but the codex CLI is not on PATH"
+    else
+      local cv; cv="$(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+      local want="0.153.4"
+      if [[ -z "$cv" ]]; then
+        warn "could not read codex version; gpt-6 models need >= $want"
+      elif [[ "$(printf '%s\n%s\n' "$want" "$cv" | sort -V | head -1)" == "$want" ]]; then
+        pass "codex $cv supports the catalogued gpt-6 models (>= $want)"
+      else
+        fail "codex $cv is too old for the catalogued gpt-6 models (need >= $want)" \
+             "Run 'codex update'. Until then every gpt-6 route fails with an unknown-model error."
+      fi
+    fi
+  fi
+}
+
 check_telemetry_schema() {
   local sf; sf="$(find "$LEGION_ROOT" -path '*/legion-observability/schema/legion.span.v1.schema.json' -not -path '*/.git/*' 2>/dev/null | head -1)"
   if [[ -z "$sf" ]]; then
@@ -734,6 +809,7 @@ run_one() {
     mcp)                check_mcp ;;
     bridges)            check_bridges ;;
     costs)              check_costs ;;
+    model-catalog)      check_model_catalog ;;
     telemetry-schema)   check_telemetry_schema ;;
     codex)              check_codex ;;
     opencode)           check_opencode ;;
@@ -755,7 +831,7 @@ run_one() {
 if [[ -n "$ONLY" ]]; then
   run_one "$ONLY"
 else
-  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs telemetry-schema codex opencode cursor deepseek router; do
+  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs model-catalog telemetry-schema codex opencode cursor deepseek router; do
     run_one "$c"
   done
   if [[ "$STRICT_DEMO" == "1" ]]; then

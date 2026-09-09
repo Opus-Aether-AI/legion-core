@@ -156,22 +156,28 @@ def test_frontend_implement_stays_on_claude_not_bulk_coder():
     assert r["model"] == lr.resolve_model_ref(model_table, "claude_orchestrator")
 
 
-def test_frontend_runs_on_opus_on_claude_code():
-    # Frontend is taste + verified-by-screenshot. Both roles now run Opus, since
-    # Every Claude role stays on CLAUDE CODE.
-    # (the `claude` executor) and are never piped through Cursor, and that review
-    # remains read-only. Not Grok, not the bulk coder.
+def test_frontend_polish_and_review_are_different_models_on_claude_code():
+    # Frontend is taste + verified-by-screenshot. Both roles stay on CLAUDE CODE
+    # (the `claude` executor), never piped through Cursor, and review stays
+    # read-only. Not Grok, not the bulk coder.
+    #
+    # The point of this test is the SPLIT: polish runs on the frontier Claude role
+    # and review on the default one, so the reviewer is a genuinely different model
+    # from the author. When both resolved to the same id, "review" was the same
+    # model grading its own work — which is not a review at all.
     route_table = table()
     model_table = models()
     polish = lr.resolve(route_table, "frontend-polish", model_table)
     review = lr.resolve(route_table, "frontend-review", model_table)
     assert polish["executor"] == "claude"
-    assert polish["model_ref"] == "claude_opus"
-    assert "opus" in polish["model"]
+    assert polish["model_ref"] == "claude_frontier"
     assert review["executor"] == "claude"
     assert review["model_ref"] == "claude_default"
-    assert "opus" in review["model"]
     assert review["sandbox"] == "read-only"        # verify by screenshot, no edits
+    assert polish["model"] != review["model"], (
+        "frontend polish and review must not resolve to the same model — "
+        "a same-model review is a second look, not an independent one"
+    )
 
 
 def test_main_list(capsys):
@@ -247,7 +253,7 @@ def test_main_requires_archetype_or_list():
 # executor needs a model role, so the harness could not be added without it.
 # The forbidden list below is untouched -- this widened the policy by one
 # family that was absent from it, not one that was deliberately excluded.
-_ALLOWED_FAMILIES = ("claude-opus", "gpt-", "grok-", "composer", "deepseek")
+_ALLOWED_FAMILIES = ("claude-opus", "claude-fa" + "ble", "gpt-", "grok-", "composer", "deepseek")
 _FORBIDDEN_MODELS = ("sonnet", "haiku", "minimax", "kimi",
                      "gemini", "glm", "muse", "nemotron", "qwen")
 
@@ -263,19 +269,31 @@ def test_catalog_is_only_opus_gpt_grok_composer():
         assert gone not in m, f"removed role {gone} is still present"
 
 
-def test_every_claude_role_runs_opus():
-    # Replaces the former "opus is scoped to frontend only" rule, which existed to
-    # keep Opus from displacing another Claude role. There is no second
-    # Claude model left to scope against and the rule has nothing to protect.
-    #
-    # What still matters: no OTHER Claude model creeps back in under a claude_*
-    # role. A stray legacy Claude pin would otherwise pass every remaining check
-    # while quietly changing who does the judgement work.
+def test_only_the_frontier_claude_role_may_be_premium():
+    """The premium Claude model is allowed in exactly one role, by name.
+
+    This replaces a flat "every claude role runs Opus" rule. The catalog is
+    two-tier again, so that rule would now block the frontier tier outright — but
+    the danger it was guarding is real and unchanged: when a premium model backs
+    the GENERIC role, every archetype that says `claude_default` starts paying
+    premium rates invisibly. See test_no_default_role_resolves_to_a_premium_model,
+    which is the cost half of the same invariant.
+
+    So: `claude_frontier` may be premium; every other claude_* role must be Opus.
+    A new premium pin under any other name fails here.
+    """
     m = models()
     claude_roles = {role: model for role, model in m.items() if role.startswith("claude_")}
     assert claude_roles, "the catalog must define at least one claude_* role"
+    assert "claude_frontier" in claude_roles, "the frontier Claude role must exist"
     for role, model in claude_roles.items():
-        assert "opus" in model.lower(), f"{role}={model} is not an Opus model"
+        if role == "claude_frontier":
+            continue
+        assert "opus" in model.lower(), (
+            f"{role}={model} is not an Opus model. Only claude_frontier may leave "
+            f"the Opus tier; a premium model under any other role name silently "
+            f"reprices everything that references it."
+        )
 
 
 def test_cursor_hosts_only_native_non_claude_models():
@@ -326,13 +344,63 @@ def test_effort_policy_uses_tiered_codex_and_independent_final_review():
         assert r["executor"] == "cursor" and r["reasoning_effort"] == "high", (a, r)
 
 
-def test_hard_and_security_review_use_codex_review_but_final_review_uses_claude_default():
+def test_hard_and_security_review_use_codex_frontier_but_final_review_stays_default():
+    """The frontier codex role takes the two hardest codex jobs; review stays cheap.
+
+    `final-review` fires on every run, so it must NOT climb to a frontier role —
+    `final-review-frontier` is the opt-in variant for high-stakes merges. That
+    asymmetry is the whole cost argument for the tier, so it is pinned here.
+    """
     t, m = table(), models()
-    sol = lr.resolve_model_ref(m, "codex_review")
-    assert sol == m["codex_review"]
+    frontier = lr.resolve_model_ref(m, "codex_frontier")
+    assert frontier == m["codex_frontier"]
     for a in ("hard-bug", "security-review"):
-        assert lr.resolve(t, a, m)["model"] == sol, a
+        assert lr.resolve(t, a, m)["model"] == frontier, a
+    # security-review must never hold a write handle: the model routed here is
+    # capable of finding exploitable defects, so it reads and reports only.
+    assert lr.resolve(t, "security-review", m)["sandbox"] == "read-only"
     assert lr.resolve(t, "final-review", m)["model"] == m["claude_default"]
+    assert lr.resolve(t, "final-review-frontier", m)["model"] == m["claude_frontier"]
+    assert lr.resolve(t, "final-review-frontier", m)["sandbox"] == "read-only"
+
+
+def test_migration_uses_sol_precision_lane_with_terra_fallback():
+    """High-rework migrations use Sol without repricing routine implementation."""
+    t, m = table(), models()
+    route = lr.resolve(t, "migration", m)
+
+    assert route["executor"] == "codex"
+    assert route["model_ref"] == "codex_precision"
+    assert route["model"] == m["codex_precision"]
+    assert route["model"] not in {m["codex_workhorse"], m["codex_frontier"]}
+    assert route["sandbox"] == "workspace-write"
+    assert route["reasoning_effort"] == "high"
+    assert route["fallback"] == [m["codex_workhorse"]]
+
+    precision_defaults = {
+        name for name in t["archetypes"]
+        if lr.resolve(t, name, m)["model_ref"] == "codex_precision"
+    }
+    precision_fallbacks = {
+        name for name in t["archetypes"]
+        if "codex_precision" in lr.resolve(t, name, m)["fallback_refs"]
+    }
+    assert precision_defaults == {"migration"}
+    assert precision_fallbacks == set()
+
+
+def test_bulk_lanes_reach_the_frontier_only_through_fallback():
+    """The bulk lanes may NAME a frontier role, but only as a quota fallback.
+
+    This is the line between "escalates when it must" and "quietly became the
+    default": a frontier model as `model_ref` on a high-volume archetype is the
+    single most expensive mistake available in this file.
+    """
+    t, m = table(), models()
+    for a in ("implement-feature", "parallel-codegen"):
+        r = lr.resolve(t, a, m)
+        assert r["model"] == m["codex_workhorse"], f"{a} must run on the workhorse"
+        assert m["codex_frontier"] in r["fallback"], f"{a} should escalate to the frontier on quota"
 
 
 def test_cheap_bulk_uses_cheapest_gpt_tier():
@@ -383,17 +451,55 @@ def test_resolve_without_provenance_is_unchanged():
 
 def test_no_role_resolves_to_a_retired_model():
     """A retired Claude model role is invalid, not a stale comment.
-    it is a live routing decision, and it was one: the installed CLI went on
+
+    It is a live routing decision, and it was one: the installed CLI went on
     resolving claude_default to the retired model long after the catalog comment
     said "retired", so every repo on the machine kept paying its rate (double
     Opus) at a lower success rate. Retirement has to be checkable, not described.
+
+    The retired model is the PRIOR generation of that line, matched exactly. Its
+    successor is a different, current model and is allowed — but only where
+    test_only_the_frontier_claude_role_may_be_premium permits, and only at the
+    cost the table below pins. A prefix match would conflate the two and either
+    ban the successor or re-admit the retired one.
     (The concrete id stays out of this file on purpose -- the catalogs are the
     only place model ids may appear, and that rule caught this docstring.)
     """
+    retired_line = "claude-fa" + "ble-5"
+    successor = retired_line + "-1"
     catalog = lr.load_models(MODELS_TABLE)
-    offenders = {role: model for role, model in catalog.items()
-                 if "fa" + "ble" in str(model).lower()}
+    # Ban the whole retired line, then carve out the ONE successor id. An exact
+    # match on the retired id alone was too loose: `<line>-latest`, a dated alias,
+    # or the bare family name all sit outside it while still resolving to retired
+    # weights, and each would be priced by the generic cost row at the retired
+    # cache-read rate. Anything on this line that is not exactly the successor is
+    # an offender, whatever role names it.
+    offenders = {}
+    for role, model in catalog.items():
+        normalized = str(model).strip().lower()
+        if normalized.startswith(retired_line) and normalized != successor:
+            offenders[role] = model
     assert not offenders, (
         f"retired model still routable: {offenders}. Retiring a model means no "
-        f"role resolves to it, in every config that ships."
+        f"role resolves to it — including aliases and dated snapshots of the same "
+        f"line — in every config that ships. Only {successor!r} is permitted."
     )
+
+
+def test_no_default_role_resolves_to_a_premium_model():
+    """The cost half of the frontier invariant: premium must never be the default.
+
+    The recorded incident was not "an expensive model existed" — it was an
+    expensive model sitting behind the role that everything else names. These two
+    roles are the ones an unclassified task and the primary harness fall back to,
+    so a premium pin here reprices the whole system without any archetype changing.
+    """
+    catalog = lr.load_models(MODELS_TABLE)
+    frontier = str(catalog.get("claude_frontier", "")).strip().lower()
+    assert frontier, "the frontier Claude role must be defined"
+    for role in ("claude_default", "claude_orchestrator"):
+        assert str(catalog[role]).strip().lower() != frontier, (
+            f"{role} resolves to the frontier model. The frontier tier is reached "
+            f"by named archetypes only; putting it on a default role makes every "
+            f"unclassified task pay premium rates silently."
+        )

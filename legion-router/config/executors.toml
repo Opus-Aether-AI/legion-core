@@ -46,13 +46,24 @@
 [executors.claude]
 acp = false
 task_file = true
+# effort        true when the adapter accepts `--effort LEVEL`.
+# model_chain   true when it accepts `--fallback-models A,B` — the archetype's
+#               fallback_refs as SAME-VENDOR alternates, tried before the
+#               adapter's own cross-executor escape.
+# Declared, not probed, exactly like task_file: probing means running the adapter
+# an extra time, and an adapter that has never heard of a flag dies on it. These
+# were previously implied by contract = "prompt", which no registered executor
+# actually uses — so the effort an archetype configured never reached Claude at
+# all. Capability belongs to the ADAPTER, not to its I/O shape.
+effort = true
+model_chain = true
 review = "prompt"
-# Every Claude role currently resolves to the same model, so a Claude-sourced
-# review is a second pass, not an independent opinion. That is why claude
-# stays LAST in [review].order: it is the reviewer of last resort, for when codex,
-# cursor and opencode are all unavailable. Genuine cross-model review comes from
-# those, not from here.
-review_model_ref = "claude_opus"
+# Claude reviews on claude_default (Opus 5), which is a DIFFERENT model from the
+# frontier role that authors frontend-polish (Fable 5.1) — so a Claude-sourced
+# review is now a real second lens within the lineage rather than the same model
+# twice. It is still same-VENDOR, so claude stays LAST in [review].order: genuine
+# cross-vendor review comes from codex, cursor and opencode first.
+review_model_ref = "claude_default"
 kind = "primary coding"
 adapter = "legion-claude"
 contract = "diff"

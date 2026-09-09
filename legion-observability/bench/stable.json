@@ -217,11 +217,11 @@
       "id": "route.frontend-polish",
       "type": "route",
       "dimension": "routing",
-      "summary": "Frontend polish runs on Opus via Claude Code (best frontend-craft combo), workspace-write. Claude models never go through Cursor.",
+      "summary": "Frontend polish runs on the frontier Claude role via Claude Code (best frontend-craft combo), workspace-write. Claude models never go through Cursor.",
       "archetype": "frontend-polish",
       "expect": {
         "executor": "claude",
-        "model_ref": "claude_opus",
+        "model_ref": "claude_frontier",
         "sandbox": "workspace-write",
         "reasoning_effort": "high"
       },
@@ -329,11 +329,11 @@
       "id": "route.migration",
       "type": "route",
       "dimension": "routing",
-      "summary": "Migrations use configured Codex workspace-write.",
+      "summary": "High-rework-risk migrations use the Sol precision role with Codex workspace-write.",
       "archetype": "migration",
       "expect": {
         "executor": "codex",
-        "model_ref": "codex_workhorse",
+        "model_ref": "codex_precision",
         "sandbox": "workspace-write",
         "reasoning_effort": "high"
       },
@@ -350,6 +350,20 @@
         "model_ref": "claude_default",
         "sandbox": "read-only",
         "reasoning_effort": "high"
+      },
+      "required": true
+    },
+    {
+      "id": "route.final-review-frontier",
+      "type": "route",
+      "dimension": "routing",
+      "summary": "The opt-in high-stakes merge gate routes to the frontier Claude role at max, read-only — while plain final-review stays on the default role.",
+      "archetype": "final-review-frontier",
+      "expect": {
+        "executor": "claude",
+        "model_ref": "claude_frontier",
+        "sandbox": "read-only",
+        "reasoning_effort": "max"
       },
       "required": true
     },
@@ -385,11 +399,11 @@
       "id": "route.security-review",
       "type": "route",
       "dimension": "routing",
-      "summary": "Security review uses configured Codex read-only.",
+      "summary": "Adversarial security review runs on the frontier codex role at max and stays read-only.",
       "archetype": "security-review",
       "expect": {
         "executor": "codex",
-        "model_ref": "codex_review",
+        "model_ref": "codex_frontier",
         "sandbox": "read-only",
         "reasoning_effort": "max"
       },
@@ -399,11 +413,11 @@
       "id": "route.hard-bug",
       "type": "route",
       "dimension": "routing",
-      "summary": "Hard bugs use configured Codex workspace-write.",
+      "summary": "A deep/tricky bug routes to the frontier codex role at max, workspace-write.",
       "archetype": "hard-bug",
       "expect": {
         "executor": "codex",
-        "model_ref": "codex_review",
+        "model_ref": "codex_frontier",
         "sandbox": "workspace-write",
         "reasoning_effort": "max"
       },
@@ -413,11 +427,11 @@
       "id": "route.perf-optimization",
       "type": "route",
       "dimension": "routing",
-      "summary": "Performance optimization uses configured Codex workspace-write.",
+      "summary": "Perf work routes to the frontier codex role at max — low volume, high judgement per call.",
       "archetype": "perf-optimization",
       "expect": {
         "executor": "codex",
-        "model_ref": "codex_workhorse",
+        "model_ref": "codex_frontier",
         "sandbox": "workspace-write",
         "reasoning_effort": "max"
       },

@@ -596,7 +596,12 @@ check_route_smoke() {
             fail "legion-route final-review executor does not support code review: $executor" "plugin:legion-router"
             bad=1
           else
-            review_model_ref="$(jq -r '.review_model_ref // .model_ref // empty' <<<"$reviewer")"
+            review_model_ref="$(jq -r '
+              if (.review_model_ref | type == "string") and (.review_model_ref | length > 0)
+              then .review_model_ref
+              else (.model_ref // empty)
+              end
+            ' <<<"$reviewer")"
             if [[ -z "$model_ref" || -z "$review_model_ref" || "$model_ref" != "$review_model_ref" ]]; then
               fail "legion-route final-review model_ref '$model_ref' does not match executor '$executor' review model '$review_model_ref'" "plugin:legion-router"
               bad=1

@@ -170,7 +170,7 @@ _review_route_fixture() {
   mkdir -p "$fake"
   export TEST_REVIEW_EXECUTOR=codex TEST_REVIEW_SANDBOX=read-only TEST_REVIEW_CAPABILITY=native
   export TEST_REVIEW_MODEL=configured-review-model TEST_REVIEW_MODEL_REF=configured-review-ref
-  export TEST_REVIEW_DECLARED_REF=configured-review-ref
+  export TEST_REVIEW_DECLARED_REF=configured-review-ref TEST_REVIEW_FALLBACK_REF=configured-review-ref
   cat > "$fake/legion-route" <<'EOF'
 #!/bin/sh
 case "$1" in
@@ -183,7 +183,8 @@ case "$1" in
   --executor-info)
     [ "$2" != unknown ] || { echo "unknown executor" >&2; exit 2; }
     jq -n --arg review "$TEST_REVIEW_CAPABILITY" --arg review_model_ref "$TEST_REVIEW_DECLARED_REF" \
-      '{kind:"primary coding",review:$review,review_model_ref:$review_model_ref}' ;;
+      --arg model_ref "$TEST_REVIEW_FALLBACK_REF" \
+      '{kind:"primary coding",review:$review,review_model_ref:$review_model_ref,model_ref:$model_ref}' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -202,6 +203,14 @@ EOF
   export TEST_REVIEW_EXECUTOR=cursor TEST_REVIEW_CAPABILITY=prompt
   PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
   [ "$status" -eq 0 ]
+}
+
+@test "doctor: route-smoke falls back from an empty review model override" {
+  _review_route_fixture
+  export TEST_REVIEW_DECLARED_REF=
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS"* ]]
 }
 
 @test "doctor: route-smoke rejects self-review and a writable reviewer" {

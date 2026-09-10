@@ -30,6 +30,14 @@ make_test_repo() {
     [ "$status" -eq 0 ]
     echo "$output" | jq -e --arg m "$DEEPSEEK_DEFAULT" \
         '.status == "ok" and .executor == "deepseek" and .model == $m'
+    jq -e '.schema == "legion.preflight.v1" and .status == "untested"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '
+      .schema == "legion.attempt.v1" and .terminal_status == "succeeded"
+      and .requested_model == null and .effective_model == null
+      and .usage_status == "unknown" and .usage == null
+      and .cost_status == "unknown" and .cost_usd == null' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
 
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
@@ -77,6 +85,10 @@ make_test_repo() {
     MOCK_DSH_FAIL=1 run "$LEGION_DEEPSEEK" run --task "break" --repo "$repo" --quiet
     [ "$status" -ne 0 ]
     echo "$output" | jq -e '.status == "failed"'
+    jq -e '
+      .terminal_status == "failed" and .failure.schema == "legion.failure.v1"
+      and .failure.class == "provider" and .failure.output_started == false' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
 }
 
 @test "legion-deepseek: a missing profile fails loudly, not silently" {
@@ -96,15 +108,27 @@ make_test_repo() {
     grep -qi "refusing to report an empty success" "$(echo "$output" | jq -r .last_message)"
 }
 
-@test "legion-deepseek: a read-only run that writes is refused" {
-    # dsh exposes no flag that withholds the write tools, so unlike the other
-    # adapters this backstop is the ONLY thing enforcing read-only. It has to
-    # actually fire.
+@test "legion-deepseek: rejects read-only before dsh resolution or launch" {
     local repo; repo="$(make_test_repo ro1)"
     run "$LEGION_DEEPSEEK" run --task "just look" --repo "$repo" --sandbox read-only --quiet
     [ "$status" -ne 0 ]
-    echo "$output" | jq -e '.status == "error"'
-    grep -qi "read-only" "$(echo "$output" | jq -r .last_message)"
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("unsupported sandbox"))
+      and .attempt_receipt == null and .failure_receipt == null'
+    assert_mock_not_called dsh
+    [ ! -d "$repo/.legion/worktrees" ]
+}
+
+@test "legion-deepseek: rejects ineffective model overrides before dsh resolution or launch" {
+    local repo; repo="$(make_test_repo model-refusal)"
+    run "$LEGION_DEEPSEEK" run --task "inspect" --repo "$repo" \
+      --model deepseek-v3.2 --quiet
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("unsupported model"))
+      and .attempt_receipt == null and .failure_receipt == null'
+    assert_mock_not_called dsh
+    [ ! -d "$repo/.legion/worktrees" ]
 }
 
 @test "legion-deepseek: honours LEGION_DSH_PROFILE" {
@@ -115,14 +139,18 @@ make_test_repo() {
     assert_mock_called dsh "--profile my-profile"
 }
 
-@test "legion-deepseek: takes the task from a file, not argv" {
-    # A task carrying a diff or a long spec exceeds ARG_MAX.
+@test "legion-deepseek: task-file input is truthfully forwarded to dsh on argv" {
+    # The adapter can read a task file, but dsh-headless still receives those
+    # bytes positionally; executors.toml must therefore keep task_file=false.
     local repo; repo="$(make_test_repo tf1)"
     local tf="$TEST_TMPDIR/task.txt"
     printf 'implement the thing described at length\n' > "$tf"
     run "$LEGION_DEEPSEEK" run --task-file "$tf" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
+    assert_mock_called dsh "implement the thing described at length"
+    run "$REPO_ROOT/legion-router/bin/legion-route" --executor-info deepseek
+    echo "$output" | jq -e '.task_file == false and .supported_task_transports == ["argv"]'
 }
 
 @test "legion-deepseek: is registered as a diff executor that cannot review" {

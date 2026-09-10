@@ -21,6 +21,9 @@ source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/adapter-contract.sh
+source "$_self_dir/lib/adapter-contract.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -193,8 +196,20 @@ cmd_run() {
   legion_require_top_level_executor "cursor" || return $?
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  agent_bin="$(resolve_cursor_bin)" || die "Cursor Agent CLI not found. Install Cursor CLI or set CURSOR_AGENT_BIN."
-  mkdir -p "$art"
+  if ! legion_adapter_preflight cursor "$art" "$sandbox" argv "$model" "" 0 "$CURSOR_AGENT_BIN"; then
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      failed "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+      "$base" "$archetype"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    jq -cn --arg run "$RUN_ID" --arg model "$model" \
+      --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
+      {run_id:$run,status:"refused",executor:"cursor",model:$model,reason:$reason,
+       preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+       usage:{},cost_usd:0}'
+    return 1
+  fi
+  agent_bin="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   legion_write_runtime_gitignore "$repo"
 
   note "-> cursor worktree $wt (branch $branch, base $base)"
@@ -250,16 +265,19 @@ cmd_run() {
   fi
   legion_activate_executor_context "$RUN_ID" cursor
   note "-> ${cmd[*]}"
+  local started_at ended_at output_started=false
+  started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
   ( cd "$wt" && "${cmd[@]}" >"$out_file" 2>"$err_file" )
   rc=$?
   set -e
-  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
+  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
-  local usage cost result actual_model diff_rc=0 status="ok"
+  local usage cost result actual_model observed_model diff_rc=0 status="ok"
   usage="$(usage_json "$out_file")"
-  actual_model="$(actual_model_from_output "$out_file" "$model")"
+  observed_model="$(actual_model_from_output "$out_file" "")"
+  actual_model="$observed_model"; [[ -n "$actual_model" ]] || actual_model="$model"
   cost="$(cost_from_output "$out_file" "$actual_model" "$usage")"
   result="$(result_text "$out_file")"
   git -C "$wt" add -A 2>/dev/null || diff_rc=1
@@ -278,11 +296,40 @@ cmd_run() {
     result="${result}Cursor produced file changes during a read-only run; refusing to apply or report ok."
   fi
   printf '%s\n' "$result" > "$art/last-message.txt"
+  [[ -n "$result" ]] && output_started=true
+  local usage_status=unknown usage_source="" cost_status=unknown cost_source=""
+  if jq -e '((.usage // .tokens) | type) == "object"' "$out_file" >/dev/null 2>&1; then
+    usage_status=known; usage_source=cursor-json
+    if jq -e '.total_cost_usd | numbers' "$out_file" >/dev/null 2>&1; then
+      cost_status=known; cost_source=cursor-json
+    elif cost_model_has_pricing "$actual_model"; then
+      cost_status=known; cost_source=legion-cost-table
+    fi
+  fi
+  local terminal_status=succeeded failure_class=""
+  if [[ "$status" != ok ]]; then
+    terminal_status=failed
+    if [[ "$sandbox" == read-only && -s "$art/diff.patch" ]]; then
+      failure_class=policy_refused
+    elif [[ "$rc" -ne 0 ]]; then
+      failure_class=provider
+    else
+      failure_class=internal
+    fi
+  fi
+  legion_adapter_write_attempt "$art" cursor cursor 1 "$model" "$observed_model" "" "" \
+    "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
+    "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
+    "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
 
   local artifacts
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg stdout "$out_file" --arg stderr "$err_file" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr}')"
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
+      preflight_receipt:$preflight,attempt_receipt:$attempt,
+      failure_receipt:(if $failure=="" then null else $failure end)}')"
   emit_span "cursor" "$actual_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
 
   if [[ "$do_apply" -eq 1 && "$status" == "ok" && -s "$art/diff.patch" ]]; then
@@ -314,10 +361,13 @@ cmd_run() {
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg result "$result" --arg auth_note "$auth_note" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"cursor", model:$model, cursor_exit:$rc,
      result:$result, worktree:$wt, diff_path:$diff, last_message_path:$last,
-     usage:$usage, cost_usd:$cost}
+     usage:$usage, cost_usd:$cost,preflight_receipt:$preflight,attempt_receipt:$attempt,
+     failure_receipt:(if $failure=="" then null else $failure end)}
     + (if $auth_note == "" then {} else {auth_error:$auth_note} end)'
   [[ "$status" == "ok" ]] || exit 1
 }

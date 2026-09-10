@@ -9,10 +9,24 @@ set -euo pipefail
 [[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'claude active=%s executor=%s depth=%s run=%s\n' \
     "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
 
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'claude 1.0.0\n'
+    exit 0
+fi
+
 MOCK_STATE_FILE="$HOME/.mock-claude-marketplaces"
 
 if [[ "${1:-}" == "-p" ]]; then
     cat >/dev/null || true
+    if [[ "${MOCK_CLAUDE_PERMISSION_PROMPT:-0}" == "1" ]]; then
+        printf 'Permission required; approval required in non-interactive mode\n' >&2
+        printf '%s\n' '{"type":"result","is_error":true,"result":""}'
+        exit 1
+    fi
+    if [[ "${MOCK_CLAUDE_OUTPUT_THEN_FAIL:-0}" == "1" ]]; then
+        printf '%s\n' '{"type":"result","is_error":false,"result":"PARTIAL_OUTPUT","usage":{"input_tokens":10,"output_tokens":2}}'
+        exit 1
+    fi
     if [[ "${MOCK_CLAUDE_WRITE:-0}" == "1" ]]; then
         printf 'unexpected\n' > claude-unexpected.txt
     fi

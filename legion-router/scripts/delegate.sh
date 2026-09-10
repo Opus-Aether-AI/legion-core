@@ -49,6 +49,9 @@ source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/adapter-contract.sh
+source "$_self_dir/lib/adapter-contract.sh"
 
 # shellcheck disable=SC1091
 # shellcheck source=lib/primary.sh
@@ -904,6 +907,9 @@ dispatch_adapter() {
       note "⚠ adapter for '$ex' predates --fallback-models; the same-vendor model chain is skipped"
     fi
   fi
+  if [[ "${premium_consent:-0}" == 1 && "$ex" == claude && "$is_own_adapter" -eq 1 ]]; then
+    aargs+=(--allow-premium-credit)
+  fi
   note "→ dispatch to $ex via $adapter${use_model:+ -m $use_model}"
   exec "$adapter_bin" "${aargs[@]}"
 }
@@ -912,7 +918,7 @@ dispatch_adapter() {
 cmd_run() {
   local model="" sandbox="" task="" repo="$PWD" base="HEAD" archetype="" effort=""
   local budget=0 do_apply=0 keep=0 detach=0 dirty_warn=1 preset_run_id=""
-  local untrusted=0
+  local untrusted=0 premium_consent="${LEGION_ALLOW_PREMIUM_CREDIT:-0}"
   local forced_executor="" explicit_model="" detached_worker=0 sandbox_dev_pid_from_parent=""
   local -a scopes=()
   [[ "${LEGION_UNTRUSTED:-0}" == "1" ]] && untrusted=1
@@ -937,6 +943,7 @@ cmd_run() {
       --no-dirty-warn) dirty_warn=0; shift ;;
       --scope) scopes+=("$2"); shift 2 ;;
       --untrusted) untrusted=1; shift ;;
+      --allow-premium-credit|--explicit-consent) premium_consent=1; shift ;;
       --_detached-worker) detached_worker=1; shift ;;
       --_sandbox-dev-pid) sandbox_dev_pid_from_parent="$2"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
@@ -1052,6 +1059,19 @@ cmd_run() {
   [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
   [[ -n "$model" ]] || die "run: --model or --archetype required"
 
+  if ! legion_adapter_preflight codex "$art" "$sandbox" stdin "$model" "$effort" 0 "$CODEX_BIN"; then
+    write_run_state failed
+    declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
+    jq -cn --arg run "$RUN_ID" --arg model "$model" \
+      --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
+      {run_id:$run,status:"refused",executor:"codex",model:$model,reason:$reason,
+       preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+       usage:{},cost_usd:0}'
+    return 1
+  fi
+  CODEX_BIN="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+
   if [[ "$detach" -eq 1 ]] && ! command -v setsid >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
     die "run: --detach requires setsid or python3"
   fi
@@ -1146,7 +1166,7 @@ cmd_run() {
   # Mark only the executor process (and its direct children) as delegated.
   # Sandbox install/dev setup above must not inherit Legion role state.
   legion_activate_executor_context "$RUN_ID" codex
-  local start_ms end_ms dur rc=0 used_model=""
+  local start_ms end_ms dur rc=0 used_model="" attempt_ordinal=0 attempt_contract_failure=0
   start_ms="$(date +%s000)"
   # Try the chosen model, then the archetype's fallback chain on a quota/rate-limit error.
   local model_list="$model"
@@ -1157,6 +1177,9 @@ cmd_run() {
     case ",$tried," in *",$attempt,"*) continue ;; esac    # dedup
     tried="${tried:+$tried,}$attempt"
     used_model="$attempt"
+    attempt_ordinal=$((attempt_ordinal + 1))
+    local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
+    attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
     if is_sandcastle_sandbox "$sandbox"; then
       note "→ sandcastle run -m $attempt --sandbox $sandbox${effort:+ (effort=$effort)}"
       run_sandcastle "$attempt"
@@ -1164,7 +1187,49 @@ cmd_run() {
       note "→ codex exec -m $attempt -s $sandbox${effort:+ (effort=$effort)}"
       run_codex "$attempt"
     fi
+    attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
+    attempt_duration=$((attempt_end_ms-attempt_start_ms))
+    local attempt_output_started=false attempt_usage attempt_cost attempt_usage_status=unknown
+    local attempt_cost_status=unknown attempt_failure="" attempt_retryable=false attempt_terminal=succeeded
+    if jq -R -s -e '[split("\n")[] | fromjson? | select(
+        .type == "item.completed" and .item.type == "agent_message" and ((.item.text // "") | length > 0))] | length > 0' \
+        "$art/stream.jsonl" >/dev/null 2>&1; then
+      attempt_output_started=true
+    fi
+    attempt_usage="$(codex_usage "$art/stream.jsonl")"
+    attempt_cost="$(cost_from_usage "$attempt" "$attempt_usage" 2>/dev/null || echo 0)"
+    if jq -R -s -e '[split("\n")[] | fromjson? | select(
+        .type == "turn.completed" and (.usage | type) == "object")] | length > 0' \
+        "$art/stream.jsonl" >/dev/null 2>&1; then
+      attempt_usage_status=known
+      cost_model_has_pricing "$attempt" && attempt_cost_status=known
+    fi
+    if [[ "$rc" -eq 0 ]] && ! jq -R -s -e \
+        '[split("\n")[] | fromjson? | select(.type == "turn.completed")] | length > 0' \
+        "$art/stream.jsonl" >/dev/null 2>&1; then
+      attempt_terminal=failed; attempt_failure=malformed_event
+      attempt_contract_failure=1
+    elif [[ "$rc" -ne 0 ]]; then
+      attempt_terminal=failed; attempt_failure=provider
+      if is_quota_error "$art/codex.err"; then
+        attempt_failure=quota; attempt_retryable=true
+      elif is_model_unavailable_error "$art"; then
+        attempt_failure=unavailable; attempt_retryable=true
+      fi
+      [[ "$attempt_output_started" != true ]] || attempt_retryable=false
+    fi
+    legion_adapter_write_attempt "$art" codex openai "$attempt_ordinal" "$attempt" "" \
+      "$effort" "$effort" "$sandbox" "$attempt_terminal" "$attempt_started_at" \
+      "$attempt_ended_at" "$attempt_duration" "$attempt_usage" "$attempt_usage_status" \
+      "$([[ "$attempt_usage_status" == known ]] && printf codex-jsonl)" "$attempt_cost" \
+      "$attempt_cost_status" "$([[ "$attempt_cost_status" == known ]] && printf legion-cost-table)" \
+      "$attempt_failure" "$attempt_retryable" "$attempt_output_started" \
+      "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$(error_log_summary "$art/codex.err" "$art/codex.err")"
     [[ "$rc" -eq 0 ]] && break
+    if [[ "$attempt_output_started" == true ]]; then
+      note "⚠ $attempt produced output before failing — fallback is suppressed"
+      break
+    fi
     if is_quota_error "$art/codex.err"; then
       note "⚠ $attempt hit quota/rate-limit — trying next fallback model"
       continue
@@ -1262,6 +1327,9 @@ cmd_run() {
   [[ "$total_tokens" =~ ^[0-9]+$ ]] || total_tokens=0   # guard: never let a non-int abort the -gt test
   if [[ "$rc" -ne 0 ]]; then
     status="failed"
+  elif [[ "$attempt_contract_failure" -eq 1 ]]; then
+    status="error"
+    note "⚠ Codex returned no terminal turn.completed event"
   elif [[ "$diff_rc" -ne 0 ]]; then
     status="error"   # codex ran but the diff couldn't be captured — don't claim ok
     note "⚠ could not capture diff from worktree"
@@ -1279,8 +1347,12 @@ cmd_run() {
   # span recorded the outcome of an instruction nobody could retrieve.
   local task_evidence; task_evidence="$(record_task_evidence "$task" "$repo" "$RUN_ID")"
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" --arg stream "$art/stream.jsonl" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --argjson copied_secret_names "$copied_secret_names" --argjson task_evidence "$task_evidence" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream, copied_secret_names:$copied_secret_names} + $task_evidence')"
+    '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream,
+      preflight_receipt:$preflight,attempt_receipt:$attempt,
+      failure_receipt:(if $failure=="" then null else $failure end),
+      copied_secret_names:$copied_secret_names} + $task_evidence')"
   emit_span "codex" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
   write_run_state "$status"
@@ -1317,9 +1389,12 @@ cmd_run() {
 
   jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-0}" --arg run "$RUN_ID" --argjson rc "${rc:-0}" '
+    --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-0}" --arg run "$RUN_ID" --argjson rc "${rc:-0}" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" '
     {run_id:$run, status:$status, executor:"codex", model:$model, thread_id:$thread, codex_exit:$rc,
-     worktree:$wt, diff_path:$diff, last_message_path:$last, error_log:$error_log, usage:$usage, cost_usd:$cost}'
+     worktree:$wt, diff_path:$diff, last_message_path:$last, error_log:$error_log, usage:$usage, cost_usd:$cost,
+     preflight_receipt:$preflight,attempt_receipt:$attempt,
+     failure_receipt:(if $failure=="" then null else $failure end)}'
   # over_budget produced a usable diff (budget is advisory — codex can't be pre-empted),
   # so it exits 0; only a real failure/error is non-zero (M1: graceful degradation).
   case "$status" in

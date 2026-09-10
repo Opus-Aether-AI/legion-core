@@ -60,7 +60,10 @@ known_bad_config_env = []
 supported_sandboxes = ["read-only", "workspace-write"]
 supported_read_modes = ["provider-tools"]
 supported_task_transports = ["stdin"]
-supported_model_patterns = ["^claude-"]
+# Claude accepts configured aliases as well as public ids; the adapter cannot
+# prove that an arbitrary configured alias is supported without a paid call.
+# Omit a pattern so requested models are admitted as untested, not falsely
+# certified or rejected. Premium Fable ids remain policy-gated below.
 supported_efforts = ["low", "medium", "high", "max"]
 billing_class = "metered"
 requires_explicit_consent = false
@@ -110,7 +113,8 @@ known_bad_config_env = []
 supported_sandboxes = ["read-only", "workspace-write"]
 supported_read_modes = ["provider-tools"]
 supported_task_transports = ["stdin"]
-supported_model_patterns = ["^gpt-"]
+# Codex can resolve user-configured providers/aliases. There is no no-spend
+# model reachability probe, so model compatibility remains untested.
 supported_efforts = ["low", "medium", "high", "xhigh", "max"]
 billing_class = "metered"
 requires_explicit_consent = false
@@ -212,7 +216,10 @@ known_bad_config_env = []
 supported_sandboxes = ["workspace-write"]
 supported_read_modes = ["provider-tools"]
 supported_task_transports = ["argv"]
-supported_model_patterns = ["^deepseek-v3\\.2$"]
+# The profile chooses the model and dsh-headless exposes no observable model
+# selection contract.  An adapter-level --model would therefore be cosmetic;
+# reject every requested override until the effective selection is observable.
+supported_model_patterns = []
 supported_efforts = []
 billing_class = "metered"
 requires_explicit_consent = false

@@ -15,6 +15,7 @@ setup_test_env() {
     unset LEGION_ACTIVE LEGION_EXECUTOR LEGION_DEPTH LEGION_RUN_ID
     unset LEGION_EXECUTOR_NAME LEGION_CROSS_HARNESS_HANDOFF
     unset LEGION_TRACE_ID LEGION_PARENT_ID
+    unset LEGION_LOW_CREDIT LEGION_ALLOW_PREMIUM_CREDIT
     export TEST_TMPDIR="$BATS_TEST_TMPDIR"
     export AGENTS_HOME="$TEST_TMPDIR/agents"
     export HOME="$TEST_TMPDIR/home"
@@ -28,6 +29,10 @@ setup_test_env() {
     # deterministic no matter which harness the suite runs under (a Codex/opencode
     # session would otherwise flip the resolved primary and its baseline label).
     export LEGION_PRIMARY=claude
+    # Cursor headless admission requires an API key. Individual refusal tests
+    # unset this explicitly; the shared fixture keeps unrelated adapter tests on
+    # their intended provider path.
+    export CURSOR_API_KEY=test-cursor-key
     # Drop ambient GitHub credentials. A developer shell usually exports one and
     # CI usually does not, which silently changes which release-lookup path the
     # installer takes; tests that need a token export their own.

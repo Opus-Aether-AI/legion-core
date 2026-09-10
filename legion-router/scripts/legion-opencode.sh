@@ -25,6 +25,9 @@ source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/adapter-contract.sh
+source "$_self_dir/lib/adapter-contract.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -204,8 +207,23 @@ cmd_run() {
   legion_require_top_level_executor "opencode" || return $?
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  oc_bin="$(resolve_opencode_bin)" || die "opencode CLI not found. Install opencode or set OPENCODE_BIN (expected \$HOME/.opencode/bin/opencode)."
-  mkdir -p "$art"
+  local preflight_binary="$OPENCODE_BIN"
+  [[ -n "$preflight_binary" || ! -x "$HOME/.opencode/bin/opencode" ]] \
+    || preflight_binary="$HOME/.opencode/bin/opencode"
+  if ! legion_adapter_preflight opencode "$art" "$sandbox" stdin "$model" "" 0 "$preflight_binary"; then
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      failed "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+      "$base" "$archetype"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    jq -cn --arg run "$RUN_ID" --arg model "$model" \
+      --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
+      {run_id:$run,status:"refused",executor:"opencode",model:$model,reason:$reason,
+       preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+       usage:{},cost_usd:0}'
+    return 1
+  fi
+  oc_bin="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   legion_write_runtime_gitignore "$repo"
 
   note "-> opencode worktree $wt (branch $branch, base $base)"
@@ -237,19 +255,22 @@ cmd_run() {
   # it back on the provider's would fix nothing.
   legion_activate_executor_context "$RUN_ID" opencode
   note "-> ${cmd[*]} (task on stdin, $(printf '%s' "$task" | wc -c | tr -d ' ') bytes)"
+  local started_at ended_at output_started=false
+  started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
   printf '%s' "$task" | ( cd "$wt" && "${cmd[@]}" ) >"$out_file" 2>"$err_file"
   rc=${PIPESTATUS[1]}
   set -e
-  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
+  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
-  local parsed usage cost result actual_model opencode_error has_error recognized_events diff_rc=0 status="ok"
+  local parsed usage cost result actual_model observed_model opencode_error has_error recognized_events diff_rc=0 status="ok"
   parsed="$(parse_opencode_output "$out_file")"
   usage="$(jq -c '.usage // {}' <<<"$parsed" 2>/dev/null || printf '{}')"
   cost="$(jq -r '.cost // 0' <<<"$parsed" 2>/dev/null || printf '0')"
-  actual_model="$(jq -r '.model // ""' <<<"$parsed" 2>/dev/null || printf '')"
-  [[ -n "$actual_model" && "$actual_model" != "/" ]] || actual_model="$model"
+  observed_model="$(jq -r '.model // ""' <<<"$parsed" 2>/dev/null || printf '')"
+  [[ "$observed_model" != "/" ]] || observed_model=""
+  actual_model="$observed_model"; [[ -n "$actual_model" ]] || actual_model="$model"
   result="$(jq -r '.result // ""' <<<"$parsed" 2>/dev/null || printf '')"
   has_error="$(jq -r '.has_error // false' <<<"$parsed" 2>/dev/null || printf 'false')"
   opencode_error="$(jq -r '.error.message // ""' <<<"$parsed" 2>/dev/null || printf '')"
@@ -302,11 +323,52 @@ cmd_run() {
     result="opencode completed without a result or a captured diff; refusing to report an empty success."
   fi
   printf '%s\n' "$result" > "$art/last-message.txt"
+  if jq -R -s -e '[splits("\n") | fromjson? | select(
+      (.type=="message.part.updated" and .properties.part.type? == "text" and ((.properties.part.text // "") | length > 0))
+      or (.type=="text" and .part.type? == "text" and ((.part.text // "") | length > 0)))] | length > 0' \
+      "$out_file" >/dev/null 2>&1; then
+    output_started=true
+  fi
+  local usage_status=unknown usage_source="" cost_status=unknown cost_source=""
+  if jq -R -s -e '[splits("\n") | fromjson? | select(
+      (.type=="message.updated" and (.properties.info.role? == "assistant") and (.properties.info.tokens? | type)=="object")
+      or (.type=="step_finish" and (.part.tokens? | type)=="object"))] | length > 0' \
+      "$out_file" >/dev/null 2>&1; then
+    usage_status=known; usage_source=opencode-jsonl
+  fi
+  if jq -R -s -e '[splits("\n") | fromjson? | select(
+      (.type=="message.updated" and (.properties.info.cost? | numbers))
+      or (.type=="step_finish" and (.part.cost? | numbers)))] | length > 0' \
+      "$out_file" >/dev/null 2>&1; then
+    cost_status=known; cost_source=opencode-jsonl
+  fi
+  local terminal_status=succeeded failure_class=""
+  if [[ "$status" != ok ]]; then
+    terminal_status=failed
+    if [[ "$sandbox" == read-only ]] \
+       && ! git -C "$wt" diff --cached --quiet -- . ':!.opencode/plans' 2>/dev/null; then
+      failure_class=policy_refused
+    elif [[ "$rc" -ne 0 || "$has_error" == true ]]; then
+      failure_class=provider
+    elif [[ "$recognized_events" == 0 ]]; then
+      failure_class=malformed_event
+    else
+      failure_class=internal
+    fi
+  fi
+  legion_adapter_write_attempt "$art" opencode opencode 1 "$model" "$observed_model" "" "" \
+    "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
+    "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
+    "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
 
   local artifacts
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg stdout "$out_file" --arg stderr "$err_file" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr}')"
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
+      preflight_receipt:$preflight,attempt_receipt:$attempt,
+      failure_receipt:(if $failure=="" then null else $failure end)}')"
   emit_span "opencode" "$actual_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
 
   if [[ "$do_apply" -eq 1 && "$status" == "ok" && -s "$art/diff.patch" ]]; then
@@ -333,11 +395,14 @@ cmd_run() {
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg result "$result" --arg opencode_error "$opencode_error" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"opencode", model:$model, opencode_exit:$rc,
      result:$result, opencode_error:(if $opencode_error == "" then null else $opencode_error end),
      worktree:$wt, diff_path:$diff, last_message_path:$last,
-     usage:$usage, cost_usd:$cost}'
+     usage:$usage, cost_usd:$cost,preflight_receipt:$preflight,attempt_receipt:$attempt,
+     failure_receipt:(if $failure=="" then null else $failure end)}'
   [[ "$status" == "ok" ]] || exit 1
 }
 

@@ -34,6 +34,10 @@ make_test_repo() {
     echo "$output" | jq -e '.executor == "claude"'
     echo "$output" | jq -e '.result == "CLAUDE_OK_OUTPUT"'
     echo "$output" | jq -e '.fell_back == false'
+    jq -e '
+      .schema == "legion.attempt.v1" and .terminal_status == "succeeded"
+      and .usage_status == "known" and .cost_status == "known"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
 
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '[.executor, .archetype] | @tsv'"
     [ "$status" -eq 0 ]
@@ -95,14 +99,69 @@ make_test_repo() {
     ' "$LEGION_REGISTRY_DIR/$run_id.json"
 }
 
-@test "legion-claude: passes --effort/--append-system-prompt/--dangerously-skip-permissions through to claude" {
+@test "legion-claude: unattended mode refuses danger permissions before provider launch" {
     local repo; repo="$(make_test_repo passthru)"
     run "$LEGION_CLAUDE" run --task "do it" --repo "$repo" \
         --effort high --append-system-prompt "be safe" --dangerously-skip-permissions --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "refused" and .reason == "permission_policy_refused"
+      and .attempt_receipt == null and .failure_receipt == null'
+    ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: unattended workspace writes deny prompts and keep ordinary flags" {
+    local repo; repo="$(make_test_repo unattended-flags)"
+    run "$LEGION_CLAUDE" run --task "do it" --repo "$repo" \
+        --effort high --append-system-prompt "be safe" --quiet
     [ "$status" -eq 0 ]
+    assert_mock_called claude "--permission-mode dontAsk"
     assert_mock_called claude "--effort high"
     assert_mock_called claude "--append-system-prompt be safe"
-    assert_mock_called claude "--dangerously-skip-permissions"
+    ! grep -q -- '--dangerously-skip-permissions' "$MOCK_CALL_LOG"
+}
+
+@test "legion-claude: Fable requires explicit premium-credit consent before any provider call" {
+    local repo premium_model
+    repo="$(make_test_repo fable-consent)"
+    premium_model="$(python3 "$REPO_ROOT/legion-router/scripts/legion-route.py" frontend-polish | jq -r '.model')"
+    run "$LEGION_CLAUDE" run --task "polish it" --repo "$repo" \
+      --model "$premium_model" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "refused" and .reason == "admission_refused"
+      and .attempt_receipt == null and .failure_receipt == null'
+    assert_mock_not_called claude
+    assert_mock_not_called legion-delegate
+
+    run "$LEGION_CLAUDE" run --task "polish it" --repo "$repo" \
+      --model "$premium_model" --allow-premium-credit --quiet
+    [ "$status" -eq 0 ]
+    assert_mock_called claude "-p --output-format json --model $premium_model"
+}
+
+@test "legion-claude: permission prompts fail closed without fallback or danger retry" {
+    local repo; repo="$(make_test_repo permission-refusal)"
+    MOCK_CLAUDE_PERMISSION_PROMPT=1 run "$LEGION_CLAUDE" run \
+      --task "edit it" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.reason == "permission_policy_refused" and .fell_back == false'
+    [ "$(grep -c '^claude -p ' "$MOCK_CALL_LOG")" -eq 1 ]
+    ! grep -q -- '--dangerously-skip-permissions' "$MOCK_CALL_LOG"
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: output_started suppresses all fallback" {
+    local repo; repo="$(make_test_repo partial-output)"
+    MOCK_CLAUDE_OUTPUT_THEN_FAIL=1 run "$LEGION_CLAUDE" run \
+      --task "edit it" --repo "$repo" --fallback-models test-fallback-model --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.reason == "claude_error_after_output" and .fell_back == false'
+    [ "$(grep -c '^claude -p ' "$MOCK_CALL_LOG")" -eq 1 ]
+    assert_mock_not_called legion-delegate
+    jq -e '.output_started == true and .failure.retryable == false' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
 }
 
 @test "legion-claude: read-only sandbox uses plan mode" {
@@ -121,6 +180,8 @@ make_test_repo() {
     [ "$status" -eq 1 ]
     echo "$output" | jq -e \
         '.status == "failed" and .reason == "read_only_violation" and .fell_back == false'
+    jq -e '.terminal_status == "failed" and .failure.class == "policy_refused"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
     [ ! -e "$repo/claude-unexpected.txt" ]
     assert_mock_not_called legion-delegate
 }
@@ -189,7 +250,7 @@ make_test_repo() {
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.executor == "codex"'
     echo "$output" | jq -e '.fell_back_reason == "claude_unavailable"'
-    assert_mock_not_called claude
+    ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
 }
 
 @test "legion-claude: worktree setup failure fails closed before invoking Claude" {
@@ -199,7 +260,7 @@ make_test_repo() {
     [ "$status" -eq 1 ]
     echo "$output" | jq -e \
         '.status == "failed" and .reason == "worktree_setup_failed" and .fell_back == false'
-    assert_mock_not_called claude
+    ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
     assert_mock_not_called legion-delegate
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor == \"claude\" and .status == \"failed\")'"
     [ "$status" -eq 0 ]
@@ -221,7 +282,7 @@ make_test_repo() {
     [ "$status" -eq 1 ]
     echo "$output" | jq -e \
         '.status == "failed" and .reason == "worktree_setup_failed" and .fell_back == false'
-    assert_mock_not_called claude
+    ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
     jq -e '
       .run_id == "queued-claude-non-git"
       and .state_version >= 2

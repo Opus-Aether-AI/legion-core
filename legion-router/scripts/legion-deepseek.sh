@@ -49,6 +49,9 @@ source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/adapter-contract.sh
+source "$_self_dir/lib/adapter-contract.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -119,6 +122,7 @@ emit_span() {
 cmd_run() {
   local default_model=""
   local task="" model="${LEGION_DEEPSEEK_MODEL:-${DSH_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
+  local requested_model="$model"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 dsh_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
   local base_commit=""
@@ -130,7 +134,7 @@ cmd_run() {
       --task-file)
         [[ -r "$2" ]] || die "--task-file not readable: $2"
         task="$(cat "$2")"; shift 2 ;;
-      --model) model="$2"; shift 2 ;;
+      --model) model="$2"; requested_model="$2"; shift 2 ;;
       --archetype) archetype="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
       --base) base="$2"; shift 2 ;;
@@ -172,8 +176,21 @@ cmd_run() {
   legion_require_top_level_executor "deepseek" || return $?
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  dsh_bin="$(resolve_dsh_bin)" || die "dsh CLI not found. Install DeepSeek Harness (npm i -g @deepseek-ai/dsh) or set DSH_BIN."
-  mkdir -p "$art"
+  if ! legion_adapter_preflight deepseek "$art" "$sandbox" argv \
+      "$requested_model" "" 0 "$DSH_BIN"; then
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      failed "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+      "$base" "$archetype"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    jq -cn --arg run "$RUN_ID" --arg model "$model" \
+      --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
+      {run_id:$run,executor:"deepseek",model:$model,status:"refused",reason:$reason,
+       preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+       usage:{},cost_usd:0}'
+    return 1
+  fi
+  dsh_bin="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   legion_write_runtime_gitignore "$repo"
 
   note "-> deepseek worktree $wt (branch $branch, base $base)"
@@ -197,18 +214,19 @@ cmd_run() {
   cmd=("$dsh_bin" --profile "$DSH_PROFILE")
   # read-only has no dsh equivalent: the headless bundle carries whatever tools
   # its profile loads, and there is no documented flag that withholds the write
-  # and bash tools. Rather than pass a flag that does not exist and report a
-  # read-only run that could still edit, the no-write guarantee is enforced
-  # below by rejecting any run that changed files -- the same backstop
-  # legion-opencode applies, here as the ONLY line of defence.
+  # and bash tools. Shared preflight therefore rejects read-only before this
+  # launch path is reachable instead of pretending a post-hoc diff check is a
+  # sandbox.
   legion_activate_executor_context "$RUN_ID" deepseek
   note "-> ${cmd[*]} (task on argv, $(printf '%s' "$task" | wc -c | tr -d ' ') bytes)"
+  local started_at ended_at output_started=false failure_class="" terminal_status=succeeded
+  started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
   ( cd "$wt" && "${cmd[@]}" "$task" ) >"$out_file" 2>"$err_file"
   rc=$?
   set -e
-  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
+  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
   # dsh publishes no headless usage contract, so nothing is metered rather than
   # something being guessed. A zero here means "not reported", and legion-report
@@ -234,11 +252,24 @@ cmd_run() {
     result="dsh completed without a result or a captured diff; refusing to report an empty success."
   fi
   printf '%s\n' "$result" > "$art/last-message.txt"
+  legion_adapter_output_started_file "$out_file" && output_started=true
+  if [[ "$status" != ok ]]; then
+    terminal_status=failed
+    if [[ "$rc" -ne 0 ]]; then failure_class=provider; else failure_class=malformed_event; fi
+  fi
+  legion_adapter_write_attempt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
+    "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
+    '{}' unknown '' 0 unknown '' "$failure_class" false "$output_started" \
+    "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
 
   local artifacts
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg stdout "$out_file" --arg stderr "$err_file" --arg profile "$DSH_PROFILE" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr, dsh_profile:$profile}')"
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
+      dsh_profile:$profile,preflight_receipt:$preflight,attempt_receipt:$attempt,
+      failure_receipt:(if $failure=="" then null else $failure end)}')"
   emit_span "deepseek" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
 
   if [[ "$do_apply" == "1" && "$status" == "ok" && -s "$art/diff.patch" ]]; then
@@ -264,8 +295,12 @@ cmd_run() {
   jq -cn --arg run_id "$RUN_ID" --arg executor deepseek --arg model "$model" \
     --arg status "$status" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg wt "$wt" --argjson usage "$usage" --argjson cost "$cost" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     '{run_id:$run_id, executor:$executor, model:$model, status:$status,
-      diff_path:$diff, last_message:$last, worktree:$wt, usage:$usage, cost_usd:$cost}'
+      diff_path:$diff, last_message:$last, worktree:$wt, usage:$usage, cost_usd:$cost,
+      preflight_receipt:$preflight,attempt_receipt:$attempt,
+      failure_receipt:(if $failure=="" then null else $failure end)}'
   [[ "$status" == "ok" ]]
 }
 

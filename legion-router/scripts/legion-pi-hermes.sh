@@ -14,6 +14,9 @@ source "$_self_dir/lib/executor-context.sh"
 source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
 source "$_self_dir/lib/task-scan.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/adapter-contract.sh
+source "$_self_dir/lib/adapter-contract.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 # shellcheck disable=SC1090
 [[ -f "$_state_lib" ]] && source "$_state_lib"
@@ -599,15 +602,26 @@ start_handoff_broker() {
   die "handoff broker failed to start; inspect $ART/broker.err"
 }
 
-prepare_runtime_roots() {
+reject_symlinked_runtime_roots() {
   local root="$REPO/.legion" candidate
   for candidate in "$root" "$root/runs" "$root/worktrees" "$ART" "$WT" "$root/.gitignore"; do
     [[ ! -L "$candidate" ]] || die "refusing symlinked Legion runtime path: $candidate"
   done
+}
+
+prepare_runtime_roots() {
+  local root="$REPO/.legion"
+  reject_symlinked_runtime_roots
   [[ ! -e "$ART" || -d "$ART" ]] || die "refusing non-directory Legion artifact path: $ART"
-  if [[ -d "$ART" && -n "$(find "$ART" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+  if [[ -d "$ART" && -n "$(find "$ART" -mindepth 1 -maxdepth 1 \
+      ! -name preflight.json ! -name "$ADAPTER_KIND-preflight.json" -print -quit 2>/dev/null)" ]]; then
     die "refusing non-empty Legion artifact directory: $ART"
   fi
+  local receipt
+  for receipt in "$ART/preflight.json" "$ART/$ADAPTER_KIND-preflight.json"; do
+    [[ ! -e "$receipt" || ( -f "$receipt" && ! -L "$receipt" ) ]] \
+      || die "refusing unsafe Legion preflight receipt: $receipt"
+  done
   mkdir -p "$ART" "$root/worktrees" "$ART/tmp" "$ART/cache"
   if [[ ! -e "$root/.gitignore" ]]; then
     printf '*\n' > "$root/.gitignore"
@@ -671,8 +685,6 @@ cmd_run() {
   REPO="$(cd "${REPO:-$PWD}" && pwd -P)" || die 'run: repo does not exist'
   resolve_state "$REPO"; BASE="$base"; SANDBOX="$sandbox"
   case "$SANDBOX" in read-only|workspace-write) ;; *) die "invalid --sandbox '$SANDBOX' (read-only|workspace-write)";; esac
-  # Hermes currently exposes no documented read-only/no-tools one-shot flag.
-  [[ "$ADAPTER_KIND" != hermes || "$SANDBOX" != read-only ]] || die 'read-only is unsupported by Hermes --oneshot; refusing to weaken isolation.'
   [[ -n "$task" ]] || task="$(cat)"; [[ -n "$task" ]] || die 'run: empty task'
   [[ "$SANDBOX" == read-only ]] || legion_scan_task_text "$task"
   legion_require_top_level_executor "$ADAPTER_KIND" || return $?
@@ -682,8 +694,25 @@ cmd_run() {
     [[ -n "$THINKING" ]] || THINKING="${BASH_REMATCH[1]}"; MODEL="${MODEL%:*}"
   fi
   [[ "$ADAPTER_KIND" != pi || -z "$THINKING" ]] || valid_thinking "$THINKING" || die "invalid --thinking '$THINKING' (off|minimal|low|medium|high|xhigh|max)"
+  local requested_model="$MODEL"
   RUN_ID="${PRESET_RUN_ID:-$(_run_id)}"; WT="$REPO/.legion/worktrees/$RUN_ID"; WT_RECORD="$WT"; ART="$REPO/.legion/runs/$RUN_ID"; BRANCH="legion/$ADAPTER_KIND-$RUN_ID"
+  # Preflight writes its no-spend receipt under ART. Authenticate every parent
+  # first so a repository-controlled runtime symlink cannot redirect that write.
+  reject_symlinked_runtime_roots
   [[ -z "$PRESET_RUN_ID" ]] || legion_arm_adopted_run_guard "$RUN_ID" "$REPO" "$ART" "$WT" "$BRANCH" "$MODEL" "$SANDBOX" "$BASE" "$ARCHETYPE" "$THINKING"
+  if ! legion_adapter_preflight "$ADAPTER_KIND" "$ART" "$SANDBOX" argv "$MODEL" \
+      "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" 0 "$PROVIDER_BIN"; then
+    write_state failed
+    [[ -z "$PRESET_RUN_ID" ]] || legion_disarm_adopted_run_guard
+    jq -cn --arg run "$RUN_ID" --arg executor "$ADAPTER_KIND" --arg model "$MODEL" \
+      --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
+      {run_id:$run,status:"refused",executor:$executor,model:$model,reason:$reason,
+       preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+       usage:{},cost_usd:0}'
+    return 1
+  fi
+  PROVIDER_BIN="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   provider_ready
   resolve_fs_sandbox
   git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repo: $REPO"
@@ -710,9 +739,12 @@ cmd_run() {
       --ignore-user-config --toolsets "terminal,file")
   fi
   note "-> ${command[*]}"
+  local started_at ended_at
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   start="$(date +%s000)"; run_provider "$out" "$err" "${command[@]}"; end="$(date +%s000)"; duration=$((end-start))
+  ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   stop_handoff_broker
-  local usage='{}' result='' cost=0 status=ok diff="$ART/diff.patch" actual_model="$MODEL" terminal_ok=0 provider_files_ok=0
+  local usage='{}' result='' cost=0 status=ok diff="$ART/diff.patch" actual_model="$MODEL" observed_model="" terminal_ok=0 provider_files_ok=0
   if verify_provider_file "$out" "$PROVIDER_OUT_ID" \
       && verify_provider_file "$err" "$PROVIDER_ERR_ID" \
       && verify_provider_file "$usage_art" "$PROVIDER_USAGE_ID"; then
@@ -723,11 +755,11 @@ cmd_run() {
   fi
   if [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == pi ]]; then
     usage="$(pi_usage "$out")"; result="$(pi_result "$out")"; pi_terminal_ok "$out" && terminal_ok=1 || true
-    actual_model="$(pi_actual_model "$out")"; [[ -n "$actual_model" ]] || actual_model="$MODEL"
+    observed_model="$(pi_actual_model "$out")"; actual_model="$observed_model"; [[ -n "$actual_model" ]] || actual_model="$MODEL"
     cost="$(pi_cost "$out")"
   elif [[ "$provider_files_ok" == 1 ]]; then
     usage="$(hermes_usage "$usage_art")"; result="$(hermes_result "$out")"; hermes_terminal_ok "$out" "$usage_art" && terminal_ok=1 || true
-    actual_model="$(hermes_actual_model "$usage_art")"; [[ -n "$actual_model" ]] || actual_model="$MODEL"
+    observed_model="$(hermes_actual_model "$usage_art")"; actual_model="$observed_model"; [[ -n "$actual_model" ]] || actual_model="$MODEL"
     cost="$(hermes_cost "$usage_art")"
   fi
   MODEL="$actual_model"
@@ -759,14 +791,61 @@ cmd_run() {
   if [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == hermes ]]; then
     cost_provenance="$(hermes_cost_provenance "$usage_art")"
   fi
-  local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" --argjson cost_provenance "$cost_provenance" '{worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage} + $cost_provenance')"
+  local usage_status=unknown usage_source="" cost_status=unknown cost_source="" output_started=false
+  if [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == pi ]] \
+     && jq -s -e '[.[] | select(.type == "message_end" and .message.role == "assistant")
+       | .message.content[]? | select(.type == "text" and ((.text // "") | length > 0))] | length > 0' \
+       "$out" >/dev/null 2>&1; then
+    output_started=true
+  elif [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == hermes ]] \
+       && legion_adapter_output_started_file "$out"; then
+    output_started=true
+  fi
+  if [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == pi ]] \
+     && jq -s -e '[.[] | select(.type == "message_end" and (.message.usage | type) == "object")] | length > 0' "$out" >/dev/null 2>&1; then
+    usage_status=known; usage_source=pi-jsonl; cost_status=known; cost_source=pi-jsonl
+  elif [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == hermes ]] \
+       && hermes_terminal_ok "$out" "$usage_art"; then
+    usage_status=known; usage_source=hermes-usage-file
+    if [[ "$(jq -r '.cost_status // "unknown"' "$usage_art")" != unknown ]]; then
+      cost_status=known; cost_source=hermes-usage-file
+    fi
+  fi
+  local terminal_status=succeeded failure_class=""
+  if [[ "$status" != ok ]]; then
+    terminal_status=failed
+    if [[ "$SANDBOX" == read-only && -s "$diff" ]]; then
+      failure_class=policy_refused
+    elif [[ "$PROVIDER_RC" -ne 0 ]]; then
+      failure_class=provider
+    elif [[ "$terminal_ok" != 1 ]]; then
+      failure_class=malformed_event
+    else
+      failure_class=internal
+    fi
+  fi
+  legion_adapter_write_attempt "$ART" "$ADAPTER_KIND" "$ADAPTER_KIND" 1 "$requested_model" "$observed_model" \
+    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+    "$SANDBOX" "$terminal_status" "$started_at" "$ended_at" "$duration" \
+    "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
+    "$failure_class" false "$output_started" \
+    "$([[ "$PROVIDER_RC" -eq 0 ]] || printf '%s' "$PROVIDER_RC")" "$result"
+  local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --argjson cost_provenance "$cost_provenance" '{worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage,
+      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)} + $cost_provenance')"
   emit_span "$status" "$duration" "$cost" "$usage" "$task" "$artifacts"
   if [[ "$apply" == 1 && "$status" == ok && -s "$diff" ]]; then
     if git -C "$REPO" apply --check "$diff"; then git -C "$REPO" apply "$diff"; else note "diff did not apply cleanly; left in $diff"; fi
   fi
   local report="$WT_RECORD"; [[ "$KEEP" == 1 ]] || { cleanup_worktree; report='(removed; rerun with --keep to retain the worktree)'; }
   write_state "$status"; [[ -z "$PRESET_RUN_ID" ]] || legion_disarm_adopted_run_guard
-  jq -cn --arg run "$RUN_ID" --arg status "$status" --arg executor "$ADAPTER_KIND" --arg model "$actual_model" --arg result "$result" --arg worktree "$report" --arg diff "$diff" --arg last "$ART/last-message.txt" --argjson usage "$usage" --argjson cost "$cost" --argjson rc "$PROVIDER_RC" '{run_id:$run,status:$status,executor:$executor,model:$model,result:$result,worktree:$worktree,diff_path:$diff,last_message_path:$last,usage:$usage,cost_usd:$cost,provider_exit:$rc}'
+  jq -cn --arg run "$RUN_ID" --arg status "$status" --arg executor "$ADAPTER_KIND" --arg model "$actual_model" --arg result "$result" --arg worktree "$report" --arg diff "$diff" --arg last "$ART/last-message.txt" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --argjson usage "$usage" --argjson cost "$cost" --argjson rc "$PROVIDER_RC" \
+    '{run_id:$run,status:$status,executor:$executor,model:$model,result:$result,worktree:$worktree,diff_path:$diff,last_message_path:$last,usage:$usage,cost_usd:$cost,provider_exit:$rc,
+      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)}'
   [[ "$status" == ok ]] || exit 1
 }
 

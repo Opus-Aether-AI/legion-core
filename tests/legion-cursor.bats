@@ -29,6 +29,10 @@ make_test_repo() {
     MOCK_CONTEXT_LOG="$context" run "$LEGION_CURSOR" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e --arg model "$CURSOR_DEFAULT" '.status == "ok" and .executor == "cursor" and .model == $model'
+    jq -e '.schema == "legion.preflight.v1" and .status == "untested"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '.schema == "legion.attempt.v1" and .terminal_status == "succeeded" and .usage_status == "known"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
     grep -q "MOCK_CURSOR_CHANGE" "$diff"
@@ -148,11 +152,27 @@ make_test_repo() {
 
     PATH="$(path_without agent)" run "$LEGION_CURSOR" run --task "x" \
       --repo "$repo" --run-id "$run_id" --quiet
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"Cursor Agent CLI not found"* ]]
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("binary not found"))
+      and .attempt_receipt == null and .failure_receipt == null'
+    assert_mock_not_called agent
+    [ ! -d "$repo/.legion/worktrees" ]
     jq -e '
       .run_id == "queued-cursor-missing-cli"
       and .state_version >= 2
       and .lifecycle.phase == "failed"
     ' "$LEGION_REGISTRY_DIR/$run_id.json"
+}
+
+@test "legion-cursor: missing headless credentials refuses before provider resolution or launch" {
+    local repo; repo="$(make_test_repo no-key)"
+    unset CURSOR_API_KEY
+    run "$LEGION_CURSOR" run --task "x" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("missing required configuration"))
+      and .attempt_receipt == null and .failure_receipt == null'
+    assert_mock_not_called agent
+    [ ! -d "$repo/.legion/worktrees" ]
 }

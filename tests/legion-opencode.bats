@@ -29,6 +29,10 @@ make_test_repo() {
     MOCK_CONTEXT_LOG="$context" run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e --arg m "$OPENCODE_DEFAULT" '.status == "ok" and .executor == "opencode" and .model == $m'
+    jq -e '.schema == "legion.preflight.v1" and .status == "untested"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '.schema == "legion.attempt.v1" and .terminal_status == "succeeded" and .usage_status == "known" and .cost_status == "known"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
     grep -q "mock-opencode-change" "$diff"
@@ -143,6 +147,8 @@ make_test_repo() {
       and .opencode_error == "The requested model is not supported."
       and (.result | contains("opencode error: The requested model is not supported."))
     '
+    jq -e '.terminal_status == "failed" and .failure.class == "provider"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .status"
     [ "$output" = "failed" ]
 }
@@ -220,8 +226,12 @@ make_test_repo() {
     OPENCODE_BIN="$TEST_TMPDIR/missing-opencode" run "$LEGION_OPENCODE" run \
       --task "x" --repo "$repo" --run-id "$run_id" --quiet
 
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"opencode CLI not found"* ]]
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("binary not found"))
+      and .attempt_receipt == null and .failure_receipt == null'
+    assert_mock_not_called opencode
+    [ ! -d "$repo/.legion/worktrees" ]
     jq -e '
       .run_id == "queued-opencode-missing-cli"
       and .state_version >= 2

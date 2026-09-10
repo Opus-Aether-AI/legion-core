@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then printf 'hermes 1.0.0\n'; exit 0; fi
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'hermes %s\n' "$*" >> "$MOCK_CALL_LOG"
 [[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'hermes active=%s executor=%s depth=%s run=%s name=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"

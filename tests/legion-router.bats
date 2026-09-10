@@ -145,6 +145,16 @@ repos_file_for_repo() {
     [ "$output" = "0" ]
 }
 
+@test "cost: receipt provenance distinguishes an unpriced zero from known pricing" {
+    run bash -c 'source "$1"; cost_model_has_pricing "$2"' _ \
+      "$LIB/cost.sh" "$CODEX_WORKHORSE"
+    [ "$status" -eq 0 ]
+
+    run bash -c 'source "$1"; cost_model_has_pricing "$2"' _ \
+      "$LIB/cost.sh" fixture-unpriced-model
+    [ "$status" -eq 1 ]
+}
+
 # ── legion-delegate run ──────────────────────────────────────────────
 @test "delegate run: happy path returns ok + captures diff + emits span" {
     local repo; repo="$(make_test_repo run1)"
@@ -153,6 +163,13 @@ repos_file_for_repo() {
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e '.model == "test-model-beta"'
+    jq -e '.schema == "legion.preflight.v1" and .status == "untested"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '
+      .schema == "legion.attempt.v1" and .terminal_status == "succeeded"
+      and .usage_status == "known" and .cost_status == "unknown"
+      and .cost_usd == null and .cost_source == null' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
     grep -q "MOCK_CODEX_CHANGE" "$diff"
@@ -166,6 +183,37 @@ repos_file_for_repo() {
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r 'select(.executor==\"codex\") | .executor'"
     [ "$output" = "codex" ]
     grep -Eq '^codex active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
+}
+
+@test "delegate run: unavailable Codex refuses in preflight before provider launch" {
+    local repo; repo="$(make_test_repo codex-preflight-unavailable)"
+    CODEX_BIN="$TEST_TMPDIR/missing-codex" run "$DELEGATE" run \
+      --model test-model-beta --task "do the thing" --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("binary not found"))
+      and .attempt_receipt == null and .failure_receipt == null'
+    ! grep -q '^codex exec ' "$MOCK_CALL_LOG"
+    [ ! -d "$repo/.legion/worktrees" ]
+}
+
+@test "delegate run: forwards explicit premium consent to the Claude admission boundary" {
+    local repo premium_model
+    repo="$(make_test_repo delegated-fable-consent)"
+    premium_model="$(python3 "$REPO_ROOT/legion-router/scripts/legion-route.py" frontend-polish | jq -r '.model')"
+    PATH="$REPO_ROOT/legion-router/bin:$PATH" run "$DELEGATE" run \
+      --executor claude --model "$premium_model" \
+      --task "polish it" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "refused" and .reason == "admission_refused"'
+    ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
+
+    PATH="$REPO_ROOT/legion-router/bin:$PATH" run "$DELEGATE" run \
+      --executor claude --model "$premium_model" \
+      --allow-premium-credit --task "polish it" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    assert_mock_called claude "-p --output-format json --model $premium_model"
 }
 
 @test "delegate run: forwards a preallocated run id to every non-Codex adapter" {
@@ -193,6 +241,8 @@ repos_file_for_repo() {
 
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok" and .executor == "pi" and .model == "openai/fixture-pi" and .result == "PI_OK_OUTPUT"'
+    jq -e '.terminal_status == "succeeded" and .usage_status == "known" and .cost_status == "known"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
     echo "$output" | jq -e '.usage == {"input_tokens":220,"cached_input_tokens":30,"output_tokens":38,"reasoning_output_tokens":12,"cache_creation_input_tokens":5} and .cost_usd == 0.007'
     assert_mock_called pi '-p --mode json --no-session --no-approve --no-extensions --no-skills --no-prompt-templates --model openai/fixture-pi --thinking high'
     assert_mock_called sandbox-exec '-f '
@@ -218,6 +268,8 @@ repos_file_for_repo() {
       _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
     [ "$status" -ne 0 ]
     echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+    jq -e '.terminal_status == "failed" and .failure.class == "malformed_event"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
 
     MOCK_PI_MISSING_USAGE=1 PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi --task "make a scoped edit" --repo "$3" --quiet' \
       _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
@@ -228,6 +280,19 @@ repos_file_for_repo() {
       _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
     [ "$status" -ne 0 ]
     echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+}
+
+@test "Pi adapter: unavailable binary refuses in preflight before provider launch" {
+    local repo; repo="$(make_test_repo pi-preflight-unavailable)"
+    PI_BIN="$TEST_TMPDIR/missing-pi" run "$REPO_ROOT/legion-router/bin/legion-pi" run \
+      --model openai/fixture-pi --task "make a scoped edit" --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("binary not found"))
+      and .attempt_receipt == null and .failure_receipt == null'
+    assert_mock_not_called pi
+    [ ! -d "$repo/.legion/worktrees" ]
 }
 
 @test "Pi adapter: meters retry and compaction calls exactly once" {
@@ -363,6 +428,8 @@ repos_file_for_repo() {
       _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-hermes" "$repo"
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok" and .executor == "hermes" and .result == "HERMES_OK_OUTPUT" and .usage.input_tokens == 256 and .cost_usd == 0.002'
+    jq -e '.terminal_status == "succeeded" and .usage_status == "known" and .cost_status == "known"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
     echo "$output" | jq -e '.model == "openai/fixture-hermes" and .usage.cached_input_tokens == 24 and .usage.output_tokens == 36 and .usage.reasoning_output_tokens == 12'
     assert_mock_called hermes '--oneshot make a scoped edit --usage-file'
     assert_mock_called hermes '--ignore-user-config --toolsets terminal,file'
@@ -393,12 +460,19 @@ repos_file_for_repo() {
     [ "$status" -ne 0 ]
     echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
 
-    : > "$MOCK_CALL_LOG"
-    HERMES_BIN=hermes run bash -c 'cd "$1" && "$2" run --model openai/fixture-hermes --sandbox read-only --task "review this" --repo "$3" --quiet' \
-      _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-hermes" "$repo"
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"read-only is unsupported"* ]]
+}
+
+@test "Hermes adapter: rejects read-only in preflight before provider resolution or launch" {
+    local repo; repo="$(make_test_repo hermes-read-only-admission)"
+    HERMES_BIN=hermes run "$REPO_ROOT/legion-router/bin/legion-hermes" run \
+      --model openai/fixture-hermes --sandbox read-only --task "review this" \
+      --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("unsupported sandbox"))
+      and .attempt_receipt == null and .failure_receipt == null'
     assert_mock_not_called hermes
+    [ ! -d "$repo/.legion/worktrees" ]
 }
 
 @test "Pi and Hermes adapters: preserve dispatcher run identity and trace context" {
@@ -1973,6 +2047,31 @@ $run_error" ]
   MOCK_CODEX_QUOTA_FAIL="$CODEX_WORKHORSE" run "$DELEGATE" run --archetype bulk-mechanical-edit --task x --repo "$repo" --quiet
   [ "$status" -eq 1 ]
   echo "$output" | jq -e --arg model "$CODEX_WORKHORSE" '.status == "failed" and .model == $model'
+}
+
+@test "delegate run: output_started suppresses the Codex fallback chain" {
+  local repo; repo="$(make_test_repo codex-partial-fallback)"
+  local precision; precision="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_precision)"
+  MOCK_CODEX_QUOTA_FAIL="$precision" MOCK_CODEX_OUTPUT_BEFORE_QUOTA=1 \
+    run "$DELEGATE" run --archetype migration --task x --repo "$repo" --quiet
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e --arg model "$precision" '.status == "failed" and .model == $model'
+  [ "$(grep -c '^codex exec ' "$MOCK_CALL_LOG")" -eq 1 ]
+  jq -e '.output_started == true and .failure.retryable == false and .failure.class == "quota"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
+}
+
+@test "delegate run: a zero-exit malformed Codex stream is a typed failed attempt" {
+  local repo; repo="$(make_test_repo codex-malformed-stream)"
+  MOCK_CODEX_MALFORMED=1 run "$DELEGATE" run \
+    --model test-model-beta --task x --repo "$repo" --quiet
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.status == "error" and .codex_exit == 0'
+  [ "$(grep -c '^codex exec ' "$MOCK_CALL_LOG")" -eq 1 ]
+  jq -e '
+    .terminal_status == "failed" and .failure.class == "malformed_event"
+    and .failure.retryable == false and .output_started == false' \
+    "$(echo "$output" | jq -r .attempt_receipt)"
 }
 
 @test "delegate run: a non-quota failure does NOT burn the fallback chain" {

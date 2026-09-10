@@ -204,7 +204,8 @@ def _compatibility(config, request, env):
     return checks, failures
 
 
-def preflight(executor, *, registry_path=None, cache_dir=None, env=None, **request):
+def preflight(executor, *, registry_path=None, cache_dir=None, env=None,
+              binary_override=None, **request):
     env = dict(os.environ if env is None else env)
     checked_at = _utc_now()
     try:
@@ -218,6 +219,12 @@ def preflight(executor, *, registry_path=None, cache_dir=None, env=None, **reque
         return {"schema": SCHEMA, "checked_at": checked_at, "executor": executor,
                 "status": "unavailable", "reason": f"executor '{executor}' is not registered",
                 "identity": None, "cache": {"hit": False, "key": None}, "compatibility": {}}
+    # Adapter-specific binary overrides (for example CODEX_BIN=/opt/codex) are
+    # part of the executable identity.  Copy the registry row so a caller can
+    # preflight the exact binary it will launch without mutating shared state.
+    config = dict(config)
+    if binary_override:
+        config["binary"] = binary_override
     checks, failures = _compatibility(config, request, env)
     missing_config = checks.get("configuration", {}).get("status") == "unavailable"
     if failures:
@@ -285,11 +292,13 @@ def main(argv=None):
     parser.add_argument("--model")
     parser.add_argument("--effort")
     parser.add_argument("--explicit-consent", action="store_true")
+    parser.add_argument("--binary")
     args = parser.parse_args(argv)
     result = preflight(
         args.executor, registry_path=args.executors_file, cache_dir=args.cache_dir,
         sandbox=args.sandbox, read_mode=args.read_mode, task_transport=args.task_transport,
         model=args.model, effort=args.effort, explicit_consent=args.explicit_consent,
+        binary_override=args.binary,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["status"] in PASSING_STATES else 1

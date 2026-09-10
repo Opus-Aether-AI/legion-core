@@ -17,6 +17,9 @@ source "$_self_dir/lib/executor-context.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/run-id.sh
 source "$_self_dir/lib/run-id.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/adapter-contract.sh
+source "$_self_dir/lib/adapter-contract.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -155,9 +158,15 @@ emit_terminal_json() {
     --arg run_id "$RUN_ID" --arg executor "$executor" --arg model "$model" \
     --arg status "$status" --arg result "$result" --argjson usage "$usage" \
     --argjson cost "${cost:-0}" --argjson fell_back "$fell_back" --arg reason "$reason" \
-    --arg wt "${LEGION_CLAUDE_WORKTREE:-}" --arg diff "${LEGION_CLAUDE_DIFF:-}" '
+    --arg wt "${LEGION_CLAUDE_WORKTREE:-}" --arg diff "${LEGION_CLAUDE_DIFF:-}" \
+    --arg preflight "${LEGION_ADAPTER_PREFLIGHT_PATH:-}" \
+    --arg attempt "${LEGION_ADAPTER_ATTEMPT_PATH:-}" \
+    --arg failure "${LEGION_ADAPTER_FAILURE_PATH:-}" '
     {run_id:$run_id, executor:$executor, model:$model, status:$status, result:$result,
-     usage:$usage, cost_usd:$cost, fell_back:$fell_back}
+     usage:$usage, cost_usd:$cost, fell_back:$fell_back,
+     preflight_receipt:(if $preflight=="" then null else $preflight end),
+     attempt_receipt:(if $attempt=="" then null else $attempt end),
+     failure_receipt:(if $failure=="" then null else $failure end)}
     + (if $reason == "" then {} else {fell_back_reason:$reason, reason:$reason} end)
     + (if $wt == "" then {} else {worktree:$wt} end)
     + (if $diff == "" then {} else {diff_path:$diff} end)'
@@ -228,6 +237,7 @@ cmd_run() {
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
   local effort="" append_sys="" skip_perms=0
+  local premium_consent="${LEGION_ALLOW_PREMIUM_CREDIT:-0}"
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
   local base_commit=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
@@ -253,6 +263,7 @@ cmd_run() {
       --effort) effort="$2"; shift 2 ;;                       # reasoning effort passthrough
       --append-system-prompt) append_sys="$2"; shift 2 ;;     # extra system prompt passthrough
       --dangerously-skip-permissions) skip_perms=1; shift ;;  # autonomous headless runs (opt-in)
+      --allow-premium-credit|--explicit-consent) premium_consent=1; shift ;;
       --base) base="$2"; shift 2 ;;                           # worktree base ref
       --apply) do_apply=1; shift ;;                           # apply the returned diff to the repo
       --keep) keep=1; shift ;;                                # retain the worktree after the run
@@ -291,9 +302,6 @@ cmd_run() {
     read-only|workspace-write) ;;
     *) die "invalid --sandbox '$sandbox' (read-only|workspace-write)" ;;
   esac
-  if [[ "$sandbox" == "read-only" && "$skip_perms" -eq 1 ]]; then
-    die "--dangerously-skip-permissions cannot be combined with --sandbox read-only"
-  fi
   : "${archetype:-}"
 
   if [[ -n "$preset_run_id" ]]; then
@@ -305,6 +313,35 @@ cmd_run() {
   [[ -n "$task" ]] || die "run: empty task"
   legion_require_top_level_executor "claude" || return $?
 
+  local contract_art="$repo/.legion/runs/$RUN_ID"
+  if ! legion_adapter_preflight claude "$contract_art" "$sandbox" stdin "$model" "$effort" \
+      "$premium_consent" "$CLAUDE_BIN"; then
+    # An unavailable CLI may safely route to the already-configured alternate;
+    # incompatible policy/model/billing requests are terminal refusals and may
+    # not spend through a different provider.
+    if [[ "$LEGION_ADAPTER_PREFLIGHT_STATUS" == unavailable && "$allow_fallback" -eq 1 ]]; then
+      reason=claude_unavailable
+      run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
+      return $?
+    fi
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      failed "$RUN_ID" "$repo" "$contract_art" "$wt" "$branch" "$model" "$sandbox" \
+      "$base" "$archetype" "$effort"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    emit_terminal_json claude "$model" refused "$LEGION_ADAPTER_PREFLIGHT_REASON" '{}' 0 false admission_refused
+    return 1
+  fi
+  CLAUDE_BIN="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+  if [[ "$skip_perms" -eq 1 ]]; then
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      failed "$RUN_ID" "$repo" "$contract_art" "$wt" "$branch" "$model" "$sandbox" \
+      "$base" "$archetype" "$effort"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    emit_terminal_json claude "$model" refused \
+      "unattended Claude runs forbid --dangerously-skip-permissions" '{}' 0 false permission_policy_refused
+    return 1
+  fi
+
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/legion-claude.${RUN_ID}.XXXXXX")"
   LEGION_CLAUDE_TMPDIR="$tmpdir"
   out_file="$tmpdir/claude.out.json"
@@ -315,11 +352,10 @@ cmd_run() {
     low_credit=1
   fi
 
-  if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1 || [[ "$low_credit" -eq 1 ]]; then
+  if [[ "$low_credit" -eq 1 ]]; then
     reason="claude_unavailable"
     if [[ "$allow_fallback" -eq 1 ]]; then
       [[ "$low_credit" -eq 1 ]] && note "⚠ LEGION_LOW_CREDIT=claude: skipping Claude and falling back to $fallback_model"
-      [[ "$low_credit" -eq 0 ]] && note "⚠ Claude CLI unavailable: falling back to $fallback_model"
       run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
       return $?
     fi
@@ -386,15 +422,33 @@ cmd_run() {
 
   start_ms="$(date +%s000)"
   local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0 chain_cost=0
+  local any_output_started=0 permission_refused=0 chain_admission_refused=0
   for attempt_model in "${claude_model_chain[@]}"; do
     chain_idx=$(( chain_idx + 1 ))
     model="$attempt_model"
+    if [[ "$chain_idx" -gt 1 ]]; then
+      local previous_attempt_id="$LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID"
+      if ! legion_adapter_preflight claude "$contract_art" "$sandbox" stdin "$model" "$effort" \
+          "$premium_consent" "$CLAUDE_BIN"; then
+        LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID="$previous_attempt_id"
+        chain_admission_refused=1
+        break
+      fi
+      LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID="$previous_attempt_id"
+    fi
     local -a claude_cmd=("$CLAUDE_BIN" -p --output-format json --model "$model")
-    [[ "$sandbox" == "read-only" ]] && claude_cmd+=(--permission-mode plan)
+    if [[ "$sandbox" == "read-only" ]]; then
+      claude_cmd+=(--permission-mode plan)
+    else
+      # Headless runs cannot answer prompts. dontAsk denies any tool that would
+      # require interaction instead of hanging or escalating permissions.
+      claude_cmd+=(--permission-mode dontAsk)
+    fi
     [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
     [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
-    [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
     note "→ ${claude_cmd[*]}"
+    local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
+    attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
     set +e
     printf '%s' "$task" | (
       legion_activate_executor_context "$RUN_ID" claude
@@ -403,6 +457,52 @@ cmd_run() {
     ) >"$out_file" 2>"$err_file"
     rc=${PIPESTATUS[1]}
     set -e
+    attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
+    attempt_duration=$((attempt_end_ms-attempt_start_ms))
+    local attempt_is_error attempt_result attempt_usage attempt_cost attempt_effective
+    local attempt_usage_status=unknown attempt_usage_source="" attempt_cost_status=unknown attempt_cost_source=""
+    local attempt_output_started=false attempt_failure=provider attempt_retryable=false attempt_terminal=failed
+    attempt_is_error="$(jq -r 'if has("is_error") then .is_error else true end' "$out_file" 2>/dev/null || printf true)"
+    attempt_result="$(jq -r '.result // empty' "$out_file" 2>/dev/null || true)"
+    attempt_usage="$(usage_json "$out_file")"
+    attempt_cost="$(cost_from_usage "$attempt_model" "$attempt_usage" 2>/dev/null || printf 0)"
+    attempt_effective="$(jq -r '.model // empty' "$out_file" 2>/dev/null || true)"
+    if jq -e '.usage | type == "object"' "$out_file" >/dev/null 2>&1; then
+      attempt_usage_status=known; attempt_usage_source=claude-result
+      if jq -e '.total_cost_usd | numbers' "$out_file" >/dev/null 2>&1; then
+        attempt_cost="$(jq -r '.total_cost_usd' "$out_file")"
+        attempt_cost_status=known; attempt_cost_source=claude-result
+      elif cost_model_has_pricing "$attempt_model"; then
+        attempt_cost_status=known; attempt_cost_source=legion-cost-table
+      fi
+    fi
+    if [[ "$attempt_is_error" != true && -n "$attempt_result" ]]; then
+      attempt_output_started=true; any_output_started=1
+    fi
+    local attempt_combined="$attempt_result"
+    [[ ! -s "$err_file" ]] || attempt_combined="${attempt_combined}"$'\n'"$(cat "$err_file")"
+    if [[ "$rc" -eq 0 && "$attempt_is_error" != true ]] && ! claude_model_declined "$out_file" "$err_file"; then
+      attempt_terminal=succeeded; attempt_failure=""
+    elif claude_model_declined "$out_file" "$err_file"; then
+      attempt_failure=unavailable; attempt_retryable=true
+    elif is_limit_text "$attempt_combined"; then
+      attempt_failure=quota; attempt_retryable=true
+    elif printf '%s' "$attempt_combined" | grep -qiE 'permission (prompt|required|denied)|requires? (user )?approval|not granted permission'; then
+      attempt_failure=policy_refused; permission_refused=1
+    elif ! jq -e . "$out_file" >/dev/null 2>&1; then
+      attempt_failure=malformed_event
+    fi
+    [[ "$attempt_output_started" != true ]] || attempt_retryable=false
+    legion_adapter_write_attempt "$contract_art" claude anthropic "$chain_idx" \
+      "$attempt_model" "$attempt_effective" "$effort" "$effort" "$sandbox" \
+      "$attempt_terminal" "$attempt_started_at" "$attempt_ended_at" "$attempt_duration" "$attempt_usage" \
+      "$attempt_usage_status" "$attempt_usage_source" "$attempt_cost" \
+      "$attempt_cost_status" "$attempt_cost_source" "$attempt_failure" "$attempt_retryable" \
+      "$attempt_output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$attempt_result"
+    if [[ "$permission_refused" -eq 1 || "$any_output_started" -eq 1 ]]; then
+      declined_final=0
+      break
+    fi
     if ! claude_model_declined "$out_file" "$err_file"; then
       declined_final=0
       break
@@ -448,6 +548,8 @@ cmd_run() {
     if [[ "$sandbox" == "read-only" && -s "$diff_path" ]]; then
       read_only_violation=1
       note "⚠ Claude produced file changes during a read-only run; refusing the result"
+      legion_adapter_fail_recorded_attempt "$contract_art" claude "$chain_idx" \
+        policy_refused "" "Claude produced file changes during a read-only run"
     fi
     if [[ "$do_apply" -eq 1 && "$read_only_violation" -eq 0 && -s "$diff_path" ]]; then
       if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
@@ -466,7 +568,12 @@ cmd_run() {
     fi
     artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" \
       --arg wt "$wt_report" --arg diff "$diff_path" --arg declined "$claude_chain_note" \
-      '{stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff}
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+      '{stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff,
+        preflight_receipt:$preflight,
+        attempt_receipt:(if $attempt=="" then null else $attempt end),
+        failure_receipt:(if $failure=="" then null else $failure end)}
        + (if $declined == "" then {} else {declined_models:$declined} end)')"
     export LEGION_CLAUDE_WORKTREE="$wt_report" LEGION_CLAUDE_DIFF="$diff_path"
   fi
@@ -496,6 +603,19 @@ cmd_run() {
   combined_text="$result"
   if [[ -s "$err_file" ]]; then
     combined_text="${combined_text}"$'\n'"$(cat "$err_file")"
+  fi
+
+  if [[ "$chain_admission_refused" -eq 1 ]]; then
+    reason="admission_refused"
+    status="failed"
+    result="$LEGION_ADAPTER_PREFLIGHT_REASON"
+    emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    return 1
   fi
 
   if [[ "$read_only_violation" -eq 1 ]]; then
@@ -537,12 +657,18 @@ cmd_run() {
     reason="claude_error"
   fi
 
-  if [[ "$allow_fallback" -eq 1 ]]; then
+  if [[ "$allow_fallback" -eq 1 && "$any_output_started" -eq 0 && "$permission_refused" -eq 0 ]]; then
     status="$([[ "$reason" == "claude_limit" ]] && printf blocked || printf failed)"
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
     note "⚠ Claude failed ($reason): falling back to $fallback_model"
     run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
     return $?
+  fi
+
+  if [[ "$permission_refused" -eq 1 ]]; then
+    reason="permission_policy_refused"
+  elif [[ "$any_output_started" -eq 1 && "$reason" != "" ]]; then
+    reason="${reason}_after_output"
   fi
 
   if [[ "$reason" == "claude_limit" ]]; then
@@ -567,7 +693,7 @@ Usage:
   legion-claude run --task "TASK" | --task-file F [--model MODEL] [--repo DIR] [--effort LEVEL]
                     [--base REF] [--run-id ID] [--apply] [--keep]
                     [--sandbox read-only|workspace-write] [--archetype NAME]
-                    [--append-system-prompt TEXT] [--dangerously-skip-permissions]
+                    [--append-system-prompt TEXT] [--allow-premium-credit]
                     [--quiet] [--no-fallback] [--fallback-model MODEL]
   legion-claude run [--model MODEL] [--repo DIR] [...] < task.txt
 
@@ -576,8 +702,11 @@ The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a 
 --keep retains the worktree; --apply applies the diff to the repo.
 Read-only runs use Claude plan mode and fail if the worktree still changes.
 
---effort / --append-system-prompt / --dangerously-skip-permissions pass through to
-`claude -p` (skip-permissions is for autonomous headless/cron runs — opt-in).
+--effort and --append-system-prompt pass through to `claude -p`.
+Premium-credit Fable models require --allow-premium-credit (or
+LEGION_ALLOW_PREMIUM_CREDIT=1). Unattended runs always deny permission prompts;
+--dangerously-skip-permissions is retained only as a fail-closed compatibility
+flag and never reaches Claude.
 Defaults resolve from legion-router/config/models.toml.
 EOF
 }

@@ -105,6 +105,9 @@ def test_live_registry_declares_contract_foundation_without_inventing_transport(
     assert executors["deepseek"]["supported_sandboxes"] == ["workspace-write"]
     assert executors["deepseek"]["usage_reliability"] == "unavailable"
     assert executors["deepseek"]["cost_reliability"] == "unavailable"
+    assert executors["deepseek"]["supported_model_patterns"] == []
+    assert "supported_model_patterns" not in executors["claude"]
+    assert "supported_model_patterns" not in executors["codex"]
     for name in ("cursor", "hermes", "pi"):
         assert executors[name]["task_file"] is False
         assert executors[name]["supported_task_transports"] == ["argv"]
@@ -162,6 +165,22 @@ def test_preflight_cache_invalidates_for_declared_config_file(tmp_path):
     second = preflight.preflight("fixture", registry_path=config, cache_dir=tmp_path / "cache", env=env)
     assert second["cache"]["hit"] is False
     assert second["cache"]["key"] != first["cache"]["key"]
+
+
+def test_preflight_binary_override_identifies_the_exact_adapter_binary(tmp_path):
+    binary = tmp_path / "custom-provider"
+    executable(binary)
+    config = tmp_path / "executors.toml"
+    write_registry(config, tmp_path / "missing-provider")
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path),
+           "PROVIDER_CALL_LOG": str(tmp_path / "calls")}
+    result = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=tmp_path / "cache", env=env,
+        binary_override=str(binary), model="fixture-ok",
+    )
+    assert result["status"] == "supported"
+    assert result["identity"]["executable_path"] == str(binary.resolve())
+    assert not Path(env["PROVIDER_CALL_LOG"]).exists()
 
 
 def test_known_bad_version_is_incompatible(tmp_path):

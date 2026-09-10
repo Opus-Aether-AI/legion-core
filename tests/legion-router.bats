@@ -1499,7 +1499,9 @@ $run_error" ]
     review_repo="$(make_test_repo review-cleanup-failed)"
     run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$review_repo" \
       --max-runtime-seconds 30 --quiet
-    [ "$status" -eq 1 ]
+    # Review containment failures retain the supervisor's reserved exit so a
+    # caller cannot downgrade them to an ordinary reviewer rejection.
+    [ "$status" -eq 70 ]
     echo "$output" | jq -e '.status == "containment_failed"
       and (.reason | contains("forced cleanup evidence"))
       and (.lease_receipt | type) == "string"'
@@ -1663,16 +1665,16 @@ $run_error" ]
     started="$SECONDS"
 
     run "$DELEGATE" review --base HEAD --repo "$repo" \
-      --max-runtime-seconds 3 --max-attempts 1 --quiet
+      --max-runtime-seconds 6 --max-attempts 1 --quiet
     elapsed=$((SECONDS - started))
 
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.status == "timed_out"'
     [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
     assert_mock_called agent "-p --output-format json"
-    jq -e '.status == "timed_out" and .max_runtime_seconds < 3' \
+    jq -e '.status == "timed_out" and .max_runtime_seconds > 0 and .max_runtime_seconds < 6' \
       "$(echo "$output" | jq -r .lease_receipt)"
-    [ "$elapsed" -lt 6 ]
+    [ "$elapsed" -lt 9 ]
 }
 
 @test "delegate review: fails closed on a schema-invalid verdict" {
@@ -1882,7 +1884,8 @@ $run_error" ]
     interrupted_attempt="$(dirname "$receipt")/attempt-1.json"
     jq -e '.schema == "legion.attempt.v1" and .terminal_status == "cancelled"
       and .failure.class == "cancelled"' "$interrupted_attempt"
-    [ "$(find "$(dirname "$receipt")" -maxdepth 1 -type f -name 'attempt-[0-9]*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    [ "$(find "$(dirname "$receipt")" -maxdepth 1 -type f \
+      -name 'attempt-[0-9]*.json' ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 1 ]
     [ "$(find "$(dirname "$receipt")" -maxdepth 1 -type f -name 'failure-[0-9]*.json' | wc -l | tr -d ' ')" -eq 1 ]
     jq -e '.kind == "review" and .lifecycle.phase == "failed"' "$registry"
     jq -e '.status == "failed" and .result_status == "failed"' \

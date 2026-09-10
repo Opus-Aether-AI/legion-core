@@ -2900,7 +2900,8 @@ cmd_review() {
   local usage cost filtered_err error_log verdict_json="null"
   local usage_status=unknown cost_status=unknown
   local review_metering='{}' span_usage span_cost span_usage_status span_cost_status
-  review_metering="$(review_canonical_metering "${review_attempt_receipts[@]}")"
+  review_metering="$(review_canonical_metering \
+    ${review_attempt_receipts[@]+"${review_attempt_receipts[@]}"})"
   usage="$(jq -c '.reconciliation.usage' <<<"$review_metering")"
   cost="$(jq -c '.reconciliation.cost_usd' <<<"$review_metering")"
   usage_status="$(jq -r '.reconciliation.usage_status' <<<"$review_metering")"

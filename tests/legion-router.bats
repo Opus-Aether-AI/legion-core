@@ -23,6 +23,7 @@ setup() {
     CODEX_FRONTIER="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_frontier)"
     CLAUDE_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref claude_default)"
     CLAUDE_FRONTIER="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref claude_frontier)"
+    CURSOR_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref cursor_default)"
     MINIMAX_MATCH="$(jq -r '.models[] | select(.match == "minimax") | .match' "$LEGION_COSTS_FILE")"
 }
 
@@ -2785,8 +2786,8 @@ PY
       "$art/failure-1.json"
     local review_span
     review_span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "cursor-review")')"
-    jq -e '
-      .model == "cursor-grok-4.6-high"
+    jq -e --arg model "$CURSOR_DEFAULT" '
+      .model == $model
       and .cost_usd == null and .cost_status == "not_applicable"
       and .tokens == null and .usage_status == "not_applicable"
       and .artifacts.rollup_only == true

@@ -100,10 +100,22 @@ stop_handoff_broker() {
   BROKER_PID=""
 }
 on_signal() {
-  local signum="$1"
+  local signum="$1" containment_reason=""
   trap - INT TERM HUP
   stop_child
+  stop_handoff_broker
+  if legion_adapter_supervisor_cleanup_failed "${ART:-}/lease.json"; then
+    containment_reason="$(legion_adapter_supervisor_reason "$ART/lease.json") (evidence: $ART/lease.json; worktree retained: $WT_RECORD)"
+  elif [[ "$BROKER_RC" -eq 70 ]]; then
+    containment_reason="handoff broker reported incomplete descendant cleanup (evidence: $ART/broker.err; worktree retained: $WT_RECORD)"
+  fi
   legion_adapter_write_signal_receipt "$signum"
+  if [[ -n "$containment_reason" ]]; then
+    KEEP=1
+    legion_adapter_fail_recorded_attempt "$ART" "$ADAPTER_KIND" 1 internal 70 "$containment_reason" || true
+    [[ -z "$RUN_ID" || -z "$ART" ]] || write_state containment_failed
+    exit 70
+  fi
   [[ -z "$RUN_ID" || -z "$ART" ]] || write_state failed
   exit $((128+signum))
 }

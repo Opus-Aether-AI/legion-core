@@ -57,6 +57,12 @@ def test_complete_span_validation_rejects_missing_invalid_and_nonfinite_values()
         BROKER._validate_span(nonfinite, "parent-run")
 
 
+def test_complete_span_validation_accepts_containment_failure() -> None:
+    containment = valid_span()
+    containment["status"] = "containment_failed"
+    assert BROKER._validate_span(containment, "parent-run")["status"] == "containment_failed"
+
+
 def test_broker_protocol_accepts_only_a_positive_typed_child_lease() -> None:
     assert BROKER._validated_args(
         ["run", "--executor", "cursor", "--max-runtime-seconds", "7"]

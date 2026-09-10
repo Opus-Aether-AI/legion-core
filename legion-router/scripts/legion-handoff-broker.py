@@ -43,7 +43,10 @@ REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 SANDBOXES = {"read-only", "workspace-write"}
 SAFE_TELEMETRY_NAME = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl$")
 SPAN_REQUIRED = {"schema", "ts", "run_id", "executor", "model", "status"}
-SPAN_STATUSES = {"ok", "failed", "error", "over_budget", "blocked", "timed_out"}
+SPAN_STATUSES = {
+    "ok", "failed", "error", "over_budget", "blocked", "timed_out",
+    "containment_failed",
+}
 
 
 class SupervisorCleanupError(ValueError):

@@ -783,6 +783,21 @@ def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
     assert diagnostics["stores"][0]["spans"] == 0
 
 
+def test_containment_failed_span_is_ingested_as_high_severity_outcome(tmp_path):
+    span = _span(
+        "containment-run",
+        "2026-08-16T01:00:00Z",
+        executor="pi",
+        status="containment_failed",
+    )
+    validated = self_learn._validated_span(span)
+    assert validated is not None
+    outcomes = self_learn.span_outcomes([validated], _catalog(tmp_path))
+    assert len(outcomes) == 1
+    assert outcomes[0]["severity"] == "high"
+    assert "containment_failed" in outcomes[0]["summary"]
+
+
 def test_cached_sibling_requires_recorded_checkout_to_still_exist(
     tmp_path, monkeypatch
 ):

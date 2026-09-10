@@ -42,6 +42,28 @@ install_cleanup_failed_python() {
   export PATH="$shim_dir:$PATH"
 }
 
+install_signal_cleanup_failed_python() {
+  local shim_dir="$TEST_TMPDIR/signal-python-shim" real_python
+  real_python="$(command -v python3)"
+  mkdir -p "$shim_dir"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == */legion-process-supervisor.py ]]; then' \
+    '  status_file=""' \
+    '  while [[ $# -gt 0 ]]; do' \
+    '    if [[ "$1" == --status-file ]]; then status_file="$2"; break; fi' \
+    '    shift' \
+    '  done' \
+    "  trap 'printf \"%s\\n\" \"{\\\"schema\\\":\\\"legion.child-execution-lease.v1\\\",\\\"status\\\":\\\"cleanup_failed\\\",\\\"reason\\\":\\\"signal drain failed\\\",\\\"max_runtime_seconds\\\":30}\" > \"\$status_file\"; exit 70' TERM" \
+    '  : > "$LEGION_TEST_SUPERVISOR_STARTED"' \
+    '  while true; do sleep 1; done' \
+    'fi' \
+    'exec "$LEGION_TEST_REAL_PYTHON" "$@"' > "$shim_dir/python3"
+  chmod +x "$shim_dir/python3"
+  export LEGION_TEST_REAL_PYTHON="$real_python"
+  export PATH="$shim_dir:$PATH"
+}
+
 assert_signal_receipt() {
   local adapter="$1" marker="$2" delay_name="$3" run_id="signal-$adapter"
   local repo out err pid rc=0 art
@@ -136,5 +158,35 @@ assert_signal_receipt() {
     worktree="$(jq -r '.worktree' "$result_file")"
     [ -d "$worktree" ]
     jq -e '.status == "cleanup_failed"' "$(jq -r '.lease_receipt' "$result_file")"
+  done
+}
+
+@test "Pi and Hermes let signal cleanup failure override cancellation" {
+  local adapter repo run_id result_file pid rc art
+  install_signal_cleanup_failed_python
+  for adapter in pi hermes; do
+    repo="$(make_test_repo "signal-cleanup-$adapter")"
+    run_id="signal-cleanup-$adapter"
+    result_file="$TEST_TMPDIR/$adapter-signal-cleanup.out"
+    export LEGION_TEST_SUPERVISOR_STARTED="$TEST_TMPDIR/$adapter-supervisor-started"
+    PI_BIN=pi HERMES_BIN=hermes \
+      "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task wait --repo "$repo" \
+        --run-id "$run_id" --quiet > "$result_file" 2>/dev/null &
+    pid=$!
+    for _ in $(seq 1 200); do
+      [[ -f "$LEGION_TEST_SUPERVISOR_STARTED" ]] && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    [ -f "$LEGION_TEST_SUPERVISOR_STARTED" ]
+    kill -TERM "$pid"
+    rc=0; wait "$pid" || rc=$?
+    [ "$rc" -eq 70 ]
+    art="$repo/.legion/runs/$run_id"
+    jq -e '.status == "cleanup_failed" and (.reason | contains("signal drain failed"))' "$art/lease.json"
+    jq -e '.terminal_status == "failed" and .failure.class == "internal"
+      and (.failure.message | contains("worktree retained"))' "$art/attempt-1.json"
+    jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
+    [ -d "$repo/.legion/worktrees/$run_id" ]
   done
 }

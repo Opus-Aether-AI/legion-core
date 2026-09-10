@@ -152,8 +152,8 @@ def test_inactive_inherited_fingerprint_cannot_disable_direct_launch(tmp_path: P
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt inheritance is Darwin-only")
-def test_existing_seatbelt_host_without_legion_canaries_is_inherited(tmp_path: Path) -> None:
-    """A trusted outer sandbox must not trigger unsupported nested sandbox-exec."""
+def test_existing_seatbelt_host_without_run_unique_canaries_fails_closed(tmp_path: Path) -> None:
+    """An arbitrary outer policy cannot safely identify reparented descendants."""
 
     home_probe = Path.home() / ".ssh"
     launched = tmp_path / "launched"
@@ -195,9 +195,108 @@ def test_existing_seatbelt_host_without_legion_canaries_is_inherited(tmp_path: P
         env=environment,
         timeout=8,
     )
+    assert result.returncode == 70, result.stderr.decode(errors="replace")
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["status"] == "cleanup_failed"
+    assert "run-unique supervisor fingerprint" in receipt["reason"]
+    assert not launched.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt inheritance is Darwin-only")
+def test_network_only_seatbelt_host_without_run_unique_canaries_fails_closed(tmp_path: Path) -> None:
+    status_file = tmp_path / "network-seatbelt.json"
+    launched = tmp_path / "launched"
+    environment = os.environ.copy()
+    environment.pop("LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY", None)
+    environment.pop("LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY", None)
+    result = subprocess.run(
+        [
+            "/usr/bin/sandbox-exec",
+            "-p",
+            '(version 1)(allow default)(deny network*)',
+            sys.executable,
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "2",
+            "--status-file",
+            str(status_file),
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(launched)!r}).touch()",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=environment,
+        timeout=8,
+    )
+    assert result.returncode == 70, result.stderr.decode(errors="replace")
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["status"] == "cleanup_failed"
+    assert "run-unique supervisor fingerprint" in receipt["reason"]
+    assert not launched.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt inheritance is Darwin-only")
+def test_active_inherited_fingerprint_is_reused_for_tracking(tmp_path: Path) -> None:
+    deny_canary = tmp_path / "deny"
+    allow_canary = tmp_path / "allow"
+    pid_file = tmp_path / "detached.pid"
+    status_file = tmp_path / "inherited-fingerprint.json"
+    deny_canary.touch()
+    allow_canary.touch()
+    profile = (
+        '(version 1)(allow default)'
+        f'(deny file-read* (literal "{deny_canary}"))'
+    )
+    environment = os.environ.copy()
+    environment["LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY"] = str(deny_canary)
+    environment["LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY"] = str(allow_canary)
+    result = subprocess.run(
+        [
+            "/usr/bin/sandbox-exec",
+            "-p",
+            profile,
+            sys.executable,
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "2",
+            "--status-file",
+            str(status_file),
+            "--",
+            sys.executable,
+            "-c",
+            """
+import os, sys
+if os.fork() != 0:
+    os._exit(0)
+os.setsid()
+if os.fork() != 0:
+    os._exit(0)
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    stream.write(str(os.getpid()))
+null = os.open("/dev/null", os.O_RDWR)
+for descriptor in (0, 1, 2):
+    os.dup2(null, descriptor)
+if null > 2:
+    os.close(null)
+os.execve("/bin/sleep", ["sleep", "30"], {})
+""",
+            str(pid_file),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=environment,
+        timeout=8,
+    )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "completed"
-    assert launched.exists()
+    assert pid_file.exists()
+    assert wait_gone(int(pid_file.read_text(encoding="utf-8")))
 
 
 def test_repeated_cancel_at_deadline_writes_one_terminal_outcome(tmp_path: Path) -> None:

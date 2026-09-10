@@ -86,7 +86,7 @@ validate() {
 	        and (.executor | type == "string")
 	        and (.model | type == "string")
 	        and ((.archetype == null) or (.archetype | type == "string"))
-	        and (.status | IN("ok", "failed", "error", "over_budget", "blocked", "timed_out"))
+	        and (.status | IN("ok", "failed", "error", "over_budget", "blocked", "timed_out", "containment_failed"))
 	        and ((.duration_ms // 0) | type == "number" and . >= 0)
 	        and ((.cost_usd // 0) | type == "number" and . >= 0)
 	        and ((.target_type == null) or (.target_type | type == "string"))

@@ -83,6 +83,12 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "telemetry: validate accepts a containment_failed terminal span" {
+  span="$("$TEL" emit --executor pi --model fixture-pi --status containment_failed)"
+  run bash -c "printf '%s\n' '$span' | '$TEL' validate -"
+  [ "$status" -eq 0 ]
+}
+
 @test "telemetry: validate catches a bad final line with no trailing newline" {
   printf '%s\n%s' \
     '{"schema":"legion.span.v1","ts":"t","run_id":"r","executor":"e","model":"m","status":"ok"}' \

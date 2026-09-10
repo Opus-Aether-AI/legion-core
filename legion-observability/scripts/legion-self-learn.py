@@ -63,7 +63,10 @@ MAX_SPAN_IDENTIFIER_LENGTH = 512
 MAX_SPAN_COLLECTION_ITEMS = 128
 MAX_SPAN_NESTING = 8
 SPAN_IDENTITY_VERSION = 2
-SPAN_STATUSES = {"ok", "failed", "error", "over_budget", "blocked", "timed_out"}
+SPAN_STATUSES = {
+    "ok", "failed", "error", "over_budget", "blocked", "timed_out",
+    "containment_failed",
+}
 GLOBAL_HINT_RESERVE = 100
 PROJECT_HINT_CAP = (
     legion_learning_context.MAX_HINTS
@@ -1481,7 +1484,7 @@ def span_outcomes(spans: list[dict[str, Any]], catalog: dict[str, Any]) -> list[
                 source="span-status",
                 target_type=etype,
                 target_name=name,
-                severity="high" if status in {"failed", "error"} else "medium",
+                severity="high" if status in {"failed", "error", "containment_failed"} else "medium",
                 summary=f"Legion run ended with status {status or 'unknown'}.",
                 evidence=_short(_text(span.get("task")), 1000),
                 run_id=_text(span.get("run_id")),

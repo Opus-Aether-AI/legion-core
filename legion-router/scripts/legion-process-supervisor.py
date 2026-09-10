@@ -203,37 +203,56 @@ def _darwin_inherited_host_sandboxed() -> bool:
 
     Some trusted launchers apply Seatbelt before invoking Legion and cannot
     safely expose policy canaries to the child.  Applying ``sandbox-exec`` a
-    second time is unsupported.  A kernel query that observes a denied private
-    home path and an allowed, already-loaded supervisor path is sufficient to
-    prove inherited containment without treating environment claims as trust.
+    second time is unsupported. A kernel query that observes any denied
+    representative filesystem operation proves inherited containment without
+    treating environment claims as trust. Inspection uncertainty fails closed.
     """
 
     try:
         home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
-        allow = str(Path(__file__).resolve()).encode()
-        check, flags = _darwin_sandbox_api()
-        if check(os.getpid(), b"file-read-data", flags, ctypes.c_char_p(allow)) != 0:
-            return False
-        probes = (
-            (b"file-read-data", home),
-            (b"file-read-data", home / ".ssh"),
-            (b"file-read-data", home / ".aws"),
-            (b"file-read-data", home / ".config" / "gh"),
-            (b"file-read-data", home / "Library" / "Keychains"),
-            (b"file-write-create", home),
-            (b"file-write-create", Path("/private/etc")),
+    except (KeyError, OSError) as error:
+        raise ProcessInspectionError("current account home cannot be resolved") from error
+    check, flags = _darwin_sandbox_api()
+    probes = (
+        (b"file-read-data", Path(__file__).resolve()),
+        (b"file-read-data", home),
+        (b"file-read-data", home / ".ssh"),
+        (b"file-read-data", home / ".aws"),
+        (b"file-read-data", home / ".config" / "gh"),
+        (b"file-read-data", home / "Library" / "Keychains"),
+        (b"file-write-create", home),
+        (b"file-write-create", Path("/private/etc")),
+    )
+    for operation, candidate in probes:
+        decision = check(
+            os.getpid(), operation, flags, ctypes.c_char_p(str(candidate).encode())
         )
-        for operation, candidate in probes:
-            decision = check(
-                os.getpid(), operation, flags, ctypes.c_char_p(str(candidate).encode())
+        if decision < 0:
+            raise ProcessInspectionError("sandbox_check failed for current process")
+        if decision > 0:
+            return True
+    # Filter-free checks catch policies that constrain non-filesystem
+    # capabilities (for example a network-only outer sandbox), where every
+    # representative path above may still be allowed.
+    no_report = flags & ~1  # remove SANDBOX_FILTER_PATH
+    for operation in (
+        b"network-outbound",
+        b"network-inbound",
+        b"process-fork",
+        b"process-info-pidinfo",
+        b"signal",
+        b"system-socket",
+        b"mach-lookup",
+        b"sandbox-check",
+    ):
+        decision = check(os.getpid(), operation, no_report)
+        if decision < 0:
+            raise ProcessInspectionError(
+                f"sandbox_check failed for current process operation {operation.decode()}"
             )
-            if decision < 0:
-                raise ProcessInspectionError("sandbox_check failed for current process")
-            if decision > 0:
-                return True
-        return False
-    except (KeyError, OSError, ProcessInspectionError):
-        return False
+        if decision > 0:
+            return True
+    return False
 
 
 def _darwin_launch_fingerprint(command: list[str]) -> tuple[list[str], str, str, str]:
@@ -794,13 +813,13 @@ def main() -> int:
     fingerprint_dir = ""
     inherited_deny = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY", "")
     inherited_allow = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY", "")
-    ancestor_contained = False
+    inherited_fingerprint_active = False
     if bool(inherited_deny) != bool(inherited_allow):
         print("legion-process-supervisor: incomplete inherited supervisor fingerprint", file=sys.stderr)
         return 2
     if sys.platform == "darwin" and inherited_deny:
         try:
-            ancestor_contained = bool(
+            inherited_fingerprint_active = bool(
                 _darwin_sandbox_decision(
                     os.getpid(), inherited_deny.encode(), inherited_allow.encode()
                 )
@@ -811,35 +830,77 @@ def main() -> int:
         # Test shims and stale caller environments may carry a well-formed pair
         # without actually running under that policy. Such a pair grants no
         # trust: fall through to a fresh direct-launch fingerprint instead.
-    if sys.platform == "darwin" and not inherited_deny:
-        ancestor_contained = _darwin_inherited_host_sandboxed()
+        # An active inherited pair is the outer supervisor's run-unique process
+        # identity. Reuse it for discovery as well as for deciding not to nest
+        # sandbox-exec. Merely observing an arbitrary restrictive host sandbox
+        # is not enough to distinguish this run from unrelated siblings.
+        if inherited_fingerprint_active and not deny_canary:
+            deny_canary = inherited_deny
+            allow_canary = inherited_allow
     if bool(deny_canary) != bool(allow_canary):
         print("legion-process-supervisor: both Darwin sandbox canaries are required", file=sys.stderr)
         return 2
     if sys.platform == "darwin" and deny_canary:
+        using_inherited = inherited_fingerprint_active and deny_canary == inherited_deny
         try:
-            if Path(deny_canary).is_symlink() or Path(allow_canary).is_symlink():
-                raise OSError("canary leaf must not be a symbolic link")
-            deny_path = Path(deny_canary).resolve(strict=True)
-            allow_path = Path(allow_canary).resolve(strict=True)
+            if using_inherited:
+                # The defining policy intentionally makes the deny leaf
+                # unstatable. Canonicalize the shared parent and retain the two
+                # leaf names; the kernel deny/allow decision below is the
+                # authoritative proof for the inherited pair.
+                deny_input = Path(deny_canary)
+                allow_input = Path(allow_canary)
+                deny_parent = deny_input.parent.resolve(strict=True)
+                allow_parent = allow_input.parent.resolve(strict=True)
+                deny_path = deny_parent / deny_input.name
+                allow_path = allow_parent / allow_input.name
+            else:
+                if Path(deny_canary).is_symlink() or Path(allow_canary).is_symlink():
+                    raise OSError("canary leaf must not be a symbolic link")
+                deny_path = Path(deny_canary).resolve(strict=True)
+                allow_path = Path(allow_canary).resolve(strict=True)
         except OSError as error:
             print(f"legion-process-supervisor: invalid Darwin sandbox canary: {error}", file=sys.stderr)
             return 2
-        if (
-            deny_path == allow_path
-            or deny_path.parent != allow_path.parent
-            or not deny_path.is_file()
-            or not allow_path.is_file()
+        if deny_path == allow_path or deny_path.parent != allow_path.parent or (
+            not using_inherited and (not deny_path.is_file() or not allow_path.is_file())
         ):
             print("legion-process-supervisor: Darwin sandbox canaries must be adjacent regular files", file=sys.stderr)
             return 2
         deny_canary = str(deny_path)
         allow_canary = str(allow_path)
-        if not _darwin_sandbox_probe(deny_canary, allow_canary):
+        if using_inherited:
+            try:
+                if not _darwin_sandbox_decision(
+                    os.getpid(), deny_canary.encode(), allow_canary.encode()
+                ):
+                    raise ProcessInspectionError("inherited fingerprint is inactive")
+            except ProcessInspectionError as error:
+                print(f"legion-process-supervisor: invalid inherited supervisor fingerprint: {error}", file=sys.stderr)
+                return 2
+        elif not _darwin_sandbox_probe(deny_canary, allow_canary):
             print("legion-process-supervisor: Darwin sandbox inspection is unavailable", file=sys.stderr)
             return 2
 
-    if sys.platform == "darwin" and not deny_canary and not ancestor_contained:
+    if sys.platform == "darwin" and not deny_canary:
+        try:
+            host_sandboxed = _darwin_inherited_host_sandboxed()
+        except ProcessInspectionError as error:
+            reason = f"cannot inspect inherited Seatbelt policy: {error}"
+            _write_status(
+                arguments.status_file, "cleanup_failed", reason, arguments.max_runtime_seconds
+            )
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+            return 70
+        if host_sandboxed:
+            reason = (
+                "inherited Seatbelt policy has no verified run-unique supervisor fingerprint"
+            )
+            _write_status(
+                arguments.status_file, "cleanup_failed", reason, arguments.max_runtime_seconds
+            )
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+            return 70
         try:
             command, deny_canary, allow_canary, fingerprint_dir = _darwin_launch_fingerprint(command)
             if not _darwin_sandbox_probe(deny_canary, allow_canary):

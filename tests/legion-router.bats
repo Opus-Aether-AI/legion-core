@@ -719,21 +719,30 @@ wait' _ "$pid_file" &
     ! kill -0 "$child" 2>/dev/null
 }
 
-@test "macOS supervisor works when its harness sandbox denies Mach task names" {
+@test "macOS supervisor fails closed when an outer sandbox hides its fingerprint" {
     [ -x /usr/bin/sandbox-exec ] || skip "macOS sandbox-exec is unavailable"
-    local pid_file supervisor child i
+    local canary_dir deny_canary allow_canary profile pid_file
+    canary_dir="$TEST_TMPDIR/mach-denied-canaries"
+    mkdir "$canary_dir"
+    canary_dir="$(cd "$canary_dir" && pwd -P)"
+    deny_canary="$canary_dir/deny"
+    allow_canary="$canary_dir/allow"
+    profile="$TEST_TMPDIR/mach-denied.sb"
+    : > "$deny_canary"
+    : > "$allow_canary"
+    chmod 400 "$deny_canary" "$allow_canary"
+    printf '%s\n' '(version 1)' '(allow default)' '(deny mach-task-name)' \
+      "(deny file-read* (literal \"$deny_canary\"))" > "$profile"
     pid_file="$TEST_TMPDIR/provider-mach-denied-child.pid"
-    /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny mach-task-name)' \
-      python3 "$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" --cwd "$TEST_TMPDIR" -- \
-      bash -c 'sleep 300 & printf "%s\n" "$!" > "$1"; wait' _ "$pid_file" &
-    supervisor=$!
-    i=0
-    while [ ! -s "$pid_file" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
-    [ -s "$pid_file" ]
-    child="$(cat "$pid_file")"
-    kill -TERM "$supervisor"
-    wait "$supervisor" || true
-    ! kill -0 "$child" 2>/dev/null
+    run /usr/bin/sandbox-exec -f "$profile" \
+      python3 "$REPO_ROOT/legion-router/scripts/legion-process-supervisor.py" \
+      --cwd "$TEST_TMPDIR" \
+      --darwin-sandbox-deny-canary "$deny_canary" \
+      --darwin-sandbox-allow-canary "$allow_canary" -- \
+      bash -c 'printf "%s\n" launched > "$1"' _ "$pid_file"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"invalid Darwin sandbox canary"* ]]
+    [ ! -e "$pid_file" ]
 }
 
 @test "macOS supervisor reaps a rapid double-fork after ancestry and environment are shed" {
@@ -826,7 +835,7 @@ PY
     for attempt in 1 2 3 4 5; do
       repo="$(make_test_repo "pi-fast-cursor-daemon-$attempt")"
       MOCK_CALL_LOG= LEGION_FS_SANDBOX_BIN=/usr/bin/sandbox-exec \
-        MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_PROVIDER_CAPTURE_HANDOFF=HANDOFF.json \
+      MOCK_PROVIDER_HANDOFF_EXECUTOR=cursor MOCK_PROVIDER_CAPTURE_HANDOFF=HANDOFF.json \
         MOCK_CURSOR_FAST_DAEMON=1 PI_BIN=pi \
         run "$REPO_ROOT/legion-router/bin/legion-pi" run --model openai/fixture-pi \
           --task "make a scoped edit and ask Cursor to verify it" --repo "$repo" --keep --quiet

@@ -128,6 +128,39 @@ def test_inherited_absolute_deadline_clamps_relative_allowance(tmp_path: Path) -
     assert elapsed < 4
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt fingerprints are Darwin-only")
+def test_forged_inherited_fingerprint_fails_before_launch(tmp_path: Path) -> None:
+    deny_canary = tmp_path / "deny"
+    allow_canary = tmp_path / "allow"
+    launched = tmp_path / "launched"
+    deny_canary.touch()
+    allow_canary.touch()
+    environment = os.environ.copy()
+    environment["LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY"] = str(deny_canary)
+    environment["LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY"] = str(allow_canary)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "2",
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(launched)!r}).touch()",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=environment,
+        timeout=4,
+    )
+    assert result.returncode == 2
+    assert b"inherited supervisor fingerprint is not active" in result.stderr
+    assert not launched.exists()
+
+
 def test_repeated_cancel_at_deadline_writes_one_terminal_outcome(tmp_path: Path) -> None:
     status_file = tmp_path / "race.json"
     process = subprocess.Popen(

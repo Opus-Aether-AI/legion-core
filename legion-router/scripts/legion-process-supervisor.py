@@ -7,7 +7,10 @@ kernel-bound process identities (Darwin unique IDs plus PID-version tokens, or
 Linux pidfds). Every macOS launch additionally receives a random inherited
 Seatbelt-policy fingerprint, which remains observable after a rapid child
 reparenting sheds every user-space identity channel. Callers that already apply
-a filesystem sandbox may supply its fingerprint canaries instead.
+a filesystem sandbox may supply its fingerprint canaries instead. Nested
+supervisors inherit and verify the enclosing fingerprint, leaving the outermost
+tracker responsible for reparented descendants instead of attempting an
+unsupported nested ``sandbox-exec`` application.
 """
 
 from __future__ import annotations
@@ -750,6 +753,25 @@ def main() -> int:
     deny_canary = arguments.darwin_sandbox_deny_canary
     allow_canary = arguments.darwin_sandbox_allow_canary
     fingerprint_dir = ""
+    inherited_deny = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY", "")
+    inherited_allow = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY", "")
+    ancestor_contained = False
+    if bool(inherited_deny) != bool(inherited_allow):
+        print("legion-process-supervisor: incomplete inherited supervisor fingerprint", file=sys.stderr)
+        return 2
+    if sys.platform == "darwin" and inherited_deny:
+        try:
+            ancestor_contained = bool(
+                _darwin_sandbox_decision(
+                    os.getpid(), inherited_deny.encode(), inherited_allow.encode()
+                )
+            )
+        except ProcessInspectionError as error:
+            print(f"legion-process-supervisor: invalid inherited supervisor fingerprint: {error}", file=sys.stderr)
+            return 2
+        if not ancestor_contained:
+            print("legion-process-supervisor: inherited supervisor fingerprint is not active", file=sys.stderr)
+            return 2
     if bool(deny_canary) != bool(allow_canary):
         print("legion-process-supervisor: both Darwin sandbox canaries are required", file=sys.stderr)
         return 2
@@ -776,7 +798,7 @@ def main() -> int:
             print("legion-process-supervisor: Darwin sandbox inspection is unavailable", file=sys.stderr)
             return 2
 
-    if sys.platform == "darwin" and not deny_canary:
+    if sys.platform == "darwin" and not deny_canary and not ancestor_contained:
         try:
             command, deny_canary, allow_canary, fingerprint_dir = _darwin_launch_fingerprint(command)
             if not _darwin_sandbox_probe(deny_canary, allow_canary):
@@ -814,6 +836,9 @@ def main() -> int:
     try:
         environment = os.environ.copy()
         environment["LEGION_SUPERVISOR_TOKEN"] = supervisor_token
+        if sys.platform == "darwin" and deny_canary:
+            environment["LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY"] = deny_canary
+            environment["LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY"] = allow_canary
         process = subprocess.Popen(
             command,
             cwd=arguments.cwd,

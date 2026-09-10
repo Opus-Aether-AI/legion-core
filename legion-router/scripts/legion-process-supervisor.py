@@ -20,6 +20,7 @@ import ctypes
 import errno
 import json
 import os
+import pwd
 import secrets
 import shutil
 import signal
@@ -194,6 +195,44 @@ def _darwin_sandbox_probe(deny_canary: str, allow_canary: str) -> bool:
             and check(os.getpid(), b"file-read-data", flags, ctypes.c_char_p(allow_canary.encode())) == 0
         )
     except ProcessInspectionError:
+        return False
+
+
+def _darwin_inherited_host_sandboxed() -> bool:
+    """Prove that this process already inherits a restrictive Seatbelt policy.
+
+    Some trusted launchers apply Seatbelt before invoking Legion and cannot
+    safely expose policy canaries to the child.  Applying ``sandbox-exec`` a
+    second time is unsupported.  A kernel query that observes a denied private
+    home path and an allowed, already-loaded supervisor path is sufficient to
+    prove inherited containment without treating environment claims as trust.
+    """
+
+    try:
+        home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
+        allow = str(Path(__file__).resolve()).encode()
+        check, flags = _darwin_sandbox_api()
+        if check(os.getpid(), b"file-read-data", flags, ctypes.c_char_p(allow)) != 0:
+            return False
+        probes = (
+            (b"file-read-data", home),
+            (b"file-read-data", home / ".ssh"),
+            (b"file-read-data", home / ".aws"),
+            (b"file-read-data", home / ".config" / "gh"),
+            (b"file-read-data", home / "Library" / "Keychains"),
+            (b"file-write-create", home),
+            (b"file-write-create", Path("/private/etc")),
+        )
+        for operation, candidate in probes:
+            decision = check(
+                os.getpid(), operation, flags, ctypes.c_char_p(str(candidate).encode())
+            )
+            if decision < 0:
+                raise ProcessInspectionError("sandbox_check failed for current process")
+            if decision > 0:
+                return True
+        return False
+    except (KeyError, OSError, ProcessInspectionError):
         return False
 
 
@@ -772,6 +811,8 @@ def main() -> int:
         # Test shims and stale caller environments may carry a well-formed pair
         # without actually running under that policy. Such a pair grants no
         # trust: fall through to a fresh direct-launch fingerprint instead.
+    if sys.platform == "darwin" and not inherited_deny:
+        ancestor_contained = _darwin_inherited_host_sandboxed()
     if bool(deny_canary) != bool(allow_canary):
         print("legion-process-supervisor: both Darwin sandbox canaries are required", file=sys.stderr)
         return 2

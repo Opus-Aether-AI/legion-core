@@ -37,6 +37,7 @@ if [[ "$#" == 0 ]]; then : "${MOCK_PI_FIXTURE:?MOCK_PI_FIXTURE must point to a c
 tools=""; model="fixture-pi"; thinking=""
 while [[ $# -gt 0 ]]; do case "$1" in --tools) tools="$2"; shift 2;; --model) model="$2"; shift 2;; --thinking) thinking="$2"; shift 2;; *) shift;; esac; done
 if [[ "${MOCK_PI_FAIL:-0}" == 1 ]]; then printf 'mock Pi failure\n' >&2; exit 4; fi
+[[ -z "${MOCK_PI_DELAY:-}" ]] || sleep "$MOCK_PI_DELAY"
 if [[ -n "${MOCK_PROVIDER_SIGNAL_PID:-}" ]]; then kill -TERM "$MOCK_PROVIDER_SIGNAL_PID"; fi
 if [[ -n "${MOCK_PROVIDER_ESCAPE_PATH:-}" ]]; then printf 'escape\n' > "$MOCK_PROVIDER_ESCAPE_PATH"; fi
 if [[ -n "${MOCK_PROVIDER_FAST_DAEMON_PID_FILE:-}" ]]; then

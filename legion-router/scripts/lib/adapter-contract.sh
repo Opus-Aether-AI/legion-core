@@ -28,6 +28,19 @@ LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID=""
 LEGION_ADAPTER_MAX_RUNTIME_SECONDS=""
 LEGION_ADAPTER_LEASE_REASON=""
 LEGION_ADAPTER_SUPERVISOR=""
+LEGION_ADAPTER_SIGNAL_ARMED=0
+LEGION_ADAPTER_SIGNAL_ART=""
+LEGION_ADAPTER_SIGNAL_EXECUTOR=""
+LEGION_ADAPTER_SIGNAL_PROVIDER=""
+LEGION_ADAPTER_SIGNAL_ORDINAL=""
+LEGION_ADAPTER_SIGNAL_REQUESTED_MODEL=""
+LEGION_ADAPTER_SIGNAL_EFFECTIVE_MODEL=""
+LEGION_ADAPTER_SIGNAL_REQUESTED_EFFORT=""
+LEGION_ADAPTER_SIGNAL_EFFECTIVE_EFFORT=""
+LEGION_ADAPTER_SIGNAL_SANDBOX=""
+LEGION_ADAPTER_SIGNAL_STARTED_AT=""
+LEGION_ADAPTER_SIGNAL_START_MS=""
+LEGION_ADAPTER_SIGNAL_OUTPUT_FILE=""
 
 legion_adapter_contract_root() {
   local lib_dir
@@ -75,6 +88,19 @@ legion_adapter_supervisor_timed_out() {
   [[ -f "$status_file" ]] \
     && jq -e '.schema == "legion.child-execution-lease.v1" and .status == "timed_out"' \
       "$status_file" >/dev/null 2>&1
+}
+
+legion_adapter_supervisor_cleanup_failed() {
+  local status_file="$1"
+  [[ -f "$status_file" ]] \
+    && jq -e '.schema == "legion.child-execution-lease.v1" and .status == "cleanup_failed"' \
+      "$status_file" >/dev/null 2>&1
+}
+
+legion_adapter_supervisor_reason() {
+  local status_file="$1" fallback="${2:-child supervisor reported an internal containment failure}" reason=""
+  reason="$(jq -r '.reason // empty' "$status_file" 2>/dev/null || true)"
+  printf '%s' "${reason:-$fallback}"
 }
 
 legion_adapter_lease_reason() {
@@ -201,6 +227,50 @@ legion_adapter_write_attempt() {
   # shellcheck disable=SC2034
   LEGION_ADAPTER_ATTEMPT_PATH="$attempt_path"
   LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID="$attempt_id"
+}
+
+legion_adapter_arm_signal_receipt() {
+  LEGION_ADAPTER_SIGNAL_ART="$1"
+  LEGION_ADAPTER_SIGNAL_EXECUTOR="$2"
+  LEGION_ADAPTER_SIGNAL_PROVIDER="$3"
+  LEGION_ADAPTER_SIGNAL_ORDINAL="$4"
+  LEGION_ADAPTER_SIGNAL_REQUESTED_MODEL="$5"
+  LEGION_ADAPTER_SIGNAL_EFFECTIVE_MODEL="$6"
+  LEGION_ADAPTER_SIGNAL_REQUESTED_EFFORT="$7"
+  LEGION_ADAPTER_SIGNAL_EFFECTIVE_EFFORT="$8"
+  LEGION_ADAPTER_SIGNAL_SANDBOX="$9"
+  LEGION_ADAPTER_SIGNAL_STARTED_AT="${10}"
+  LEGION_ADAPTER_SIGNAL_START_MS="${11}"
+  LEGION_ADAPTER_SIGNAL_OUTPUT_FILE="${12:-}"
+  LEGION_ADAPTER_SIGNAL_ARMED=1
+}
+
+legion_adapter_disarm_signal_receipt() {
+  LEGION_ADAPTER_SIGNAL_ARMED=0
+}
+
+legion_adapter_write_signal_receipt() {
+  local signum="$1" ended_at end_ms duration output_started=false message
+  [[ "$LEGION_ADAPTER_SIGNAL_ARMED" == 1 ]] || return 0
+  LEGION_ADAPTER_SIGNAL_ARMED=0
+  [[ -n "$LEGION_ADAPTER_SIGNAL_ART" && -n "${RUN_ID:-}" ]] || return 0
+  # A signal delivered after the normal receipt rename must not fabricate a
+  # second terminal outcome for the same launched provider call.
+  [[ ! -f "$LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json" ]] || return 0
+  legion_adapter_output_started_file "$LEGION_ADAPTER_SIGNAL_OUTPUT_FILE" && output_started=true
+  ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  end_ms="$(date +%s000)"
+  duration=$((end_ms-LEGION_ADAPTER_SIGNAL_START_MS))
+  (( duration >= 0 )) || duration=0
+  message="provider attempt cancelled by signal $signum"
+  legion_adapter_write_attempt \
+    "$LEGION_ADAPTER_SIGNAL_ART" "$LEGION_ADAPTER_SIGNAL_EXECUTOR" \
+    "$LEGION_ADAPTER_SIGNAL_PROVIDER" "$LEGION_ADAPTER_SIGNAL_ORDINAL" \
+    "$LEGION_ADAPTER_SIGNAL_REQUESTED_MODEL" "$LEGION_ADAPTER_SIGNAL_EFFECTIVE_MODEL" \
+    "$LEGION_ADAPTER_SIGNAL_REQUESTED_EFFORT" "$LEGION_ADAPTER_SIGNAL_EFFECTIVE_EFFORT" \
+    "$LEGION_ADAPTER_SIGNAL_SANDBOX" cancelled "$LEGION_ADAPTER_SIGNAL_STARTED_AT" \
+    "$ended_at" "$duration" '{}' unknown '' 0 unknown '' cancelled false \
+    "$output_started" "$((128+signum))" "$message"
 }
 
 # Reclassify an already-recorded provider call when an adapter-level invariant

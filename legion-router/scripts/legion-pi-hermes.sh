@@ -100,13 +100,17 @@ stop_handoff_broker() {
   BROKER_PID=""
 }
 on_signal() {
+  local signum="$1"
   trap - INT TERM HUP
   stop_child
+  legion_adapter_write_signal_receipt "$signum"
   [[ -z "$RUN_ID" || -z "$ART" ]] || write_state failed
-  exit 143
+  exit $((128+signum))
 }
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit; cleanup_worktree' EXIT
-trap on_signal INT TERM HUP
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
 
 resolve_state() {
   if declare -F legion_resolve_state >/dev/null 2>&1; then legion_resolve_state "$1"; else
@@ -747,7 +751,13 @@ cmd_run() {
   note "-> ${command[*]}"
   local started_at ended_at
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  start="$(date +%s000)"; run_provider "$out" "$err" "${command[@]}"; end="$(date +%s000)"; duration=$((end-start))
+  start="$(date +%s000)"
+  legion_adapter_arm_signal_receipt "$ART" "$ADAPTER_KIND" "$ADAPTER_KIND" 1 \
+    "$requested_model" "" \
+    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+    "$SANDBOX" "$started_at" "$start" "$out"
+  run_provider "$out" "$err" "${command[@]}"; end="$(date +%s000)"; duration=$((end-start))
   ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   stop_handoff_broker
   local usage='{}' result='' cost=0 status=ok diff="$ART/diff.patch" actual_model="$MODEL" observed_model="" terminal_ok=0 provider_files_ok=0
@@ -770,8 +780,11 @@ cmd_run() {
   fi
   MODEL="$actual_model"
   [[ -n "$usage" ]] || usage='{}'
-  local lease_reason=""
-  if legion_adapter_supervisor_timed_out "$ART/lease.json"; then
+  local lease_reason="" containment_failed=0
+  if legion_adapter_supervisor_cleanup_failed "$ART/lease.json"; then
+    containment_failed=1
+    lease_reason="$(legion_adapter_supervisor_reason "$ART/lease.json") (evidence: $ART/lease.json; worktree retained: $WT_RECORD)"
+  elif legion_adapter_supervisor_timed_out "$ART/lease.json"; then
     lease_reason="$(legion_adapter_lease_reason "$ART/lease.json")"
   fi
   if [[ "$BROKER_RC" -ne 0 ]]; then
@@ -779,9 +792,11 @@ cmd_run() {
     result="${result:+$result$'\n'}handoff broker failed closed with exit $BROKER_RC; inspect $ART/broker.err"
   fi
   if ! jq -en --argjson value "$cost" '$value | type == "number" and . >= 0' >/dev/null 2>&1; then cost=0; terminal_ok=0; fi
-  if ! capture_trusted_diff "$diff"; then
+  if [[ "$containment_failed" -ne 1 ]] && ! capture_trusted_diff "$diff"; then
     status=error
     result="${result:+$result$'\n'}$ADAPTER_KIND modified trusted worktree metadata or diff capture failed; refusing unsandboxed Git evaluation."
+  elif [[ "$containment_failed" -eq 1 ]]; then
+    : > "$diff"
   fi
   [[ "$PROVIDER_RC" == 0 ]] || status=failed
   [[ "$status" != ok || "$terminal_ok" == 1 ]] || status=error
@@ -791,7 +806,11 @@ cmd_run() {
   [[ "$status" != ok || -n "$result" ]] || status=error
   [[ "$SANDBOX" != read-only || ! -s "$diff" ]] || { status=error; result="${result:+$result$'\n'}Pi produced file changes during a read-only run; refusing to report ok."; }
   [[ "$status" != ok || -n "$result" || -s "$diff" ]] || { status=error; result="$ADAPTER_KIND completed without an authoritative terminal result or diff."; }
-  if [[ -n "$lease_reason" ]]; then
+  if [[ "$containment_failed" == 1 ]]; then
+    status=containment_failed
+    KEEP=1
+    result="$lease_reason"
+  elif [[ -n "$lease_reason" ]]; then
     status=timed_out
     KEEP=0
     result="$lease_reason"
@@ -822,8 +841,15 @@ cmd_run() {
   elif [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == hermes ]] \
        && hermes_terminal_ok "$out" "$usage_art"; then
     usage_status=known; usage_source=hermes-usage-file
-    if [[ "$(jq -r '.cost_status // "unknown"' "$usage_art")" != unknown ]]; then
-      cost_status=known; cost_source=hermes-usage-file
+    local hermes_cost_status hermes_cost_source
+    hermes_cost_status="$(jq -r '.cost_status // "unknown"' "$usage_art")"
+    hermes_cost_source="$(jq -r '.cost_source // "none"' "$usage_art")"
+    if [[ "$hermes_cost_status" != unknown ]]; then
+      # The common attempt schema records a numeric provider-reported value as
+      # known; retain whether Hermes called it actual, estimated, or included
+      # and the original source in the unrestricted provenance string.
+      cost_status=known
+      cost_source="hermes-usage-file:$hermes_cost_status:$hermes_cost_source"
     fi
   fi
   local terminal_status=succeeded failure_class=""
@@ -832,6 +858,8 @@ cmd_run() {
     if [[ "$status" == timed_out ]]; then
       terminal_status=timed_out
       failure_class=timed_out
+    elif [[ "$status" == containment_failed ]]; then
+      failure_class=internal
     elif [[ "$SANDBOX" == read-only && -s "$diff" ]]; then
       failure_class=policy_refused
     elif [[ "$PROVIDER_RC" -ne 0 ]]; then
@@ -849,11 +877,13 @@ cmd_run() {
     "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
     "$failure_class" false "$output_started" \
     "$([[ "$PROVIDER_RC" -eq 0 ]] || printf '%s' "$PROVIDER_RC")" "$result"
+  legion_adapter_disarm_signal_receipt
   local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    --arg reason "$lease_reason" \
+    --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
     --argjson cost_provenance "$cost_provenance" '{worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage,
-      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)} + $cost_provenance
+      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end),
+      lease_receipt:$lease} + $cost_provenance
       + (if $reason=="" then {} else {lease_reason:$reason} end)')"
   emit_span "$status" "$duration" "$cost" "$usage" "$task" "$artifacts"
   if [[ "$apply" == 1 && "$status" == ok && -s "$diff" ]]; then
@@ -863,10 +893,10 @@ cmd_run() {
   write_state "$status"; [[ -z "$PRESET_RUN_ID" ]] || legion_disarm_adopted_run_guard
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg executor "$ADAPTER_KIND" --arg model "$actual_model" --arg result "$result" --arg worktree "$report" --arg diff "$diff" --arg last "$ART/last-message.txt" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    --arg reason "$lease_reason" \
+    --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
     --argjson usage "$usage" --argjson cost "$cost" --argjson rc "$PROVIDER_RC" \
     '{run_id:$run,status:$status,executor:$executor,model:$model,result:$result,worktree:$worktree,diff_path:$diff,last_message_path:$last,usage:$usage,cost_usd:$cost,provider_exit:$rc,
-      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)}
+      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
       + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == ok ]] || exit 1
 }

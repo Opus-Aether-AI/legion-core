@@ -151,6 +151,55 @@ def test_inactive_inherited_fingerprint_cannot_disable_direct_launch(tmp_path: P
     assert launched.exists()
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt inheritance is Darwin-only")
+def test_existing_seatbelt_host_without_legion_canaries_is_inherited(tmp_path: Path) -> None:
+    """A trusted outer sandbox must not trigger unsupported nested sandbox-exec."""
+
+    home_probe = Path.home() / ".ssh"
+    launched = tmp_path / "launched"
+    status_file = tmp_path / "outer-seatbelt.json"
+    profile = (
+        '(version 1)(allow default)'
+        f'(deny file-read* (subpath "{home_probe}"))'
+    )
+    environment = os.environ.copy()
+    environment.pop("LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY", None)
+    environment.pop("LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY", None)
+    result = subprocess.run(
+        [
+            "/usr/bin/sandbox-exec",
+            "-p",
+            profile,
+            sys.executable,
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "2",
+            "--status-file",
+            str(status_file),
+            "--",
+            sys.executable,
+            "-c",
+            (
+                "import ctypes,os,pathlib,sys;"
+                "s=ctypes.CDLL('/usr/lib/libsandbox.1.dylib');"
+                "s.sandbox_check.argtypes=(ctypes.c_int,ctypes.c_char_p,ctypes.c_int);"
+                "s.sandbox_check.restype=ctypes.c_int;"
+                f"assert s.sandbox_check(os.getpid(),b'file-read-data',1,b'{home_probe}')>0;"
+                f"pathlib.Path({str(launched)!r}).touch()"
+            ),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=environment,
+        timeout=8,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "completed"
+    assert launched.exists()
+
+
 def test_repeated_cancel_at_deadline_writes_one_terminal_outcome(tmp_path: Path) -> None:
     status_file = tmp_path / "race.json"
     process = subprocess.Popen(

@@ -47,6 +47,8 @@ if [[ "${MOCK_DSH_NO_PROFILE:-0}" == "1" ]]; then
   exit 1
 fi
 
+[[ -z "${MOCK_DSH_DELAY:-}" ]] || sleep "$MOCK_DSH_DELAY"
+
 # Silence with a zero exit -- the adapter must not call that a success.
 [[ "${MOCK_DSH_EMPTY:-0}" != "1" ]] || exit 0
 

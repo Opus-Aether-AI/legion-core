@@ -32,10 +32,25 @@ if [[ -f "$_state_lib" ]]; then
 fi
 
 CURSOR_AGENT_BIN="${CURSOR_AGENT_BIN:-}"
+CHILD_PID=""
 
 die() { printf 'legion-cursor: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
+on_signal() {
+  local signum="$1"
+  trap - INT TERM HUP
+  if [[ -n "$CHILD_PID" ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+    CHILD_PID=""
+  fi
+  legion_adapter_write_signal_receipt "$signum"
+  exit $((128+signum))
+}
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit' EXIT
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
@@ -279,11 +294,15 @@ cmd_run() {
   local lease_status="$art/lease.json"
   started_at="$(_now)"
   start_ms="$(date +%s000)"
+  legion_adapter_arm_signal_receipt "$art" cursor cursor 1 "$model" "" "" "" \
+    "$sandbox" "$started_at" "$start_ms" "$out_file"
   set +e
-  ( cd "$wt" && python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+  ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
       --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
-      --status-file "$lease_status" -- "${cmd[@]}" >"$out_file" 2>"$err_file" )
-  rc=$?
+      --status-file "$lease_status" -- "${cmd[@]}" ) >"$out_file" 2>"$err_file" &
+  CHILD_PID=$!
+  wait "$CHILD_PID"; rc=$?
+  CHILD_PID=""
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
@@ -293,15 +312,25 @@ cmd_run() {
   actual_model="$observed_model"; [[ -n "$actual_model" ]] || actual_model="$model"
   cost="$(cost_from_output "$out_file" "$actual_model" "$usage")"
   result="$(result_text "$out_file")"
-  git -C "$wt" add -A 2>/dev/null || diff_rc=1
+  local containment_failed=0
+  legion_adapter_supervisor_cleanup_failed "$lease_status" && containment_failed=1
+  if [[ "$containment_failed" -ne 1 ]]; then
+    git -C "$wt" add -A 2>/dev/null || diff_rc=1
   # Diff against the worktree's STARTING commit, not HEAD. `diff --cached` alone
   # compares the index to HEAD, so an executor that COMMITS its work yields an
   # empty patch -- HEAD already holds it, nothing is staged, and the run reports
   # ok having lost everything. legion-pi-hermes already pins a base sha for this
   # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
   # had actually been done.
-  git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
-  if legion_adapter_supervisor_timed_out "$lease_status"; then
+    git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  else
+    : > "$art/diff.patch"
+  fi
+  if [[ "$containment_failed" -eq 1 ]]; then
+    status="containment_failed"
+    keep=1
+    result="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+  elif legion_adapter_supervisor_timed_out "$lease_status"; then
     status="timed_out"
     keep=0
     result="$(legion_adapter_lease_reason "$lease_status")"
@@ -331,6 +360,8 @@ cmd_run() {
     if [[ "$status" == timed_out ]]; then
       terminal_status=timed_out
       failure_class=timed_out
+    elif [[ "$status" == containment_failed ]]; then
+      failure_class=internal
     elif [[ "$sandbox" == read-only && -s "$art/diff.patch" ]]; then
       failure_class=policy_refused
     elif [[ "$rc" -ne 0 ]]; then
@@ -343,6 +374,7 @@ cmd_run() {
     "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
     "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
     "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
+  legion_adapter_disarm_signal_receipt
 
   local artifacts
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
@@ -385,12 +417,13 @@ cmd_run() {
     --arg result "$result" --arg auth_note "$auth_note" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    --arg reason "$([[ "$status" == timed_out ]] && legion_adapter_lease_reason "$lease_status")" \
+    --arg reason "$([[ "$status" == timed_out ]] && legion_adapter_lease_reason "$lease_status" || [[ "$status" == containment_failed ]] && legion_adapter_supervisor_reason "$lease_status")" \
+    --arg lease "$lease_status" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"cursor", model:$model, cursor_exit:$rc,
      result:$result, worktree:$wt, diff_path:$diff, last_message_path:$last,
      usage:$usage, cost_usd:$cost,preflight_receipt:$preflight,attempt_receipt:$attempt,
-     failure_receipt:(if $failure=="" then null else $failure end)}
+     failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
     + (if $reason=="" then {} else {reason:$reason} end)
     + (if $auth_note == "" then {} else {auth_error:$auth_note} end)'
   [[ "$status" == "ok" ]] || exit 1

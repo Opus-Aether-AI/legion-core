@@ -30,6 +30,8 @@ fi
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 LEGION_CLAUDE_TMPDIR=""
 LEGION_CLAUDE_LEASE_DEADLINE_NS=""
+LEGION_CLAUDE_LEASE_RECEIPT=""
+CHILD_PID=""
 
 die() { printf 'legion-claude: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -38,7 +40,21 @@ cleanup_claude_on_exit() {
     && legion_terminalize_adopted_run_on_exit
   [[ -z "$LEGION_CLAUDE_TMPDIR" ]] || rm -rf "$LEGION_CLAUDE_TMPDIR"
 }
+on_signal() {
+  local signum="$1"
+  trap - INT TERM HUP
+  if [[ -n "$CHILD_PID" ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+    CHILD_PID=""
+  fi
+  legion_adapter_write_signal_receipt "$signum"
+  exit $((128+signum))
+}
 trap cleanup_claude_on_exit EXIT
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
@@ -213,12 +229,14 @@ emit_terminal_json() {
     --arg wt "${LEGION_CLAUDE_WORKTREE:-}" --arg diff "${LEGION_CLAUDE_DIFF:-}" \
     --arg preflight "${LEGION_ADAPTER_PREFLIGHT_PATH:-}" \
     --arg attempt "${LEGION_ADAPTER_ATTEMPT_PATH:-}" \
-    --arg failure "${LEGION_ADAPTER_FAILURE_PATH:-}" '
+    --arg failure "${LEGION_ADAPTER_FAILURE_PATH:-}" \
+    --arg lease "${LEGION_CLAUDE_LEASE_RECEIPT:-}" '
     {run_id:$run_id, executor:$executor, model:$model, status:$status, result:$result,
      usage:$usage, cost_usd:$cost, fell_back:$fell_back,
      preflight_receipt:(if $preflight=="" then null else $preflight end),
      attempt_receipt:(if $attempt=="" then null else $attempt end),
-     failure_receipt:(if $failure=="" then null else $failure end)}
+     failure_receipt:(if $failure=="" then null else $failure end),
+     lease_receipt:(if $lease=="" then null else $lease end)}
     + (if $reason == "" then {} else {fell_back_reason:$reason, reason:$reason} end)
     + (if $wt == "" then {} else {worktree:$wt} end)
     + (if $diff == "" then {} else {diff_path:$diff} end)'
@@ -499,7 +517,7 @@ cmd_run() {
   start_ms="$(date +%s000)"
   local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0 chain_cost=0
   local any_output_started=0 permission_refused=0 chain_admission_refused=0
-  local lease_timed_out=0 lease_reason=""
+  local lease_timed_out=0 containment_failed=0 lease_reason=""
   for attempt_model in "${claude_model_chain[@]}"; do
     chain_idx=$(( chain_idx + 1 ))
     model="$attempt_model"
@@ -535,15 +553,20 @@ cmd_run() {
     local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
     attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
     local lease_status="$contract_art/lease-$chain_idx.json"
+    legion_adapter_arm_signal_receipt "$contract_art" claude anthropic "$chain_idx" \
+      "$attempt_model" "" "$effort" "$effort" "$sandbox" "$attempt_started_at" \
+      "$attempt_start_ms" "$out_file"
     set +e
-    printf '%s' "$task" | (
+    (
       legion_activate_executor_context "$RUN_ID" claude
       cd "${wt:-$repo}"
-      python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "${wt:-$repo}" \
+      exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "${wt:-$repo}" \
         --max-runtime-seconds "$attempt_runtime" \
         --status-file "$lease_status" -- "${claude_cmd[@]}"
-    ) >"$out_file" 2>"$err_file"
-    rc=${PIPESTATUS[1]}
+    ) < <(printf '%s' "$task") >"$out_file" 2>"$err_file" &
+    CHILD_PID=$!
+    wait "$CHILD_PID"; rc=$?
+    CHILD_PID=""
     set -e
     attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
     attempt_duration=$((attempt_end_ms-attempt_start_ms))
@@ -569,7 +592,13 @@ cmd_run() {
     fi
     local attempt_combined="$attempt_result"
     [[ ! -s "$err_file" ]] || attempt_combined="${attempt_combined}"$'\n'"$(cat "$err_file")"
-    if legion_adapter_supervisor_timed_out "$lease_status"; then
+    if legion_adapter_supervisor_cleanup_failed "$lease_status"; then
+      containment_failed=1
+      keep=1
+      LEGION_CLAUDE_LEASE_RECEIPT="$lease_status"
+      lease_reason="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: ${wt:-$repo})"
+      attempt_failure=internal
+    elif legion_adapter_supervisor_timed_out "$lease_status"; then
       lease_timed_out=1
       lease_reason="child execution lease expired after $LEGION_ADAPTER_MAX_RUNTIME_SECONDS seconds"
       attempt_terminal=timed_out; attempt_failure=timed_out
@@ -592,7 +621,8 @@ cmd_run() {
       "$attempt_cost_status" "$attempt_cost_source" "$attempt_failure" "$attempt_retryable" \
       "$attempt_output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" \
       "${lease_reason:-$attempt_result}"
-    [[ "$lease_timed_out" -ne 1 ]] || break
+    legion_adapter_disarm_signal_receipt
+    [[ "$lease_timed_out" -ne 1 && "$containment_failed" -ne 1 ]] || break
     if [[ "$permission_refused" -eq 1 || "$any_output_started" -eq 1 ]]; then
       declined_final=0
       break
@@ -629,24 +659,29 @@ cmd_run() {
   # loop in delegate.sh, which also reports only its final attempt's usage.
   [[ -n "$claude_chain_note" ]] && note "model chain: declined by $claude_chain_note → answered by $model"
   [[ "$lease_timed_out" -ne 1 ]] || keep=0
+  [[ "$containment_failed" -ne 1 ]] || keep=1
 
   if [[ -n "$wt" ]]; then
-    git -C "$wt" add -A 2>/dev/null || diff_rc=1
+    if [[ "$containment_failed" -ne 1 ]]; then
+      git -C "$wt" add -A 2>/dev/null || diff_rc=1
     # Diff against the worktree's STARTING commit, not HEAD. `diff --cached` alone
     # compares the index to HEAD, so an executor that COMMITS its work yields an
     # empty patch -- HEAD already holds it, nothing is staged, and the run reports
     # ok having lost everything. legion-pi-hermes already pins a base sha for this
     # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
     # had actually been done.
-    git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
+      git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
+    else
+      : > "$diff_path"
+    fi
     [[ "$diff_rc" -ne 0 ]] && note "⚠ could not capture a diff from $wt"
-    if [[ "$lease_timed_out" -ne 1 && "$sandbox" == "read-only" && -s "$diff_path" ]]; then
+    if [[ "$lease_timed_out" -ne 1 && "$containment_failed" -ne 1 && "$sandbox" == "read-only" && -s "$diff_path" ]]; then
       read_only_violation=1
       note "⚠ Claude produced file changes during a read-only run; refusing the result"
       legion_adapter_fail_recorded_attempt "$contract_art" claude "$chain_idx" \
         policy_refused "" "Claude produced file changes during a read-only run"
     fi
-    if [[ "$lease_timed_out" -ne 1 && "$do_apply" -eq 1 && "$read_only_violation" -eq 0 && -s "$diff_path" ]]; then
+    if [[ "$lease_timed_out" -ne 1 && "$containment_failed" -ne 1 && "$do_apply" -eq 1 && "$read_only_violation" -eq 0 && -s "$diff_path" ]]; then
       if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
         git -C "$repo" apply "$diff_path" && note "diff applied to $repo"
       else
@@ -698,6 +733,19 @@ cmd_run() {
   combined_text="$result"
   if [[ -s "$err_file" ]]; then
     combined_text="${combined_text}"$'\n'"$(cat "$err_file")"
+  fi
+
+  if [[ "$containment_failed" -eq 1 ]]; then
+    reason="containment_failed"
+    status="containment_failed"
+    result="$lease_reason"
+    emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    return 1
   fi
 
   if [[ "$lease_timed_out" -eq 1 ]]; then

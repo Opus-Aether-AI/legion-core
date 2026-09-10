@@ -280,6 +280,15 @@ make_test_repo() {
     [ "$final_attempt" = "$art/attempt-1.json" ]
     jq -e '.executor == "codex" and .terminal_status == "succeeded"' "$final_attempt"
     jq -e '.executor == "claude" and .failure.class == "quota"' "$art/claude/attempt-1.json"
+    local claude_span
+    claude_span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c \
+      'select(.run_id == "real-fallback-receipts-claude" and .executor == "claude")')"
+    for evidence in preflight_receipt attempt_receipt failure_receipt lease_receipt; do
+      local evidence_path
+      evidence_path="$(jq -r --arg key "$evidence" '.artifacts[$key]' <<<"$claude_span")"
+      [[ "$evidence_path" == "$art/claude/"* ]]
+      [ -f "$evidence_path" ]
+    done
     echo "$output" | jq -e '
       .run_id == "real-fallback-receipts-claude"
       and .executor == "codex" and (.result | length > 0)
@@ -463,13 +472,33 @@ PY
 }
 
 @test "legion-claude: a single-model chain that declines is not reported ok" {
-    local repo; repo="$(make_test_repo chain-single)"
+    local repo attempt_cost; repo="$(make_test_repo chain-single)"
     # No fallback_refs at all -- the common case for most archetypes.
-    MOCK_CLAUDE_DECLINE_MODELS="model-only" \
-      run "$LEGION_CLAUDE" run --task x --model model-only \
+    MOCK_CLAUDE_DECLINE_MODELS="$CLAUDE_DEFAULT" \
+      run "$LEGION_CLAUDE" run --task x --model "$CLAUDE_DEFAULT" \
         --repo "$repo" --no-fallback --quiet
     echo "$output" | jq -e '.status != "ok"'
     echo "$output" | jq -e '.reason == "claude_declined"'
+    attempt_cost="$(jq -r .cost_usd "$(echo "$output" | jq -r .attempt_receipt)")"
+    [ "$(echo "$output" | jq -r .cost_usd)" = "$attempt_cost" ]
+    [ "$attempt_cost" != 0 ]
+}
+
+@test "foreground adapters disarm signal accounting only after provider span emission" {
+    local script receipt_line span_line disarm_line
+    for script in legion-cursor.sh legion-opencode.sh legion-deepseek.sh legion-pi-hermes.sh; do
+      receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
+      span_line="$(grep -n '^  emit_span ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
+      disarm_line="$(grep -n '^  legion_adapter_disarm_signal_receipt$' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
+      [ "$receipt_line" -lt "$span_line" ]
+      [ "$span_line" -lt "$disarm_line" ]
+    done
+    local claude_script="$REPO_ROOT/legion-router/scripts/legion-claude.sh"
+    receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$claude_script" | tail -1 | cut -d: -f1)"
+    span_line="$(grep -n '^  emit_span "claude"' "$claude_script" | tail -1 | cut -d: -f1)"
+    disarm_line="$(grep -n '^  finish_claude_signal_accounting$' "$claude_script" | tail -1 | cut -d: -f1)"
+    [ "$receipt_line" -lt "$span_line" ]
+    [ "$span_line" -lt "$disarm_line" ]
 }
 
 @test "legion-claude: an ordinary failure does NOT burn the model chain" {
@@ -527,4 +556,22 @@ PY
     # The chain is legible in the record rather than only in the logs.
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '.artifacts.declined_models // empty'"
     [ "$output" = "$CLAUDE_DEFAULT" ]
+}
+
+@test "legion-claude: final provider span uses its receipt model and duration" {
+    local repo final_attempt final_span; repo="$(make_test_repo chain-final-span)"
+    MOCK_CLAUDE_DECLINE_MODELS="$CLAUDE_DEFAULT" \
+      MOCK_CLAUDE_DECLINE_DELAY=1 \
+      MOCK_CLAUDE_EFFECTIVE_MODEL="anthropic/effective-answer" \
+      run "$LEGION_CLAUDE" run --task x --model "$CLAUDE_DEFAULT" \
+        --fallback-models "model-answers" --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    final_attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    final_span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c \
+      'select(.executor == "claude" and ((.artifacts.intermediate_attempt // false) | not))')"
+    jq -e --arg model "$(jq -r '.effective_model // .requested_model' "$final_attempt")" \
+      --argjson duration "$(jq -r .duration_ms "$final_attempt")" \
+      '.model == $model and .duration_ms == $duration' <<<"$final_span"
+    [ "$(jq -r .model <<<"$final_span")" = "anthropic/effective-answer" ]
 }

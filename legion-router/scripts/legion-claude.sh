@@ -77,6 +77,13 @@ on_signal() {
   legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
   exit $((128+signum))
 }
+finish_claude_signal_accounting() {
+  legion_adapter_disarm_signal_receipt
+  SIGNAL_CHILD_PID=""
+  SIGNAL_CHILD_RC=0
+  SIGNAL_LEASE_STATUS=""
+  SIGNAL_WORKTREE=""
+}
 trap cleanup_claude_on_exit EXIT
 trap 'on_signal 2' INT
 trap 'on_signal 15' TERM
@@ -222,10 +229,13 @@ PY
 archive_claude_fallback_receipts() {
   local art="$1" archive="$1/claude" path name
   mkdir -p "$archive"
-  for path in "$art"/attempt-*.json "$art"/failure-*.json; do
+  for path in "$art"/attempt-*.json "$art"/failure-*.json \
+      "$art"/claude-preflight*.json "$art"/lease-*.json; do
     [[ -f "$path" ]] || continue
     name="${path##*/}"
-    [[ "$name" =~ ^(attempt|failure)-[0-9]+\.json$ ]] || continue
+    [[ "$name" =~ ^(attempt|failure)-[0-9]+\.json$ \
+      || "$name" =~ ^claude-preflight(-[0-9]+)?\.json$ \
+      || "$name" =~ ^lease-[0-9]+\.json$ ]] || continue
     mv -f "$path" "$archive/$name"
   done
   if [[ -n "${LEGION_ADAPTER_ATTEMPT_PATH:-}" ]]; then
@@ -235,6 +245,14 @@ archive_claude_fallback_receipts() {
   if [[ -n "${LEGION_ADAPTER_FAILURE_PATH:-}" ]]; then
     name="${LEGION_ADAPTER_FAILURE_PATH##*/}"
     [[ -f "$archive/$name" ]] && LEGION_ADAPTER_FAILURE_PATH="$archive/$name"
+  fi
+  if [[ -n "${LEGION_ADAPTER_PREFLIGHT_PATH:-}" ]]; then
+    name="${LEGION_ADAPTER_PREFLIGHT_PATH##*/}"
+    [[ -f "$archive/$name" ]] && LEGION_ADAPTER_PREFLIGHT_PATH="$archive/$name"
+  fi
+  if [[ -n "${LEGION_CLAUDE_LEASE_RECEIPT:-}" ]]; then
+    name="${LEGION_CLAUDE_LEASE_RECEIPT##*/}"
+    [[ -f "$archive/$name" ]] && LEGION_CLAUDE_LEASE_RECEIPT="$archive/$name"
   fi
   # These are mutable aliases, not attempt evidence. The fallback owns them
   # once invoked; deleting them first prevents a preflight-only Codex failure
@@ -667,11 +685,6 @@ cmd_run() {
       "$attempt_cost_status" "$attempt_cost_source" "$attempt_failure" "$attempt_retryable" \
       "$attempt_output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" \
       "${lease_reason:-$attempt_result}"
-    legion_adapter_disarm_signal_receipt
-    SIGNAL_CHILD_PID=""
-    SIGNAL_CHILD_RC=0
-    SIGNAL_LEASE_STATUS=""
-    SIGNAL_WORKTREE=""
     [[ "$lease_timed_out" -ne 1 && "$containment_failed" -ne 1 ]] || break
     if [[ "$permission_refused" -eq 1 || "$any_output_started" -eq 1 ]]; then
       declined_final=0
@@ -691,12 +704,12 @@ cmd_run() {
     # this attempt's cost now or it disappears from the record entirely. On a large
     # prompt at frontier rates that is real money silently unaccounted for, in a
     # system whose whole point is honest cost attribution.
-    local _declined_usage _declined_cost
-    _declined_usage="$(usage_json "$out_file")"
-    _declined_cost="$(cost_from_usage "$model" "$_declined_usage" 2>/dev/null || printf '0')"
-    chain_cost="$(awk -v a="$chain_cost" -v b="$_declined_cost" 'BEGIN{printf "%.6f", a + b}')"
     claude_chain_note="${claude_chain_note}${claude_chain_note:+; }$model"
     if [[ "$chain_idx" -lt "$chain_len" ]]; then
+      local _declined_usage _declined_cost
+      _declined_usage="$(usage_json "$out_file")"
+      _declined_cost="$(cost_from_usage "$model" "$_declined_usage" 2>/dev/null || printf '0')"
+      chain_cost="$(awk -v a="$chain_cost" -v b="$_declined_cost" 'BEGIN{printf "%.6f", a + b}')"
       # This paid provider attempt will no longer be the adapter's terminal
       # attempt, so publish its own durable span now. The final attempt is
       # emitted by the common terminal path below; together this keeps every
@@ -714,6 +727,7 @@ cmd_run() {
       emit_span "claude" "$attempt_model" failed "$attempt_duration" \
         "$prior_cost" "$prior_usage" "$task" "$prior_artifacts" \
         "$prior_usage_status" "$prior_cost_status"
+      finish_claude_signal_accounting
       note "⚠ $model declined the task or is unreachable — trying the next Claude model"
     else
       note "⚠ $model declined the task or is unreachable — no Claude models left in the chain"
@@ -814,19 +828,23 @@ cmd_run() {
   # but a provider span must describe exactly the canonical attempt it links.
   # In particular, an unmetered failed attempt is unknown/null, never `{}`/$0.
   local span_usage=null span_cost=null span_usage_status=not_applicable span_cost_status=not_applicable
+  local span_model="$model" span_duration="$dur"
   if [[ -n "${LEGION_ADAPTER_ATTEMPT_PATH:-}" && -f "$LEGION_ADAPTER_ATTEMPT_PATH" ]]; then
     span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_model="$(jq -r '.effective_model // .requested_model // "unknown"' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_duration="$(jq -r '.duration_ms' "$LEGION_ADAPTER_ATTEMPT_PATH")"
   fi
 
   if [[ "$containment_failed" -eq 1 ]]; then
     reason="containment_failed"
     status="containment_failed"
     result="$lease_reason"
-    emit_span "claude" "$model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
+    finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
@@ -839,8 +857,9 @@ cmd_run() {
     reason="$lease_reason"
     status="timed_out"
     result="$lease_reason"
-    emit_span "claude" "$model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
+    finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
@@ -866,8 +885,9 @@ cmd_run() {
     status="failed"
     [[ -n "$result" ]] && result="${result}"$'\n'
     result="${result}Claude produced file changes during a read-only run."
-    emit_span "claude" "$model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
+    finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
@@ -881,8 +901,9 @@ cmd_run() {
   # the refusal text as the run's result.
   if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" && "$declined_final" -eq 0 ]]; then
     status="ok"
-    emit_span "claude" "$model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
+    finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
@@ -906,13 +927,18 @@ cmd_run() {
     status="$([[ "$reason" == "claude_limit" ]] && printf blocked || printf failed)"
     archive_claude_fallback_receipts "$contract_art"
     artifacts="$(jq -c \
+      --arg preflight "${LEGION_ADAPTER_PREFLIGHT_PATH:-}" \
       --arg attempt "${LEGION_ADAPTER_ATTEMPT_PATH:-}" \
-      --arg failure "${LEGION_ADAPTER_FAILURE_PATH:-}" '
-      .attempt_receipt=(if $attempt=="" then null else $attempt end)
+      --arg failure "${LEGION_ADAPTER_FAILURE_PATH:-}" \
+      --arg lease "${LEGION_CLAUDE_LEASE_RECEIPT:-}" '
+      .preflight_receipt=(if $preflight=="" then null else $preflight end)
+      | .attempt_receipt=(if $attempt=="" then null else $attempt end)
       | .failure_receipt=(if $failure=="" then null else $failure end)
+      | .lease_receipt=(if $lease=="" then null else $lease end)
     ' <<<"$artifacts")"
-    emit_span "claude" "$model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
+    finish_claude_signal_accounting
     note "⚠ Claude failed ($reason): falling back to $fallback_model"
     run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
     return $?
@@ -929,8 +955,9 @@ cmd_run() {
   else
     status="failed"
   fi
-  emit_span "claude" "$model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+  emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
     "$span_usage_status" "$span_cost_status"
+  finish_claude_signal_accounting
   [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
     "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
     "$model" "$sandbox" "$base" "$archetype" "$effort"

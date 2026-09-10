@@ -290,7 +290,7 @@ SH
     [ ! -s "$filtered" ]
     [ "$(echo "$output" | jq -r .error_log)" = "no run-level errors were recorded (raw stderr: $raw)" ]
     # span written
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r 'select(.executor==\"codex\") | .executor'"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r 'select(.executor==\"codex\" and .artifacts.provider_attempt==true) | .executor'"
     [ "$output" = "codex" ]
     grep -Eq '^codex active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
@@ -1273,7 +1273,7 @@ $run_error" ]
     run "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
 
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -src '[.[].executor] | sort'"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -src '[.[] | select(.artifacts.rollup_only != true) | .executor] | sort'"
     [ "$output" = '["codex","opus-baseline"]' ]
 
     run "$SHARE" --dir "$LEGION_TELEMETRY_DIR"
@@ -1355,7 +1355,7 @@ $run_error" ]
 @test "delegate run: standalone span is its own trace root (trace_id=run_id, parent null)" {
     local repo; repo="$(make_test_repo trace0)"
     "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet >/dev/null
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | {same:(.trace_id==.run_id), parent:.parent_id}'"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -sec '[.[] | select(.executor==\"codex\")] | if length > 0 and all(.[]; .trace_id==.run_id and .parent_id==null) then {same:true,parent:null} else error(\"invalid trace root\") end'"
     [ "$output" = '{"same":true,"parent":null}' ]
 }
 
@@ -1363,7 +1363,7 @@ $run_error" ]
     local repo; repo="$(make_test_repo trace1)"
     LEGION_TRACE_ID="trace-abc" LEGION_PARENT_ID="parent-xyz" \
         "$DELEGATE" run --model test-model-alpha --task "x" --repo "$repo" --quiet >/dev/null
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | {t:.trace_id, p:.parent_id}'"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -sec '[.[] | select(.executor==\"codex\")] | if length > 0 and all(.[]; .trace_id==\"trace-abc\" and .parent_id==\"parent-xyz\") then {t:\"trace-abc\",p:\"parent-xyz\"} else error(\"invalid inherited trace\") end'"
     [ "$output" = '{"t":"trace-abc","p":"parent-xyz"}' ]
 }
 
@@ -1384,7 +1384,7 @@ $run_error" ]
     run "$DELEGATE" run --model test-model-beta --task "touch foo" --repo "$repo" --quiet
 
     [ "$status" -eq 0 ]
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | .artifacts.copied_secret_names'"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\" and .artifacts.copied_secret_names != null) | .artifacts.copied_secret_names'"
     [ "$output" = '[".env.local"]' ]
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor==\"codex\") | tostring | contains(\"super-secret\") | not'"
     [ "$status" -eq 0 ]
@@ -1988,6 +1988,46 @@ $run_error" ]
     [ ! -e "$art/failure-1.json" ]
 }
 
+@test "delegate native signal writer honors completed lease and retained child result" {
+    local helper art lease
+    helper="$TEST_TMPDIR/native-signal-completed.sh"
+    art="$TEST_TMPDIR/native-signal-completed-art"
+    lease="$art/lease-1.json"
+    mkdir -p "$art"
+    printf '%s\n' '{"schema":"legion.child-execution-lease.v1","status":"completed","reason":"child completed","max_runtime_seconds":30,"child_exit_code":0}' > "$lease"
+    {
+      sed -n '/^write_interrupted_native_attempt()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+source "$1"
+RUN_ID=native-completed-race
+_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+codex_usage() { printf '{}'; }
+cost_from_usage() { printf 0; }
+cost_model_has_pricing() { return 1; }
+NATIVE_ATTEMPT_ART="$2"
+NATIVE_ATTEMPT_EXECUTOR=codex
+NATIVE_ATTEMPT_ORDINAL=1
+NATIVE_ATTEMPT_MODEL=fixture-model
+NATIVE_ATTEMPT_EFFORT=high
+NATIVE_ATTEMPT_SANDBOX=workspace-write
+NATIVE_ATTEMPT_STREAM="$2/stream.jsonl"
+NATIVE_ATTEMPT_LAST_MESSAGE="$2/last-message.txt"
+NATIVE_ATTEMPT_STARTED_AT=2026-01-01T00:00:00Z
+NATIVE_ATTEMPT_START_MS="$(date +%s000)"
+NATIVE_LEASE_STATUS="$3"
+CODEX_CHILD_RC=127
+: > "$NATIVE_ATTEMPT_STREAM"
+write_interrupted_native_attempt
+SH
+    } > "$helper"
+
+    run bash "$helper" "$LIB/adapter-contract.sh" "$art" "$lease"
+
+    [ "$status" -eq 0 ]
+    jq -e '.terminal_status == "succeeded" and .failure == null' "$art/attempt-1.json"
+    [ ! -e "$art/failure-1.json" ]
+}
+
 @test "adapter receipts clear the mutable failure alias after a successful retry" {
     local art="$TEST_TMPDIR/receipt-retry"
     mkdir -p "$art"
@@ -2138,6 +2178,22 @@ $run_error" ]
   [ ! -e "$art/failure.json" ]
   [ -s "$route_env" ]
   ! grep -Eq 'pre=1|executor=codex|fallback=test-model-beta' "$route_env"
+
+  local spans provider_spans rollup
+  spans="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl)"
+  provider_spans="$(jq -cs '[.[] | select(.executor == "codex" and .artifacts.provider_attempt == true)]' \
+    <<<"$spans")"
+  [ "$(jq length <<<"$provider_spans")" -eq 2 ]
+  while IFS= read -r provider_span; do
+    local receipt
+    receipt="$(jq -r .artifacts.attempt_receipt <<<"$provider_span")"
+    jq -e --arg model "$(jq -r '.effective_model // .requested_model' "$receipt")" \
+      --argjson duration "$(jq -r .duration_ms "$receipt")" \
+      '.model == $model and .duration_ms == $duration' <<<"$provider_span"
+  done < <(jq -c '.[]' <<<"$provider_spans")
+  rollup="$(jq -c 'select(.executor == "codex" and .artifacts.rollup_only == true)' <<<"$spans")"
+  jq -e '.cost_usd == null and .cost_status == "not_applicable"
+    and .tokens == null and .usage_status == "not_applicable"' <<<"$rollup"
 }
 
 @test "delegate run: a refused fallback never replaces the paid model identity" {
@@ -2385,8 +2441,8 @@ PY
       [ "$status" -eq 0 ]
       echo "$output" | jq -e --arg target "$target" '.status == "ok" and .executor == $target'
       local run_id; run_id="$(echo "$output" | jq -r .run_id)"
-      run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec --arg run '$run_id' --arg parent 'parent-${source}-${target}' \
-        'select(.run_id == \$run) | .parent_id == \$parent'"
+      run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -sec --arg run '$run_id' --arg parent 'parent-${source}-${target}' \
+        '[.[] | select(.run_id == \$run)] | length > 0 and all(.[]; .parent_id == \$parent)'"
       [ "$status" -eq 0 ]
       [ "$output" = "true" ]
     done
@@ -2441,6 +2497,24 @@ PY
     and (.cache_lineage.previous_attempt_id | type) == "string"' \
     "$(echo "$output" | jq -r .attempt_receipt)"
   assert_mock_called codex "exec resume mock-thread-0001"
+}
+
+@test "delegate resume: each resume retains its ordinal-specific lease receipt" {
+  local repo rid first second first_lease second_lease
+  repo="$(make_test_repo resume-ordinal-leases)"
+  out="$("$DELEGATE" run --model test-model-alpha --task initial --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+
+  first="$("$DELEGATE" resume --run "$rid" --task first --repo "$repo" --quiet)"
+  second="$("$DELEGATE" resume --run "$rid" --task second --repo "$repo" --quiet)"
+  first_lease="$(echo "$first" | jq -r .lease_receipt)"
+  second_lease="$(echo "$second" | jq -r .lease_receipt)"
+
+  [ "$first_lease" != "$second_lease" ]
+  [[ "$first_lease" == */resume-1/lease-1.json ]]
+  [[ "$second_lease" == */resume-2/lease-2.json ]]
+  jq -e '.status == "completed"' "$first_lease"
+  jq -e '.status == "completed"' "$second_lease"
 }
 
 @test "delegate resume: unavailable admission refuses before another provider launch" {
@@ -2927,8 +3001,8 @@ PY
       '{"verdict":"approve","summary":"No blocking findings.","findings":[]}' \
       > "$MOCK_CURSOR_RESULT_SEQUENCE_FILE"
 
-    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
-      --repo "$repo" --quiet
+    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review \
+      --archetype security-review --base HEAD --repo "$repo" --quiet
 
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
@@ -2949,6 +3023,10 @@ PY
       and .artifacts.metering_reconciliation.cost_usd == 0.06
       and .artifacts.metering_reconciliation.known_cost_attempts == 2
     ' <<<"$review_span"
+    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s \
+      '[.[] | select(.executor == "cursor" and .cost_status == "known"
+        and .archetype == "security-review"
+        and (.artifacts.attempt_receipt | endswith("/attempt-1.json")))] | length')" -eq 2 ]
     [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | .cost_usd // 0] | add')" = "0.06" ]
 }
 

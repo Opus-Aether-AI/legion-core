@@ -511,8 +511,8 @@ def enrich_run(
 ) -> dict[str, Any]:
     """Attach activity and provenance-aware cost to a registry record.
 
-    A live or single-attempt run uses its stream estimate. Once a retried run is
-    terminal, its durable per-attempt spans are the authoritative cost record.
+    A live run uses its stream estimate. Once a run is terminal, its durable
+    per-attempt spans are the authoritative cost record, including one attempt.
     """
     activity = _parse_streams(_stream_paths(run_dir)) if run_dir else _empty_activity()
     model = record.get("model") or record.get("resolved_model")
@@ -527,7 +527,7 @@ def enrich_run(
     prefer_durable = (
         phase in TERMINAL_PHASES
         and durable_metering is not None
-        and durable_attempt_count > 1
+        and durable_attempt_count > 0
     )
     if activity != _empty_activity() and not prefer_durable:
         stream_cost = round(cost_for(model, activity.get("usage"), costs), 6)

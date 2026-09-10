@@ -340,6 +340,13 @@ legion_adapter_write_signal_receipt() {
   lease_status="$(jq -r '
     if .schema == "legion.child-execution-lease.v1" then (.status // "") else "" end
   ' "$lease_path" 2>/dev/null || true)"
+  local lease_child_rc
+  lease_child_rc="$(jq -r '
+    if .schema == "legion.child-execution-lease.v1"
+       and (.child_exit_code | type) == "number"
+    then (.child_exit_code | tostring) else "" end
+  ' "$lease_path" 2>/dev/null || true)"
+  [[ -z "$lease_child_rc" ]] || child_rc="$lease_child_rc"
   case "$lease_status" in
     completed)
       # Bash may dispatch a pending signal after wait(1) returned but before the

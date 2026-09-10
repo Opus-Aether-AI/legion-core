@@ -161,6 +161,56 @@ def _nonnegative_num(value):
     return value if value >= 0 else None
 
 
+def _positive_count(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _cost_provenance(span):
+    value = _nonnegative_num(span.get("cost_usd"))
+    status = span.get("cost_status")
+    if status == "known":
+        return "known" if value is not None else "unknown"
+    if status == "partial":
+        lower = _nonnegative_num(span.get("known_cost_usd"))
+        return "partial" if lower is not None and _positive_count(
+            span.get("known_cost_attempts")
+        ) else "unknown"
+    if status in {"unknown", "not_applicable"}:
+        return status
+    return "known" if value is not None else "unknown"
+
+
+def _cost_summary(spans):
+    known = partial = unknown = known_runs = 0
+    lower_bound = 0.0
+    for span in spans:
+        status = _cost_provenance(span)
+        if status == "known":
+            known += 1
+            known_runs += 1
+            lower_bound += _nonnegative_num(span.get("cost_usd")) or 0.0
+        elif status == "partial":
+            partial += 1
+            known_runs += _positive_count(span.get("known_cost_attempts"))
+            lower_bound += _nonnegative_num(span.get("known_cost_usd")) or 0.0
+        elif status == "unknown":
+            unknown += 1
+    applicable = known + partial + unknown
+    status = (
+        "not_applicable" if not applicable
+        else "known" if known == applicable
+        else "unknown" if not known and not partial
+        else "partial"
+    )
+    lower_bound = round(lower_bound, 6)
+    return {
+        "cost_usd": lower_bound if status == "known" else None,
+        "cost_status": status,
+        "known_cost_usd": lower_bound if known_runs else None,
+        "known_cost_runs": known_runs,
+    }
+
+
 def _is_synthetic_primary_baseline(span):
     artifacts = span.get("artifacts") or {}
     if not isinstance(artifacts, dict):
@@ -171,13 +221,22 @@ def _is_synthetic_primary_baseline(span):
     )
 
 
-def _classification_payload(delegated, classified, unclassified, unclassified_cost):
+def _is_rollup_only(span):
+    artifacts = span.get("artifacts") or {}
+    return isinstance(artifacts, dict) and artifacts.get("rollup_only") is True
+
+
+def _classification_payload(delegated, classified, unclassified, unclassified_spans):
+    cost = _cost_summary(unclassified_spans)
     return {
         "delegated_runs": delegated,
         "classified_runs": classified,
         "unclassified_runs": unclassified,
         "classification_rate": round(classified / delegated, 4) if delegated else 0,
-        "unclassified_cost_usd": round(unclassified_cost, 6),
+        "unclassified_cost_usd": cost["cost_usd"],
+        "unclassified_cost_status": cost["cost_status"],
+        "unclassified_known_cost_usd": cost["known_cost_usd"],
+        "unclassified_known_cost_runs": cost["known_cost_runs"],
     }
 
 
@@ -185,7 +244,7 @@ def load_spans(spans_dir, *, with_classification=False):
     """Load only rankable spans while streaming unclassified coverage counters."""
     spans = []
     delegated = classified = unclassified = 0
-    unclassified_cost = 0.0
+    unclassified_spans = []
     pattern = os.path.join(os.path.expanduser(str(spans_dir)), "*.jsonl")
     for path in sorted(glob.glob(pattern)):
         try:
@@ -202,7 +261,7 @@ def load_spans(spans_dir, *, with_classification=False):
                         continue
                     if span.get("schema") != SPAN_SCHEMA:
                         continue
-                    if _is_synthetic_primary_baseline(span):
+                    if _is_synthetic_primary_baseline(span) or _is_rollup_only(span):
                         continue
                     if not is_delegated_executor(span.get("executor")):
                         continue
@@ -213,22 +272,23 @@ def load_spans(spans_dir, *, with_classification=False):
                         spans.append(span)
                     else:
                         unclassified += 1
-                        unclassified_cost += _nonnegative_num(span.get("cost_usd")) or 0.0
+                        unclassified_spans.append(span)
         except OSError:
             continue
     classification = _classification_payload(
-        delegated, classified, unclassified, unclassified_cost
+        delegated, classified, unclassified, unclassified_spans
     )
     return (spans, classification) if with_classification else spans
 
 
 def classification_summary(spans):
     delegated = classified = unclassified = 0
-    unclassified_cost = 0.0
+    unclassified_spans = []
     for span in spans:
         if (
             not isinstance(span, dict)
             or _is_synthetic_primary_baseline(span)
+            or _is_rollup_only(span)
             or not is_delegated_executor(span.get("executor"))
         ):
             continue
@@ -238,9 +298,9 @@ def classification_summary(spans):
             classified += 1
         else:
             unclassified += 1
-            unclassified_cost += _nonnegative_num(span.get("cost_usd")) or 0.0
+            unclassified_spans.append(span)
     return _classification_payload(
-        delegated, classified, unclassified, unclassified_cost
+        delegated, classified, unclassified, unclassified_spans
     )
 
 
@@ -253,7 +313,7 @@ def stats_by_arch_route(spans):
     for span in spans:
         if not isinstance(span, dict):
             continue
-        if _is_synthetic_primary_baseline(span):
+        if _is_synthetic_primary_baseline(span) or _is_rollup_only(span):
             continue
         executor = executor_family(span.get("executor"))
         if executor is None:
@@ -571,6 +631,17 @@ def _build_payload(spans_dir, routing_file, proposals, min_samples, classificati
     }
 
 
+def _classification_cost_text(classification):
+    status = classification.get("unclassified_cost_status")
+    if status == "partial":
+        return f'>=${classification.get("unclassified_known_cost_usd", 0):.4f}'
+    if status == "unknown":
+        return "unknown"
+    if status == "not_applicable":
+        return "n/a"
+    return f'${classification.get("unclassified_cost_usd", 0):.4f}'
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Propose advisory Legion routing model changes.")
     ap.add_argument("--spans", default=DEFAULT_SPANS_DIR)
@@ -594,7 +665,7 @@ def main(argv=None):
     unclassified_note = (
         f'{classification["unclassified_runs"]} of '
         f'{classification["delegated_runs"]} delegated runs are unclassified '
-        f'(${classification["unclassified_cost_usd"]:.4f}); '
+        f'({_classification_cost_text(classification)}); '
         "they cannot inform per-archetype routing proposals."
     )
 

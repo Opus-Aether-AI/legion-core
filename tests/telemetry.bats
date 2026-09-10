@@ -17,7 +17,10 @@ setup() {
 @test "telemetry: emit defaults run_id, mirrors trace_id, nulls parent" {
   run "$TEL" emit --executor claude --model fixture-claude --status ok
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.run_id != "" and .trace_id == .run_id and .parent_id == null'
+  echo "$output" | jq -e '
+    .run_id != "" and .trace_id == .run_id and .parent_id == null
+    and .cost_usd == null and .cost_status == "unknown"
+    and .tokens == null and .usage_status == "unknown"'
 }
 
 @test "telemetry: emit carries task / trace-id / parent-id / artifacts" {
@@ -119,6 +122,47 @@ setup() {
   [ "$status" -eq 0 ]
   run bash -c "jq -c '. + {cost_usd:null,cost_status:\"known\",tokens:null,usage_status:\"known\"}' <<<'$base' | '$TEL' validate -"
   [ "$status" -eq 1 ]
+}
+
+@test "telemetry: emit derives nullable unknown and not-applicable values" {
+  run "$TEL" emit --executor codex --model fixture-codex --status failed \
+    --cost-status unknown --usage-status unknown
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .cost_status == "unknown" and .cost_usd == null
+    and .usage_status == "unknown" and .tokens == null'
+
+  run "$TEL" emit --executor legion-run --model orchestrator --status ok \
+    --cost-status not_applicable --usage-status not_applicable
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .cost_status == "not_applicable" and .cost_usd == null
+    and .usage_status == "not_applicable" and .tokens == null'
+}
+
+@test "telemetry: emit constructs and validates partial provenance" {
+  run "$TEL" emit --executor codex --model fixture-codex --status failed \
+    --cost-status partial --known-cost 0.25 --known-cost-attempts 1 \
+    --usage-status partial --known-usage '{"input_tokens":7}' \
+    --known-usage-attempts 1
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .cost_usd == null and .cost_status == "partial"
+    and .known_cost_usd == 0.25 and .known_cost_attempts == 1
+    and .tokens == null and .usage_status == "partial"
+    and .known_usage.input_tokens == 7 and .known_usage_attempts == 1'
+}
+
+@test "telemetry: emit rejects contradictory provenance before append" {
+  run "$TEL" emit --executor codex --model fixture-codex --status failed \
+    --cost-status unknown --cost 0 --usage-status unknown --tokens '{}'
+  [ "$status" -eq 2 ]
+  [ -z "$(find "$LEGION_TELEMETRY_DIR" -name '*.jsonl' 2>/dev/null)" ]
+
+  run "$TEL" emit --executor codex --model fixture-codex --status failed \
+    --cost-status partial --known-cost 0.25 --known-cost-attempts 0
+  [ "$status" -eq 2 ]
+  [ -z "$(find "$LEGION_TELEMETRY_DIR" -name '*.jsonl' 2>/dev/null)" ]
 }
 
 @test "telemetry: validate rejects a non-string archetype" {

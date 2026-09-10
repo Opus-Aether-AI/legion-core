@@ -407,12 +407,6 @@ cmd_run() {
     "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
     "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
     "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
-  legion_adapter_disarm_signal_receipt
-  SIGNAL_CHILD_PID=""
-  SIGNAL_CHILD_RC=0
-  SIGNAL_LEASE_STATUS=""
-  SIGNAL_WORKTREE=""
-
   local artifacts
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg stdout "$out_file" --arg stderr "$err_file" \
@@ -428,6 +422,11 @@ cmd_run() {
   span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
   emit_span "cursor" "$actual_model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
     "$span_usage_status" "$span_cost_status"
+  legion_adapter_disarm_signal_receipt
+  SIGNAL_CHILD_PID=""
+  SIGNAL_CHILD_RC=0
+  SIGNAL_LEASE_STATUS=""
+  SIGNAL_WORKTREE=""
 
   if [[ "$do_apply" -eq 1 && "$status" == "ok" && -s "$art/diff.patch" ]]; then
     if git -C "$repo" apply --check "$art/diff.patch" 2>/dev/null; then

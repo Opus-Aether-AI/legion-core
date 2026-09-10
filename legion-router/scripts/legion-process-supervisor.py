@@ -848,7 +848,13 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_status(path: str, status: str, reason: str, runtime_seconds: int) -> None:
+def _write_status(
+    path: str,
+    status: str,
+    reason: str,
+    runtime_seconds: int,
+    child_exit_code: Optional[int] = None,
+) -> None:
     """Atomically publish the supervisor outcome outside provider-controlled output.
 
     Exit code 124 alone is ambiguous because a provider can return it itself.  The
@@ -865,16 +871,15 @@ def _write_status(path: str, status: str, reason: str, runtime_seconds: int) -> 
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(
-                {
-                    "schema": "legion.child-execution-lease.v1",
-                    "status": status,
-                    "reason": reason,
-                    "max_runtime_seconds": runtime_seconds,
-                },
-                handle,
-                separators=(",", ":"),
-            )
+            payload = {
+                "schema": "legion.child-execution-lease.v1",
+                "status": status,
+                "reason": reason,
+                "max_runtime_seconds": runtime_seconds,
+            }
+            if child_exit_code is not None:
+                payload["child_exit_code"] = child_exit_code
+            json.dump(payload, handle, separators=(",", ":"))
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -1147,7 +1152,11 @@ def main() -> int:
         cleanup_ok = False
     except OSError as error:
         if error.errno == errno.ENOENT:
-            print(f"legion-process-supervisor: command not found: {command[0]}", file=sys.stderr)
+            reason = f"child launch failed: command not found: {command[0]}"
+            _write_status(
+                arguments.status_file, "completed", reason, arguments.max_runtime_seconds
+            )
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 127
         raise
     finally:
@@ -1183,7 +1192,13 @@ def main() -> int:
             arguments.max_runtime_seconds,
         )
         return 128 + interrupted
-    _write_status(arguments.status_file, "completed", "child completed", arguments.max_runtime_seconds)
+    _write_status(
+        arguments.status_file,
+        "completed",
+        "child completed",
+        arguments.max_runtime_seconds,
+        returncode if returncode >= 0 else 128 - returncode,
+    )
     return returncode if returncode >= 0 else 128 - returncode
 
 

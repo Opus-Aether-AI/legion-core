@@ -940,9 +940,6 @@ cmd_run() {
     "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
     "$failure_class" false "$output_started" \
     "$([[ "$PROVIDER_RC" -eq 0 ]] || printf '%s' "$PROVIDER_RC")" "$result"
-  legion_adapter_disarm_signal_receipt
-  SIGNAL_CHILD_PID=""
-  CHILD_WAIT_RC=0
   local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
@@ -957,6 +954,9 @@ cmd_run() {
   span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
   emit_span "$status" "$duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
     "$span_usage_status" "$span_cost_status"
+  legion_adapter_disarm_signal_receipt
+  SIGNAL_CHILD_PID=""
+  CHILD_WAIT_RC=0
   if [[ "$apply" == 1 && "$status" == ok && -s "$diff" ]]; then
     if git -C "$REPO" apply --check "$diff"; then git -C "$REPO" apply "$diff"; else note "diff did not apply cleanly; left in $diff"; fi
   fi

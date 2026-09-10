@@ -10,6 +10,12 @@
     "schema": {"const": "legion.child-execution-lease.v1"},
     "status": {"enum": ["completed", "cancelled", "timed_out", "cleanup_failed"]},
     "reason": {"type": "string", "minLength": 1},
-    "max_runtime_seconds": {"type": "integer", "minimum": 1}
+    "max_runtime_seconds": {"type": "integer", "minimum": 1},
+    "child_exit_code": {
+      "description": "The direct child's normalized exit code when status is completed.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    }
   }
 }

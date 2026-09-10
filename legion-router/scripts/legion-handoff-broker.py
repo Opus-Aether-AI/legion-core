@@ -31,6 +31,18 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+CLIENT_ENTRYPOINT = Path(sys.argv[0]).name == "legion-delegate"
+if not CLIENT_ENTRYPOINT:
+    OBSERVABILITY_SCRIPTS = (
+        Path(__file__).resolve().parents[2] / "legion-observability" / "scripts"
+    )
+    sys.path.insert(0, str(OBSERVABILITY_SCRIPTS))
+    from legion_executor_registry import (  # noqa: E402
+        has_executor_capability,
+        load_executor_registry,
+    )
+
+
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
 MAX_TASK_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -38,15 +50,17 @@ MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_TELEMETRY_BYTES = 4 * 1024 * 1024
 MAX_AUTH_FILE_BYTES = 16 * 1024 * 1024
 HEADER = struct.Struct("!I")
-EXECUTORS = {"claude", "codex", "cursor", "opencode", "hermes", "pi"}
-REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 SANDBOXES = {"read-only", "workspace-write"}
 SAFE_TELEMETRY_NAME = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl$")
-SPAN_REQUIRED = {"schema", "ts", "run_id", "executor", "model", "status"}
-SPAN_STATUSES = {
-    "ok", "failed", "error", "over_budget", "blocked", "timed_out",
-    "containment_failed",
-}
+if not CLIENT_ENTRYPOINT:
+    SPAN_SCHEMA_PATH = (
+        Path(__file__).resolve().parents[2]
+        / "legion-observability"
+        / "schema"
+        / "legion.span.v1.schema.json"
+    )
+    with SPAN_SCHEMA_PATH.open(encoding="utf-8") as _span_schema_file:
+        SPAN_SCHEMA = json.load(_span_schema_file)
 
 
 class SupervisorCleanupError(ValueError):
@@ -122,7 +136,7 @@ def _clean_value(flag: str, value: str, *, maximum: int = 4096) -> str:
     return value
 
 
-def _validated_args(value: Any) -> list[str]:
+def _validated_args(value: Any, *, registry_path: Optional[Path] = None) -> list[str]:
     """Parse a minimal typed protocol; never forward opaque worker tokens."""
 
     if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
@@ -162,12 +176,8 @@ def _validated_args(value: Any) -> list[str]:
         if flag in seen or index + 1 >= len(value):
             raise ValueError(f"sandbox handoff {flag} must occur once with a value")
         supplied = _clean_value(flag, value[index + 1], maximum=MAX_TASK_BYTES if flag == "--task" else 4096)
-        if flag == "--executor" and supplied not in EXECUTORS:
-            raise ValueError(f"sandbox handoff executor is not registered: {supplied}")
         if flag == "--sandbox" and supplied not in SANDBOXES:
             raise ValueError(f"sandbox handoff sandbox is invalid: {supplied}")
-        if flag == "--reasoning-effort" and supplied not in REASONING_EFFORTS:
-            raise ValueError(f"sandbox handoff reasoning effort is invalid: {supplied}")
         if flag == "--budget-tokens":
             if not re.fullmatch(r"[0-9]{1,8}", supplied) or int(supplied) > 10_000_000:
                 raise ValueError("sandbox handoff --budget-tokens must be an integer from 0 to 10000000")
@@ -182,6 +192,21 @@ def _validated_args(value: Any) -> list[str]:
 
     if "--executor" not in seen:
         raise ValueError("sandbox handoff requires one explicit --executor")
+    executor = args[args.index("--executor") + 1]
+    try:
+        registry = load_executor_registry(registry_path)
+    except (OSError, ValueError) as error:
+        raise ValueError(f"sandbox handoff executor registry is invalid: {error}") from error
+    executor_config = registry.get(executor)
+    if not has_executor_capability(executor_config, "coding"):
+        raise ValueError(f"sandbox handoff executor is not registered for coding: {executor}")
+    if "--reasoning-effort" in seen:
+        effort = args[args.index("--reasoning-effort") + 1]
+        supported_efforts = executor_config.get("supported_efforts", [])
+        if effort not in supported_efforts:
+            raise ValueError(
+                f"sandbox handoff reasoning effort is invalid for executor {executor}: {effort}"
+            )
     return args
 
 
@@ -208,41 +233,75 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number is forbidden: {value}")
 
 
-def _valid_optional_string(payload: dict[str, Any], name: str) -> bool:
-    return name not in payload or payload[name] is None or isinstance(payload[name], str)
+def _json_schema_type_matches(payload: Any, expected: str) -> bool:
+    if expected == "null":
+        return payload is None
+    if expected == "object":
+        return isinstance(payload, dict)
+    if expected == "string":
+        return isinstance(payload, str)
+    if expected == "integer":
+        return isinstance(payload, int) and not isinstance(payload, bool)
+    if expected == "number":
+        return (
+            isinstance(payload, (int, float))
+            and not isinstance(payload, bool)
+            and (not isinstance(payload, float) or math.isfinite(payload))
+        )
+    return False
 
 
-def _valid_nonnegative_number(payload: dict[str, Any], name: str) -> bool:
-    if name not in payload:
-        return True
-    value = payload[name]
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-        return False
-    return not isinstance(value, float) or math.isfinite(value)
+def _validate_json_schema(payload: Any, schema: dict[str, Any], path: str = "span") -> None:
+    """Validate the JSON-Schema features used by the canonical span schema."""
+
+    expected_types = schema.get("type")
+    if isinstance(expected_types, str):
+        expected_types = [expected_types]
+    if isinstance(expected_types, list) and not any(
+        _json_schema_type_matches(payload, expected) for expected in expected_types
+    ):
+        if "number" in expected_types and isinstance(payload, (int, float)):
+            raise ValueError(f"{path} has an invalid nonnegative number")
+        raise ValueError(f"{path} has an invalid type")
+    if "const" in schema and payload != schema["const"]:
+        raise ValueError(f"{path} has an invalid constant value")
+    if "enum" in schema and payload not in schema["enum"]:
+        raise ValueError(f"{path} has a value outside the canonical enum")
+    if (
+        "minimum" in schema
+        and _json_schema_type_matches(payload, "number")
+        and payload < schema["minimum"]
+    ):
+        raise ValueError(f"{path} has an invalid nonnegative number")
+    if "minLength" in schema and isinstance(payload, str) and len(payload) < schema["minLength"]:
+        raise ValueError(f"{path} is shorter than the canonical minimum")
+    if isinstance(payload, dict):
+        missing = [name for name in schema.get("required", []) if name not in payload]
+        if missing:
+            raise ValueError(f"{path} is missing required field {missing[0]}")
+        for name, child_schema in schema.get("properties", {}).items():
+            if name in payload:
+                _validate_json_schema(payload[name], child_schema, f"{path}.{name}")
+    for condition in schema.get("allOf", []):
+        predicate = condition.get("if")
+        if not isinstance(predicate, dict):
+            _validate_json_schema(payload, condition, path)
+            continue
+        try:
+            _validate_json_schema(payload, predicate, path)
+        except ValueError:
+            continue
+        consequent = condition.get("then")
+        if isinstance(consequent, dict):
+            _validate_json_schema(payload, consequent, path)
 
 
 def _validate_span(payload: Any, expected_parent: str) -> dict[str, Any]:
     """Validate the complete in-repository legion.span.v1 schema contract."""
 
-    if not isinstance(payload, dict) or not SPAN_REQUIRED.issubset(payload):
-        raise ValueError("nested handoff telemetry is missing required span fields")
-    if payload.get("schema") != "legion.span.v1" or payload.get("parent_id") != expected_parent:
+    _validate_json_schema(payload, SPAN_SCHEMA)
+    if payload.get("parent_id") != expected_parent:
         raise ValueError("nested handoff emitted invalid telemetry attribution")
-    for name in ("ts", "run_id", "executor", "model"):
-        if not isinstance(payload.get(name), str):
-            raise ValueError(f"nested handoff telemetry {name} must be a string")
-    if payload.get("status") not in SPAN_STATUSES:
-        raise ValueError("nested handoff telemetry status is invalid")
-    if not all(_valid_optional_string(payload, name) for name in ("trace_id", "parent_id", "archetype", "target_type", "target_name")):
-        raise ValueError("nested handoff telemetry has an invalid optional string")
-    if "task" in payload and not isinstance(payload["task"], str):
-        raise ValueError("nested handoff telemetry task must be a string")
-    if not _valid_nonnegative_number(payload, "duration_ms") or not _valid_nonnegative_number(payload, "cost_usd"):
-        raise ValueError("nested handoff telemetry has an invalid nonnegative number")
-    if "tokens" in payload and not isinstance(payload["tokens"], dict):
-        raise ValueError("nested handoff telemetry tokens must be an object")
-    if "artifacts" in payload and not isinstance(payload["artifacts"], dict):
-        raise ValueError("nested handoff telemetry artifacts must be an object")
     return payload
 
 

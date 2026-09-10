@@ -260,6 +260,32 @@ def test_completed_all_unknown_retries_still_prefer_durable_unknown(tmp_path):
     assert enriched["cost_status"] == "unknown"
 
 
+def test_completed_single_attempt_prefers_durable_provenance(tmp_path):
+    run_dir = tmp_path / "runs" / "single"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+    durable = {
+        "single": {
+            "cost_usd": None,
+            "cost_status": "unknown",
+            "known_cost_usd": None,
+            "known_cost_attempts": 0,
+            "attempt_count": 1,
+        }
+    }
+
+    enriched = activity.enrich_run(
+        {"run_id": "single", "model": "test-model-alpha", "lifecycle": {"phase": "ok"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=durable,
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+    assert enriched["activity"]["items"] == 3
+
+
 def test_group_by_session_merges_a_fanouts_agents_across_their_worktrees():
     # A session (trace_id) = one fan-out that spawned N agents in N ephemeral
     # worktrees. Grouping by trace_id collects them; grouping by worktree would be 1:1.

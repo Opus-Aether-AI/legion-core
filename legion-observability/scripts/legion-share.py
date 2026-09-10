@@ -142,10 +142,16 @@ def is_synthetic_opus_baseline(s):
     return artifacts.get("synthetic_opus_baseline") is True or artifacts.get("synthetic_primary_baseline") is True
 
 
+def is_rollup_only(s):
+    artifacts = s.get("artifacts") or {}
+    return isinstance(artifacts, dict) and artifacts.get("rollup_only") is True
+
+
 def compute(spans):
-    failed = sum(1 for s in spans if s.get("status") not in SUCCESS_STATUSES)
+    measured = [s for s in spans if not is_rollup_only(s)]
+    failed = sum(1 for s in measured if s.get("status") not in SUCCESS_STATUSES)
     ok = [
-        s for s in spans if s.get("status") in SUCCESS_STATUSES
+        s for s in measured if s.get("status") in SUCCESS_STATUSES
     ]  # share = usable work only (failed runs do not count)
     if any((not is_codex(s.get("executor"))) and not is_synthetic_opus_baseline(s) for s in ok):
         ok = [s for s in ok if not is_synthetic_opus_baseline(s)]

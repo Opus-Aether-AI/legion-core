@@ -24,9 +24,10 @@ emit() {
   local executor="" model="" status="" run_id="" task="" trace_id="" parent_id=""
   local archetype="${LEGION_ARCHETYPE:-}"
   local target_type="${LEGION_TARGET_TYPE:-}" target_name="${LEGION_TARGET_NAME:-}"
-  local cost=0 dur=0 tokens="{}" artifacts="{}"
-  local cost_status=known usage_status=known known_cost=null known_cost_attempts=0
+  local cost=null dur=0 tokens=null artifacts="{}"
+  local cost_status="" usage_status="" known_cost=null known_cost_attempts=0
   local known_usage=null known_usage_attempts=0
+  local cost_set=0 tokens_set=0 known_cost_set=0 known_usage_set=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --executor)    executor="$2"; shift 2 ;;
@@ -37,14 +38,14 @@ emit() {
       --trace-id)    trace_id="$2"; shift 2 ;;
       --parent-id)   parent_id="$2"; shift 2 ;;
       --archetype)   archetype="$2"; shift 2 ;;
-      --cost)        cost="$2"; shift 2 ;;
+      --cost)        cost="$2"; cost_set=1; shift 2 ;;
       --cost-status) cost_status="$2"; shift 2 ;;
-      --known-cost) known_cost="$2"; shift 2 ;;
+      --known-cost) known_cost="$2"; known_cost_set=1; shift 2 ;;
       --known-cost-attempts) known_cost_attempts="$2"; shift 2 ;;
       --duration-ms) dur="$2"; shift 2 ;;
-      --tokens)      tokens="$2"; shift 2 ;;
+      --tokens)      tokens="$2"; tokens_set=1; shift 2 ;;
       --usage-status) usage_status="$2"; shift 2 ;;
-      --known-usage) known_usage="$2"; shift 2 ;;
+      --known-usage) known_usage="$2"; known_usage_set=1; shift 2 ;;
       --known-usage-attempts) known_usage_attempts="$2"; shift 2 ;;
       --artifacts)   artifacts="$2"; shift 2 ;;
       --target-type) target_type="$2"; shift 2 ;;
@@ -57,8 +58,23 @@ emit() {
   [[ -n "$run_id" ]]   || run_id="$(_now)-$$"
   [[ -n "$trace_id" ]] || trace_id="$run_id"
 
+  if [[ -z "$cost_status" ]]; then
+    [[ "$cost_set" -eq 1 ]] && cost_status=known || cost_status=unknown
+  fi
+  if [[ -z "$usage_status" ]]; then
+    [[ "$tokens_set" -eq 1 ]] && usage_status=known || usage_status=unknown
+  fi
+  if [[ "$known_cost_set" -eq 1 && "$cost_status" != partial ]]; then
+    echo "emit: --known-cost requires --cost-status partial" >&2
+    return 2
+  fi
+  if [[ "$known_usage_set" -eq 1 && "$usage_status" != partial ]]; then
+    echo "emit: --known-usage requires --usage-status partial" >&2
+    return 2
+  fi
+
   local span
-  span="$(jq -cn \
+  if ! span="$(jq -cn \
     --arg ts "$(_now)" --arg run "$run_id" --arg trace "$trace_id" --arg parent "$parent_id" \
     --arg ex "$executor" --arg model "$model" --arg archetype "$archetype" \
     --arg task "$task" --arg status "$status" \
@@ -84,7 +100,15 @@ emit() {
        else {} end)
     + (if $usage_status == "partial" then
          {known_usage:$known_usage,known_usage_attempts:$known_usage_attempts}
-       else {} end)')"
+       else {} end)')"; then
+    echo "emit: metering and artifact values must be valid JSON" >&2
+    return 2
+  fi
+
+  if ! printf '%s\n' "$span" | validate - >/dev/null; then
+    echo "emit: span fields violate legion.span.v1" >&2
+    return 2
+  fi
 
   mkdir -p "$LEGION_TELEMETRY_DIR"
   printf '%s\n' "$span" >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"

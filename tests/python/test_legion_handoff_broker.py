@@ -63,6 +63,63 @@ def test_complete_span_validation_accepts_containment_failure() -> None:
     assert BROKER._validate_span(containment, "parent-run")["status"] == "containment_failed"
 
 
+@pytest.mark.parametrize("status", ["unknown", "not_applicable"])
+def test_complete_span_validation_accepts_nullable_unknown_telemetry(status: str) -> None:
+    span = valid_span()
+    span.update(
+        {
+            "cost_usd": None,
+            "cost_status": status,
+            "known_cost_usd": None,
+            "tokens": None,
+            "usage_status": status,
+            "known_usage": None,
+        }
+    )
+    assert BROKER._validate_span(span, "parent-run")["cost_status"] == status
+
+
+def test_complete_span_validation_accepts_partial_telemetry_lower_bounds() -> None:
+    span = valid_span()
+    span.update(
+        {
+            "cost_usd": None,
+            "cost_status": "partial",
+            "known_cost_usd": 0.25,
+            "known_cost_attempts": 1,
+            "tokens": None,
+            "usage_status": "partial",
+            "known_usage": {"input_tokens": 7},
+            "known_usage_attempts": 1,
+        }
+    )
+    assert BROKER._validate_span(span, "parent-run")["known_cost_usd"] == 0.25
+
+
+@pytest.mark.parametrize(
+    ("changes", "field"),
+    [
+        ({"cost_status": "known", "cost_usd": None}, "cost_usd"),
+        ({"cost_status": "unknown", "cost_usd": 0.0}, "cost_usd"),
+        ({"cost_status": "not_applicable", "cost_usd": None, "known_cost_usd": 0.0}, "known_cost_usd"),
+        ({"cost_status": "partial", "cost_usd": 0.0, "known_cost_usd": 0.0, "known_cost_attempts": 1}, "cost_usd"),
+        ({"cost_status": "partial", "cost_usd": None, "known_cost_usd": 0.0}, "known_cost_attempts"),
+        ({"usage_status": "known", "tokens": None}, "tokens"),
+        ({"usage_status": "unknown", "tokens": {}}, "tokens"),
+        ({"usage_status": "not_applicable", "tokens": None, "known_usage": {}}, "known_usage"),
+        ({"usage_status": "partial", "tokens": {}, "known_usage": {}, "known_usage_attempts": 1}, "tokens"),
+        ({"usage_status": "partial", "tokens": None, "known_usage": {}}, "known_usage_attempts"),
+    ],
+)
+def test_complete_span_validation_rejects_status_value_contradictions(
+    changes: dict[str, object], field: str
+) -> None:
+    span = valid_span()
+    span.update(changes)
+    with pytest.raises(ValueError, match=field):
+        BROKER._validate_span(span, "parent-run")
+
+
 def test_broker_protocol_accepts_only_a_positive_typed_child_lease() -> None:
     assert BROKER._validated_args(
         ["run", "--executor", "cursor", "--max-runtime-seconds", "7"]
@@ -72,6 +129,36 @@ def test_broker_protocol_accepts_only_a_positive_typed_child_lease() -> None:
             BROKER._validated_args(
                 ["run", "--executor", "cursor", "--max-runtime-seconds", value]
             )
+
+
+def test_broker_protocol_uses_registry_executor_and_effort_capabilities() -> None:
+    assert BROKER._validated_args(["run", "--executor", "deepseek"]) == [
+        "run", "--executor", "deepseek"
+    ]
+    for effort in ("off", "minimal"):
+        assert BROKER._validated_args(
+            ["run", "--executor", "pi", "--reasoning-effort", effort]
+        )[-1] == effort
+    with pytest.raises(ValueError, match="invalid for executor cursor"):
+        BROKER._validated_args(
+            ["run", "--executor", "cursor", "--reasoning-effort", "minimal"]
+        )
+
+
+def test_broker_protocol_fails_closed_on_an_invalid_executor_registry(tmp_path: Path) -> None:
+    registry = tmp_path / "executors.toml"
+    registry.write_text(
+        'schema = "legion.executor-registry.v1"\n'
+        '[executors.cursor]\n'
+        'kind = "primary coding"\n'
+        'supported_efforts = []\n'
+        'typo_capability = true\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="executor registry is invalid"):
+        BROKER._validated_args(
+            ["run", "--executor", "cursor"], registry_path=registry
+        )
 
 
 def test_broker_inherits_or_lowers_but_never_raises_parent_lease() -> None:

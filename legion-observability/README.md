@@ -79,7 +79,9 @@ The executor boundary also publishes `legion.preflight.v1`,
 `legion.failure.v1`, `legion.attempt.v1`, and
 `legion.child-execution-lease.v1` schemas. The lease receipt is the
 supervisor-authored source of truth that distinguishes a hard monotonic timeout
-from a provider that happens to return exit code 124. The constructor helpers in
+from a provider that happens to return exit code 124. Completed leases also bind
+the normalized child exit code so a delayed shell signal cannot lose the child
+result between `wait` and receipt publication. The constructor helpers in
 `scripts/legion_receipts.py` bind failure and retry truth to a specific attempt,
 keep requested and effective model/effort distinct, retain cache lineage, and
 require explicit usage/cost status and source. Unknown values are `null`, never

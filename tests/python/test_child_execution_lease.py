@@ -1,3 +1,5 @@
+import errno
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -63,6 +65,7 @@ def test_child_finishing_below_lease_succeeds(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert receipt["status"] == "completed"
+    assert receipt["child_exit_code"] == 0
     assert elapsed < 1.5
 
 
@@ -145,6 +148,47 @@ def test_expired_inherited_deadline_refuses_before_child_launch(tmp_path: Path) 
     assert "before launch" in receipt["reason"]
     assert not launched.exists()
     assert elapsed < 1
+
+
+def test_command_disappearing_before_popen_still_writes_lease_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = tmp_path / "admitted-but-removed"
+    status_file = tmp_path / "launch-race.json"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_launch_race", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+
+    def disappear(*_args, **_kwargs):
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(missing))
+
+    monkeypatch.setattr(supervisor.sys, "platform", "linux")
+    monkeypatch.setattr(supervisor.subprocess, "Popen", disappear)
+    monkeypatch.setattr(
+        supervisor.sys,
+        "argv",
+        [
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "2",
+            "--status-file",
+            str(status_file),
+            "--",
+            str(missing),
+        ],
+    )
+
+    assert supervisor.main() == 127
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt == {
+        "schema": "legion.child-execution-lease.v1",
+        "status": "completed",
+        "reason": f"child launch failed: command not found: {missing}",
+        "max_runtime_seconds": 2,
+    }
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt fingerprints are Darwin-only")

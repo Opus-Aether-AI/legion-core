@@ -113,11 +113,33 @@ def test_sandcastle_wrapper_cannot_bypass_provider_sandbox_admission(tmp_path: P
         sandbox="docker",
     )
 
-    assert result["status"] == "incompatible"
-    assert result["compatibility"]["sandbox"] == {
-        "requested": "docker",
-        "provider_sandbox": "workspace-write",
-        "wrapper": "docker",
-        "status": "incompatible",
-    }
-    assert "requires unsupported provider sandbox 'workspace-write'" in result["reason"]
+    assert result["status"] == "unavailable"
+    assert result["compatibility"] == {}
+    assert "is not admitted by supported_sandboxes" in result["reason"]
+
+
+@pytest.mark.parametrize("field", ["supported_sandbox", "billing_clas"])
+def test_misspelled_policy_cannot_downgrade_preflight_to_untested(
+    tmp_path: Path, field: str
+) -> None:
+    binary = executable(tmp_path / "fixture")
+    config = registry(
+        tmp_path / "executors.toml",
+        binary,
+        provider_sandboxes='["read-only", "workspace-write"]',
+    )
+    with config.open("a", encoding="utf-8") as handle:
+        handle.write(f'{field} = "misspelled"\n')
+
+    result = preflight.preflight(
+        "fixture",
+        registry_path=config,
+        cache_dir=tmp_path / "cache",
+        env={"HOME": str(tmp_path / "home"), "PATH": os.environ["PATH"]},
+        sandbox="workspace-write",
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["compatibility"] == {}
+    assert "unknown policy field" in result["reason"]
+    assert field in result["reason"]

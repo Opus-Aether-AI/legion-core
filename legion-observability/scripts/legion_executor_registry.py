@@ -38,7 +38,7 @@ _STRING_FIELDS = frozenset(
         "kind", "adapter", "contract", "model_ref", "review", "review_model_ref",
         "binary", "version_regex", "version_policy", "billing_class",
         "usage_reliability", "usage_source", "cost_reliability", "cost_source",
-        "cancellation",
+        "cancellation", "sandbox_wrapper_provider_sandbox",
     }
 )
 _BOOL_FIELDS = frozenset(
@@ -50,17 +50,22 @@ _STRING_LIST_FIELDS = frozenset(
         "config_fingerprint_env", "config_fingerprint_files", "required_config_env",
         "supported_config_env", "known_bad_config_env", "supported_sandboxes", "supported_read_modes",
         "supported_task_transports", "supported_model_patterns", "supported_efforts",
-        "explicit_consent_model_patterns",
+        "explicit_consent_model_patterns", "supported_sandbox_wrappers", "capabilities",
     }
 )
 _ENUM_FIELDS = {
     "contract": {"", "native", "diff", "prompt"},
+    "review": {"native", "prompt", "none"},
     "version_policy": {"open", "closed"},
     "billing_class": {"free", "local", "metered", "premium_credit", "unknown"},
     "usage_reliability": {"provider_reported", "estimated", "unavailable", "unknown"},
     "cost_reliability": {"provider_reported", "computed", "estimated", "unavailable", "unknown"},
     "cancellation": {"none", "process", "process_group", "process_tree", "provider", "unknown"},
 }
+_INTEGER_FIELDS = frozenset({"max_runtime_seconds"})
+_EXECUTOR_FIELDS = _STRING_FIELDS | _BOOL_FIELDS | _STRING_LIST_FIELDS | _INTEGER_FIELDS
+_SANDBOX_WRAPPERS = frozenset({"docker", "podman", "vercel"})
+_PROVIDER_SANDBOXES = frozenset({"read-only", "workspace-write", "danger-full-access"})
 
 
 def _fallback_table(path):
@@ -76,8 +81,15 @@ def _fallback_table(path):
                 if not match:
                     current = None
                     continue
+                parts = match.group(1).split(".")
+                if len(parts) > 2 and parts[0] == "executors":
+                    # Legacy fallback parsing has never promoted nested tables
+                    # into executor policy. Keep ignoring them rather than
+                    # misclassifying the table name as a scalar policy field.
+                    current = None
+                    continue
                 current = table
-                for part in match.group(1).split("."):
+                for part in parts:
                     child = current.setdefault(part, {})
                     if not isinstance(child, dict):
                         raise ValueError(f"table path conflicts with scalar: {part}")
@@ -139,6 +151,11 @@ def validate_executor_registry(executors):
     for name, config in executors.items():
         if not isinstance(name, str) or not name or not isinstance(config, dict):
             raise ExecutorRegistryError("every executor must be a named table")
+        unknown = sorted(set(config) - _EXECUTOR_FIELDS)
+        if unknown:
+            raise ExecutorRegistryError(
+                f"executor '{name}' has unknown policy field(s): {', '.join(unknown)}"
+            )
         for field in _STRING_FIELDS:
             if field in config and not isinstance(config[field], str):
                 raise ExecutorRegistryError(f"executor '{name}' field '{field}' must be a string")
@@ -159,6 +176,18 @@ def validate_executor_registry(executors):
             if field in config and config[field] not in allowed:
                 raise ExecutorRegistryError(
                     f"executor '{name}' field '{field}' must be one of {sorted(allowed)}"
+                )
+        provider_sandboxes = config.get("supported_sandboxes")
+        if provider_sandboxes is not None:
+            unknown_sandboxes = sorted(set(provider_sandboxes) - _PROVIDER_SANDBOXES)
+            if unknown_sandboxes:
+                raise ExecutorRegistryError(
+                    f"executor '{name}' has unsupported provider sandbox(es): "
+                    f"{', '.join(unknown_sandboxes)}"
+                )
+            if len(set(provider_sandboxes)) != len(provider_sandboxes):
+                raise ExecutorRegistryError(
+                    f"executor '{name}' supported_sandboxes must be unique"
                 )
         if config.get("binary") == "":
             raise ExecutorRegistryError(f"executor '{name}' field 'binary' must not be empty")
@@ -195,6 +224,39 @@ def validate_executor_registry(executors):
                         f"executor '{name}' {predicate_field} entries must be NAME=REGEX"
                     )
                 _validate_patterns(name, predicate_field, [pattern])
+        wrappers = config.get("supported_sandbox_wrappers")
+        provider_sandbox = config.get("sandbox_wrapper_provider_sandbox")
+        if (wrappers is None) != (provider_sandbox is None):
+            raise ExecutorRegistryError(
+                f"executor '{name}' must declare supported_sandbox_wrappers and "
+                "sandbox_wrapper_provider_sandbox together"
+            )
+        if wrappers is not None:
+            if len(set(wrappers)) != len(wrappers):
+                raise ExecutorRegistryError(
+                    f"executor '{name}' supported_sandbox_wrappers must be unique"
+                )
+            unknown_wrappers = sorted(set(wrappers) - _SANDBOX_WRAPPERS)
+            if unknown_wrappers:
+                raise ExecutorRegistryError(
+                    f"executor '{name}' has unsupported sandbox wrapper(s): "
+                    f"{', '.join(unknown_wrappers)}"
+                )
+            if not isinstance(provider_sandboxes, list) or provider_sandbox not in provider_sandboxes:
+                raise ExecutorRegistryError(
+                    f"executor '{name}' sandbox wrapper provider sandbox "
+                    f"{provider_sandbox!r} is not admitted by supported_sandboxes"
+                )
+            if provider_sandbox in _SANDBOX_WRAPPERS:
+                raise ExecutorRegistryError(
+                    f"executor '{name}' sandbox wrapper provider sandbox must be a provider mode"
+                )
+            overlap = sorted(set(wrappers) & set(provider_sandboxes))
+            if overlap:
+                raise ExecutorRegistryError(
+                    f"executor '{name}' sandbox wrapper(s) must not also be provider sandboxes: "
+                    f"{', '.join(overlap)}"
+                )
     return executors
 
 
@@ -219,6 +281,9 @@ def load_executor_registry(path=None):
             table = tomllib.load(fh)
     if not isinstance(table, dict):
         raise ExecutorRegistryError("executors.toml must contain an executor table")
+    if "executors" in table:
+        if "schema" in table and table["schema"] != "legion.executor-registry.v1":
+            raise ExecutorRegistryError("executors.toml has an unsupported schema")
     executors = table.get("executors", table)
     if not isinstance(executors, dict):
         raise ExecutorRegistryError("executors.toml must contain an [executors] table")

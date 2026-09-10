@@ -4,6 +4,7 @@
   "title": "legion.executor-registry.v1",
   "description": "The backwards-compatible executor capability and admission registry represented by executors.toml.",
   "type": "object",
+  "additionalProperties": false,
   "required": ["executors"],
   "properties": {
     "schema": {"enum": ["legion.executor-registry.v1"]},
@@ -15,11 +16,19 @@
   "$defs": {
     "executor": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["cancellation", "max_runtime_seconds"],
       "properties": {
+        "acp": {"type": "boolean"},
+        "task_file": {"type": "boolean"},
+        "effort": {"type": "boolean"},
+        "model_chain": {"type": "boolean"},
         "kind": {"type": "string"}, "adapter": {"type": "string"},
         "contract": {"enum": ["", "native", "diff", "prompt"]},
         "model_ref": {"type": "string"}, "binary": {"type": "string"},
+        "capabilities": {"$ref": "#/$defs/stringArray"},
+        "review": {"enum": ["native", "prompt", "none"]},
+        "review_model_ref": {"type": "string"},
         "version_args": {"$ref": "#/$defs/stringArray"},
         "version_regex": {"type": "string"}, "version_policy": {"enum": ["open", "closed"]},
         "supported_version_patterns": {"$ref": "#/$defs/stringArray"},
@@ -29,7 +38,17 @@
         "required_config_env": {"$ref": "#/$defs/stringArray"},
         "supported_config_env": {"$ref": "#/$defs/stringArray"},
         "known_bad_config_env": {"$ref": "#/$defs/stringArray"},
-        "supported_sandboxes": {"$ref": "#/$defs/stringArray"},
+        "supported_sandboxes": {
+          "type": "array",
+          "items": {"enum": ["read-only", "workspace-write", "danger-full-access"]},
+          "uniqueItems": true
+        },
+        "supported_sandbox_wrappers": {
+          "type": "array",
+          "items": {"enum": ["docker", "podman", "vercel"]},
+          "uniqueItems": true
+        },
+        "sandbox_wrapper_provider_sandbox": {"type": "string", "minLength": 1},
         "supported_read_modes": {"$ref": "#/$defs/stringArray"},
         "supported_task_transports": {"$ref": "#/$defs/stringArray"},
         "supported_model_patterns": {"$ref": "#/$defs/stringArray"},
@@ -43,6 +62,10 @@
         "cost_source": {"type": "string"},
         "cancellation": {"enum": ["none", "process", "process_group", "process_tree", "provider", "unknown"]},
         "max_runtime_seconds": {"type": "integer", "minimum": 1}
+      },
+      "dependentRequired": {
+        "supported_sandbox_wrappers": ["sandbox_wrapper_provider_sandbox"],
+        "sandbox_wrapper_provider_sandbox": ["supported_sandbox_wrappers"]
       }
     },
     "stringArray": {"type": "array", "items": {"type": "string", "minLength": 1}}

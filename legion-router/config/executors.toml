@@ -111,6 +111,11 @@ required_config_env = []
 supported_config_env = []
 known_bad_config_env = []
 supported_sandboxes = ["read-only", "workspace-write"]
+# Sandcastle modes wrap Codex rather than becoming Codex CLI sandbox values.
+# Admission therefore normalizes them to the provider's write sandbox and
+# still checks that normalized value against supported_sandboxes.
+supported_sandbox_wrappers = ["docker", "podman", "vercel"]
+sandbox_wrapper_provider_sandbox = "workspace-write"
 supported_read_modes = ["provider-tools"]
 supported_task_transports = ["stdin"]
 # Codex can resolve user-configured providers/aliases. There is no no-spend

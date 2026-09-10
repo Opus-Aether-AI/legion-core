@@ -74,6 +74,7 @@ jobs:
       LEGION_CORE_VERSION: ${{ inputs.version }}
       LEGION_CORE_TAG: ${{ inputs.tag }}
       LEGION_CORE_SHA: ${{ inputs.source_sha }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
       UPDATE_BRANCH: chore/legion-core-latest
       UPDATE_COMMAND: ${{ inputs.update_command }}
       VALIDATION_COMMAND: ${{ inputs.validation_command }}
@@ -93,6 +94,14 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+
+      - name: Refresh the queued run to the latest default branch
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+          git checkout --detach "refs/remotes/origin/$BASE_BRANCH"
+          git reset --hard "refs/remotes/origin/$BASE_BRANCH"
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:

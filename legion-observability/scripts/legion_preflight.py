@@ -92,9 +92,10 @@ def _read_cache(path, key):
 
 
 def _write_cache(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, temporary = tempfile.mkstemp(prefix=".preflight-", dir=str(path.parent))
+    temporary = None
     try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, temporary = tempfile.mkstemp(prefix=".preflight-", dir=str(path.parent))
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(value, handle, sort_keys=True, separators=(",", ":"))
             handle.write("\n")
@@ -102,11 +103,18 @@ def _write_cache(path, value):
             os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
+    except OSError:
+        # Admission is a no-spend probe; an optional cache must never turn an
+        # otherwise valid executor into an unavailable one. This is expected
+        # under read-only HOME/XDG mounts and hardened CI containers.
+        return False
     finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+    return True
 
 
 def _discover_version(executable, config, cache_dir, binary_digest, config_digest, env):
@@ -158,12 +166,32 @@ def _compatibility(config, request, env):
         supported = config.get(registry_name)
         state = "not_requested"
         if requested is not None:
-            state = "untested" if supported is None else (
-                "supported" if requested in supported else "incompatible"
-            )
+            admitted = requested
+            wrapper = None
+            declared_wrappers = config.get("supported_sandbox_wrappers", [])
+            if request_name == "sandbox" \
+                    and isinstance(declared_wrappers, (list, tuple)) \
+                    and requested in declared_wrappers:
+                wrapper = requested
+                admitted = config.get("sandbox_wrapper_provider_sandbox")
+            if wrapper is not None and (not isinstance(admitted, str) or not admitted):
+                state = "incompatible"
+            else:
+                state = "untested" if supported is None else (
+                    "supported" if admitted in supported else "incompatible"
+                )
             if state == "incompatible":
-                failures.append(f"unsupported {request_name} '{requested}'")
+                if wrapper is not None:
+                    failures.append(
+                        f"sandbox wrapper '{wrapper}' requires unsupported provider sandbox "
+                        f"'{admitted}'"
+                    )
+                else:
+                    failures.append(f"unsupported {request_name} '{requested}'")
         checks[request_name] = {"requested": requested, "status": state}
+        if request_name == "sandbox" and requested is not None:
+            checks[request_name]["provider_sandbox"] = admitted
+            checks[request_name]["wrapper"] = wrapper
 
     model = request.get("model")
     model_patterns = config.get("supported_model_patterns")
@@ -245,8 +273,10 @@ def preflight(executor, *, registry_path=None, cache_dir=None, env=None,
                 "identity": None, "cache": {"hit": False, "key": None}, "compatibility": {}}
     config_digest = _config_identity(config, env)
     if cache_dir is None:
+        default_home = env.get("HOME") or os.path.expanduser("~")
         cache_dir = env.get("LEGION_PREFLIGHT_CACHE_DIR") or os.path.join(
-            env.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "legion", "preflight"
+            env.get("XDG_CACHE_HOME") or os.path.join(default_home, ".cache"),
+            "legion", "preflight",
         )
     raw, version, cache_hit, cache_key = _discover_version(
         executable, config, cache_dir, binary_digest, config_digest, env

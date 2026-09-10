@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
 
 POLICY_PATH = Path(".claude-plugin/license-policy.json")
+CHANGE_LICENSE_TITLES = {
+    "Apache-2.0": "Apache License, Version 2.0",
+}
 
 
 def load_json(path: Path) -> dict:
@@ -34,6 +39,16 @@ def checked_file(root: Path, relative: Path) -> Path:
     return candidate
 
 
+def license_parameter(text: str, name: str) -> str:
+    matches = re.findall(
+        rf"(?m)^{re.escape(name)}:[ \t]*(\S(?:.*\S)?)[ \t]*$",
+        text,
+    )
+    if len(matches) != 1:
+        raise ValueError(f"LICENSE must declare exactly one {name}")
+    return matches[0]
+
+
 def validate(root: Path) -> list[str]:
     root = root.resolve(strict=True)
     policy = load_json(checked_file(root, POLICY_PATH))
@@ -45,13 +60,39 @@ def validate(root: Path) -> list[str]:
     declared_digest = policy.get("license_sha256")
     if not isinstance(declared_digest, str) or len(declared_digest) != 64:
         raise ValueError("license policy must declare a SHA-256 digest")
+    change_date = policy.get("change_date")
+    if not isinstance(change_date, str):
+        raise ValueError("license policy must declare change_date as YYYY-MM-DD")
+    try:
+        parsed_change_date = date.fromisoformat(change_date)
+    except ValueError as exc:
+        raise ValueError("license policy must declare change_date as YYYY-MM-DD") from exc
+    if parsed_change_date.isoformat() != change_date:
+        raise ValueError("license policy must declare change_date as YYYY-MM-DD")
+    change_license = policy.get("change_license")
+    if not isinstance(change_license, str) or not change_license:
+        raise ValueError("license policy must declare a non-empty change_license")
 
     license_path = checked_file(root, Path(policy.get("license_file", "")))
-    actual_digest = hashlib.sha256(license_path.read_bytes()).hexdigest()
+    license_bytes = license_path.read_bytes()
+    actual_digest = hashlib.sha256(license_bytes).hexdigest()
+    license_text = license_bytes.decode("utf-8")
+    actual_change_date = license_parameter(license_text, "Change Date")
+    actual_change_license = license_parameter(license_text, "Change License")
     errors: list[str] = []
     if actual_digest != declared_digest:
         errors.append(
             f"{license_path.relative_to(root)} digest {actual_digest} != policy {declared_digest}"
+        )
+    if actual_change_date != change_date:
+        errors.append(
+            f"LICENSE Change Date {actual_change_date!r} != policy {change_date!r}"
+        )
+    expected_change_license = CHANGE_LICENSE_TITLES.get(change_license, change_license)
+    if actual_change_license != expected_change_license:
+        errors.append(
+            f"LICENSE Change License {actual_change_license!r} != policy "
+            f"{change_license!r} ({expected_change_license!r})"
         )
 
     package = load_json(checked_file(root, Path("package.json")))

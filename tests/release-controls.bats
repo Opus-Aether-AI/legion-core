@@ -436,8 +436,19 @@ EOF
 
     grep -q 'group: legion-core-consumer-update-${{ github.repository }}' "$consumer"
     grep -q 'cancel-in-progress: false' "$consumer"
+    grep -q 'BASE_BRANCH: \${{ github.event.repository.default_branch }}' "$consumer"
     grep -q 'UPDATE_BRANCH: chore/legion-core-latest' "$consumer"
     ! grep -q 'chore/legion-core-v\$LEGION_CORE_VERSION' "$consumer"
+
+    # Queued dispatches must arbitrate from the current default branch rather
+    # than the caller SHA captured before the concurrency wait.
+    grep -q 'git fetch --no-tags origin' "$consumer"
+    grep -q 'refs/heads/\$BASE_BRANCH:refs/remotes/origin/\$BASE_BRANCH' "$consumer"
+    grep -q 'git checkout --detach "refs/remotes/origin/\$BASE_BRANCH"' "$consumer"
+    grep -q 'git reset --hard "refs/remotes/origin/\$BASE_BRANCH"' "$consumer"
+    refresh_line="$(grep -n -m1 'Refresh the queued run' "$consumer" | cut -d: -f1)"
+    arbitrate_line="$(grep -n -m1 'Arbitrate the latest release' "$consumer" | cut -d: -f1)"
+    [ "$refresh_line" -lt "$arbitrate_line" ]
 
     # Both the checked-in pin and the remote stable candidate participate in
     # semantic-version arbitration before package/update commands can run.

@@ -1,0 +1,8 @@
+{
+  "schema": "legion.license-policy.v1",
+  "spdx": "BUSL-1.1",
+  "license_file": "LICENSE",
+  "license_sha256": "05e64e45f6912a72a02f58a4c8a69dbf0ba79f8f0355434d44befb1c562de37b",
+  "change_license": "Apache-2.0",
+  "change_date": "2030-08-27"
+}

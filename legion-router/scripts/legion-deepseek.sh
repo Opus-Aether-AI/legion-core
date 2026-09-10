@@ -125,6 +125,7 @@ cmd_run() {
   local requested_model="$model"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 dsh_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
+  local max_runtime_seconds=""
   local base_commit=""
 
   while [[ $# -gt 0 ]]; do
@@ -140,6 +141,7 @@ cmd_run() {
       --base) base="$2"; shift 2 ;;
       --sandbox) sandbox="$2"; shift 2 ;;
       --run-id) preset_run_id="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       --apply) do_apply=1; shift ;;
       --keep) keep=1; shift ;;
       --quiet) QUIET=1; shift ;;
@@ -174,6 +176,7 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
   legion_require_top_level_executor "deepseek" || return $?
+  legion_adapter_resolve_lease deepseek "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   if ! legion_adapter_preflight deepseek "$art" "$sandbox" argv \
@@ -220,10 +223,13 @@ cmd_run() {
   legion_activate_executor_context "$RUN_ID" deepseek
   note "-> ${cmd[*]} (task on argv, $(printf '%s' "$task" | wc -c | tr -d ' ') bytes)"
   local started_at ended_at output_started=false failure_class="" terminal_status=succeeded
+  local lease_status="$art/lease.json"
   started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
-  ( cd "$wt" && "${cmd[@]}" "$task" ) >"$out_file" 2>"$err_file"
+  ( cd "$wt" && python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+      --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+      --status-file "$lease_status" -- "${cmd[@]}" "$task" ) >"$out_file" 2>"$err_file"
   rc=$?
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
@@ -239,7 +245,13 @@ cmd_run() {
   # Diff against the worktree's STARTING commit, not HEAD -- an executor that
   # commits its work would otherwise produce an empty patch.
   git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
-  [[ "$rc" -ne 0 ]] && status="failed"
+  if legion_adapter_supervisor_timed_out "$lease_status"; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$rc" -ne 0 ]]; then
+    status="failed"
+  fi
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
   if [[ "$sandbox" == "read-only" && "$status" == "ok" ]] \
      && ! git -C "$wt" diff --cached --quiet 2>/dev/null; then
@@ -255,7 +267,9 @@ cmd_run() {
   legion_adapter_output_started_file "$out_file" && output_started=true
   if [[ "$status" != ok ]]; then
     terminal_status=failed
-    if [[ "$rc" -ne 0 ]]; then failure_class=provider; else failure_class=malformed_event; fi
+    if [[ "$status" == timed_out ]]; then
+      terminal_status=timed_out; failure_class=timed_out
+    elif [[ "$rc" -ne 0 ]]; then failure_class=provider; else failure_class=malformed_event; fi
   fi
   legion_adapter_write_attempt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
     "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
@@ -297,10 +311,12 @@ cmd_run() {
     --arg wt "$wt" --argjson usage "$usage" --argjson cost "$cost" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg reason "$([[ "$status" == timed_out ]] && legion_adapter_lease_reason "$lease_status")" \
     '{run_id:$run_id, executor:$executor, model:$model, status:$status,
       diff_path:$diff, last_message:$last, worktree:$wt, usage:$usage, cost_usd:$cost,
       preflight_receipt:$preflight,attempt_receipt:$attempt,
-      failure_receipt:(if $failure=="" then null else $failure end)}'
+      failure_receipt:(if $failure=="" then null else $failure end)}
+      + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == "ok" ]]
 }
 
@@ -310,7 +326,7 @@ legion-deepseek — delegate a scoped task to DeepSeek Harness (dsh)
 
   legion-deepseek run [--task T | --task-file F] [--model M] [--repo DIR]
                       [--base REF] [--sandbox read-only|workspace-write]
-                      [--archetype A] [--apply] [--keep] [--quiet]
+                      [--archetype A] [--max-runtime-seconds N] [--apply] [--keep] [--quiet]
 
 Environment:
   DSH_BIN              path to the dsh binary (default: dsh on PATH)

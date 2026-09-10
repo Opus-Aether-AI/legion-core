@@ -40,6 +40,13 @@ on:
         required: false
         default: false
         type: boolean
+    outputs:
+      disposition:
+        description: Latest-wins disposition for the dispatched release
+        value: ${{ jobs.update.outputs.disposition }}
+      receipt:
+        description: JSON receipt for the latest-wins decision
+        value: ${{ jobs.update.outputs.receipt }}
 
 # A called workflow's permissions cannot exceed the caller's. Requesting a
 # scope no caller grants (packages: read) makes every consumer fail at startup
@@ -51,15 +58,23 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: legion-core-consumer-update-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   update:
     name: Open legion-core update PR
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      disposition: ${{ steps.arbitrate.outputs.disposition }}
+      receipt: ${{ steps.arbitrate.outputs.receipt }}
     env:
       LEGION_CORE_VERSION: ${{ inputs.version }}
       LEGION_CORE_TAG: ${{ inputs.tag }}
       LEGION_CORE_SHA: ${{ inputs.source_sha }}
+      UPDATE_BRANCH: chore/legion-core-latest
       UPDATE_COMMAND: ${{ inputs.update_command }}
       VALIDATION_COMMAND: ${{ inputs.validation_command }}
       GH_TOKEN: ${{ github.token }}
@@ -115,13 +130,202 @@ jobs:
             exit 2
           }
 
+      - name: Arbitrate the latest release
+        id: arbitrate
+        run: |
+          set -euo pipefail
+
+          semver_cmp() {
+            node - "$1" "$2" <<'NODE'
+          const parse = (raw) => {
+            const match = raw.match(/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
+            if (!match) throw new Error(`invalid semver: ${raw}`);
+            return {
+              core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+              pre: match[4] === undefined ? null : match[4].split('.'),
+            };
+          };
+          const compare = (left, right) => {
+            for (let i = 0; i < 3; i += 1) {
+              if (left.core[i] < right.core[i]) return -1;
+              if (left.core[i] > right.core[i]) return 1;
+            }
+            if (left.pre === null && right.pre === null) return 0;
+            if (left.pre === null) return 1;
+            if (right.pre === null) return -1;
+            const count = Math.max(left.pre.length, right.pre.length);
+            for (let i = 0; i < count; i += 1) {
+              if (left.pre[i] === undefined) return -1;
+              if (right.pre[i] === undefined) return 1;
+              const leftNumeric = /^[0-9]+$/.test(left.pre[i]);
+              const rightNumeric = /^[0-9]+$/.test(right.pre[i]);
+              if (leftNumeric && rightNumeric) {
+                const a = BigInt(left.pre[i]);
+                const b = BigInt(right.pre[i]);
+                if (a < b) return -1;
+                if (a > b) return 1;
+              } else if (leftNumeric !== rightNumeric) {
+                return leftNumeric ? -1 : 1;
+              } else {
+                if (left.pre[i] < right.pre[i]) return -1;
+                if (left.pre[i] > right.pre[i]) return 1;
+              }
+            }
+            return 0;
+          };
+          process.stdout.write(String(compare(parse(process.argv[2]), parse(process.argv[3]))));
+          NODE
+          }
+
+          read_pin() {
+            local ref="$1" label="$2" pin
+            if ! pin="$(git show "$ref:.legion/legion-core.json" 2>/dev/null)"; then
+              [ "$label" = "checked-in" ] && return 1
+              echo "::error::$label candidate $ref has no .legion/legion-core.json" >&2
+              return 2
+            fi
+            printf '%s' "$pin" | jq -e '
+              .schema == "legion.core-pin.v1" and
+              .package == "@opus-aether-ai/legion-core" and
+              (.version | type == "string" and
+                test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$")) and
+              .tag == ("v" + .version) and
+              (.source_sha | type == "string" and test("^[0-9a-f]{40}$"))' \
+              >/dev/null || {
+                echo "::error::$label Legion Core pin is malformed" >&2
+                return 2
+              }
+            printf '%s' "$pin"
+          }
+
+          base_pin=''
+          if git cat-file -e "HEAD:.legion/legion-core.json" 2>/dev/null; then
+            base_pin="$(read_pin HEAD checked-in)"
+          fi
+
+          remote_sha="$(git ls-remote origin "refs/heads/$UPDATE_BRANCH" | awk 'NR == 1 {print $1}')"
+          candidate_pin=''
+          if [ -n "$remote_sha" ]; then
+            git fetch --no-tags origin "$remote_sha"
+            candidate_pin="$(read_pin "$remote_sha" stable)"
+          fi
+
+          authoritative_kind=none
+          authoritative_pin=''
+          if [ -n "$base_pin" ]; then
+            authoritative_kind=checked_in
+            authoritative_pin="$base_pin"
+          fi
+          if [ -n "$candidate_pin" ]; then
+            if [ -z "$authoritative_pin" ]; then
+              authoritative_kind=candidate
+              authoritative_pin="$candidate_pin"
+            else
+              base_version="$(printf '%s' "$base_pin" | jq -r .version)"
+              candidate_version="$(printf '%s' "$candidate_pin" | jq -r .version)"
+              comparison="$(semver_cmp "$candidate_version" "$base_version")"
+              if [ "$comparison" -gt 0 ]; then
+                authoritative_kind=candidate
+                authoritative_pin="$candidate_pin"
+              elif [ "$comparison" -eq 0 ] && \
+                   ! diff -u \
+                     <(printf '%s' "$base_pin" | jq -S '{version,tag,source_sha}') \
+                     <(printf '%s' "$candidate_pin" | jq -S '{version,tag,source_sha}') \
+                     >/dev/null; then
+                receipt="$(jq -cn \
+                  --arg status identity_conflict \
+                  --arg incoming "$LEGION_CORE_VERSION" \
+                  --arg checked_in "$base_version" \
+                  --arg candidate "$candidate_version" \
+                  '{schema:"legion.core-consumer-update.v1",status:$status,
+                    incoming_version:$incoming,checked_in_version:$checked_in,
+                    candidate_version:$candidate}')"
+                printf 'disposition=identity_conflict\nreceipt=%s\n' "$receipt" >> "$GITHUB_OUTPUT"
+                printf '### Legion Core update receipt\n\n~~~json\n%s\n~~~\n' "$receipt" >> "$GITHUB_STEP_SUMMARY"
+                echo "::error::checked-in and stable-candidate pins disagree at version $base_version"
+                exit 1
+              fi
+            fi
+          fi
+
+          mode=apply
+          disposition=update_required
+          current_version=''
+          if [ -n "$authoritative_pin" ]; then
+            current_version="$(printf '%s' "$authoritative_pin" | jq -r .version)"
+            comparison="$(semver_cmp "$LEGION_CORE_VERSION" "$current_version")"
+            if [ "$comparison" -lt 0 ]; then
+              mode=skip
+              disposition=superseded
+            elif [ "$comparison" -eq 0 ]; then
+              if ! printf '%s' "$authoritative_pin" | jq -e \
+                --arg version "$LEGION_CORE_VERSION" \
+                --arg tag "$LEGION_CORE_TAG" \
+                --arg source_sha "$LEGION_CORE_SHA" \
+                '.version == $version and .tag == $tag and .source_sha == $source_sha' \
+                >/dev/null; then
+                receipt="$(jq -cn \
+                  --arg status identity_conflict \
+                  --arg incoming "$LEGION_CORE_VERSION" \
+                  --arg current "$current_version" \
+                  '{schema:"legion.core-consumer-update.v1",status:$status,
+                    incoming_version:$incoming,current_version:$current}')"
+                printf 'disposition=identity_conflict\nreceipt=%s\n' "$receipt" >> "$GITHUB_OUTPUT"
+                printf '### Legion Core update receipt\n\n~~~json\n%s\n~~~\n' "$receipt" >> "$GITHUB_STEP_SUMMARY"
+                echo "::error::release identity conflicts with immutable version $current_version"
+                exit 1
+              fi
+              disposition=already_current
+              if [ "$authoritative_kind" = candidate ]; then
+                mode=replay
+              else
+                mode=skip
+              fi
+            fi
+          fi
+
+          receipt="$(jq -cn \
+            --arg status "$disposition" \
+            --arg mode "$mode" \
+            --arg incoming "$LEGION_CORE_VERSION" \
+            --arg current "$current_version" \
+            --arg branch "$UPDATE_BRANCH" \
+            --arg remote_sha "$remote_sha" \
+            '{schema:"legion.core-consumer-update.v1",status:$status,mode:$mode,
+              incoming_version:$incoming,
+              current_version:(if $current == "" then null else $current end),
+              branch:$branch,
+              candidate_sha:(if $remote_sha == "" then null else $remote_sha end)}')"
+          printf 'mode=%s\ndisposition=%s\nremote_sha=%s\nreceipt=%s\n' \
+            "$mode" "$disposition" "$remote_sha" "$receipt" >> "$GITHUB_OUTPUT"
+          printf '### Legion Core update receipt\n\n~~~json\n%s\n~~~\n' "$receipt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prepare the stable candidate branch
+        if: ${{ steps.arbitrate.outputs.mode != 'skip' }}
+        env:
+          UPDATE_MODE: ${{ steps.arbitrate.outputs.mode }}
+          REMOTE_SHA: ${{ steps.arbitrate.outputs.remote_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$UPDATE_MODE" = replay ]; then
+            [ -n "$REMOTE_SHA" ] || {
+              echo "::error::replay requested without a stable candidate SHA"
+              exit 1
+            }
+            git checkout -B "$UPDATE_BRANCH" "$REMOTE_SHA"
+          else
+            git checkout -B "$UPDATE_BRANCH"
+          fi
+
       - name: Apply the published Legion policy
+        if: ${{ steps.arbitrate.outputs.mode == 'apply' }}
         run: |
           npx --yes --@opus-aether-ai:registry=https://registry.npmjs.org \
             --package "@opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \
             legion-init --repo .
 
       - name: Record the repository core baseline
+        if: ${{ steps.arbitrate.outputs.mode == 'apply' }}
         run: |
           set -euo pipefail
           mkdir -p .legion
@@ -140,10 +344,11 @@ jobs:
           mv "$temp" .legion/legion-core.json
 
       - name: Apply repository-specific dependency metadata
-        if: ${{ inputs.update_command != '' }}
+        if: ${{ steps.arbitrate.outputs.mode == 'apply' && inputs.update_command != '' }}
         run: bash -euo pipefail -c "$UPDATE_COMMAND"
 
       - name: Validate Legion policy and repository integration
+        if: ${{ steps.arbitrate.outputs.mode != 'skip' }}
         run: |
           set -euo pipefail
           npx --yes --@opus-aether-ai:registry=https://registry.npmjs.org \
@@ -164,40 +369,60 @@ jobs:
           fi
 
       - name: Create or update the dependency PR
+        if: ${{ steps.arbitrate.outputs.mode != 'skip' }}
+        env:
+          UPDATE_MODE: ${{ steps.arbitrate.outputs.mode }}
+          EXPECTED_REMOTE_SHA: ${{ steps.arbitrate.outputs.remote_sha }}
         run: |
           set -euo pipefail
-          if [ -z "$(git status --porcelain)" ]; then
-            echo "Repository is already current at legion-core $LEGION_CORE_VERSION."
-            exit 0
-          fi
-
-          branch="chore/legion-core-v$LEGION_CORE_VERSION"
+          branch="$UPDATE_BRANCH"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$branch"
-          git add -A
-          git add -f .legion/legion-core.json
-          git commit -m "chore(deps): update legion-core to $LEGION_CORE_VERSION"
 
-          expected="$(git ls-remote origin "refs/heads/$branch" | awk '{print $1}')"
-          if [ -n "$expected" ]; then
-            git push --force-with-lease="refs/heads/$branch:$expected" origin \
+          if [ "$UPDATE_MODE" = apply ]; then
+            [ -n "$(git status --porcelain)" ] || {
+              echo "::error::latest-wins arbitration selected an update but produced no change"
+              exit 1
+            }
+            git add -A
+            git add -f .legion/legion-core.json
+            git commit -m "chore(deps): update legion-core to $LEGION_CORE_VERSION"
+            git push --force-with-lease="refs/heads/$branch:$EXPECTED_REMOTE_SHA" origin \
               "HEAD:refs/heads/$branch"
           else
-            git push origin "HEAD:refs/heads/$branch"
+            actual_remote="$(git ls-remote origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
+            [ "$actual_remote" = "$EXPECTED_REMOTE_SHA" ] || {
+              echo "::error::stable candidate moved while replaying it; retry against the new head"
+              exit 1
+            }
           fi
 
-          body="$(printf '%s\n\n%s\n%s\n%s\n\n%s' \
+          candidate_sha="$(git rev-parse HEAD)"
+          actual_remote="$(git ls-remote origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
+          [ "$actual_remote" = "$candidate_sha" ] || {
+            echo "::error::remote stable candidate does not match the locally validated head"
+            exit 1
+          }
+
+          if [ -n "$VALIDATION_COMMAND" ]; then
+            validation_line="- Repository-owned validation: completed successfully"
+          else
+            validation_line="- Repository-owned validation command: not configured (Legion policy and immutable pin checks only)"
+          fi
+          body="$(printf '%s\n\n%s\n%s\n%s\n%s' \
             "Automated Legion fleet update from $LEGION_CORE_TAG." \
             "- Package: @opus-aether-ai/legion-core@$LEGION_CORE_VERSION" \
             "- Release commit: $LEGION_CORE_SHA" \
             "- Policy: applied non-destructively with legion-init" \
-            "Repository-owned validation completed before this PR was opened.")"
+            "$validation_line")"
           existing="$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
             gh pr edit "$existing" \
               --title "chore(deps): update legion-core to $LEGION_CORE_VERSION" \
               --body "$body"
+            if [ "$(gh pr view "$existing" --json isDraft --jq .isDraft)" != true ]; then
+              gh pr ready "$existing" --undo
+            fi
           else
             # The branch is already pushed at this point. If PR creation is
             # refused, say why in one actionable line: the raw GraphQL error
@@ -208,6 +433,7 @@ jobs:
             if ! create_error="$(gh pr create \
               --base "${{ github.event.repository.default_branch }}" \
               --head "$branch" \
+              --draft \
               --title "chore(deps): update legion-core to $LEGION_CORE_VERSION" \
               --body "$body" 2>&1)"; then
               printf '%s\n' "$create_error" >&2
@@ -222,3 +448,13 @@ jobs:
               exit 1
             fi
           fi
+
+          pr="$(gh pr view "$branch" --json isDraft,headRefOid,baseRefName)"
+          printf '%s' "$pr" | jq -e \
+            --arg head "$candidate_sha" \
+            --arg base "${{ github.event.repository.default_branch }}" \
+            '.isDraft == true and .headRefOid == $head and .baseRefName == $base' \
+            >/dev/null || {
+              echo "::error::update PR is not a draft for the validated stable candidate"
+              exit 1
+            }

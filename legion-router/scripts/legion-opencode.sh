@@ -151,6 +151,7 @@ cmd_run() {
   local task="" model="${LEGION_OPENCODE_MODEL:-${OPENCODE_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 oc_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
+  local max_runtime_seconds=""
   local base_commit=""
 
   while [[ $# -gt 0 ]]; do
@@ -167,6 +168,7 @@ cmd_run() {
       --base) base="$2"; shift 2 ;;
       --sandbox) sandbox="$2"; shift 2 ;;
       --run-id) preset_run_id="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       --apply) do_apply=1; shift ;;
       --keep) keep=1; shift ;;
       --quiet) QUIET=1; shift ;;
@@ -205,6 +207,7 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
   legion_require_top_level_executor "opencode" || return $?
+  legion_adapter_resolve_lease opencode "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   local preflight_binary="$OPENCODE_BIN"
@@ -256,10 +259,13 @@ cmd_run() {
   legion_activate_executor_context "$RUN_ID" opencode
   note "-> ${cmd[*]} (task on stdin, $(printf '%s' "$task" | wc -c | tr -d ' ') bytes)"
   local started_at ended_at output_started=false
+  local lease_status="$art/lease.json"
   started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
-  printf '%s' "$task" | ( cd "$wt" && "${cmd[@]}" ) >"$out_file" 2>"$err_file"
+  printf '%s' "$task" | ( cd "$wt" && python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+    --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+    --status-file "$lease_status" -- "${cmd[@]}" ) >"$out_file" 2>"$err_file"
   rc=${PIPESTATUS[1]}
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
@@ -298,8 +304,14 @@ cmd_run() {
   # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
   # had actually been done.
   git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
-  [[ "$rc" -ne 0 ]] && status="failed"
-  if [[ "$has_error" == "true" ]]; then
+  if legion_adapter_supervisor_timed_out "$lease_status"; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$rc" -ne 0 ]]; then
+    status="failed"
+  fi
+  if [[ "$status" != "timed_out" && "$has_error" == "true" ]]; then
     status="failed"
     [[ -n "$result" ]] && result="${result}"$'\n'
     result="${result}opencode error: ${opencode_error:-unknown error}"
@@ -345,7 +357,10 @@ cmd_run() {
   local terminal_status=succeeded failure_class=""
   if [[ "$status" != ok ]]; then
     terminal_status=failed
-    if [[ "$sandbox" == read-only ]] \
+    if [[ "$status" == timed_out ]]; then
+      terminal_status=timed_out
+      failure_class=timed_out
+    elif [[ "$sandbox" == read-only ]] \
        && ! git -C "$wt" diff --cached --quiet -- . ':!.opencode/plans' 2>/dev/null; then
       failure_class=policy_refused
     elif [[ "$rc" -ne 0 || "$has_error" == true ]]; then
@@ -397,12 +412,14 @@ cmd_run() {
     --arg result "$result" --arg opencode_error "$opencode_error" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg reason "$([[ "$status" == timed_out ]] && legion_adapter_lease_reason "$lease_status")" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"opencode", model:$model, opencode_exit:$rc,
      result:$result, opencode_error:(if $opencode_error == "" then null else $opencode_error end),
      worktree:$wt, diff_path:$diff, last_message_path:$last,
      usage:$usage, cost_usd:$cost,preflight_receipt:$preflight,attempt_receipt:$attempt,
-     failure_receipt:(if $failure=="" then null else $failure end)}'
+     failure_receipt:(if $failure=="" then null else $failure end)}
+     + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == "ok" ]] || exit 1
 }
 
@@ -411,7 +428,7 @@ usage() {
 legion-opencode — delegate a scoped task to opencode headless.
 
 Usage:
-  legion-opencode run --task "TASK" | --task-file F [--model provider/model] [--archetype NAME] [--repo DIR] [--run-id ID]
+  legion-opencode run --task "TASK" | --task-file F [--model provider/model] [--archetype NAME] [--repo DIR] [--run-id ID] [--max-runtime-seconds N]
                       [--base REF] [--sandbox read-only|workspace-write] [--apply] [--keep] [--quiet]
   legion-opencode run [--repo DIR] < task.txt
 

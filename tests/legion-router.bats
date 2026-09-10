@@ -653,6 +653,48 @@ repos_file_for_repo() {
     ! kill -0 "$child" 2>/dev/null
 }
 
+@test "delegate child lease emits one timed_out lineage and removes kept Git state" {
+    local repo run_id pid_file child attempt failure
+    repo="$(make_test_repo codex-lease-timeout)"
+    run_id="codex-lease-timeout"
+    pid_file="$TEST_TMPDIR/codex-lease-child.pid"
+
+    MOCK_CODEX_DELAY=30 MOCK_CODEX_DETACH_DELAY=1 \
+      MOCK_CODEX_DELAY_PID_FILE="$pid_file" \
+      run "$DELEGATE" run --executor codex --model fixture-codex \
+        --task "wait forever" --repo "$repo" --run-id "$run_id" \
+        --max-runtime-seconds 1 --keep --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "timed_out" and (.reason | contains("expired after 1 seconds"))'
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    failure="$(echo "$output" | jq -r .failure_receipt)"
+    jq -e '.terminal_status == "timed_out" and .failure.class == "timed_out"' "$attempt"
+    jq -e '.class == "timed_out" and .retryable == false' "$failure"
+    [ ! -d "$repo/.legion/worktrees/$run_id" ]
+    ! git -C "$repo" show-ref --verify --quiet "refs/heads/legion/delegate-$run_id"
+    jq -e '.lifecycle.phase == "timed_out"' "$LEGION_REGISTRY_DIR/$run_id.json"
+    child="$(cat "$pid_file")"
+    ! kill -0 "$child" 2>/dev/null
+}
+
+@test "delegate child lease can only lower the registry default" {
+    local repo
+    repo="$(make_test_repo codex-lease-cap)"
+    run "$DELEGATE" run --executor codex --model fixture-codex \
+      --task "do the thing" --repo "$repo" --max-runtime-seconds 3601 --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"may lower but not raise"* ]]
+    ! grep -q '^codex exec ' "$MOCK_CALL_LOG"
+
+    run "$DELEGATE" run --executor codex --model fixture-codex \
+      --task "do the thing" --repo "$repo" \
+      --max-runtime-seconds 999999999999999999999999999999999999 --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"may lower but not raise"* ]]
+    ! grep -q '^codex exec ' "$MOCK_CALL_LOG"
+}
+
 @test "portable process supervisor terminates a setsid descendant that ignores TERM" {
     local pid_file supervisor child i
     pid_file="$TEST_TMPDIR/provider-setsid-child.pid"
@@ -998,7 +1040,7 @@ PY
     wait "$victim" || true
 }
 
-@test "delegate run: fails closed when an adapter cannot honor run identity" {
+@test "delegate run: prefers its trusted sibling over an unverified external adapter" {
     local repo; repo="$(make_test_repo legacy-adapter)"
     local adapter_bin="$TEST_TMPDIR/legacy-adapter-bin"
     mkdir -p "$adapter_bin"
@@ -1016,10 +1058,9 @@ SH
     PATH="$adapter_bin:$PATH" run "$DELEGATE" run --executor cursor \
       --run-id queued-slice-cursor --task "do the thing" --repo "$repo" --quiet
 
-    [ "$status" -eq 64 ]
-    [[ "$output" == *"does not support --run-id"* ]]
-    [ "$(grep -c '^legacy-cursor ' "$MOCK_CALL_LOG")" -eq 1 ]
-    grep -Fq -- "--run-id queued-slice-cursor" "$MOCK_CALL_LOG"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok" and .run_id == "queued-slice-cursor"'
+    [ "$(grep -c '^legacy-cursor ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
 }
 
 @test "delegate run: executor context does not leak into sandbox setup" {
@@ -1365,6 +1406,27 @@ $run_error" ]
 }
 
 # ── review / cleanup ─────────────────────────────────────────────────
+@test "delegate review: native child lease times out once without retrying" {
+    local repo pid_file child receipt
+    repo="$(make_test_repo review-lease-timeout)"
+    pid_file="$TEST_TMPDIR/review-lease-child.pid"
+
+    MOCK_CODEX_REVIEW_DELAY=30 MOCK_CODEX_REVIEW_CHILD_PID_FILE="$pid_file" \
+      run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" \
+        --max-runtime-seconds 1 --max-attempts 2 --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "timed_out" and .attempts == 1
+      and (.reason | contains("expired after 1 seconds"))
+    '
+    receipt="$(echo "$output" | jq -r .terminal_receipt)"
+    jq -e '.schema == "legion.review-terminal.v1" and .status == "timed_out"' "$receipt"
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
+    child="$(cat "$pid_file")"
+    ! kill -0 "$child" 2>/dev/null
+}
+
 @test "delegate review: returns a verdict + emits span" {
     local repo; repo="$(make_test_repo rev1)"
     local base_sha; base_sha="$(git -C "$repo" rev-parse HEAD)"
@@ -1958,6 +2020,30 @@ $run_error" ]
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.status == "ok" and .thread_id == "mock-thread-0001"'
   assert_mock_called codex "exec resume mock-thread-0001"
+}
+
+@test "delegate resume: child lease timeout removes the kept worktree and branch" {
+  local repo rid pid_file child
+  repo="$(make_test_repo resume-lease-timeout)"
+  out="$("$DELEGATE" run --model test-model-alpha --task initial --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+  pid_file="$TEST_TMPDIR/resume-lease-child.pid"
+
+  MOCK_CODEX_DELAY=30 MOCK_CODEX_DETACH_DELAY=1 \
+    MOCK_CODEX_DELAY_PID_FILE="$pid_file" \
+    run "$DELEGATE" resume --run "$rid" --task "wait forever" --repo "$repo" \
+      --max-runtime-seconds 1 --quiet
+
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '
+    .status == "timed_out"
+    and (.reason | contains("expired after 1 seconds"))
+    and (.worktree | contains("removed after child execution lease timeout"))
+  '
+  [ ! -d "$repo/.legion/worktrees/$rid" ]
+  ! git -C "$repo" show-ref --verify --quiet "refs/heads/legion/delegate-$rid"
+  child="$(cat "$pid_file")"
+  ! kill -0 "$child" 2>/dev/null
 }
 
 @test "delegate resume: restores the original routing archetype in telemetry" {

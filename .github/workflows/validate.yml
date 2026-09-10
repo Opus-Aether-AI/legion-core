@@ -21,6 +21,9 @@ jobs:
       - name: Marketplace JSON parses
         run: jq empty .claude-plugin/marketplace.json
 
+      - name: Release licence metadata is coherent
+        run: python3 scripts/check-license-metadata.py --root .
+
       - name: Marketplace has required top-level fields
         run: |
           jq -e '.name and .owner and .version and .plugins and (.plugins | type == "array")' \

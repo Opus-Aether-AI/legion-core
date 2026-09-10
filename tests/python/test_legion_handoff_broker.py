@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import socket
 import subprocess
@@ -54,6 +55,29 @@ def test_complete_span_validation_rejects_missing_invalid_and_nonfinite_values()
     nonfinite["cost_usd"] = float("nan")
     with pytest.raises(ValueError, match="nonnegative number"):
         BROKER._validate_span(nonfinite, "parent-run")
+
+
+def test_broker_protocol_accepts_only_a_positive_typed_child_lease() -> None:
+    assert BROKER._validated_args(
+        ["run", "--executor", "cursor", "--max-runtime-seconds", "7"]
+    ) == ["run", "--executor", "cursor", "--max-runtime-seconds", "7"]
+    for value in ("0", "-1", "1.5", "$(id)"):
+        with pytest.raises(ValueError, match="max-runtime-seconds"):
+            BROKER._validated_args(
+                ["run", "--executor", "cursor", "--max-runtime-seconds", value]
+            )
+
+
+def test_broker_inherits_or_lowers_but_never_raises_parent_lease() -> None:
+    inherited = BROKER._bounded_lease_args(["run", "--executor", "cursor"], 12)
+    assert inherited[-2:] == ["--max-runtime-seconds", "12"]
+    assert BROKER._bounded_lease_args(
+        ["run", "--executor", "cursor", "--max-runtime-seconds", "7"], 12
+    )[-1] == "7"
+    with pytest.raises(ValueError, match="may lower but not raise"):
+        BROKER._bounded_lease_args(
+            ["run", "--executor", "cursor", "--max-runtime-seconds", "13"], 12
+        )
 
 
 def test_short_telemetry_append_rolls_back_the_partial_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,6 +152,76 @@ def test_incomplete_descendant_supervisor_exit_fails_closed(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="incomplete cleanup"):
         BROKER._terminate_supervisor(process)
+
+
+def test_broker_lease_reaps_a_silent_setsid_nested_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = tmp_path / "nested.pid"
+    delegate = tmp_path / "fake-delegate"
+    delegate.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, signal, time\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"    open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        "    while True: time.sleep(1)\n"
+        "while True: time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    delegate.chmod(0o700)
+    broker_root = tmp_path / "broker-root"
+    broker = BROKER.Broker(
+        socket_path=tmp_path / "unused.sock",
+        token="test-token",
+        delegate=delegate,
+        source_repo=tmp_path,
+        broker_root=broker_root,
+        base_sha="deadbeef",
+        sandbox_bin=Path("/usr/bin/true"),
+        sandbox_kind="bwrap",
+        supervisor=ROOT / "legion-router" / "scripts" / "legion-process-supervisor.py",
+        supervisor_deny_canary=tmp_path / "deny",
+        supervisor_allow_canary=tmp_path / "allow",
+        telemetry_dir=None,
+        expected_parent="parent",
+        max_runtime_seconds=1,
+    )
+    broker.broker_repo = tmp_path
+    monkeypatch.setattr(broker, "_prepare_repository", lambda: None)
+    monkeypatch.setattr(broker, "_sandbox_command", lambda command: command)
+    monkeypatch.setattr(broker, "_target_environment", os.environ.copy)
+
+    client, server = socket.socketpair()
+    thread = threading.Thread(target=broker._handle, args=(server,))
+    thread.start()
+    BROKER._send_json(
+        client,
+        {
+            "token": "test-token",
+            "argv": ["run", "--executor", "cursor", "--max-runtime-seconds", "1"],
+            "stdin": "",
+        },
+        BROKER.MAX_REQUEST_BYTES,
+    )
+    response = BROKER._recv_json(client, BROKER.MAX_RESPONSE_BYTES)
+    client.close()
+    thread.join(timeout=8)
+
+    assert not thread.is_alive()
+    assert response["returncode"] == 124
+    assert json.loads((broker_root / "lease.json").read_text(encoding="utf-8"))["status"] == "timed_out"
+    child = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("nested setsid child survived broker lease expiry")
 
 
 def test_abandoned_client_preserves_supervisor_exit_70(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

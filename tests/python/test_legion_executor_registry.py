@@ -372,7 +372,12 @@ def test_symmetric_adapter_requires_a_concrete_provider_binary_before_any_worktr
     )
 
     assert result.returncode != 0
-    assert "pi CLI not found" in result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "refused"
+    assert receipt["executor"] == "pi"
+    assert receipt["reason"] == "executor binary not found: pi"
+    worktrees = repo / ".legion" / "worktrees"
+    assert not worktrees.exists() or not any(worktrees.iterdir())
 
 
 def test_fallback_loader_preserves_bare_booleans(tmp_path):

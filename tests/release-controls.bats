@@ -431,6 +431,40 @@ EOF
     ! grep -qE '^\s*packages:' "$consumer"
 }
 
+@test "consumer update workflow serializes one latest-wins draft candidate" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+
+    grep -q 'group: legion-core-consumer-update-${{ github.repository }}' "$consumer"
+    grep -q 'cancel-in-progress: false' "$consumer"
+    grep -q 'UPDATE_BRANCH: chore/legion-core-latest' "$consumer"
+    ! grep -q 'chore/legion-core-v\$LEGION_CORE_VERSION' "$consumer"
+
+    # Both the checked-in pin and the remote stable candidate participate in
+    # semantic-version arbitration before package/update commands can run.
+    grep -q 'base_pin="$(read_pin HEAD checked-in)"' "$consumer"
+    grep -q 'candidate_pin="$(read_pin "$remote_sha" stable)"' "$consumer"
+    grep -q 'comparison="$(semver_cmp "$LEGION_CORE_VERSION" "$current_version")"' "$consumer"
+    grep -q 'disposition=superseded' "$consumer"
+    grep -q 'disposition=already_current' "$consumer"
+    grep -q 'status identity_conflict' "$consumer"
+    grep -q 'schema:"legion.core-consumer-update.v1"' "$consumer"
+
+    # A missing branch and an existing branch both use the same explicit lease;
+    # an empty expected value means "create only if still absent".
+    grep -q 'git push --force-with-lease="refs/heads/\$branch:\$EXPECTED_REMOTE_SHA"' "$consumer"
+    ! grep -qE '^\s+git push origin ' "$consumer"
+
+    grep -q -- '--draft' "$consumer"
+    grep -q 'gh pr ready "$existing" --undo' "$consumer"
+    grep -q '.isDraft == true and .headRefOid == $head and .baseRefName == $base' "$consumer"
+
+    # An empty validation_command must produce an explicit no-validation line,
+    # never the old unconditional completion claim.
+    grep -q 'if \[ -n "$VALIDATION_COMMAND" \]; then' "$consumer"
+    grep -q 'Repository-owned validation command: not configured' "$consumer"
+    ! grep -q '^            "Repository-owned validation completed before this PR was opened.\\n")"' "$consumer"
+}
+
 @test "recovery verifies a v0.19.0-style legacy tag with current controls" {
     local release_dir="$TEST_TMPDIR/legacy-v0.19.0"
     local outputs="$TEST_TMPDIR/recovery-outputs"

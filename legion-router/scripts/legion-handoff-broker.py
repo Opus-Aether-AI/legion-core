@@ -43,7 +43,7 @@ REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 SANDBOXES = {"read-only", "workspace-write"}
 SAFE_TELEMETRY_NAME = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl$")
 SPAN_REQUIRED = {"schema", "ts", "run_id", "executor", "model", "status"}
-SPAN_STATUSES = {"ok", "failed", "error", "over_budget", "blocked"}
+SPAN_STATUSES = {"ok", "failed", "error", "over_budget", "blocked", "timed_out"}
 
 
 class SupervisorCleanupError(ValueError):
@@ -151,7 +151,10 @@ def _validated_args(value: Any) -> list[str]:
             args.append(flag)
             index += 1
             continue
-        if flag not in {"--executor", "--task", "--sandbox", "--reasoning-effort", "--budget-tokens"}:
+        if flag not in {
+            "--executor", "--task", "--sandbox", "--reasoning-effort",
+            "--budget-tokens", "--max-runtime-seconds",
+        }:
             raise ValueError(f"sandbox handoff does not permit {flag!r}")
         if flag in seen or index + 1 >= len(value):
             raise ValueError(f"sandbox handoff {flag} must occur once with a value")
@@ -166,6 +169,10 @@ def _validated_args(value: Any) -> list[str]:
             if not re.fullmatch(r"[0-9]{1,8}", supplied) or int(supplied) > 10_000_000:
                 raise ValueError("sandbox handoff --budget-tokens must be an integer from 0 to 10000000")
             supplied = str(int(supplied))
+        if flag == "--max-runtime-seconds":
+            if not re.fullmatch(r"[1-9][0-9]{0,7}", supplied):
+                raise ValueError("sandbox handoff --max-runtime-seconds must be a positive integer")
+            supplied = str(int(supplied))
         seen.add(flag)
         args.extend((flag, supplied))
         index += 2
@@ -173,6 +180,19 @@ def _validated_args(value: Any) -> list[str]:
     if "--executor" not in seen:
         raise ValueError("sandbox handoff requires one explicit --executor")
     return args
+
+
+def _bounded_lease_args(args: list[str], parent_max_runtime_seconds: int) -> list[str]:
+    """Apply the parent lease cap to one already validated broker request."""
+    bounded = list(args)
+    try:
+        lease_index = bounded.index("--max-runtime-seconds")
+    except ValueError:
+        bounded.extend(("--max-runtime-seconds", str(parent_max_runtime_seconds)))
+        return bounded
+    if int(bounded[lease_index + 1]) > parent_max_runtime_seconds:
+        raise ValueError("sandbox handoff may lower but not raise the parent child execution lease")
+    return bounded
 
 
 def _scheme_escape(value: str) -> str:
@@ -343,6 +363,7 @@ class Broker:
         supervisor_allow_canary: Path,
         telemetry_dir: Optional[Path],
         expected_parent: str,
+        max_runtime_seconds: int = 3600,
     ) -> None:
         self.socket_path = socket_path
         self.token = token
@@ -356,6 +377,7 @@ class Broker:
         self.supervisor = supervisor
         self.supervisor_deny_canary = supervisor_deny_canary
         self.supervisor_allow_canary = supervisor_allow_canary
+        self.max_runtime_seconds = max_runtime_seconds
         self.telemetry_dir = telemetry_dir
         self.expected_parent = expected_parent
         self.stop = threading.Event()
@@ -739,6 +761,7 @@ class Broker:
                 self.used = True
 
             self._prepare_repository()
+            args = _bounded_lease_args(args, self.max_runtime_seconds)
             command = [
                 str(self.delegate),
                 *args,
@@ -753,6 +776,10 @@ class Broker:
                 str(self.supervisor),
                 "--cwd",
                 str(self.broker_repo),
+                "--max-runtime-seconds",
+                str(self.max_runtime_seconds),
+                "--status-file",
+                str(self.broker_root / "lease.json"),
             ]
             if self.sandbox_kind == "sandbox-exec":
                 supervised.extend(
@@ -830,6 +857,8 @@ class Broker:
 
 
 def _server(arguments: argparse.Namespace) -> int:
+    if arguments.max_runtime_seconds < 1:
+        raise ValueError("broker max runtime must be positive")
     telemetry = Path(arguments.telemetry_dir).resolve() if arguments.telemetry_dir else None
     deny_argument = Path(arguments.supervisor_deny_canary)
     allow_argument = Path(arguments.supervisor_allow_canary)
@@ -856,6 +885,7 @@ def _server(arguments: argparse.Namespace) -> int:
         supervisor=Path(arguments.supervisor).resolve(strict=True),
         supervisor_deny_canary=supervisor_deny_canary,
         supervisor_allow_canary=supervisor_allow_canary,
+        max_runtime_seconds=arguments.max_runtime_seconds,
         telemetry_dir=telemetry,
         expected_parent=arguments.expected_parent,
     )
@@ -884,6 +914,7 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--supervisor", required=True)
     serve.add_argument("--supervisor-deny-canary", required=True)
     serve.add_argument("--supervisor-allow-canary", required=True)
+    serve.add_argument("--max-runtime-seconds", required=True, type=int)
     serve.add_argument("--telemetry-dir", default="")
     serve.add_argument("--expected-parent", required=True)
     return parser

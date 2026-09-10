@@ -43,6 +43,36 @@ make_test_repo() {
     grep -Eq '^agent active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
+@test "legion-cursor: timeout reaps a setsid child and terminalizes exactly once" {
+    local repo run_id pid_file child attempt failure
+    repo="$(make_test_repo lease-timeout)"
+    run_id="cursor-lease-timeout"
+    pid_file="$TEST_TMPDIR/cursor-lease-child.pid"
+
+    MOCK_CURSOR_DELAY=30 MOCK_CURSOR_DETACH_DELAY=1 \
+      MOCK_CURSOR_DELAY_PID_FILE="$pid_file" \
+      run "$LEGION_CURSOR" run --task "wait forever" --repo "$repo" \
+        --run-id "$run_id" --max-runtime-seconds 1 --keep --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "timed_out"
+      and (.reason | contains("child execution lease expired after 1 seconds"))
+    '
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    failure="$(echo "$output" | jq -r .failure_receipt)"
+    jq -e '.terminal_status == "timed_out" and .failure.class == "timed_out"' "$attempt"
+    jq -e '.class == "timed_out" and .retryable == false' "$failure"
+    [ "$(find "$(dirname "$attempt")" -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    [ "$(find "$(dirname "$attempt")" -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    [ ! -d "$repo/.legion/worktrees/$run_id" ]
+    ! git -C "$repo" show-ref --verify --quiet "refs/heads/legion/cursor-$run_id"
+    jq -e '.lifecycle.phase == "timed_out"' "$LEGION_REGISTRY_DIR/$run_id.json"
+    child="$(cat "$pid_file")"
+    ! kill -0 "$child" 2>/dev/null
+    cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -e 'select(.status == "timed_out")'
+}
+
 @test "legion-cursor: adopts a preallocated run id and closes its queued lifecycle" {
     local repo; repo="$(make_test_repo adopted-id)"
     local run_id="queued-slice-cursor"

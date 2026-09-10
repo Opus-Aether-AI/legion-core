@@ -199,7 +199,8 @@ run_fallback() {
   fi
   set +e
   fallback_args=(run --executor codex --model "$model" --task "$task" --repo "$repo"
-    --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID")
+    --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID"
+    --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS")
   [[ -z "${archetype:-}" ]] || fallback_args+=(--archetype "$archetype")
   [[ "${QUIET:-0}" != "1" ]] || fallback_args+=(--quiet)
   out="$("$delegate_bin" "${fallback_args[@]}")"
@@ -238,6 +239,7 @@ cmd_run() {
   local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
   local effort="" append_sys="" skip_perms=0
   local premium_consent="${LEGION_ALLOW_PREMIUM_CREDIT:-0}"
+  local max_runtime_seconds=""
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
   local base_commit=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
@@ -270,6 +272,7 @@ cmd_run() {
       --sandbox) sandbox="$2"; shift 2 ;;                     # accepted for diff-contract parity
       --archetype) archetype="$2"; shift 2 ;;                 # accepted for diff-contract parity
       --run-id) preset_run_id="$2"; shift 2 ;;                # adopt fanout's queued identity
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       *) die "run: unknown arg '$1'" ;;
     esac
   done
@@ -312,6 +315,7 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
   legion_require_top_level_executor "claude" || return $?
+  legion_adapter_resolve_lease claude "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
 
   local contract_art="$repo/.legion/runs/$RUN_ID"
   if ! legion_adapter_preflight claude "$contract_art" "$sandbox" stdin "$model" "$effort" \
@@ -423,6 +427,7 @@ cmd_run() {
   start_ms="$(date +%s000)"
   local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0 chain_cost=0
   local any_output_started=0 permission_refused=0 chain_admission_refused=0
+  local lease_timed_out=0 lease_reason=""
   for attempt_model in "${claude_model_chain[@]}"; do
     chain_idx=$(( chain_idx + 1 ))
     model="$attempt_model"
@@ -449,11 +454,14 @@ cmd_run() {
     note "→ ${claude_cmd[*]}"
     local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
     attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
+    local lease_status="$contract_art/lease-$chain_idx.json"
     set +e
     printf '%s' "$task" | (
       legion_activate_executor_context "$RUN_ID" claude
       cd "${wt:-$repo}"
-      "${claude_cmd[@]}"
+      python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "${wt:-$repo}" \
+        --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+        --status-file "$lease_status" -- "${claude_cmd[@]}"
     ) >"$out_file" 2>"$err_file"
     rc=${PIPESTATUS[1]}
     set -e
@@ -481,7 +489,11 @@ cmd_run() {
     fi
     local attempt_combined="$attempt_result"
     [[ ! -s "$err_file" ]] || attempt_combined="${attempt_combined}"$'\n'"$(cat "$err_file")"
-    if [[ "$rc" -eq 0 && "$attempt_is_error" != true ]] && ! claude_model_declined "$out_file" "$err_file"; then
+    if legion_adapter_supervisor_timed_out "$lease_status"; then
+      lease_timed_out=1
+      lease_reason="$(legion_adapter_lease_reason "$lease_status")"
+      attempt_terminal=timed_out; attempt_failure=timed_out
+    elif [[ "$rc" -eq 0 && "$attempt_is_error" != true ]] && ! claude_model_declined "$out_file" "$err_file"; then
       attempt_terminal=succeeded; attempt_failure=""
     elif claude_model_declined "$out_file" "$err_file"; then
       attempt_failure=unavailable; attempt_retryable=true
@@ -498,7 +510,9 @@ cmd_run() {
       "$attempt_terminal" "$attempt_started_at" "$attempt_ended_at" "$attempt_duration" "$attempt_usage" \
       "$attempt_usage_status" "$attempt_usage_source" "$attempt_cost" \
       "$attempt_cost_status" "$attempt_cost_source" "$attempt_failure" "$attempt_retryable" \
-      "$attempt_output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$attempt_result"
+      "$attempt_output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" \
+      "${lease_reason:-$attempt_result}"
+    [[ "$lease_timed_out" -ne 1 ]] || break
     if [[ "$permission_refused" -eq 1 || "$any_output_started" -eq 1 ]]; then
       declined_final=0
       break
@@ -534,6 +548,7 @@ cmd_run() {
   # cost a single call on the second model. Same limitation as the codex fallback
   # loop in delegate.sh, which also reports only its final attempt's usage.
   [[ -n "$claude_chain_note" ]] && note "model chain: declined by $claude_chain_note → answered by $model"
+  [[ "$lease_timed_out" -ne 1 ]] || keep=0
 
   if [[ -n "$wt" ]]; then
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
@@ -545,13 +560,13 @@ cmd_run() {
     # had actually been done.
     git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
     [[ "$diff_rc" -ne 0 ]] && note "⚠ could not capture a diff from $wt"
-    if [[ "$sandbox" == "read-only" && -s "$diff_path" ]]; then
+    if [[ "$lease_timed_out" -ne 1 && "$sandbox" == "read-only" && -s "$diff_path" ]]; then
       read_only_violation=1
       note "⚠ Claude produced file changes during a read-only run; refusing the result"
       legion_adapter_fail_recorded_attempt "$contract_art" claude "$chain_idx" \
         policy_refused "" "Claude produced file changes during a read-only run"
     fi
-    if [[ "$do_apply" -eq 1 && "$read_only_violation" -eq 0 && -s "$diff_path" ]]; then
+    if [[ "$lease_timed_out" -ne 1 && "$do_apply" -eq 1 && "$read_only_violation" -eq 0 && -s "$diff_path" ]]; then
       if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
         git -C "$repo" apply "$diff_path" && note "diff applied to $repo"
       else
@@ -603,6 +618,19 @@ cmd_run() {
   combined_text="$result"
   if [[ -s "$err_file" ]]; then
     combined_text="${combined_text}"$'\n'"$(cat "$err_file")"
+  fi
+
+  if [[ "$lease_timed_out" -eq 1 ]]; then
+    reason="$lease_reason"
+    status="timed_out"
+    result="$lease_reason"
+    emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    return 1
   fi
 
   if [[ "$chain_admission_refused" -eq 1 ]]; then
@@ -691,7 +719,7 @@ legion-claude — delegate a scoped task to Claude headless, with fallback to Co
 
 Usage:
   legion-claude run --task "TASK" | --task-file F [--model MODEL] [--repo DIR] [--effort LEVEL]
-                    [--base REF] [--run-id ID] [--apply] [--keep]
+                    [--base REF] [--run-id ID] [--max-runtime-seconds N] [--apply] [--keep]
                     [--sandbox read-only|workspace-write] [--archetype NAME]
                     [--append-system-prompt TEXT] [--allow-premium-credit]
                     [--quiet] [--no-fallback] [--fallback-model MODEL]

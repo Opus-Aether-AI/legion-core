@@ -14,11 +14,13 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import json
 import os
 import secrets
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -417,16 +419,23 @@ class DescendantTracker:
         self._thread.start()
         self._thread_started = True
 
-    def close(self) -> None:
+    def close(self) -> bool:
         self._stop.set()
         if self._thread_started:
             self._thread.join(timeout=1.0)
+            # Do not turn the monitor's bounded join into an unbounded lock
+            # wait. A daemon still completing its final kernel snapshot owns
+            # these handles until process teardown; reporting cleanup failure
+            # is safer than blocking the supervisor past its shutdown bound.
+            if self._thread.is_alive():
+                return False
         with self._operation_lock:
             with self._lock:
                 handles = list(self._handles.values())
                 self._handles.clear()
             for handle in handles:
                 handle.close()
+        return True
 
     def raise_if_error(self) -> None:
         with self._lock:
@@ -638,14 +647,58 @@ def _terminate_tree(process: subprocess.Popen[bytes], tracker: DescendantTracker
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cwd", required=True)
+    parser.add_argument("--max-runtime-seconds", default=3600, type=int)
+    parser.add_argument("--status-file", default="")
     parser.add_argument("--darwin-sandbox-deny-canary", default="")
     parser.add_argument("--darwin-sandbox-allow-canary", default="")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
 
+def _write_status(path: str, status: str, reason: str, runtime_seconds: int) -> None:
+    """Atomically publish the supervisor outcome outside provider-controlled output.
+
+    Exit code 124 alone is ambiguous because a provider can return it itself.  The
+    sidecar lets adapters distinguish that ordinary provider failure from a lease
+    expiry without parsing stderr or racing a signal handler.
+    """
+
+    if not path:
+        return
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "schema": "legion.child-execution-lease.v1",
+                    "status": status,
+                    "reason": reason,
+                    "max_runtime_seconds": runtime_seconds,
+                },
+                handle,
+                separators=(",", ":"),
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def main() -> int:
     arguments = _parser().parse_args()
+    if arguments.max_runtime_seconds < 1:
+        print("legion-process-supervisor: --max-runtime-seconds must be at least 1", file=sys.stderr)
+        return 2
     command = arguments.command
     if command and command[0] == "--":
         command = command[1:]
@@ -684,15 +737,22 @@ def main() -> int:
     process: Optional[subprocess.Popen[bytes]] = None
     tracker: Optional[DescendantTracker] = None
     interrupted = 0
-    cancel_requested = threading.Event()
+    cancel_requested = False
     returncode = 1
     cleanup_ok = True
+    cleanup_attempted = False
+    timed_out = False
     supervisor_token = secrets.token_hex(24)
 
     def stop(signum: int, _frame: object) -> None:
-        nonlocal interrupted
+        nonlocal cancel_requested, interrupted
         interrupted = signum
-        cancel_requested.set()
+        # Python handlers can be re-entered by repeated delivery of the same
+        # signal. threading.Event.set() takes a non-reentrant condition lock,
+        # so a second TERM at the wrong bytecode boundary can deadlock the
+        # supervisor forever. A plain assignment is re-entrant; the main loop
+        # observes it within POLL_SECONDS.
+        cancel_requested = True
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
@@ -712,19 +772,34 @@ def main() -> int:
         )
         tracker = DescendantTracker(process.pid, supervisor_token, deny_canary, allow_canary)
         tracker.start()
-        while process.poll() is None and not cancel_requested.wait(POLL_SECONDS):
+        deadline = time.monotonic() + arguments.max_runtime_seconds
+        while process.poll() is None:
             tracker.raise_if_error()
-        if cancel_requested.is_set():
-            cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
-        try:
-            returncode = process.wait(timeout=GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
-            try:
-                returncode = process.wait(timeout=GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                returncode = -signal.SIGKILL
-                cleanup_ok = False
+            now = time.monotonic()
+            # The monotonic deadline wins a simultaneous timeout/cancel race.
+            # A child already observed complete wins instead, including one that
+            # finishes immediately below the lease boundary.
+            if now >= deadline:
+                if process.poll() is not None:
+                    break
+                timed_out = True
+                break
+            if cancel_requested:
+                break
+            time.sleep(min(POLL_SECONDS, deadline - now))
+        # One descendant drain owns the entire TERM/KILL cleanup budget. The
+        # old lifecycle could spend that budget here, another wait budget, and
+        # then a second complete drain in finally (roughly ten seconds under
+        # contention). _terminate_tree polls/reaps the direct child itself, so
+        # a second blocking wait or drain adds no containment guarantee.
+        cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
+        cleanup_attempted = True
+        observed_returncode = process.poll()
+        if observed_returncode is None:
+            returncode = -signal.SIGKILL
+            cleanup_ok = False
+        else:
+            returncode = observed_returncode
     except ProcessInspectionError as error:
         print(f"legion-process-supervisor: descendant inspection failed: {error}", file=sys.stderr)
         returncode = 70
@@ -736,14 +811,33 @@ def main() -> int:
         raise
     finally:
         if process is not None and tracker is not None:
-            cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
-            tracker.close()
+            if not cleanup_attempted:
+                cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
+            cleanup_ok = tracker.close() and cleanup_ok
 
     if not cleanup_ok:
+        _write_status(
+            arguments.status_file,
+            "cleanup_failed",
+            "descendant cleanup was incomplete",
+            arguments.max_runtime_seconds,
+        )
         print("legion-process-supervisor: descendant cleanup was incomplete", file=sys.stderr)
         return 70
+    if timed_out:
+        reason = f"child execution lease expired after {arguments.max_runtime_seconds} seconds"
+        _write_status(arguments.status_file, "timed_out", reason, arguments.max_runtime_seconds)
+        print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+        return 124
     if interrupted:
+        _write_status(
+            arguments.status_file,
+            "cancelled",
+            f"cancelled by {signal.Signals(interrupted).name}",
+            arguments.max_runtime_seconds,
+        )
         return 128 + interrupted
+    _write_status(arguments.status_file, "completed", "child completed", arguments.max_runtime_seconds)
     return returncode if returncode >= 0 else 128 - returncode
 
 

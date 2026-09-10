@@ -733,7 +733,7 @@ def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
     spans_dir.mkdir(parents=True)
     huge = "x" * (self_learn.MAX_SPAN_TEXT_LENGTH + 100)
     valid = {
-        **_span("valid", "2026-08-16T01:00:00Z", status="failed"),
+        **_span("valid", "2026-08-16T01:00:00Z", status="timed_out"),
         "model": huge,
         "archetype": huge,
         "task": huge,

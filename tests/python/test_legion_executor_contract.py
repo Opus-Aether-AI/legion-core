@@ -26,16 +26,25 @@ def test_preflight_is_exposed_by_plugin_and_npm_install_discovery():
 
 def test_contract_schemas_are_public_strict_versioned_documents():
     schema_dir = ROOT / "legion-observability" / "schema"
-    for name in ("legion.preflight.v1", "legion.failure.v1", "legion.attempt.v1"):
+    for name in (
+        "legion.preflight.v1",
+        "legion.failure.v1",
+        "legion.attempt.v1",
+        "legion.child-execution-lease.v1",
+    ):
         schema = json.loads((schema_dir / f"{name}.schema.json").read_text(encoding="utf-8"))
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert schema["title"] == name
         assert schema["additionalProperties"] is False
+
     registry_schema = json.loads(
         (schema_dir / "legion.executor-registry.v1.schema.json").read_text(encoding="utf-8")
     )
     assert registry_schema["title"] == "legion.executor-registry.v1"
     assert "executors" in registry_schema["required"]
+    assert {"cancellation", "max_runtime_seconds"} <= set(
+        registry_schema["$defs"]["executor"]["required"]
+    )
 
 
 def executable(path, version="1.2.3"):
@@ -100,6 +109,8 @@ def test_live_registry_declares_contract_foundation_without_inventing_transport(
         "cancellation", "max_runtime_seconds",
     }
     assert all(required <= set(config) for config in executors.values())
+    assert all(config["max_runtime_seconds"] > 0 for config in executors.values())
+    assert all(config["cancellation"] == "process_tree" for config in executors.values())
     assert executors["deepseek"]["task_file"] is False
     assert executors["deepseek"]["supported_task_transports"] == ["argv"]
     assert executors["deepseek"]["supported_sandboxes"] == ["workspace-write"]

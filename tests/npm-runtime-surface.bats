@@ -26,6 +26,10 @@ setup() {
   [ -f "$tarball" ]
   tar -xzf "$tarball" -C "$EXTRACTED"
 
+  run python3 "$EXTRACTED/package/scripts/check-license-metadata.py" \
+    --root "$EXTRACTED/package"
+  [ "$status" -eq 0 ]
+
   local required
   for required in \
     "legion-opencode-mode/SKILL.md" \

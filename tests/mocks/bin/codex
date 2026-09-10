@@ -97,6 +97,22 @@ if [[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_DELAY:-}" ]]; then
   wait "$delay_pid"
 fi
 
+if [[ $review -eq 0 && -n "${MOCK_CODEX_DELAY:-}" ]]; then
+  if [[ "${MOCK_CODEX_DETACH_DELAY:-0}" == 1 ]]; then
+    python3 - "$MOCK_CODEX_DELAY" <<'PY' &
+import os, signal, sys, time
+os.setsid()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+time.sleep(float(sys.argv[1]))
+PY
+  else
+    sleep "$MOCK_CODEX_DELAY" &
+  fi
+  delay_pid=$!
+  [[ -z "${MOCK_CODEX_DELAY_PID_FILE:-}" ]] || printf '%s\n' "$delay_pid" > "$MOCK_CODEX_DELAY_PID_FILE"
+  wait "$delay_pid"
+fi
+
 if [[ "${MOCK_CODEX_FAIL:-}" == "1" ]]; then
   printf '%s\n' '{"type":"thread.started","thread_id":"mock-fail"}'
   printf 'mock codex forced failure\n' >&2

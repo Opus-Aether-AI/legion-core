@@ -63,7 +63,7 @@ MAX_SPAN_IDENTIFIER_LENGTH = 512
 MAX_SPAN_COLLECTION_ITEMS = 128
 MAX_SPAN_NESTING = 8
 SPAN_IDENTITY_VERSION = 2
-SPAN_STATUSES = {"ok", "failed", "error", "over_budget", "blocked"}
+SPAN_STATUSES = {"ok", "failed", "error", "over_budget", "blocked", "timed_out"}
 GLOBAL_HINT_RESERVE = 100
 PROJECT_HINT_CAP = (
     legion_learning_context.MAX_HINTS

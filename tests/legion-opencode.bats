@@ -153,6 +153,22 @@ make_test_repo() {
     [ "$output" = "failed" ]
 }
 
+@test "legion-opencode: lease timeout remains authoritative over an earlier error event" {
+    local repo attempt failure
+    repo="$(make_test_repo timed-out-error)"
+
+    MOCK_OPENCODE_ERROR_EVENT=1 MOCK_OPENCODE_ERROR_DELAY=30 \
+      run "$LEGION_OPENCODE" run --task "inspect" --repo "$repo" \
+        --max-runtime-seconds 1 --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "timed_out" and (.reason | contains("expired after 1 seconds"))'
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    failure="$(echo "$output" | jq -r .failure_receipt)"
+    jq -e '.terminal_status == "timed_out" and .failure.class == "timed_out"' "$attempt"
+    jq -e '.class == "timed_out" and .retryable == false' "$failure"
+}
+
 @test "legion-opencode: an empty event stream is never reported as success" {
     local repo; repo="$(make_test_repo empty-stream)"
     MOCK_OPENCODE_EMPTY_STREAM=1 run "$LEGION_OPENCODE" run --task "inspect" \

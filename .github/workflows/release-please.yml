@@ -229,6 +229,7 @@ jobs:
             echo "::error::package.json ($pkg) != marketplace.json ($mkt)"
             exit 1
           fi
+          python3 scripts/check-license-metadata.py --root .
           echo "${RELEASE_TAG} resolves to gated SHA ${GATED_SHA}; version ${pkg} is in sync"
 
       # Upload before registry publication so a transient registry failure cannot

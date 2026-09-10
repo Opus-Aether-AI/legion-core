@@ -36,6 +36,7 @@ WT_GIT_FILE_ID="" BASE_SHA="" SAFE_GIT_DIR="" COMMON_GIT_OBJECTS=""
 PROVIDER_OUT="" PROVIDER_ERR="" PROVIDER_USAGE=""
 PROVIDER_OUT_ID="" PROVIDER_ERR_ID="" PROVIDER_USAGE_ID=""
 FS_SANDBOX_BIN="" FS_SANDBOX_KIND=""
+MAX_RUNTIME_SECONDS=""
 PRIVATE_RUNTIME_DIR="" PI_PRIVATE_AGENT_DIR="" HERMES_PRIVATE_HOME=""
 FS_SANDBOX_COMMAND=()
 DELEGATE_BLOCK_PATHS=()
@@ -586,6 +587,7 @@ start_handoff_broker() {
     --delegate "$delegate" --source-repo "$REPO" --broker-root "$BROKER_ROOT" --base-sha "$BASE_SHA" \
     --sandbox-bin "$FS_SANDBOX_BIN" --sandbox-kind "$FS_SANDBOX_KIND" \
     --supervisor "$supervisor" \
+    --max-runtime-seconds "$MAX_RUNTIME_SECONDS" \
     --supervisor-deny-canary "$TARGET_SUPERVISOR_DENY_CANARY" \
     --supervisor-allow-canary "$TARGET_SUPERVISOR_ALLOW_CANARY" \
     --telemetry-dir "${LEGION_TELEMETRY_DIR:-}" --expected-parent "$RUN_ID" \
@@ -659,7 +661,8 @@ run_provider() {
     invocation+=("HERMES_HOME=$HERMES_PRIVATE_HOME")
   fi
   invocation+=("${FS_SANDBOX_COMMAND[@]}" "$@")
-  local -a supervisor_args=(python3 "$supervisor" --cwd "$WT")
+  local -a supervisor_args=(python3 "$supervisor" --cwd "$WT"
+    --max-runtime-seconds "$MAX_RUNTIME_SECONDS" --status-file "$ART/lease.json")
   if [[ "$FS_SANDBOX_KIND" == sandbox-exec ]]; then
     supervisor_args+=(--darwin-sandbox-deny-canary "$SUPERVISOR_DENY_CANARY" \
       --darwin-sandbox-allow-canary "$SUPERVISOR_ALLOW_CANARY")
@@ -673,13 +676,14 @@ run_provider() {
 
 cmd_run() {
   local task="" explicit_model="${PI_MODEL:-}" sandbox="workspace-write" base="HEAD" apply=0 start end duration
+  local max_runtime_seconds=""
   ARCHETYPE="${LEGION_ARCHETYPE:-}"; PRESET_RUN_ID=""; THINKING="${LEGION_PI_THINKING:-${PI_THINKING:-}}"; PROVIDER_RC=0
   [[ "$ADAPTER_KIND" == hermes ]] && explicit_model="${HERMES_MODEL:-}"
   while [[ $# -gt 0 ]]; do case "$1" in
     --task) task="$2"; shift 2;;
     --task-file) [[ -r "$2" ]] || die "--task-file not readable: $2"; task="$(cat "$2")"; shift 2;; --model) explicit_model="$2"; shift 2;; --thinking) [[ "$ADAPTER_KIND" == pi ]] || die '--thinking is only supported by Pi'; THINKING="$2"; shift 2;;
     --archetype) ARCHETYPE="$2"; shift 2;; --repo) REPO="$2"; shift 2;; --base) base="$2"; shift 2;; --sandbox) sandbox="$2"; shift 2;;
-    --run-id) PRESET_RUN_ID="$2"; shift 2;; --apply) apply=1; shift;; --keep) KEEP=1; shift;; --quiet) QUIET=1; shift;; *) die "run: unknown arg '$1'";; esac; done
+    --run-id) PRESET_RUN_ID="$2"; shift 2;; --max-runtime-seconds) max_runtime_seconds="$2"; shift 2;; --apply) apply=1; shift;; --keep) KEEP=1; shift;; --quiet) QUIET=1; shift;; *) die "run: unknown arg '$1'";; esac; done
   # The OS sandbox matches canonical paths. On macOS, /tmp is a symlink to
   # /private/tmp, so a logical path would deny legitimate worktree writes.
   REPO="$(cd "${REPO:-$PWD}" && pwd -P)" || die 'run: repo does not exist'
@@ -688,6 +692,8 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"; [[ -n "$task" ]] || die 'run: empty task'
   [[ "$SANDBOX" == read-only ]] || legion_scan_task_text "$task"
   legion_require_top_level_executor "$ADAPTER_KIND" || return $?
+  legion_adapter_resolve_lease "$ADAPTER_KIND" "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
+  MAX_RUNTIME_SECONDS="$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
   [[ -z "$PRESET_RUN_ID" ]] || { declare -F legion_write_adapter_run_state >/dev/null 2>&1 || die 'run: --run-id requires lifecycle-state support'; legion_validate_run_id "$PRESET_RUN_ID" || die "run: invalid --run-id '$PRESET_RUN_ID'"; }
   MODEL="$explicit_model"; [[ -n "$MODEL" ]] || MODEL="$(legion_model_ref "${ADAPTER_KIND}_default")" || die "could not resolve ${ADAPTER_KIND}_default"
   if [[ "$ADAPTER_KIND" == pi && "$MODEL" =~ :(off|minimal|low|medium|high|xhigh|max)$ ]]; then
@@ -764,6 +770,10 @@ cmd_run() {
   fi
   MODEL="$actual_model"
   [[ -n "$usage" ]] || usage='{}'
+  local lease_reason=""
+  if legion_adapter_supervisor_timed_out "$ART/lease.json"; then
+    lease_reason="$(legion_adapter_lease_reason "$ART/lease.json")"
+  fi
   if [[ "$BROKER_RC" -ne 0 ]]; then
     status=failed
     result="${result:+$result$'\n'}handoff broker failed closed with exit $BROKER_RC; inspect $ART/broker.err"
@@ -781,6 +791,11 @@ cmd_run() {
   [[ "$status" != ok || -n "$result" ]] || status=error
   [[ "$SANDBOX" != read-only || ! -s "$diff" ]] || { status=error; result="${result:+$result$'\n'}Pi produced file changes during a read-only run; refusing to report ok."; }
   [[ "$status" != ok || -n "$result" || -s "$diff" ]] || { status=error; result="$ADAPTER_KIND completed without an authoritative terminal result or diff."; }
+  if [[ -n "$lease_reason" ]]; then
+    status=timed_out
+    KEEP=0
+    result="$lease_reason"
+  fi
   printf '%s\n' "$result" > "$ART/last-message.txt"
   # Only read provenance from a VERIFIED artifact. provider_files_ok is cleared
   # when the provider replaced or symlinked a parent-owned file, and the whole
@@ -814,7 +829,10 @@ cmd_run() {
   local terminal_status=succeeded failure_class=""
   if [[ "$status" != ok ]]; then
     terminal_status=failed
-    if [[ "$SANDBOX" == read-only && -s "$diff" ]]; then
+    if [[ "$status" == timed_out ]]; then
+      terminal_status=timed_out
+      failure_class=timed_out
+    elif [[ "$SANDBOX" == read-only && -s "$diff" ]]; then
       failure_class=policy_refused
     elif [[ "$PROVIDER_RC" -ne 0 ]]; then
       failure_class=provider
@@ -833,8 +851,10 @@ cmd_run() {
     "$([[ "$PROVIDER_RC" -eq 0 ]] || printf '%s' "$PROVIDER_RC")" "$result"
   local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg reason "$lease_reason" \
     --argjson cost_provenance "$cost_provenance" '{worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage,
-      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)} + $cost_provenance')"
+      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)} + $cost_provenance
+      + (if $reason=="" then {} else {lease_reason:$reason} end)')"
   emit_span "$status" "$duration" "$cost" "$usage" "$task" "$artifacts"
   if [[ "$apply" == 1 && "$status" == ok && -s "$diff" ]]; then
     if git -C "$REPO" apply --check "$diff"; then git -C "$REPO" apply "$diff"; else note "diff did not apply cleanly; left in $diff"; fi
@@ -843,11 +863,13 @@ cmd_run() {
   write_state "$status"; [[ -z "$PRESET_RUN_ID" ]] || legion_disarm_adopted_run_guard
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg executor "$ADAPTER_KIND" --arg model "$actual_model" --arg result "$result" --arg worktree "$report" --arg diff "$diff" --arg last "$ART/last-message.txt" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg reason "$lease_reason" \
     --argjson usage "$usage" --argjson cost "$cost" --argjson rc "$PROVIDER_RC" \
     '{run_id:$run,status:$status,executor:$executor,model:$model,result:$result,worktree:$worktree,diff_path:$diff,last_message_path:$last,usage:$usage,cost_usd:$cost,provider_exit:$rc,
-      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)}'
+      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)}
+      + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == ok ]] || exit 1
 }
 
-usage() { printf '%s — isolated, metered %s diff adapter.\n\nUsage: %s run --task TASK [--model MODEL] [--repo DIR] [--sandbox read-only|workspace-write] [--base REF] [--run-id ID] [--apply] [--keep]\n' "$ADAPTER" "$ADAPTER_KIND" "$ADAPTER"; }
+usage() { printf '%s — isolated, metered %s diff adapter.\n\nUsage: %s run --task TASK [--model MODEL] [--repo DIR] [--sandbox read-only|workspace-write] [--base REF] [--run-id ID] [--max-runtime-seconds N] [--apply] [--keep]\n' "$ADAPTER" "$ADAPTER_KIND" "$ADAPTER"; }
 case "${1:-}" in run) shift; cmd_run "$@";; ''|help|-h|--help) usage;; *) die "unknown command '$1'";; esac

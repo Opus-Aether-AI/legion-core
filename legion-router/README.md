@@ -108,9 +108,31 @@ and undeclared capabilities are incompatible. Cache identity includes the
 resolved executable path, its SHA-256 digest, and a fingerprint of only the
 registry-declared relevant environment/files. Binary or configuration changes
 therefore force a new local version probe. The cache and output retain hashes,
-not configuration values. This release establishes the shared primitive;
-individual adapter admission is migrated separately rather than overstating
-coverage before each boundary has refusal tests.
+not configuration values. Every registered adapter now applies this admission
+contract before launching its provider.
+
+## Child execution leases
+
+Every delegated child run has a hard, positive lease from the selected
+executor's `max_runtime_seconds` registry entry. Operators can shorten it, but
+cannot silently extend it:
+
+```bash
+legion-delegate run --executor codex --max-runtime-seconds 900 --task "..." --repo .
+```
+
+The same flag is supported by each direct adapter. Nested Pi/Hermes handoffs
+carry the parent cap through the authenticated broker and may lower it again.
+The deadline uses monotonic time. On expiry, the descendant-aware supervisor
+terminates the complete tracked tree with bounded TERM/KILL grace, including
+children that create a new session. The terminal result, span, run state,
+`legion.attempt.v1`, and `legion.failure.v1` all use `timed_out`; the failure is
+non-retryable and remains bound to the provider attempt. Timeout overrides
+`--keep`, and cleanup removes the child, nested broker, worktree, branch, and
+queued lifecycle before returning.
+
+This lease is deliberately child-only. It does not impose a wall-clock timeout
+on the primary session or its semantic-convergence lifecycle.
 
 ## DeepSeek Harness (`deepseek`, needs a profile you author)
 

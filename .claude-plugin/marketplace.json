@@ -4,6 +4,7 @@
     "name": "legion-core"
   },
   "version": "0.29.1",
+  "license": "BUSL-1.1",
   "metadata": {
     "description": "Legion Core — the model-agnostic execution layer for AI agents. Ships scoped delegation, multi-model fan-out, telemetry and cost reporting, doctor/self-learn/heal loops, and cross-harness setup for Claude Code, Codex, Cursor, opencode, DeepSeek Harness, Hermes, and Pi.",
     "repository": "https://github.com/Opus-Aether-AI/legion-core"
@@ -13,7 +14,7 @@
       "name": "legion-router",
       "source": "./legion-router",
       "description": "Legion's registry-driven router: scoped delegation across Claude, Codex, Cursor, opencode, DeepSeek Harness, Hermes, and Pi. Adapters return an isolated-worktree diff and evidence; usage is reported only where the provider publishes a usable contract. Ships `legion-delegate`, executor wrappers, generic GitHub issue intake via `legion-intake` (delegate, cursor, or a compatible custom worker), the loopback :8082 metering proxy, and the shared cost table.",
-      "version": "0.9.2",
+      "version": "0.10.0",
       "category": "agent-orchestration",
       "keywords": [
         "multi-model",
@@ -31,13 +32,13 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-observability",
       "source": "./legion-observability",
       "description": "See everything Legion does and close the self-learning loop. Unified legion.span.v1 telemetry, legion-report cost/success/latency, legion-bench deterministic repeated gates, legion-self-learn evidence/proposals, review-only legion-improve draft PRs, legion-trace, legion-otel-export, and legion-doctor verification.",
-      "version": "0.4.3",
+      "version": "0.5.0",
       "category": "infrastructure",
       "keywords": [
         "observability",
@@ -58,7 +59,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-orchestrate",
@@ -81,7 +82,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-run",
@@ -103,7 +104,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-setup",
@@ -126,7 +127,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-codex-mode",
@@ -148,7 +149,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-opencode-mode",
@@ -170,7 +171,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-hermes-mode",
@@ -192,7 +193,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-pi-mode",
@@ -213,7 +214,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-deepseek-mode",
@@ -234,7 +235,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     },
     {
       "name": "legion-code-intel",
@@ -256,7 +257,7 @@
         "name": "legion-core"
       },
       "repository": "https://github.com/Opus-Aether-AI/legion-core",
-      "license": "Apache-2.0"
+      "license": "BUSL-1.1"
     }
   ]
 }

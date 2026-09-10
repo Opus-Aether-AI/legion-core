@@ -59,7 +59,7 @@ _ENUM_FIELDS = {
     "billing_class": {"free", "local", "metered", "premium_credit", "unknown"},
     "usage_reliability": {"provider_reported", "estimated", "unavailable", "unknown"},
     "cost_reliability": {"provider_reported", "computed", "estimated", "unavailable", "unknown"},
-    "cancellation": {"none", "process", "process_group", "provider", "unknown"},
+    "cancellation": {"none", "process", "process_group", "process_tree", "provider", "unknown"},
 }
 
 

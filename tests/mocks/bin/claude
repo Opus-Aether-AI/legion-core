@@ -30,6 +30,9 @@ if [[ "${1:-}" == "-p" ]]; then
     if [[ "${MOCK_CLAUDE_WRITE:-0}" == "1" ]]; then
         printf 'unexpected\n' > claude-unexpected.txt
     fi
+    if [[ -n "${MOCK_CLAUDE_DELAY:-}" ]]; then
+        sleep "$MOCK_CLAUDE_DELAY"
+    fi
     # MOCK_CLAUDE_DECLINE_MODELS: comma-separated model ids that should answer the
     # way the real CLI answers for a model this account cannot run. The envelope
     # below is copied from actual `claude -p --output-format json --model <bogus>`

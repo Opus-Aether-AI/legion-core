@@ -6,7 +6,7 @@
     "name": "legion-core"
   },
   "homepage": "https://github.com/Opus-Aether-AI/legion-core/tree/main/legion-opencode-mode",
-  "license": "UNLICENSED",
+  "license": "BUSL-1.1",
   "keywords": [
     "opencode",
     "multi-model",

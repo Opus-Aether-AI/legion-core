@@ -38,6 +38,7 @@ fi
 # process itself exits 0. The adapter must treat the event as authoritative.
 if [[ "${MOCK_OPENCODE_ERROR_EVENT:-0}" == "1" ]]; then
   jq -cn '{type:"error",sessionID:"mock-session",error:{name:"APIError",data:{message:"The requested model is not supported.",statusCode:400,isRetryable:false}}}'
+  [[ -z "${MOCK_OPENCODE_ERROR_DELAY:-}" ]] || sleep "$MOCK_OPENCODE_ERROR_DELAY"
   exit 0
 fi
 

@@ -323,14 +323,17 @@ error_log_summary() {
 # Run codex exec for one model into $art files; sets the caller's $rc (dynamic scope).
 # Reads $sandbox $wt $effort $task $art from the calling function.
 run_codex() {
+  local lease_status="$art/lease-$attempt_ordinal.json"
+  local -a supervisor=(python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt"
+    --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" --status-file "$lease_status" --)
   set +e
   if [[ -n "$effort" ]]; then
-    printf '%s' "$task" | "$CODEX_BIN" exec --json -m "$1" -s "$sandbox" -C "$wt" \
+    printf '%s' "$task" | "${supervisor[@]}" "$CODEX_BIN" exec --json -m "$1" -s "$sandbox" -C "$wt" \
         --skip-git-repo-check -c "model_reasoning_effort=$effort" -o "$art/last-message.txt" - \
         >"$art/stream.jsonl" 2>"$art/codex.err" &
     CODEX_CHILD_PID=$!
   else
-    printf '%s' "$task" | "$CODEX_BIN" exec --json -m "$1" -s "$sandbox" -C "$wt" \
+    printf '%s' "$task" | "${supervisor[@]}" "$CODEX_BIN" exec --json -m "$1" -s "$sandbox" -C "$wt" \
         --skip-git-repo-check -o "$art/last-message.txt" - \
         >"$art/stream.jsonl" 2>"$art/codex.err" &
     CODEX_CHILD_PID=$!
@@ -368,7 +371,10 @@ run_sandcastle() {
     '{task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
       main_repo:$main_repo, artifact_dir:$artifact_dir, untrusted:$untrusted,
       effort:(if $effort=="" then null else $effort end)}' \
-    | "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
+    | python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+        --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+        --status-file "$art/lease-$attempt_ordinal.json" -- \
+        "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
   rc=${PIPESTATUS[1]}
   set -e
   # Surface the wrapper's stderr (e.g. the @ai-hero/sandcastle install hint on
@@ -598,7 +604,7 @@ write_run_state() {
       printf '{"repo_root":%s,"seen_at":"%s"}\n' "$(jq -Rn --arg r "$repo" '$r')" "$now" >> "$LEGION_REPOS_FILE"
     fi
   } 2>/dev/null || true
-  case "$phase" in ok|failed|error|over_budget|cancelled) prune_run_registry ;; esac
+  case "$phase" in ok|failed|error|over_budget|cancelled|timed_out) prune_run_registry ;; esac
   return 0
 }
 
@@ -617,7 +623,7 @@ prune_run_registry() {
     [[ -n "$f" ]] || continue
     phase="$(jq -r '.lifecycle.phase // ""' "$f" 2>/dev/null)"
     case "$phase" in
-      ok|failed|error|over_budget|cancelled) rm -f "$f" 2>/dev/null ;;
+      ok|failed|error|over_budget|cancelled|timed_out) rm -f "$f" 2>/dev/null ;;
     esac
   done < <(find "$LEGION_REGISTRY_DIR" -maxdepth 1 -name '*.json' -type f -mtime +"$retain_days" 2>/dev/null)
 }
@@ -808,8 +814,9 @@ dispatch_adapter() {
   # A cross-harness worker must use the sibling adapter from this Legion
   # install. Otherwise an older globally-installed `legion-cursor`/etc. on
   # PATH can reintroduce the old nested-delegation guard and break an approved
-  # handoff. Keep PATH precedence for top-level/custom adapter workflows.
-  if legion_delegated_context && [[ -x "$_self_dir/../bin/$adapter" ]]; then
+  # handoff. Top-level PATH resolution is retained only long enough to identify
+  # and fail closed on an adapter that cannot guarantee this install's lease.
+  if [[ -x "$_self_dir/../bin/$adapter" ]]; then
     adapter_bin="$_self_dir/../bin/$adapter"
   else
     adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
@@ -836,15 +843,12 @@ dispatch_adapter() {
   # Same evidence contract as the native path. The adapter emits its own span, so
   # this records the digest where the dispatcher can still see the exact bytes.
   record_task_evidence "$task" "$repo" "$RUN_ID" > "$repo/.legion/tasks/$RUN_ID.evidence.json" 2>/dev/null || true
-  # A globally installed adapter predating --task-file may still be first on
-  # PATH, and PATH precedence here is deliberate (see above). Feature-detect
-  # rather than assume: an old adapter keeps the argv path and its ARG_MAX
-  # ceiling, a current one takes the payload out of argv entirely.
+  # Feature-detect this install's task transport before constructing arguments.
   local -a aargs
-  # The declaration in executors.toml describes THIS install's adapter. PATH may
-  # deliberately resolve a different one -- substituting an adapter is a
-  # supported extension point -- and a foreign adapter has not agreed to any of
-  # this, so it keeps the argv path.
+  # The declaration in executors.toml describes THIS install's adapter. A
+  # foreign same-named adapter has not agreed to the lease contract and is
+  # rejected below. Prefer the trusted sibling even for top-level dispatches;
+  # a stale globally installed adapter must not make a source checkout unusable.
   local supports_task_file="false" is_own_adapter=0 sibling="$_self_dir/../bin/$adapter"
   if [[ -x "$sibling" ]] && [[ "$adapter_bin" -ef "$sibling" ]]; then
     is_own_adapter=1
@@ -856,6 +860,10 @@ dispatch_adapter() {
     note "⚠ adapter for '$ex' is not this install's; passing the task on argv (large tasks may fail)"
     aargs=(run --repo "$repo" --task "$task" --run-id "$RUN_ID")
   fi
+  if [[ "$is_own_adapter" -ne 1 ]]; then
+    die "executor '$ex' resolved to an unverified external adapter; a truthful child execution lease cannot be guaranteed"
+  fi
+  aargs+=(--max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS")
   [[ -n "$use_model" ]] && aargs+=(--model "$use_model")
   [[ "${QUIET:-0}" == "1" ]] && aargs+=(--quiet)
   case "$contract" in
@@ -918,7 +926,7 @@ dispatch_adapter() {
 cmd_run() {
   local model="" sandbox="" task="" repo="$PWD" base="HEAD" archetype="" effort=""
   local budget=0 do_apply=0 keep=0 detach=0 dirty_warn=1 preset_run_id=""
-  local untrusted=0 premium_consent="${LEGION_ALLOW_PREMIUM_CREDIT:-0}"
+  local untrusted=0 premium_consent="${LEGION_ALLOW_PREMIUM_CREDIT:-0}" max_runtime_seconds=""
   local forced_executor="" explicit_model="" detached_worker=0 sandbox_dev_pid_from_parent=""
   local -a scopes=()
   [[ "${LEGION_UNTRUSTED:-0}" == "1" ]] && untrusted=1
@@ -944,6 +952,7 @@ cmd_run() {
       --scope) scopes+=("$2"); shift 2 ;;
       --untrusted) untrusted=1; shift ;;
       --allow-premium-credit|--explicit-consent) premium_consent=1; shift ;;
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       --_detached-worker) detached_worker=1; shift ;;
       --_sandbox-dev-pid) sandbox_dev_pid_from_parent="$2"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
@@ -1042,6 +1051,8 @@ cmd_run() {
   fi
   route_preflight "${r_exec:-codex}" "$model" "$task" "$archetype" \
     "$([[ -n "$forced_executor" ]] && printf 1 || printf 0)" || return $?
+  legion_adapter_resolve_lease "${r_exec:-codex}" "$max_runtime_seconds" \
+    || die "$LEGION_ADAPTER_LEASE_REASON"
   # Dispatch by executor. `self` is the primary's own inline work (never delegated);
   # codex (or an unclassified task) uses the native codex path below; any other
   # registered coding executor runs through its adapter.
@@ -1133,7 +1144,8 @@ cmd_run() {
     local -a worker_args=(run --_detached-worker --run-id "$RUN_ID" --model "$model" \
       --sandbox "$sandbox" --reasoning-effort "$effort" --task-file "$worker_task_file" \
       --repo "$repo" --base "$base" \
-      --budget-tokens "$budget" --no-dirty-warn)
+      --budget-tokens "$budget" --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+      --no-dirty-warn)
     [[ -n "$archetype" ]] && worker_args+=(--archetype "$archetype")
     [[ -n "$forced_executor" ]] && worker_args+=(--executor "$forced_executor")
     [[ "$do_apply" -eq 1 ]] && worker_args+=(--apply)
@@ -1191,6 +1203,11 @@ cmd_run() {
     attempt_duration=$((attempt_end_ms-attempt_start_ms))
     local attempt_output_started=false attempt_usage attempt_cost attempt_usage_status=unknown
     local attempt_cost_status=unknown attempt_failure="" attempt_retryable=false attempt_terminal=succeeded
+    local attempt_timed_out=0 lease_status="$art/lease-$attempt_ordinal.json" lease_reason=""
+    if legion_adapter_supervisor_timed_out "$lease_status"; then
+      attempt_timed_out=1
+      lease_reason="$(legion_adapter_lease_reason "$lease_status")"
+    fi
     if jq -R -s -e '[split("\n")[] | fromjson? | select(
         .type == "item.completed" and .item.type == "agent_message" and ((.item.text // "") | length > 0))] | length > 0' \
         "$art/stream.jsonl" >/dev/null 2>&1; then
@@ -1204,7 +1221,9 @@ cmd_run() {
       attempt_usage_status=known
       cost_model_has_pricing "$attempt" && attempt_cost_status=known
     fi
-    if [[ "$rc" -eq 0 ]] && ! jq -R -s -e \
+    if [[ "$attempt_timed_out" -eq 1 ]]; then
+      attempt_terminal=timed_out; attempt_failure=timed_out
+    elif [[ "$rc" -eq 0 ]] && ! jq -R -s -e \
         '[split("\n")[] | fromjson? | select(.type == "turn.completed")] | length > 0' \
         "$art/stream.jsonl" >/dev/null 2>&1; then
       attempt_terminal=failed; attempt_failure=malformed_event
@@ -1224,7 +1243,9 @@ cmd_run() {
       "$([[ "$attempt_usage_status" == known ]] && printf codex-jsonl)" "$attempt_cost" \
       "$attempt_cost_status" "$([[ "$attempt_cost_status" == known ]] && printf legion-cost-table)" \
       "$attempt_failure" "$attempt_retryable" "$attempt_output_started" \
-      "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$(error_log_summary "$art/codex.err" "$art/codex.err")"
+      "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" \
+      "${lease_reason:-$(error_log_summary "$art/codex.err" "$art/codex.err")}"
+    [[ "$attempt_timed_out" -ne 1 ]] || break
     [[ "$rc" -eq 0 ]] && break
     if [[ "$attempt_output_started" == true ]]; then
       note "⚠ $attempt produced output before failing — fallback is suppressed"
@@ -1325,7 +1346,10 @@ cmd_run() {
   local total_tokens status="ok"
   total_tokens="$(jq -r '((.input_tokens//0)+(.output_tokens//0)+(.reasoning_output_tokens//0)) | floor' <<<"$usage" 2>/dev/null || echo 0)"
   [[ "$total_tokens" =~ ^[0-9]+$ ]] || total_tokens=0   # guard: never let a non-int abort the -gt test
-  if [[ "$rc" -ne 0 ]]; then
+  if legion_adapter_supervisor_timed_out "$art/lease-$attempt_ordinal.json"; then
+    status="timed_out"
+    keep=0
+  elif [[ "$rc" -ne 0 ]]; then
     status="failed"
   elif [[ "$attempt_contract_failure" -eq 1 ]]; then
     status="error"
@@ -1384,17 +1408,19 @@ cmd_run() {
   fi
 
   local lifecycle_status="completed"
-  case "$status" in failed|error) lifecycle_status="failed" ;; esac
+  case "$status" in failed|error|timed_out) lifecycle_status="failed" ;; esac
   write_run_artifact_status "$art" "$RUN_ID" "$lifecycle_status" "$wt_report" "" "$status"
 
   jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-0}" --arg run "$RUN_ID" --argjson rc "${rc:-0}" \
-    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" '
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg reason "$([[ "$status" == timed_out ]] && legion_adapter_lease_reason "$art/lease-$attempt_ordinal.json")" '
     {run_id:$run, status:$status, executor:"codex", model:$model, thread_id:$thread, codex_exit:$rc,
      worktree:$wt, diff_path:$diff, last_message_path:$last, error_log:$error_log, usage:$usage, cost_usd:$cost,
      preflight_receipt:$preflight,attempt_receipt:$attempt,
-     failure_receipt:(if $failure=="" then null else $failure end)}'
+     failure_receipt:(if $failure=="" then null else $failure end)}
+     + (if $reason=="" then {} else {reason:$reason} end)'
   # over_budget produced a usable diff (budget is advisory — codex can't be pre-empted),
   # so it exits 0; only a real failure/error is non-zero (M1: graceful degradation).
   case "$status" in
@@ -1526,7 +1552,9 @@ review_invoke_prompt() {
   info="$(python3 "$ROUTE_BIN" --executor-info "$ex" 2>/dev/null)" || return 127
   adapter="$(jq -r '.adapter // ""' <<<"$info")"
   [[ -n "$adapter" ]] || return 127
-  adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
+  # Use this install's adapter so the hard-lease contract cannot be weakened by
+  # an older same-named executable earlier on PATH.
+  adapter_bin="$_self_dir/../bin/$adapter"
   [[ -x "$adapter_bin" ]] || { printf 'reviewer adapter %s: command not found\n' "$adapter" >"$err"; return 127; }
   prompt="Act as a code reviewer. Review ONLY the unified diff below. Do not modify any file.
 Return ONLY a JSON object conforming to this schema, with no prose or code fences:
@@ -1566,7 +1594,8 @@ $(cat "$patch")
   local errexit_was_set=0
   case "$-" in *e*) errexit_was_set=1 ;; esac
   set +e
-  ( cd "$wt" && LEGION_REVIEW_HANDOFF=1 "$adapter_bin" run --repo "$wt" "${task_args[@]}" ${model:+--model "$model"} --quiet ) \
+  ( cd "$wt" && LEGION_REVIEW_HANDOFF=1 "$adapter_bin" run --repo "$wt" "${task_args[@]}" \
+      ${model:+--model "$model"} --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" --quiet ) \
     </dev/null >"$stream" 2>"$err"
   rc=$?
   [[ "$errexit_was_set" -eq 0 ]] || set -e
@@ -1778,7 +1807,7 @@ review_executor_unavailable() {
 cmd_review() {
   local RUN_KIND="review"
   local model="" base="" head="" repo="$PWD" archetype="" effort="" task=""
-  local max_attempts="${LEGION_REVIEW_MAX_ATTEMPTS:-2}"
+  local max_attempts="${LEGION_REVIEW_MAX_ATTEMPTS:-2}" max_runtime_seconds=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --model) model="$2"; shift 2 ;;
@@ -1788,6 +1817,7 @@ cmd_review() {
       --archetype) archetype="$2"; shift 2 ;;
       --reasoning-effort) effort="$2"; shift 2 ;;
       --max-attempts) max_attempts="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       --task) task="$2"; shift 2 ;;
       --task-file)
         [[ -r "$2" ]] || die "--task-file not readable: $2"
@@ -1907,6 +1937,8 @@ cmd_review() {
       reason="reviewer-unavailable"
       continue
     fi
+    legion_adapter_resolve_lease "$review_executor" "$max_runtime_seconds" \
+      || die "$LEGION_ADAPTER_LEASE_REASON"
     legion_activate_executor_context "$RUN_ID" "$review_executor"
     REVIEW_EXECUTOR_LABEL="$review_executor"
     REVIEW_RECEIPT_MODEL="$model"
@@ -1946,8 +1978,11 @@ cmd_review() {
     fi
     codex_review_args+=(--output-schema "$REVIEW_SCHEMA" -o "$attempt_verdict")
     if [[ "$review_kind" == "native" ]]; then
+      local attempt_lease="$art/attempt-$attempt.lease.json"
       set +e
-      ( cd "$wt" && "$CODEX_BIN" "${codex_review_args[@]}" ) \
+      ( cd "$wt" && python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+          --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+          --status-file "$attempt_lease" -- "$CODEX_BIN" "${codex_review_args[@]}" ) \
         </dev/null >"$attempt_stream" 2>"$attempt_err" &
       CODEX_CHILD_PID=$!
       wait "$CODEX_CHILD_PID"; rc=$?
@@ -1959,6 +1994,18 @@ cmd_review() {
         "$attempt_verdict" "$attempt_stream" "$attempt_err" "$review_prompt"
       rc=$?
       set -e
+    fi
+
+    if [[ "$review_kind" == "native" ]] && legion_adapter_supervisor_timed_out "$attempt_lease"; then
+      status="timed_out"
+      reason="$(legion_adapter_lease_reason "$attempt_lease")"
+      break
+    fi
+    if [[ "$review_kind" != "native" ]] \
+      && jq -e '.status == "timed_out"' "$attempt_stream" >/dev/null 2>&1; then
+      status="timed_out"
+      reason="$(jq -r '.reason // "child execution lease expired"' "$attempt_stream")"
+      break
     fi
 
     if [[ "$rc" -eq 0 ]]; then
@@ -2038,6 +2085,7 @@ cmd_review() {
     if [[ "$status" == "ok" ]]; then
       break
     fi
+    [[ "$status" != "timed_out" ]] || break
     if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
       note "⚠ reviewer '$review_executor' is unavailable (exit $rc); trying the next candidate"
       reason="reviewer-unavailable"
@@ -2105,7 +2153,7 @@ cmd_review() {
 
 # ── resume (continue a kept codex session for iterative refinement) ──
 cmd_resume() {
-  local run="" task="" model="" repo="$PWD" effort="" archetype=""
+  local run="" task="" model="" repo="$PWD" effort="" archetype="" max_runtime_seconds=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --run) run="$2"; shift 2 ;;
@@ -2116,6 +2164,7 @@ cmd_resume() {
       --model) model="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
       --reasoning-effort) effort="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
       *) die "resume: unknown arg '$1'" ;;
     esac
@@ -2162,20 +2211,24 @@ cmd_resume() {
   [[ -n "$model" ]] || model="$(cat "$art/model.txt" 2>/dev/null || true)"
   [[ -n "$model" ]] || model="$(legion_model_ref codex_workhorse)" || die "could not resolve codex_workhorse in models.toml"
   [[ -n "$effort" ]] || effort="xhigh"   # codex always at xhigh unless overridden
+  legion_adapter_resolve_lease codex "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
 
   RUN_ID="$run"
   legion_activate_executor_context "$RUN_ID" codex
   local start_ms end_ms dur rc=0
   start_ms="$(date +%s000)"
   note "→ codex exec resume $thread_id (run $run)"
+  local lease_status="$art/resume-lease.json"
+  local -a resume_supervisor=(python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt"
+    --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" --status-file "$lease_status" --)
   set +e
   if [[ -n "$effort" ]]; then
-    printf '%s' "$task" | ( cd "$wt" && "$CODEX_BIN" exec resume "$thread_id" --json \
+    printf '%s' "$task" | ( cd "$wt" && "${resume_supervisor[@]}" "$CODEX_BIN" exec resume "$thread_id" --json \
         -m "$model" -c "model_reasoning_effort=$effort" --skip-git-repo-check \
         -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err" &
     CODEX_CHILD_PID=$!
   else
-    printf '%s' "$task" | ( cd "$wt" && "$CODEX_BIN" exec resume "$thread_id" --json \
+    printf '%s' "$task" | ( cd "$wt" && "${resume_supervisor[@]}" "$CODEX_BIN" exec resume "$thread_id" --json \
         -m "$model" --skip-git-repo-check \
         -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err" &
     CODEX_CHILD_PID=$!
@@ -2187,26 +2240,42 @@ cmd_resume() {
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 
-  local usage cost diff_rc=0 status="ok"
+  local usage cost diff_rc=0 status="ok" reason="" wt_report="$wt"
   usage="$(codex_usage "$art/resume-stream.jsonl")"
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
   cleanup_generated_diff_noise "$wt"
   git -C "$wt" add -A 2>/dev/null || diff_rc=1
   git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
-  [[ "$rc" -ne 0 ]] && status="failed"
+  if legion_adapter_supervisor_timed_out "$lease_status"; then
+    status="timed_out"
+    reason="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$rc" -ne 0 ]]; then
+    status="failed"
+  fi
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
 
   emit_span "codex-resume" "$model" "$status" "$dur" "$cost" "$usage" "resume $run: $task" \
-    "$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" '{worktree:$wt, diff:$diff}')"
+    "$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg lease "$lease_status" \
+      '{worktree:$wt, diff:$diff, lease_receipt:$lease}')"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
+
+  if [[ "$status" == "timed_out" ]]; then
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+    git -C "$repo" branch -D "legion/delegate-$run" >/dev/null 2>&1 || true
+    with_git_worktree_lock "$repo" git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    wt_report="(removed after child execution lease timeout)"
+    write_run_artifact_status "$art" "$run" "failed" "$wt_report" "" "$status"
+  fi
 
   jq -cn --arg status "$status" --arg model "$model" --arg archetype "$archetype" \
     --arg thread "$thread_id" \
-    --arg wt "$wt" --arg diff "$art/diff.patch" --arg run "$run" \
+    --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg run "$run" --arg reason "$reason" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" '
     {run_id:$run, status:$status, model:$model,
      archetype:(if $archetype=="" then null else $archetype end),
-     thread_id:$thread, worktree:$wt, diff_path:$diff, usage:$usage, cost_usd:$cost}'
+     thread_id:$thread, worktree:$wt, diff_path:$diff, usage:$usage, cost_usd:$cost}
+     + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == "ok" ]] || exit 1
 }
 
@@ -2407,11 +2476,12 @@ default; any registered executor via --executor)
            [--sandbox read-only|workspace-write|docker|podman|vercel]
            [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
            [--base REF] [--budget-tokens N] [--scope PATHSPEC ...] [--detach] [--apply] [--keep]
-           [--no-dirty-warn] [--untrusted]
+           [--max-runtime-seconds N] [--no-dirty-warn] [--untrusted]
   review   [--archetype A | --model M] --base REF [--head REF] [--max-attempts N]
-           [--repo DIR] [--reasoning-effort E] [--task T]
+           [--repo DIR] [--reasoning-effort E] [--task T] [--max-runtime-seconds N]
            -> immutable-SHA structured verdict + terminal receipt
   resume   --run RUN_ID [--task T|stdin] [--model M] [--repo DIR] [--reasoning-effort E]
+           [--max-runtime-seconds N]
            -> continue a kept codex session (original run needs --keep)
   apply    --run RUN_ID [--repo DIR]
   status   --run RUN_ID [--repo DIR]
@@ -2422,6 +2492,7 @@ default; any registered executor via --executor)
 --archetype resolves model/sandbox/effort from routing.toml + models.toml. List them: legion-route --list
 --executor forces a specific harness (symmetric reverse-delegate). List them: legion-route --list-executors
 --scope may be repeated; it limits the captured diff to those git pathspecs.
+--max-runtime-seconds may lower, but never raise, the selected executor's registry default.
 --detach returns after setup and leaves the worker running in a new session; use status --run RUN_ID to poll it.
 EOF
       [[ "$cmd" == "" ]] && exit 2 || exit 0 ;;

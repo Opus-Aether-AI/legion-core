@@ -16,7 +16,7 @@
     "model": { "type": "string" },
     "archetype": { "type": ["string", "null"], "description": "Optional routing archetype used to select the executor/model." },
     "task": { "type": "string" },
-    "status": { "type": "string", "enum": ["ok", "failed", "error", "over_budget", "blocked"] },
+    "status": { "type": "string", "enum": ["ok", "failed", "error", "over_budget", "blocked", "timed_out"] },
     "target_type": { "type": ["string", "null"], "description": "Optional catalog entity type for self-learning attribution, e.g. plugin, skill, command, agent, hook, mcp." },
     "target_name": { "type": ["string", "null"], "description": "Optional catalog entity name for self-learning attribution." },
     "duration_ms": { "type": "number", "minimum": 0 },

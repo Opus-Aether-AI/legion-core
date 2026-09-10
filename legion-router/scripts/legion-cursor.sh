@@ -140,6 +140,7 @@ cmd_run() {
   local task="" model="${LEGION_CURSOR_MODEL:-${CURSOR_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 agent_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
+  local max_runtime_seconds=""
   local base_commit=""
 
   while [[ $# -gt 0 ]]; do
@@ -156,6 +157,7 @@ cmd_run() {
       --base) base="$2"; shift 2 ;;
       --sandbox) sandbox="$2"; shift 2 ;;
       --run-id) preset_run_id="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       --apply) do_apply=1; shift ;;
       --keep) keep=1; shift ;;
       --quiet) QUIET=1; shift ;;
@@ -194,6 +196,7 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
   legion_require_top_level_executor "cursor" || return $?
+  legion_adapter_resolve_lease cursor "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   if ! legion_adapter_preflight cursor "$art" "$sandbox" argv "$model" "" 0 "$CURSOR_AGENT_BIN"; then
@@ -266,10 +269,13 @@ cmd_run() {
   legion_activate_executor_context "$RUN_ID" cursor
   note "-> ${cmd[*]}"
   local started_at ended_at output_started=false
+  local lease_status="$art/lease.json"
   started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
-  ( cd "$wt" && "${cmd[@]}" >"$out_file" 2>"$err_file" )
+  ( cd "$wt" && python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+      --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+      --status-file "$lease_status" -- "${cmd[@]}" >"$out_file" 2>"$err_file" )
   rc=$?
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
@@ -288,7 +294,13 @@ cmd_run() {
   # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
   # had actually been done.
   git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
-  [[ "$rc" -ne 0 ]] && status="failed"
+  if legion_adapter_supervisor_timed_out "$lease_status"; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$rc" -ne 0 ]]; then
+    status="failed"
+  fi
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
   if [[ "$sandbox" == "read-only" && -s "$art/diff.patch" && "$status" == "ok" ]]; then
     status="error"
@@ -309,7 +321,10 @@ cmd_run() {
   local terminal_status=succeeded failure_class=""
   if [[ "$status" != ok ]]; then
     terminal_status=failed
-    if [[ "$sandbox" == read-only && -s "$art/diff.patch" ]]; then
+    if [[ "$status" == timed_out ]]; then
+      terminal_status=timed_out
+      failure_class=timed_out
+    elif [[ "$sandbox" == read-only && -s "$art/diff.patch" ]]; then
       failure_class=policy_refused
     elif [[ "$rc" -ne 0 ]]; then
       failure_class=provider
@@ -363,11 +378,13 @@ cmd_run() {
     --arg result "$result" --arg auth_note "$auth_note" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg reason "$([[ "$status" == timed_out ]] && legion_adapter_lease_reason "$lease_status")" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"cursor", model:$model, cursor_exit:$rc,
      result:$result, worktree:$wt, diff_path:$diff, last_message_path:$last,
      usage:$usage, cost_usd:$cost,preflight_receipt:$preflight,attempt_receipt:$attempt,
      failure_receipt:(if $failure=="" then null else $failure end)}
+    + (if $reason=="" then {} else {reason:$reason} end)
     + (if $auth_note == "" then {} else {auth_error:$auth_note} end)'
   [[ "$status" == "ok" ]] || exit 1
 }
@@ -377,7 +394,7 @@ usage() {
 legion-cursor — delegate a scoped task to Cursor Agent headless.
 
 Usage:
-  legion-cursor run --task "TASK" | --task-file F [--model MODEL] [--archetype NAME] [--repo DIR] [--base REF] [--run-id ID]
+  legion-cursor run --task "TASK" | --task-file F [--model MODEL] [--archetype NAME] [--repo DIR] [--base REF] [--run-id ID] [--max-runtime-seconds N]
                     [--sandbox read-only|workspace-write] [--apply] [--keep] [--quiet]
   legion-cursor run [--repo DIR] < task.txt
 

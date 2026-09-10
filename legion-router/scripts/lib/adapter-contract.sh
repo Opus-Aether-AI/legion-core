@@ -24,11 +24,67 @@ LEGION_ADAPTER_ATTEMPT_PATH=""
 LEGION_ADAPTER_FAILURE_PATH=""
 # shellcheck disable=SC2034
 LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID=""
+# Effective child-only hard lease resolved from the executor registry.
+LEGION_ADAPTER_MAX_RUNTIME_SECONDS=""
+LEGION_ADAPTER_LEASE_REASON=""
+LEGION_ADAPTER_SUPERVISOR=""
 
 legion_adapter_contract_root() {
   local lib_dir
   lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   cd "$lib_dir/../../.." && pwd
+}
+
+legion_adapter_resolve_lease() {
+  local executor="$1" requested="${2:-}" root route info declared
+  root="$(legion_adapter_contract_root)"
+  route="$root/legion-router/scripts/legion-route.py"
+  LEGION_ADAPTER_LEASE_REASON=""
+  if [[ ! -f "$route" ]] || ! info="$(python3 "$route" --executor-info "$executor" 2>/dev/null)"; then
+    LEGION_ADAPTER_LEASE_REASON="executor '$executor' has no readable lease declaration"
+    return 1
+  fi
+  declared="$(jq -r '.max_runtime_seconds // empty' <<<"$info" 2>/dev/null || true)"
+  if [[ ! "$declared" =~ ^[1-9][0-9]*$ ]]; then
+    LEGION_ADAPTER_LEASE_REASON="executor '$executor' has no positive max_runtime_seconds"
+    return 1
+  fi
+  if [[ -n "$requested" ]]; then
+    if [[ ! "$requested" =~ ^[1-9][0-9]*$ ]]; then
+      LEGION_ADAPTER_LEASE_REASON="--max-runtime-seconds must be a positive integer"
+      return 1
+    fi
+    if [[ "${#requested}" -gt "${#declared}" ||
+          ( "${#requested}" -eq "${#declared}" && "$requested" > "$declared" ) ]]; then
+      LEGION_ADAPTER_LEASE_REASON="--max-runtime-seconds may lower but not raise executor '$executor' default ($declared)"
+      return 1
+    fi
+    LEGION_ADAPTER_MAX_RUNTIME_SECONDS="$requested"
+  else
+    LEGION_ADAPTER_MAX_RUNTIME_SECONDS="$declared"
+  fi
+  LEGION_ADAPTER_SUPERVISOR="$root/legion-router/scripts/legion-process-supervisor.py"
+  if [[ ! -x "$LEGION_ADAPTER_SUPERVISOR" ]]; then
+    LEGION_ADAPTER_LEASE_REASON="descendant-aware process supervisor is unavailable"
+    return 1
+  fi
+}
+
+legion_adapter_supervisor_timed_out() {
+  local status_file="$1"
+  [[ -f "$status_file" ]] \
+    && jq -e '.schema == "legion.child-execution-lease.v1" and .status == "timed_out"' \
+      "$status_file" >/dev/null 2>&1
+}
+
+legion_adapter_lease_reason() {
+  local status_file="$1" reason=""
+  reason="$(jq -r '.reason // empty' "$status_file" 2>/dev/null || true)"
+  if [[ -n "$reason" ]]; then
+    printf '%s' "$reason"
+  else
+    printf 'child execution lease expired after %s seconds' "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
+  fi
 }
 
 legion_adapter_preflight() {

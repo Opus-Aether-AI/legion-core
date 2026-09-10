@@ -45,6 +45,24 @@ make_test_repo() {
     grep -Eq '^claude active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
+@test "legion-claude: timeout never applies a partial diff" {
+    local repo attempt failure
+    repo="$(make_test_repo lease-partial)"
+
+    MOCK_CLAUDE_WRITE=1 MOCK_CLAUDE_DELAY=30 \
+      run "$LEGION_CLAUDE" run --task "make a change and wait" --repo "$repo" \
+        --max-runtime-seconds 1 --apply --keep --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "timed_out" and (.reason | contains("expired after 1 seconds"))'
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    failure="$(echo "$output" | jq -r .failure_receipt)"
+    jq -e '.terminal_status == "timed_out" and .failure.class == "timed_out"' "$attempt"
+    jq -e '.class == "timed_out" and .retryable == false' "$failure"
+    [ ! -e "$repo/claude-unexpected.txt" ]
+    [[ "$(echo "$output" | jq -r .worktree)" == *"removed"* ]]
+}
+
 @test "legion-claude: adopts a preallocated run id and closes its queued lifecycle" {
     local repo; repo="$(make_test_repo adopted-id)"
     local run_id="queued-slice-claude"

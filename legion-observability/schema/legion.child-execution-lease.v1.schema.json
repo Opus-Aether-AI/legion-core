@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/legion-observability/schema/legion.child-execution-lease.v1.schema.json",
+  "title": "legion.child-execution-lease.v1",
+  "description": "The authoritative terminal outcome of one descendant-aware child execution lease.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "reason", "max_runtime_seconds"],
+  "properties": {
+    "schema": {"const": "legion.child-execution-lease.v1"},
+    "status": {"enum": ["completed", "cancelled", "timed_out", "cleanup_failed"]},
+    "reason": {"type": "string", "minLength": 1},
+    "max_runtime_seconds": {"type": "integer", "minimum": 1}
+  }
+}

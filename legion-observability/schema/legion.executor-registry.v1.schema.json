@@ -15,6 +15,7 @@
   "$defs": {
     "executor": {
       "type": "object",
+      "required": ["cancellation", "max_runtime_seconds"],
       "properties": {
         "kind": {"type": "string"}, "adapter": {"type": "string"},
         "contract": {"enum": ["", "native", "diff", "prompt"]},
@@ -40,7 +41,7 @@
         "usage_source": {"type": "string"},
         "cost_reliability": {"enum": ["provider_reported", "computed", "estimated", "unavailable", "unknown"]},
         "cost_source": {"type": "string"},
-        "cancellation": {"enum": ["none", "process", "process_group", "provider", "unknown"]},
+        "cancellation": {"enum": ["none", "process", "process_group", "process_tree", "provider", "unknown"]},
         "max_runtime_seconds": {"type": "integer", "minimum": 1}
       }
     },

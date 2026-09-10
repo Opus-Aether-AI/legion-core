@@ -52,7 +52,7 @@ on_signal() {
     wait "$CHILD_PID" 2>/dev/null || child_rc=$?
     CHILD_PID=""
   fi
-  legion_adapter_write_signal_receipt "$signum"
+  legion_adapter_write_signal_receipt "$signum" "$child_rc" "$SIGNAL_LEASE_STATUS"
   if legion_adapter_supervisor_cleanup_failed "$SIGNAL_LEASE_STATUS" \
       || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
         '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
@@ -71,8 +71,10 @@ on_signal() {
         "$base" "$archetype" "" || true
       legion_disarm_adopted_run_guard
     fi
+    legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
     exit 70
   fi
+  legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
   exit $((128+signum))
 }
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit' EXIT

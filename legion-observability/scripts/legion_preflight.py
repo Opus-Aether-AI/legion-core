@@ -292,9 +292,20 @@ def preflight(executor, *, registry_path=None, models_path=None, cache_dir=None,
                 "identity": None, "cache": {"hit": False, "key": None}, "compatibility": {}}
     checks, failures = _compatibility(executor, config, request, env, models)
     missing_config = checks.get("configuration", {}).get("status") == "unavailable"
+    incompatible = any(
+        isinstance(check, dict) and check.get("status") == "incompatible"
+        for check in checks.values()
+    )
     if failures:
         return {"schema": SCHEMA, "checked_at": checked_at, "executor": executor,
-                "status": "unavailable" if missing_config else "incompatible",
+                # Policy incompatibility is terminal even when the same
+                # executor is also unavailable. Callers may fall through on a
+                # typed unavailable result, so allowing missing credentials to
+                # mask an unsupported model/sandbox/effort/billing/configuration
+                # request could spend through a different provider.
+                "status": "incompatible" if incompatible else (
+                    "unavailable" if missing_config else "incompatible"
+                ),
                 "reason": "; ".join(failures), "identity": None,
                 "cache": {"hit": False, "key": None}, "compatibility": checks}
     executable = _resolve_binary(config.get("binary") or executor, env)

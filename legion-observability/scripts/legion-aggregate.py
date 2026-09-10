@@ -167,19 +167,23 @@ def _archetype_group(span):
     return "not_applicable"
 
 
-def _classification_payload(total, classified, unclassified, unclassified_cost):
+def _classification_payload(total, classified, unclassified, unclassified_cost_group):
+    cost = _finalize_group(unclassified_cost_group)
     return {
         "delegated_runs": total,
         "classified_runs": classified,
         "unclassified_runs": unclassified,
         "classification_rate": round(classified / total, 4) if total else 0,
-        "unclassified_cost_usd": round(unclassified_cost, 6),
+        "unclassified_cost_usd": cost["cost_usd"],
+        "unclassified_cost_status": cost["cost_status"],
+        "unclassified_known_cost_usd": cost["known_cost_usd"],
+        "unclassified_known_cost_runs": cost["known_cost_runs"],
     }
 
 
 def classification_summary(spans):
     total = classified = unclassified = 0
-    unclassified_cost = 0.0
+    unclassified_cost = _new_group()
     for span in spans:
         if not is_delegated_executor(span.get("executor")):
             continue
@@ -189,7 +193,8 @@ def classification_summary(spans):
             classified += 1
         else:
             unclassified += 1
-            unclassified_cost += _num(span.get("cost_usd", 0))
+            unclassified_cost["count"] += 1
+            _record_provenance(unclassified_cost, span)
     return _classification_payload(
         total, classified, unclassified, unclassified_cost
     )
@@ -215,7 +220,7 @@ def aggregate(spans, by="executor", trace=""):
     spans, trace_meta = filter_trace(spans, trace)
     groups = {}
     delegated = classified = unclassified = 0
-    unclassified_cost = 0.0
+    unclassified_cost = _new_group()
     for s in spans:
         if _is_synthetic_opus_baseline(s):
             continue
@@ -226,7 +231,8 @@ def aggregate(spans, by="executor", trace=""):
                 classified += 1
             else:
                 unclassified += 1
-                unclassified_cost += _num(s.get("cost_usd", 0))
+                unclassified_cost["count"] += 1
+                _record_provenance(unclassified_cost, s)
         key = _archetype_group(s) if by == "archetype" else (s.get(by) or "unknown")
         g = groups.setdefault(key, _new_group())
         g["count"] += 1

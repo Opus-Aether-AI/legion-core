@@ -76,3 +76,31 @@ def test_unknown_and_partial_costs_are_not_rendered_as_free():
     assert ">=$0.2500" in tui
     assert "unknown" in html
     assert "&gt;=$0.2500" in html
+
+
+def test_unclassified_partial_cost_renders_as_a_lower_bound():
+    report = _report()
+    report["classification"].update({
+        "unclassified_cost_usd": None,
+        "unclassified_cost_status": "partial",
+        "unclassified_known_cost_usd": 0.75,
+        "unclassified_known_cost_runs": 1,
+    })
+
+    tui = render.tui(report)
+    rendered_html = render.to_html(report)
+    assert "unclassified cost >=$0.7500" in tui
+    assert "&gt;=$0.7500" in rendered_html
+
+
+def test_unclassified_unknown_cost_is_not_rendered_as_free():
+    report = _report()
+    report["classification"].update({
+        "unclassified_cost_usd": None,
+        "unclassified_cost_status": "unknown",
+        "unclassified_known_cost_usd": None,
+        "unclassified_known_cost_runs": 0,
+    })
+
+    assert "unclassified cost unknown" in render.tui(report)
+    assert "<strong>unknown</strong>" in render.to_html(report)

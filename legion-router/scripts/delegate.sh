@@ -2193,26 +2193,31 @@ $(cat "$patch")
     review_prompt_containment_reason="$adapter_reason (evidence: ${review_lease_receipt:-$receipt_dir/lease.json}; worktree retained: $wt)"
     rc=70
   fi
-  local preflight_no_spend_unavailable=0
+  local preflight_no_spend_status=""
   if [[ -n "$review_preflight_receipt" && -z "$source_attempt" && -z "$source_failure" \
         && -z "$source_lease" ]] && jq -e --arg executor "$ex" --arg model "$model" \
         --arg sandbox "$review_sandbox" '
       .schema == "legion.preflight.v1" and .executor == $executor
-      and .status == "unavailable" and .identity == null
-      # Binary-unavailable preflight exits before compatibility probing, so its
-      # compatibility object is empty. If those fields are present they must
-      # still agree with this exact candidate; absence is the expected no-launch
-      # form and cannot conceal a paid attempt because all execution receipts
-      # and the lease are required to be absent above.
-      and ((.compatibility.model.requested? // $model) == $model)
-      and ((.compatibility.sandbox.requested? // $sandbox) == $sandbox)
+      and (
+        (.status == "unavailable" and .identity == null
+         # Binary-unavailable preflight exits before compatibility probing, so
+         # these fields may be absent.
+         and ((.compatibility.model.requested? // $model) == $model)
+         and ((.compatibility.sandbox.requested? // $sandbox) == $sandbox))
+        or
+        (.status == "incompatible" and (.identity | type) == "object"
+         # Authenticated incompatibility has completed compatibility probing;
+         # bind the refusal to this exact candidate and sandbox.
+         and .compatibility.model.requested == $model
+         and .compatibility.sandbox.requested == $sandbox)
+      )
     ' "$review_preflight_receipt" >/dev/null 2>&1; then
-    preflight_no_spend_unavailable=1
+    preflight_no_spend_status="$(jq -r '.status' "$review_preflight_receipt")"
   fi
   if [[ -z "$review_preflight_receipt" || -z "$review_attempt_receipt" || -z "$review_lease_receipt" ||
         ( -n "$source_failure" && -z "$review_failure_receipt" ) ]]; then
     receipt_contract_failed=1
-    if [[ "$preflight_no_spend_unavailable" -ne 1 ]]; then
+    if [[ -z "$preflight_no_spend_status" ]]; then
       review_containment_failed=1
       LEGION_WT_KEEP=1
       review_prompt_containment_reason="prompt reviewer launched or claimed execution without a valid durable attempt/lease receipt (evidence: $receipt_dir; worktree retained: $wt)"
@@ -2765,6 +2770,16 @@ cmd_review() {
       rc=$?
       review_track_attempt_receipt "$review_attempt_receipt"
       set -e
+      if [[ -n "$review_preflight_receipt" && -z "$review_attempt_receipt" ]] \
+          && jq -e '.schema == "legion.preflight.v1" and .status == "incompatible"' \
+            "$review_preflight_receipt" >/dev/null 2>&1; then
+        attempt=$((attempt - 1))
+        REVIEW_RECEIPT_ATTEMPT="$attempt"
+        status="refused"
+        reason="$(jq -r '.reason // "adapter-preflight-incompatible"' \
+          "$review_preflight_receipt")"
+        break
+      fi
     fi
 
     if [[ "$review_kind" == "native" ]] && legion_adapter_supervisor_cleanup_failed "$attempt_lease"; then

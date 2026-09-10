@@ -143,6 +143,43 @@ SH
     export PATH="$shim_dir:$PATH"
 }
 
+install_authenticated_incompatible_preflight_shim() {
+    local shim_dir="$TEST_TMPDIR/authenticated-incompatible-python" real_python
+    local refused_executor="$1" refused_model="$2"
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion_preflight.py ]]; then
+  executor="" model="" sandbox=""
+  for ((i=1; i <= $#; i++)); do
+    case "${!i}" in
+      --executor) j=$((i + 1)); executor="${!j}" ;;
+      --model) j=$((i + 1)); model="${!j}" ;;
+      --sandbox) j=$((i + 1)); sandbox="${!j}" ;;
+    esac
+  done
+  if [[ "$executor" == "$LEGION_TEST_REFUSED_EXECUTOR" \
+        && "$model" == "$LEGION_TEST_REFUSED_MODEL" ]]; then
+    jq -cn --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" '
+      {schema:"legion.preflight.v1",executor:$executor,status:"incompatible",
+       reason:"authenticated model incompatibility",
+       identity:{config_sha256:"fixture-config",executable_path:"/fixture/provider"},
+       cache:{hit:false,key:"fixture-cache"},
+       compatibility:{model:{requested:$model,status:"unsupported"},
+                      sandbox:{requested:$sandbox,status:"supported"}}}'
+    exit 1
+  fi
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export LEGION_TEST_REFUSED_EXECUTOR="$refused_executor"
+    export LEGION_TEST_REFUSED_MODEL="$refused_model"
+    export PATH="$shim_dir:$PATH"
+}
+
 # ── codex-json parser ────────────────────────────────────────────────
 @test "codex-json: thread-id from fixture" {
     run "$LIB/codex-json.sh" thread-id "$FIXTURE"
@@ -2151,6 +2188,32 @@ $run_error" ]
   [ "$(grep -c '^codex exec ' "$MOCK_CALL_LOG")" -eq 2 ]
 }
 
+@test "Claude does not re-emit a declined attempt for a later no-launch model" {
+  local repo art run_id
+  repo="$(make_test_repo claude-decline-no-launch)"
+  install_authenticated_incompatible_preflight_shim claude model-b
+
+  MOCK_CLAUDE_DECLINE_MODELS=model-declines \
+    LEGION_CLAUDE_FALLBACK_MODELS=model-b \
+    run "$REPO_ROOT/legion-router/bin/legion-claude" run \
+      --model model-declines --no-fallback --task x --repo "$repo" --quiet
+
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.status == "failed" and .reason == "admission_refused"
+    and .model == "model-b"'
+  art="$(dirname "$(echo "$output" | jq -r .attempt_receipt)")"
+  run_id="$(echo "$output" | jq -r .run_id)"
+  [ -f "$art/attempt-1.json" ]
+  [ ! -e "$art/attempt-2.json" ]
+  [ "$(grep -Ec '^claude -p ' "$MOCK_CALL_LOG")" -eq 1 ]
+  jq -s -e --arg run "$run_id" '
+    [.[] | select(.run_id == $run and .executor == "claude")] as $spans
+    | ($spans | length) == 1
+      and $spans[0].model == "model-declines"
+      and $spans[0].artifacts.provider_attempt == true
+  ' "$LEGION_TELEMETRY_DIR"/*.jsonl
+}
+
 @test "delegate run: inherited Codex deadline can lower but never be raised" {
   local repo inherited started elapsed
   repo="$(make_test_repo codex-inherited-lease)"
@@ -2941,6 +3004,27 @@ PY
       "$(echo "$output" | jq -r .preflight_receipt)"
     assert_mock_not_called codex
     assert_mock_not_called agent
+}
+
+@test "delegate review: authenticated prompt incompatibility is a zero-attempt refusal" {
+    local repo preflight
+    repo="$(make_test_repo review-prompt-admission-incompatible)"
+    install_authenticated_incompatible_preflight_shim cursor "$CURSOR_DEFAULT"
+
+    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+      --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "refused" and .attempts == 0
+      and .reason == "authenticated model incompatibility"
+      and .attempt_receipt == null and .failure_receipt == null
+      and (.preflight_receipt | contains("/prompt-review-"))'
+    preflight="$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"
+      and .status == "incompatible" and (.identity | type) == "object"' "$preflight"
+    assert_mock_not_called agent
+    assert_mock_not_called opencode
+    assert_mock_not_called claude
 }
 
 @test "delegate review: substantive route refusal stops reviewer selection" {

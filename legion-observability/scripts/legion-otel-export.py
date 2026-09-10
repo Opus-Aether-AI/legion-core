@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -32,6 +33,48 @@ def _hex(seed, nbytes):
     return hashlib.sha256(seed.encode()).hexdigest()[: nbytes * 2]
 
 
+def _positive_int(value):
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
+
+
+def _attempt_identity(span):
+    """Return stable provider-attempt identity while preserving legacy IDs."""
+    attempt_id = span.get("attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id.strip():
+        attempt_id = ""
+    else:
+        attempt_id = attempt_id.strip()
+
+    ordinal = _positive_int(span.get("attempt_ordinal"))
+    if ordinal is None:
+        # Accept early producers that copied the receipt field verbatim.
+        ordinal = _positive_int(span.get("ordinal"))
+
+    receipt = ""
+    artifacts = span.get("artifacts")
+    if isinstance(artifacts, dict):
+        candidate = artifacts.get("attempt_receipt")
+        if isinstance(candidate, str) and candidate.strip():
+            receipt = candidate.strip()
+            if ordinal is None:
+                match = re.search(r"(?:^|/)attempt-(\d+)\.json$", receipt)
+                if match:
+                    ordinal = int(match.group(1))
+
+    parts = []
+    if attempt_id:
+        parts.append(f"id:{attempt_id}")
+    if ordinal is not None:
+        parts.append(f"ordinal:{ordinal}")
+    if receipt:
+        parts.append(f"receipt:{receipt}")
+    return "|".join(parts), attempt_id, ordinal
+
+
 def _ts_nanos(ts):
     if not ts:
         return 0
@@ -46,7 +89,11 @@ def _ts_nanos(ts):
 
 def span_to_otlp(s):
     trace_id = _hex(str(s.get("trace_id") or s.get("run_id") or "legion"), 16)
-    span_id = _hex(f'{s.get("run_id", "")}{s.get("ts", "")}{s.get("executor", "")}', 8)
+    legacy_seed = f'{s.get("run_id", "")}{s.get("ts", "")}{s.get("executor", "")}'
+    attempt_identity, attempt_id, attempt_ordinal = _attempt_identity(s)
+    span_id = _hex(
+        legacy_seed if not attempt_identity else f"{legacy_seed}\0{attempt_identity}", 8
+    )
     start = _ts_nanos(s.get("ts"))
     dur = _num(s.get("duration_ms"))
     attrs = []
@@ -57,6 +104,10 @@ def span_to_otlp(s):
     a("legion.executor", str(s.get("executor", "")))
     a("legion.model", str(s.get("model", "")))
     a("legion.status", str(s.get("status", "")))
+    if attempt_id:
+        a("legion.attempt_id", attempt_id)
+    if attempt_ordinal is not None:
+        a("legion.attempt_ordinal", attempt_ordinal, "intValue")
     cost_status = str(s.get("cost_status") or (
         "known" if _nonnegative_number(s.get("cost_usd")) else "unknown"
     ))

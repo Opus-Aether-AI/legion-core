@@ -20,6 +20,15 @@ TOKEN_FIELDS = (
     "output_tokens",
     "reasoning_output_tokens",
 )
+TERMINAL_PHASES = {
+    "blocked",
+    "containment_failed",
+    "error",
+    "failed",
+    "ok",
+    "over_budget",
+    "timed_out",
+}
 TOOLLESS_ITEM_TYPES = {"agent_message", "reasoning"}
 FILE_ITEM_TYPES = {"file_change", "patch"}
 PATH_KEYS = {
@@ -442,6 +451,24 @@ def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _durable_attempt_count(records: list[dict[str, Any]]) -> int:
+    """Count durable billable attempts without counting rollup-only spans."""
+    count = 0
+    for record in records:
+        status = _span_cost_status(record)
+        if status == "not_applicable":
+            continue
+        explicit = int(_num(record.get("known_cost_attempts")))
+        if status == "known":
+            count += max(1, explicit)
+        elif status == "partial":
+            # Partial means at least one known and one unknown leaf attempt.
+            count += max(2, explicit + 1)
+        else:
+            count += 1
+    return count
+
+
 def load_span_costs(spans_dir: str) -> dict[str, dict[str, Any]]:
     """run_id -> provenance-aware cost summary from the DURABLE spans. The stream lives in the
     repo's ephemeral .legion/runs/ and gets cleaned; the span (in
@@ -468,7 +495,12 @@ def load_span_costs(spans_dir: str) -> dict[str, dict[str, Any]]:
                         spans.setdefault(rid, []).append(span)
         except OSError:
             continue
-    return {run_id: _cost_summary(records) for run_id, records in spans.items()}
+    summaries = {}
+    for run_id, records in spans.items():
+        summary = _cost_summary(records)
+        summary["attempt_count"] = _durable_attempt_count(records)
+        summaries[run_id] = summary
+    return summaries
 
 
 def enrich_run(
@@ -477,12 +509,27 @@ def enrich_run(
     costs: dict[str, Any],
     span_costs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Attach activity and cost to a registry record. Cost prefers the run's own
-    stream usage; when the stream is gone, falls back to the durable span cost."""
+    """Attach activity and provenance-aware cost to a registry record.
+
+    A live or single-attempt run uses its stream estimate. Once a retried run is
+    terminal, its durable per-attempt spans are the authoritative cost record.
+    """
     activity = _parse_streams(_stream_paths(run_dir)) if run_dir else _empty_activity()
     model = record.get("model") or record.get("resolved_model")
     run_id = record.get("run_id")
-    if activity != _empty_activity():
+    durable = (span_costs or {}).get(run_id)
+    durable_attempt_count = 0
+    durable_metering = None
+    if isinstance(durable, dict):
+        durable_metering = dict(durable)
+        durable_attempt_count = int(_num(durable_metering.pop("attempt_count", 0)))
+    phase = _string(_dict(record.get("lifecycle")).get("phase"))
+    prefer_durable = (
+        phase in TERMINAL_PHASES
+        and durable_metering is not None
+        and durable_attempt_count > 1
+    )
+    if activity != _empty_activity() and not prefer_durable:
         stream_cost = round(cost_for(model, activity.get("usage"), costs), 6)
         metering = {
             "cost_usd": stream_cost,
@@ -491,9 +538,8 @@ def enrich_run(
             "known_cost_attempts": 1,
         }
     else:
-        durable = (span_costs or {}).get(run_id)
-        if isinstance(durable, dict):
-            metering = dict(durable)
+        if durable_metering is not None:
+            metering = durable_metering
         elif isinstance(durable, (int, float)) and not isinstance(durable, bool):
             metering = {"cost_usd": round(float(durable), 6), "cost_status": "known",
                         "known_cost_usd": round(float(durable), 6), "known_cost_attempts": 1}

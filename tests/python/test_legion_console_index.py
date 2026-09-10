@@ -163,6 +163,28 @@ def test_derive_status_state_machine():
     ) == "failed"
 
 
+def test_timeout_and_containment_failure_are_terminal_failures():
+    for status in ("timed_out", "containment_failed"):
+        record = _record(f"run-{status}", phase=status)
+        span = _span(f"run-{status}", status=status)
+        assert indexer.derive_status(
+            record,
+            span,
+            alive=False,
+            worktree_exists=True,
+            diff_exists=True,
+        ) == "failed"
+
+        running_record = _record(f"stale-{status}", phase="running")
+        assert indexer.derive_status(
+            running_record,
+            span,
+            alive=False,
+            worktree_exists=True,
+            diff_exists=False,
+        ) == "failed"
+
+
 def test_load_spans_latest_ts_wins_and_sums_cost_and_tokens(tmp_path):
     spans_dir = tmp_path / "spans"
     _write_spans(

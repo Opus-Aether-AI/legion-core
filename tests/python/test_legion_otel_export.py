@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import json
 import os
 import sys
 
@@ -32,6 +33,46 @@ def test_span_to_otlp_failed_status_and_parent():
 
 def test_trace_id_is_deterministic():
     assert oe.span_to_otlp(_SPAN)["traceId"] == oe.span_to_otlp(_SPAN)["traceId"]
+
+
+def test_legacy_span_id_remains_byte_compatible_without_attempt_identity():
+    expected = oe._hex(f'{_SPAN["run_id"]}{_SPAN["ts"]}{_SPAN["executor"]}', 8)
+    assert oe.span_to_otlp(_SPAN)["spanId"] == expected
+
+
+def test_provider_retries_have_unique_span_ids_for_same_second():
+    first = dict(_SPAN, attempt_id="r1-codex-attempt-1", attempt_ordinal=1)
+    second = dict(_SPAN, attempt_id="r1-codex-attempt-2", attempt_ordinal=2)
+
+    first_otlp = oe.span_to_otlp(first)
+    second_otlp = oe.span_to_otlp(second)
+    assert first_otlp["spanId"] != second_otlp["spanId"]
+    attributes = {item["key"]: item["value"] for item in second_otlp["attributes"]}
+    assert attributes["legion.attempt_id"]["stringValue"] == "r1-codex-attempt-2"
+    assert attributes["legion.attempt_ordinal"]["intValue"] == 2
+
+
+def test_current_attempt_receipt_artifacts_disambiguate_provider_retries():
+    first = dict(_SPAN, artifacts={"provider_attempt": True,
+                                   "attempt_receipt": "/run/attempt-1.json"})
+    second = dict(_SPAN, artifacts={"provider_attempt": True,
+                                    "attempt_receipt": "/run/attempt-2.json"})
+
+    first_otlp = oe.span_to_otlp(first)
+    second_otlp = oe.span_to_otlp(second)
+    assert first_otlp["spanId"] != second_otlp["spanId"]
+    attributes = {item["key"]: item["value"] for item in second_otlp["attributes"]}
+    assert attributes["legion.attempt_ordinal"]["intValue"] == 2
+
+
+def test_span_schema_declares_attempt_identity_fields():
+    schema_path = os.path.join(
+        HERE, "..", "..", "legion-observability", "schema", "legion.span.v1.schema.json"
+    )
+    with open(schema_path, encoding="utf-8") as handle:
+        properties = json.load(handle)["properties"]
+    assert properties["attempt_id"]["type"] == ["string", "null"]
+    assert properties["attempt_ordinal"]["minimum"] == 1
 
 
 def test_span_to_otlp_tolerates_nonnumeric_duration_and_cost():
@@ -103,5 +144,4 @@ def test_partial_metering_exports_lower_bound_values_and_counts():
 
 
 def _to_jsonl(d):
-    import json
     return json.dumps(d) + "\n"

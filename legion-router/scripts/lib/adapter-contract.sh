@@ -41,6 +41,7 @@ LEGION_ADAPTER_SIGNAL_SANDBOX=""
 LEGION_ADAPTER_SIGNAL_STARTED_AT=""
 LEGION_ADAPTER_SIGNAL_START_MS=""
 LEGION_ADAPTER_SIGNAL_OUTPUT_FILE=""
+LEGION_ADAPTER_SIGNAL_TERMINALIZED=0
 
 legion_adapter_contract_root() {
   local lib_dir
@@ -316,6 +317,7 @@ legion_adapter_arm_signal_receipt() {
   LEGION_ADAPTER_SIGNAL_STARTED_AT="${10}"
   LEGION_ADAPTER_SIGNAL_START_MS="${11}"
   LEGION_ADAPTER_SIGNAL_OUTPUT_FILE="${12:-}"
+  LEGION_ADAPTER_SIGNAL_TERMINALIZED=0
   LEGION_ADAPTER_SIGNAL_ARMED=1
 }
 
@@ -324,27 +326,107 @@ legion_adapter_disarm_signal_receipt() {
 }
 
 legion_adapter_write_signal_receipt() {
-  local signum="$1" ended_at end_ms duration output_started=false message
+  local signum="$1" child_rc="${2:-}" lease_path="${3:-}"
+  local ended_at end_ms duration output_started=false message
+  local terminal_status=cancelled failure_class=cancelled retryable=false
+  local provider_code="$((128+signum))" lease_status=""
   [[ "$LEGION_ADAPTER_SIGNAL_ARMED" == 1 ]] || return 0
   LEGION_ADAPTER_SIGNAL_ARMED=0
   [[ -n "$LEGION_ADAPTER_SIGNAL_ART" && -n "${RUN_ID:-}" ]] || return 0
+  LEGION_ADAPTER_SIGNAL_TERMINALIZED=1
   # A signal delivered after the normal receipt rename must not fabricate a
   # second terminal outcome for the same launched provider call.
   [[ ! -f "$LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json" ]] || return 0
+  lease_status="$(jq -r '
+    if .schema == "legion.child-execution-lease.v1" then (.status // "") else "" end
+  ' "$lease_path" 2>/dev/null || true)"
+  case "$lease_status" in
+    completed)
+      # Bash may dispatch a pending signal after wait(1) returned but before the
+      # adapter committed its attempt. The retained wait result and supervisor
+      # sidecar are authoritative: that provider call was not cancelled.
+      if [[ "$child_rc" =~ ^[0-9]+$ && "$child_rc" -eq 0 ]]; then
+        terminal_status=succeeded
+        failure_class=""
+        provider_code=""
+        message="provider completed before signal $signum was dispatched"
+      else
+        terminal_status=failed
+        failure_class=provider
+        provider_code="${child_rc:-unknown}"
+        message="provider exited before signal $signum was dispatched"
+      fi
+      ;;
+    timed_out)
+      terminal_status=timed_out
+      failure_class=timed_out
+      provider_code=124
+      message="$(legion_adapter_lease_reason "$lease_path")"
+      ;;
+    *)
+      message="provider attempt cancelled by signal $signum"
+      ;;
+  esac
   legion_adapter_output_started_file "$LEGION_ADAPTER_SIGNAL_OUTPUT_FILE" && output_started=true
   ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   end_ms="$(date +%s000)"
   duration=$((end_ms-LEGION_ADAPTER_SIGNAL_START_MS))
   (( duration >= 0 )) || duration=0
-  message="provider attempt cancelled by signal $signum"
   legion_adapter_write_attempt \
     "$LEGION_ADAPTER_SIGNAL_ART" "$LEGION_ADAPTER_SIGNAL_EXECUTOR" \
     "$LEGION_ADAPTER_SIGNAL_PROVIDER" "$LEGION_ADAPTER_SIGNAL_ORDINAL" \
     "$LEGION_ADAPTER_SIGNAL_REQUESTED_MODEL" "$LEGION_ADAPTER_SIGNAL_EFFECTIVE_MODEL" \
     "$LEGION_ADAPTER_SIGNAL_REQUESTED_EFFORT" "$LEGION_ADAPTER_SIGNAL_EFFECTIVE_EFFORT" \
-    "$LEGION_ADAPTER_SIGNAL_SANDBOX" cancelled "$LEGION_ADAPTER_SIGNAL_STARTED_AT" \
-    "$ended_at" "$duration" '{}' unknown '' 0 unknown '' cancelled false \
-    "$output_started" "$((128+signum))" "$message"
+    "$LEGION_ADAPTER_SIGNAL_SANDBOX" "$terminal_status" "$LEGION_ADAPTER_SIGNAL_STARTED_AT" \
+    "$ended_at" "$duration" '{}' unknown '' 0 unknown '' "$failure_class" "$retryable" \
+    "$output_started" "$provider_code" "$message"
+}
+
+# Publish the provider span for a signal-terminalized attempt from the durable
+# receipt, never from mutable shell variables. The claim directory makes a
+# pending outer signal and an adapter-local trap safe to retry without double
+# counting the same paid call.
+legion_adapter_emit_signal_span() {
+  local task_text="${1:-}" lease_path="${2:-}" attempt_path claim root trace_bin
+  local executor model terminal span_status duration usage cost usage_status cost_status artifacts
+  [[ "$LEGION_ADAPTER_SIGNAL_TERMINALIZED" == 1 ]] || return 0
+  attempt_path="$LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json"
+  [[ -f "$attempt_path" ]] || return 0
+  claim="$attempt_path.signal-span-emitted"
+  mkdir "$claim" 2>/dev/null || return 0
+  if ! jq -e '.schema == "legion.attempt.v1" and .attempt_kind == "provider"' \
+      "$attempt_path" >/dev/null 2>&1; then
+    rmdir "$claim" 2>/dev/null || true
+    return 1
+  fi
+  executor="$(jq -r '.executor' "$attempt_path")"
+  model="$(jq -r '.effective_model // .requested_model // "unknown"' "$attempt_path")"
+  terminal="$(jq -r '.terminal_status' "$attempt_path")"
+  duration="$(jq -r '.duration_ms' "$attempt_path")"
+  usage="$(jq -c '.usage' "$attempt_path")"
+  cost="$(jq -c '.cost_usd' "$attempt_path")"
+  usage_status="$(jq -r '.usage_status' "$attempt_path")"
+  cost_status="$(jq -r '.cost_status' "$attempt_path")"
+  case "$terminal" in
+    succeeded) span_status=ok ;;
+    timed_out) span_status=timed_out ;;
+    *) span_status=failed ;;
+  esac
+  artifacts="$(jq -cn --arg attempt "$attempt_path" --arg lease "$lease_path" \
+    '{provider_attempt:true,signal_terminalized:true,attempt_receipt:$attempt,
+      lease_receipt:(if $lease=="" then null else $lease end)}')"
+  root="$(legion_adapter_contract_root)"
+  trace_bin="$root/legion-observability/bin/legion-trace"
+  if [[ ! -x "$trace_bin" ]] || ! "$trace_bin" emit \
+      --executor "$executor" --model "$model" --status "$span_status" \
+      --run-id "$RUN_ID" --trace-id "${LEGION_TRACE_ID:-$RUN_ID}" \
+      --parent-id "${LEGION_PARENT_ID:-}" --archetype "${archetype:-${ARCHETYPE:-}}" \
+      --duration-ms "$duration" --cost "$cost" --cost-status "$cost_status" \
+      --task "$task_text" --tokens "$usage" --usage-status "$usage_status" \
+      --artifacts "$artifacts" >/dev/null 2>&1; then
+    rmdir "$claim" 2>/dev/null || true
+    return 1
+  fi
 }
 
 # Reclassify an already-recorded provider call when an adapter-level invariant

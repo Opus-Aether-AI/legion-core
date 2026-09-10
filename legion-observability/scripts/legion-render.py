@@ -33,6 +33,18 @@ def _cost_text(record, width=0):
     return f"{value:>{width}}" if width else value
 
 
+def _classification_cost_text(classification):
+    status = classification.get("unclassified_cost_status")
+    if status == "partial":
+        return f">={_fmt_money(classification.get('unclassified_known_cost_usd'))}"
+    if status == "unknown":
+        return "unknown"
+    if status == "not_applicable":
+        return "n/a"
+    # Reports written before provenance fields were added remain renderable.
+    return _fmt_money(classification.get("unclassified_cost_usd"))
+
+
 def _fmt_pct(value):
     return f"{_num(value) * 100:.1f}%"
 
@@ -57,7 +69,7 @@ def tui(d):
             f'{classification.get("classified_runs", 0)}/'
             f'{classification.get("delegated_runs", 0)} '
             f'({_fmt_pct(classification.get("classification_rate", 0))}); '
-            f'unclassified cost {_fmt_money(classification.get("unclassified_cost_usd", 0))}'
+            f'unclassified cost {_classification_cost_text(classification)}'
         )
     return "\n".join(out)
 
@@ -71,7 +83,7 @@ def to_html(d):
             '<div class="metric"><span>Routing classification</span><strong>'
             f'{_fmt_pct(classification.get("classification_rate", 0))}'
             '</strong></div><div class="metric"><span>Unclassified cost</span><strong>'
-            f'{_fmt_money(classification.get("unclassified_cost_usd", 0))}'
+            f'{html.escape(_classification_cost_text(classification))}'
             "</strong></div>"
         )
     rows = []

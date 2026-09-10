@@ -136,6 +136,9 @@ def test_aggregate_by_archetype_surfaces_unclassified_delegations():
         "unclassified_runs": 1,
         "classification_rate": 0.5,
         "unclassified_cost_usd": 2.0,
+        "unclassified_cost_status": "known",
+        "unclassified_known_cost_usd": 2.0,
+        "unclassified_known_cost_runs": 1,
     }
 
 
@@ -159,6 +162,9 @@ def test_classification_covers_registered_executor_families_and_codex_modes():
         "unclassified_runs": 3,
         "classification_rate": 0.0,
         "unclassified_cost_usd": 3.0,
+        "unclassified_cost_status": "known",
+        "unclassified_known_cost_usd": 3.0,
+        "unclassified_known_cost_runs": 3,
     }
 
 
@@ -184,6 +190,35 @@ def test_aggregate_folds_classification_into_grouping_pass(monkeypatch):
     ])
 
     assert result["classification"]["classification_rate"] == 0.5
+
+
+def test_unclassified_cost_preserves_partial_lower_bound():
+    result = agg.aggregate([
+        {"schema": "legion.span.v1", "executor": "codex", "status": "ok",
+         "cost_usd": 0.75, "cost_status": "known"},
+        {"schema": "legion.span.v1", "executor": "codex", "status": "failed",
+         "cost_usd": None, "cost_status": "unknown"},
+    ])
+
+    classification = result["classification"]
+    assert classification["unclassified_cost_usd"] is None
+    assert classification["unclassified_cost_status"] == "partial"
+    assert classification["unclassified_known_cost_usd"] == 0.75
+    assert classification["unclassified_known_cost_runs"] == 1
+
+
+def test_unclassified_cost_distinguishes_unknown_and_not_applicable():
+    unknown = agg.classification_summary([
+        {"schema": "legion.span.v1", "executor": "codex", "status": "failed",
+         "cost_usd": None, "cost_status": "unknown"}
+    ])
+    assert unknown["unclassified_cost_usd"] is None
+    assert unknown["unclassified_cost_status"] == "unknown"
+    assert unknown["unclassified_known_cost_usd"] is None
+
+    absent = agg.classification_summary([])
+    assert absent["unclassified_cost_usd"] is None
+    assert absent["unclassified_cost_status"] == "not_applicable"
 
 
 def test_over_budget_usable_work_counts_as_success():
@@ -250,5 +285,8 @@ def test_empty_input_is_safe():
         "classified_runs": 0,
         "unclassified_runs": 0,
         "classification_rate": 0,
-        "unclassified_cost_usd": 0,
+        "unclassified_cost_usd": None,
+        "unclassified_cost_status": "not_applicable",
+        "unclassified_known_cost_usd": None,
+        "unclassified_known_cost_runs": 0,
     }

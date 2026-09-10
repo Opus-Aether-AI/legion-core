@@ -186,6 +186,7 @@ def test_activity_preserves_partial_durable_cost_as_a_lower_bound(tmp_path):
         "cost_status": "partial",
         "known_cost_usd": 0,
         "known_cost_attempts": 1,
+        "attempt_count": 2,
     }
     rec = {"run_id": "mixed", "model": "test-model-alpha", "lifecycle": {"phase": "ok"}}
     enriched = activity.enrich_run(rec, "", _costs_payload(), span_costs=summaries)
@@ -196,6 +197,67 @@ def test_activity_preserves_partial_durable_cost_as_a_lower_bound(tmp_path):
         enriched["cost_usd"], enriched["cost_status"], enriched["known_cost_usd"]
     ) == ">=0.000000"
     assert activity._format_cost(None, "unknown") == "unknown"
+
+
+def test_completed_multi_attempt_activity_prefers_durable_reconciliation(tmp_path):
+    run_dir = tmp_path / "runs" / "retried"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+    durable = {
+        "retried": {
+            "cost_usd": 1.25,
+            "cost_status": "known",
+            "known_cost_usd": 1.25,
+            "known_cost_attempts": 2,
+            "attempt_count": 2,
+        }
+    }
+
+    completed = activity.enrich_run(
+        {"run_id": "retried", "model": "test-model-alpha", "lifecycle": {"phase": "ok"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=durable,
+    )
+    running = activity.enrich_run(
+        {"run_id": "retried", "model": "test-model-alpha", "lifecycle": {"phase": "running"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=durable,
+    )
+
+    assert completed["cost_usd"] == 1.25
+    assert completed["known_cost_attempts"] == 2
+    assert "attempt_count" not in completed
+    assert completed["activity"]["items"] == 3
+    assert running["cost_usd"] == 0.00345
+    assert running["known_cost_attempts"] == 1
+
+
+def test_completed_all_unknown_retries_still_prefer_durable_unknown(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "2026-09-11.jsonl").write_text("\n".join([
+        json.dumps({"schema": "legion.span.v1", "run_id": "retried",
+                    "cost_usd": None, "cost_status": "unknown"}),
+        json.dumps({"schema": "legion.span.v1", "run_id": "retried",
+                    "cost_usd": None, "cost_status": "unknown"}),
+    ]) + "\n")
+    run_dir = tmp_path / "runs" / "retried"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+
+    summaries = activity.load_span_costs(str(spans))
+    assert summaries["retried"]["attempt_count"] == 2
+    enriched = activity.enrich_run(
+        {"run_id": "retried", "model": "test-model-alpha", "lifecycle": {"phase": "failed"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=summaries,
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
 
 
 def test_group_by_session_merges_a_fanouts_agents_across_their_worktrees():

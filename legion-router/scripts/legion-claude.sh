@@ -52,7 +52,7 @@ on_signal() {
     wait "$CHILD_PID" 2>/dev/null || child_rc=$?
     CHILD_PID=""
   fi
-  legion_adapter_write_signal_receipt "$signum"
+  legion_adapter_write_signal_receipt "$signum" "$child_rc" "$SIGNAL_LEASE_STATUS"
   if legion_adapter_supervisor_cleanup_failed "$SIGNAL_LEASE_STATUS" \
       || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
         '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
@@ -71,8 +71,10 @@ on_signal() {
         "$base" "$archetype" "$effort" || true
       legion_disarm_adopted_run_guard
     fi
+    legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
     exit 70
   fi
+  legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
   exit $((128+signum))
 }
 trap cleanup_claude_on_exit EXIT
@@ -554,6 +556,7 @@ cmd_run() {
   start_ms="$(date +%s000)"
   local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0 chain_cost=0
   local any_output_started=0 permission_refused=0 chain_admission_refused=0
+  local chain_stopped_before_launch=0
   local lease_timed_out=0 containment_failed=0 lease_reason=""
   for attempt_model in "${claude_model_chain[@]}"; do
     chain_idx=$(( chain_idx + 1 ))
@@ -564,6 +567,7 @@ cmd_run() {
           "$premium_consent" "$CLAUDE_BIN"; then
         LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID="$previous_attempt_id"
         chain_admission_refused=1
+        chain_stopped_before_launch=1
         break
       fi
       LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID="$previous_attempt_id"
@@ -773,7 +777,15 @@ cmd_run() {
   end_ms="$(date +%s000)"
   dur=$(( end_ms - start_ms ))
 
-  if jq -e . "$out_file" >/dev/null 2>&1; then
+  if [[ "$chain_stopped_before_launch" -eq 1 ]]; then
+    # out_file still belongs to the previous paid decline. It already has its
+    # own durable receipt/span and its cost was banked in chain_cost; treating
+    # it as the later preflight-only model would duplicate both identity and
+    # spend.
+    usage='{}'
+    cost="$chain_cost"
+    result="$LEGION_ADAPTER_PREFLIGHT_REASON"
+  elif jq -e . "$out_file" >/dev/null 2>&1; then
     json_ok=1
     is_error="$(jq -r '.is_error // false' "$out_file" 2>/dev/null || printf 'false')"
     result="$(jq -r '.result // ""' "$out_file" 2>/dev/null || true)"
@@ -841,8 +853,6 @@ cmd_run() {
     reason="admission_refused"
     status="failed"
     result="$LEGION_ADAPTER_PREFLIGHT_REASON"
-    emit_span "claude" "$model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
-      "$span_usage_status" "$span_cost_status"
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"

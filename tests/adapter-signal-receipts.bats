@@ -90,6 +90,38 @@ assert_signal_receipt() {
   jq -e '.terminal_status == "cancelled" and .failure.class == "cancelled"' \
     "$art/attempt-1.json"
   jq -e '.class == "cancelled" and .retryable == false' "$art/failure-1.json"
+  jq -s -e --arg run "$run_id" --arg executor "$adapter" \
+    --argjson attempt "$(cat "$art/attempt-1.json")" '
+      [.[] | select(.run_id == $run and .executor == $executor
+        and .artifacts.provider_attempt == true
+        and .artifacts.signal_terminalized == true)] as $spans
+      | ($spans | length) == 1
+        and $spans[0].tokens == $attempt.usage
+        and $spans[0].usage_status == $attempt.usage_status
+        and $spans[0].cost_usd == $attempt.cost_usd
+        and $spans[0].cost_status == $attempt.cost_status
+    ' "$LEGION_TELEMETRY_DIR"/*.jsonl
+}
+
+@test "signal receipt honors a child that completed before the trap was dispatched" {
+  local art="$TEST_TMPDIR/completed-race" lease="$TEST_TMPDIR/completed-race.lease.json"
+  mkdir -p "$art"
+  printf '%s\n' \
+    '{"schema":"legion.child-execution-lease.v1","status":"completed","reason":"child completed","max_runtime_seconds":30}' \
+    > "$lease"
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    RUN_ID=completed-race
+    legion_adapter_arm_signal_receipt "$2" cursor cursor 1 fixture "" "" "" \
+      read-only 2026-01-01T00:00:00Z "$(date +%s000)" /dev/null
+    legion_adapter_write_signal_receipt 15 0 "$3"
+    jq -e '\''
+      .terminal_status == "succeeded" and .failure == null
+      and .usage_status == "unknown" and .cost_status == "unknown"
+    '\'' "$2/attempt-1.json"
+  ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$art" "$lease"
+  [ "$status" -eq 0 ]
 }
 
 @test "Claude writes one terminal attempt when signalled after launch" {

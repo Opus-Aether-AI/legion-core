@@ -144,14 +144,16 @@ on_signal() {
   elif [[ "$BROKER_RC" -eq 70 ]]; then
     containment_reason="handoff broker reported incomplete descendant cleanup (evidence: $ART/broker.err; worktree retained: $WT_RECORD)"
   fi
-  legion_adapter_write_signal_receipt "$signum"
+  legion_adapter_write_signal_receipt "$signum" "$CHILD_WAIT_RC" "${ART:-}/lease.json"
   if [[ -n "$containment_reason" ]]; then
     KEEP=1
     legion_adapter_fail_recorded_attempt "$ART" "$ADAPTER_KIND" 1 internal 70 "$containment_reason" || true
     [[ -z "$RUN_ID" || -z "$ART" ]] || write_state containment_failed
+    legion_adapter_emit_signal_span "${task:-}" "${ART:-}/lease.json" || true
     exit 70
   fi
   [[ -z "$RUN_ID" || -z "$ART" ]] || write_state failed
+  legion_adapter_emit_signal_span "${task:-}" "${ART:-}/lease.json" || true
   exit $((128+signum))
 }
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit; cleanup_worktree' EXIT

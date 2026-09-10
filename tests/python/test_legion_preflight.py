@@ -42,6 +42,109 @@ def registry(path: Path, binary: Path, *, provider_sandboxes: str) -> Path:
     return path
 
 
+def registry_with_missing_configuration(
+    path: Path, binary: Path, *, extra: str = ""
+) -> Path:
+    registry(path, binary, provider_sandboxes='["read-only", "workspace-write"]')
+    text = path.read_text(encoding="utf-8").replace(
+        "required_config_env = []\n",
+        'required_config_env = ["REQUIRED_TOKEN"]\n',
+    )
+    if extra.startswith("supported_config_env = "):
+        text = text.replace("supported_config_env = []\n", extra)
+        extra = ""
+    path.write_text(text + extra, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("policy", "extra", "requested", "environment", "check"),
+    [
+        (
+            "sandbox",
+            "",
+            {"sandbox": "danger-full-access"},
+            {},
+            "sandbox",
+        ),
+        (
+            "effort",
+            'supported_efforts = ["low"]\n',
+            {"effort": "high"},
+            {},
+            "effort",
+        ),
+        (
+            "model",
+            'supported_model_patterns = ["^fixture-ok$"]\n',
+            {"model": "fixture-unsupported"},
+            {},
+            "model",
+        ),
+        (
+            "billing",
+            "requires_explicit_consent = true\n",
+            {"model": "fixture-ok", "explicit_consent": False},
+            {},
+            "billing",
+        ),
+        (
+            "configuration",
+            'supported_config_env = ["MODE=^safe$"]\n',
+            {},
+            {"MODE": "unsafe"},
+            "configuration",
+        ),
+    ],
+)
+def test_incompatibility_dominates_missing_required_configuration(
+    tmp_path: Path,
+    policy: str,
+    extra: str,
+    requested: dict[str, object],
+    environment: dict[str, str],
+    check: str,
+) -> None:
+    binary = executable(tmp_path / "fixture")
+    config = registry_with_missing_configuration(
+        tmp_path / "executors.toml", binary, extra=extra
+    )
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "PATH": os.environ["PATH"],
+        **environment,
+    }
+
+    result = preflight.preflight(
+        "fixture",
+        registry_path=config,
+        cache_dir=tmp_path / "cache",
+        env=env,
+        **requested,
+    )
+
+    assert result["status"] == "incompatible", policy
+    assert result["compatibility"][check]["status"] == "incompatible"
+    assert "missing required configuration: REQUIRED_TOKEN" in result["reason"]
+    assert result["identity"] is None
+
+
+def test_missing_required_configuration_alone_remains_unavailable(tmp_path: Path) -> None:
+    binary = executable(tmp_path / "fixture")
+    config = registry_with_missing_configuration(tmp_path / "executors.toml", binary)
+
+    result = preflight.preflight(
+        "fixture",
+        registry_path=config,
+        cache_dir=tmp_path / "cache",
+        env={"HOME": str(tmp_path / "home"), "PATH": os.environ["PATH"]},
+        sandbox="read-only",
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["compatibility"]["configuration"]["status"] == "unavailable"
+
+
 def test_preflight_succeeds_when_read_only_home_prevents_cache_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

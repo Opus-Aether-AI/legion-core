@@ -72,6 +72,18 @@ def test_main_no_endpoint_is_noop(capsys, monkeypatch):
     assert "no-op" in capsys.readouterr().err
 
 
+def test_unknown_metering_is_not_exported_as_free_cost():
+    span = oe.span_to_otlp({
+        "schema": "legion.span.v1", "run_id": "unknown-metering", "executor": "deepseek",
+        "model": "unknown", "status": "ok", "cost_usd": None, "cost_status": "unknown",
+        "tokens": None, "usage_status": "unknown",
+    })
+    attributes = {item["key"]: item["value"] for item in span["attributes"]}
+    assert attributes["legion.cost_status"]["stringValue"] == "unknown"
+    assert attributes["legion.usage_status"]["stringValue"] == "unknown"
+    assert "legion.cost_usd" not in attributes
+
+
 def _to_jsonl(d):
     import json
     return json.dumps(d) + "\n"

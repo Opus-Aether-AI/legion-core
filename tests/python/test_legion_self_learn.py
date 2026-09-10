@@ -739,12 +739,23 @@ def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
         "task": huge,
         "artifacts": {"verdict": huge, "nested": {"detail": huge}},
     }
+    unknown_metering = {
+        **_span("unknown-metering", "2026-08-16T01:00:01Z", status="ok"),
+        "cost_usd": None,
+        "cost_status": "unknown",
+        "tokens": None,
+        "usage_status": "unknown",
+    }
     malformed = [
         {key: value for key, value in valid.items() if key != "model"},
         {**valid, "run_id": 7},
         {**valid, "status": "invented"},
         {**valid, "duration_ms": -1},
         {**valid, "artifacts": "not-an-object"},
+        {**valid, "cost_usd": 0, "cost_status": "unknown"},
+        {**valid, "cost_usd": None, "cost_status": "known"},
+        {**valid, "tokens": {}, "usage_status": "unknown"},
+        {**valid, "tokens": None, "usage_status": "partial", "known_usage": {}},
     ]
     deep = (
         '{"schema":"legion.span.v1","ts":"2026-08-16T00:00:00Z",'
@@ -757,13 +768,13 @@ def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
     )
     (spans_dir / "2026-08-16.jsonl").write_text(
         deep
-        + "".join(json.dumps(record) + "\n" for record in [*malformed, valid]),
+        + "".join(json.dumps(record) + "\n" for record in [*malformed, valid, unknown_metering]),
         encoding="utf-8",
     )
 
     spans = self_learn.load_spans(str(logs))
 
-    assert [span["run_id"] for span in spans] == ["valid"]
+    assert [span["run_id"] for span in spans] == ["valid", "unknown-metering"]
     assert len(spans[0]["task"]) == self_learn.MAX_SPAN_TEXT_LENGTH
     assert len(spans[0]["model"]) == self_learn.MAX_SPAN_IDENTIFIER_LENGTH
     assert len(spans[0]["archetype"]) == self_learn.MAX_SPAN_IDENTIFIER_LENGTH
@@ -774,7 +785,7 @@ def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
     )
 
     incremental, cursor = self_learn.load_spans_incremental(str(logs))
-    assert [span["run_id"] for span in incremental] == ["valid"]
+    assert [span["run_id"] for span in incremental] == ["valid", "unknown-metering"]
     diagnostics = {}
     unchanged, _cursor = self_learn.load_spans_incremental(
         str(logs), cursor=cursor, diagnostics=diagnostics

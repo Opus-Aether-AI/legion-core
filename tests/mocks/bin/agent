@@ -83,6 +83,11 @@ PY
 fi
 
 cursor_result="${MOCK_CURSOR_RESULT:-CURSOR_OK_OUTPUT}"
+if [[ -n "${MOCK_CURSOR_RESULT_SEQUENCE_FILE:-}" && -s "$MOCK_CURSOR_RESULT_SEQUENCE_FILE" ]]; then
+  cursor_result="$(sed -n '1p' "$MOCK_CURSOR_RESULT_SEQUENCE_FILE")"
+  sed '1d' "$MOCK_CURSOR_RESULT_SEQUENCE_FILE" > "$MOCK_CURSOR_RESULT_SEQUENCE_FILE.tmp.$$"
+  mv -f "$MOCK_CURSOR_RESULT_SEQUENCE_FILE.tmp.$$" "$MOCK_CURSOR_RESULT_SEQUENCE_FILE"
+fi
 if [[ "${MOCK_CURSOR_FAST_DAEMON:-0}" == 1 ]]; then
   daemon_pid="$(python3 <<'PY'
 import os

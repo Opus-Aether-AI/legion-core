@@ -20,8 +20,46 @@
     "target_type": { "type": ["string", "null"], "description": "Optional catalog entity type for self-learning attribution, e.g. plugin, skill, command, agent, hook, mcp." },
     "target_name": { "type": ["string", "null"], "description": "Optional catalog entity name for self-learning attribution." },
     "duration_ms": { "type": "number", "minimum": 0 },
-    "cost_usd": { "type": "number", "minimum": 0 },
-    "tokens": { "type": "object" },
+    "cost_usd": { "type": ["number", "null"], "minimum": 0 },
+    "cost_status": { "type": "string", "enum": ["known", "partial", "unknown", "not_applicable"] },
+    "known_cost_usd": { "type": ["number", "null"], "minimum": 0 },
+    "known_cost_attempts": { "type": "integer", "minimum": 0 },
+    "tokens": { "type": ["object", "null"] },
+    "usage_status": { "type": "string", "enum": ["known", "partial", "unknown", "not_applicable"] },
+    "known_usage": { "type": ["object", "null"] },
+    "known_usage_attempts": { "type": "integer", "minimum": 0 },
     "artifacts": { "type": "object" }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["cost_status"], "properties": { "cost_status": { "const": "known" } } },
+      "then": { "required": ["cost_usd"], "properties": { "cost_usd": { "type": "number" } } }
+    },
+    {
+      "if": { "required": ["cost_status"], "properties": { "cost_status": { "enum": ["unknown", "not_applicable"] } } },
+      "then": { "properties": { "cost_usd": { "type": "null" }, "known_cost_usd": { "type": "null" } } }
+    },
+    {
+      "if": { "required": ["cost_status"], "properties": { "cost_status": { "const": "partial" } } },
+      "then": {
+        "required": ["cost_usd", "known_cost_usd", "known_cost_attempts"],
+        "properties": { "cost_usd": { "type": "null" }, "known_cost_usd": { "type": "number" }, "known_cost_attempts": { "minimum": 1 } }
+      }
+    },
+    {
+      "if": { "required": ["usage_status"], "properties": { "usage_status": { "const": "known" } } },
+      "then": { "required": ["tokens"], "properties": { "tokens": { "type": "object" } } }
+    },
+    {
+      "if": { "required": ["usage_status"], "properties": { "usage_status": { "enum": ["unknown", "not_applicable"] } } },
+      "then": { "properties": { "tokens": { "type": "null" }, "known_usage": { "type": "null" } } }
+    },
+    {
+      "if": { "required": ["usage_status"], "properties": { "usage_status": { "const": "partial" } } },
+      "then": {
+        "required": ["tokens", "known_usage", "known_usage_attempts"],
+        "properties": { "tokens": { "type": "null" }, "known_usage": { "type": "object" }, "known_usage_attempts": { "minimum": 1 } }
+      }
+    }
+  ]
 }

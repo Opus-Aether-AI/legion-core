@@ -153,6 +153,19 @@ NATIVE_ATTEMPT_START_MS=0
 NATIVE_LEASE_STATUS=""
 NATIVE_RESUME_ART=""
 NATIVE_RESUME_WT=""
+PROMPT_CHILD_PID=""
+PROMPT_CHILD_RC=0
+PROMPT_LEASE_STATUS=""
+PROMPT_ATTEMPT_ART=""
+PROMPT_ATTEMPT_ORDINAL=0
+PROMPT_WORKTREE=""
+PROMPT_RECEIPT_DIR=""
+PROMPT_SHARED_ART=""
+PROMPT_EXPECTED_EXECUTOR=""
+PROMPT_EXPECTED_PROVIDER=""
+PROMPT_EXPECTED_MODEL=""
+PROMPT_EXPECTED_SANDBOX=""
+PROMPT_RUN_ID=""
 child_lease_tighten_deadline() {
   local runtime_seconds="$1" inherited="${CHILD_LEASE_DEADLINE_NS:-${LEGION_CHILD_LEASE_DEADLINE_NS:-}}"
   if [[ -n "$inherited" && ( ! "$inherited" =~ ^[1-9][0-9]*$ ) ]]; then
@@ -186,6 +199,14 @@ kill_codex_child() {
   local pid="${CODEX_CHILD_PID:-}"
   [[ -n "$pid" ]] || return 0
   terminate_process_tree "$pid"
+}
+kill_prompt_child() {
+  local pid="${PROMPT_CHILD_PID:-}"
+  [[ -n "$pid" ]] || return 0
+  # The adapter owns and supervises its provider tree. Signal only the adapter
+  # so its trap can drain the supervisor and atomically publish canonical
+  # attempt/failure/lease receipts before the outer review preserves them.
+  kill -TERM "$pid" 2>/dev/null || true
 }
 terminate_process_tree() {
   local pid="$1" child
@@ -287,24 +308,41 @@ on_terminating_signal() {
   local interrupted_native_ordinal="${NATIVE_ATTEMPT_ORDINAL:-0}"
   local child_rc="$CODEX_CHILD_RC" terminal_status=failed terminal_reason=interrupted provider_exit=143
   local supervised_pid="${CODEX_SIGNAL_CHILD_PID:-unknown}"
+  local signal_worktree="${LEGION_WT_PATH:-${REVIEW_WT_PATH:-}}"
   kill_codex_child
   if [[ -n "${CODEX_CHILD_PID:-}" ]]; then
     wait "$CODEX_CHILD_PID" 2>/dev/null || child_rc=$?
   fi
   CODEX_CHILD_PID=""
+  if [[ -n "${PROMPT_CHILD_PID:-}" ]]; then
+    supervised_pid="$PROMPT_CHILD_PID"
+    kill_prompt_child
+    wait "$PROMPT_CHILD_PID" 2>/dev/null || PROMPT_CHILD_RC=$?
+    PROMPT_CHILD_PID=""
+  fi
+  if [[ -n "${PROMPT_LEASE_STATUS:-}" ]]; then
+    child_rc="$PROMPT_CHILD_RC"
+    NATIVE_LEASE_STATUS="$PROMPT_LEASE_STATUS"
+    supervised_pid="${supervised_pid:-unknown}"
+    signal_worktree="${PROMPT_WORKTREE:-$signal_worktree}"
+  fi
   if legion_adapter_supervisor_cleanup_failed "$NATIVE_LEASE_STATUS" \
       || { [[ -f "$NATIVE_LEASE_STATUS" ]] && jq -e \
         '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
         "$NATIVE_LEASE_STATUS" >/dev/null 2>&1; }; then
     terminal_status=containment_failed
     provider_exit=70
-    terminal_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: ${LEGION_WT_PATH:-${REVIEW_WT_PATH:-}})"
+    terminal_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: $signal_worktree)"
   elif [[ "$child_rc" -eq 70 ]]; then
     terminal_status=containment_failed
     provider_exit=70
-    terminal_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $NATIVE_LEASE_STATUS; worktree retained: ${LEGION_WT_PATH:-${REVIEW_WT_PATH:-}})"
+    terminal_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $NATIVE_LEASE_STATUS; worktree retained: $signal_worktree)"
   fi
   write_interrupted_native_attempt
+  if [[ -n "${PROMPT_ATTEMPT_ART:-}" ]]; then
+    preserve_interrupted_prompt_receipts
+  fi
+  [[ "$terminal_status" != containment_failed ]] || LEGION_WT_KEEP=1
   if [[ "$terminal_status" == containment_failed && -n "$interrupted_native_art" && "$interrupted_native_ordinal" -gt 0 ]]; then
     LEGION_WT_KEEP=1
     legion_adapter_fail_recorded_attempt "$interrupted_native_art" "$interrupted_native_executor" \
@@ -319,22 +357,50 @@ on_terminating_signal() {
     "$terminal_status" "$terminal_reason" "$provider_exit"
   write_interrupted_review_receipt "$terminal_status" "$terminal_reason" "$provider_exit"
   if [[ -n "$REVIEW_ART_PATH" && -n "${RUN_ID:-}" ]]; then
-    local usage cost end_ms dur artifacts
-    usage="$(aggregate_review_usage "$REVIEW_ART_PATH" "$REVIEW_RECEIPT_ATTEMPT" 2>/dev/null || printf '{}')"
-    cost="$(cost_from_usage "$REVIEW_RECEIPT_MODEL" "$usage" 2>/dev/null || printf '0')"
+    local usage cost end_ms dur artifacts signal_metering='{}'
+    local span_usage span_cost span_usage_status=known span_cost_status=known
+    if [[ -n "${PROMPT_ATTEMPT_ART:-}" ]]; then
+      signal_metering="$(review_canonical_metering \
+        ${review_attempt_receipts[@]+"${review_attempt_receipts[@]}"} 2>/dev/null || printf '{}')"
+      usage="$(jq -c '.reconciliation.usage // null' <<<"$signal_metering")"
+      cost="$(jq -c '.reconciliation.cost_usd // null' <<<"$signal_metering")"
+      local signal_executor signal_model
+      signal_executor="$(jq -r '.last.executor // empty' <<<"$signal_metering")"
+      signal_model="$(jq -r '.last.model // empty' <<<"$signal_metering")"
+      [[ -z "$signal_executor" ]] || REVIEW_EXECUTOR_LABEL="$signal_executor"
+      [[ -z "$signal_model" ]] || REVIEW_RECEIPT_MODEL="$signal_model"
+      span_usage=null; span_cost=null
+      span_usage_status=not_applicable; span_cost_status=not_applicable
+    else
+      usage="$(aggregate_review_usage "$REVIEW_ART_PATH" "$REVIEW_RECEIPT_ATTEMPT" 2>/dev/null || printf '{}')"
+      cost="$(cost_from_usage "$REVIEW_RECEIPT_MODEL" "$usage" 2>/dev/null || printf '0')"
+      span_usage="$usage"; span_cost="$cost"
+    fi
     end_ms="$(date +%s000)"
     dur=$(( end_ms - REVIEW_START_MS ))
     [[ "$dur" -ge 0 ]] || dur=0
     artifacts="$(jq -cn --arg receipt "$REVIEW_RECEIPT_PATH" \
       --arg patch "$REVIEW_RECEIPT_PATCH" --arg base "$REVIEW_RECEIPT_BASE_SHA" \
       --arg head "$REVIEW_RECEIPT_HEAD_SHA" --arg reason "$terminal_reason" \
+      --arg preflight "${review_preflight_receipt:-}" \
+      --arg attempt "${review_attempt_receipt:-}" --arg failure "${review_failure_receipt:-}" \
+      --arg lease "${review_lease_receipt:-}" --argjson metering "$signal_metering" \
       '{terminal_receipt:$receipt, review_patch:$patch,
         reviewed_base_sha:$base, reviewed_head_sha:$head,
-        reason:$reason, attempts:'"${REVIEW_RECEIPT_ATTEMPT:-0}"'}' \
+        reason:$reason, attempts:'"${REVIEW_RECEIPT_ATTEMPT:-0}"',
+        preflight_receipt:(if $preflight=="" then null else $preflight end),
+        attempt_receipt:(if $attempt=="" then null else $attempt end),
+        failure_receipt:(if $failure=="" then null else $failure end),
+        lease_receipt:(if $lease=="" then null else $lease end),
+        metering_reconciliation:($metering.reconciliation // null),
+        rollup_only:($metering != {})}' \
       2>/dev/null || printf '{}')"
-    emit_span "${REVIEW_EXECUTOR_LABEL:-codex}-review" "$REVIEW_RECEIPT_MODEL" "$terminal_status" "$dur" "$cost" "$usage" \
-      "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" "$artifacts" || true
-    ingest_usage "$REVIEW_RECEIPT_MODEL" "codex" "$provider_exit" "$usage" "$cost" || true
+    emit_span "${REVIEW_EXECUTOR_LABEL:-codex}-review" "$REVIEW_RECEIPT_MODEL" "$terminal_status" "$dur" "$span_cost" "$span_usage" \
+      "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" "$artifacts" \
+      "$span_usage_status" "$span_cost_status" || true
+    if [[ -z "${PROMPT_ATTEMPT_ART:-}" ]]; then
+      ingest_usage "$REVIEW_RECEIPT_MODEL" "codex" "$provider_exit" "$usage" "$cost" || true
+    fi
     write_run_state "$terminal_status" || true
     declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
     write_run_artifact_status "$REVIEW_ART_PATH" "$RUN_ID" "failed" \
@@ -508,7 +574,7 @@ run_sandcastle() {
   }
   sandcastle_script="$_self_dir/sandcastle-run.mjs"
   : > "$art/stream.jsonl"
-  set +e
+  local input="$art/sandcastle-input.json"
   jq -cn \
     --arg task "$task" --arg model "$1" --arg sandbox "$sandbox" \
     --arg cwd "$wt" --arg main_repo "$repo" --arg base "$base" --arg branch "$branch" \
@@ -516,12 +582,18 @@ run_sandcastle() {
     --arg effort "$effort" --argjson untrusted "$untrusted" \
     '{task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
       main_repo:$main_repo, artifact_dir:$artifact_dir, untrusted:$untrusted,
-      effort:(if $effort=="" then null else $effort end)}' \
-    | python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
-        --max-runtime-seconds "$attempt_runtime" \
-        --status-file "$art/lease-$attempt_ordinal.json" -- \
-        "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
-  rc=${PIPESTATUS[1]}
+      effort:(if $effort=="" then null else $effort end)}' > "$input"
+  set +e
+  python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+    --max-runtime-seconds "$attempt_runtime" \
+    --status-file "$art/lease-$attempt_ordinal.json" -- \
+    "$node_bin" "$sandcastle_script" < "$input" \
+    >"$art/sandcastle-result.json" 2>"$art/codex.err" &
+  CODEX_CHILD_PID=$!
+  CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
+  wait "$CODEX_CHILD_PID"; rc=$?
+  CODEX_CHILD_RC="$rc"
+  CODEX_CHILD_PID=""
   set -e
   # Surface the wrapper's stderr (e.g. the @ai-hero/sandcastle install hint on
   # exit 3) — it lands in codex.err, which cmd_run never prints otherwise.
@@ -612,6 +684,7 @@ emit_primary_baseline_span() {
 # emit_span <executor> <model> <status> <duration_ms> <cost_usd> <usage_json> <task> <artifacts_json>
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  local usage_status="${9:-known}" cost_status="${10:-known}"
   mkdir -p "$LEGION_TELEMETRY_DIR"
   case "$executor" in
     codex*)
@@ -633,14 +706,16 @@ emit_span() {
     --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
     --arg executor "$executor" --arg model "$model" --arg archetype "${archetype:-}" \
     --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
-    --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-    --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
+    --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-null}" \
+    --argjson usage "${usage:-null}" --arg usage_status "$usage_status" \
+    --arg cost_status "$cost_status" --arg task "$task" --argjson artifacts "$artifacts" '
     {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id,
      parent_id:(if $parent_id=="" then null else $parent_id end),
      executor:$executor, model:$model, archetype:$archetype, task:$task, status:$status,
      target_type:(if $target_type=="" then null else $target_type end),
      target_name:(if $target_name=="" then null else $target_name end),
-     duration_ms:$dur, cost_usd:$cost, tokens:$usage, artifacts:$artifacts}' \
+     duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
+     tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
     >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
 }
 
@@ -1363,21 +1438,24 @@ cmd_run() {
     attempt_ordinal=$((attempt_ordinal + 1))
     local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
     attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
+    NATIVE_ATTEMPT_ART="$art"
+    NATIVE_ATTEMPT_EXECUTOR=codex
+    NATIVE_ATTEMPT_ORDINAL="$attempt_ordinal"
+    NATIVE_ATTEMPT_MODEL="$attempt"
+    NATIVE_ATTEMPT_EFFORT="$effort"
+    NATIVE_ATTEMPT_SANDBOX="$sandbox"
+    NATIVE_ATTEMPT_STARTED_AT="$attempt_started_at"
+    NATIVE_ATTEMPT_START_MS="$attempt_start_ms"
+    NATIVE_LEASE_STATUS="$art/lease-$attempt_ordinal.json"
     if is_sandcastle_sandbox "$sandbox"; then
+      NATIVE_ATTEMPT_STREAM="$art/sandcastle-result.json"
+      NATIVE_ATTEMPT_LAST_MESSAGE=""
       note "→ sandcastle run -m $attempt --sandbox $sandbox${effort:+ (effort=$effort)}"
       run_sandcastle "$attempt"
     else
       note "→ codex exec -m $attempt -s $sandbox${effort:+ (effort=$effort)}"
-      NATIVE_ATTEMPT_ART="$art"
-      NATIVE_ATTEMPT_EXECUTOR=codex
-      NATIVE_ATTEMPT_ORDINAL="$attempt_ordinal"
-      NATIVE_ATTEMPT_MODEL="$attempt"
-      NATIVE_ATTEMPT_EFFORT="$effort"
-      NATIVE_ATTEMPT_SANDBOX="$sandbox"
       NATIVE_ATTEMPT_STREAM="$art/stream.jsonl"
       NATIVE_ATTEMPT_LAST_MESSAGE="$art/last-message.txt"
-      NATIVE_ATTEMPT_STARTED_AT="$attempt_started_at"
-      NATIVE_ATTEMPT_START_MS="$attempt_start_ms"
       run_codex "$attempt"
     fi
     attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
@@ -1393,26 +1471,42 @@ cmd_run() {
       attempt_timed_out=1
       lease_reason="$(legion_adapter_lease_reason "$lease_status")"
     fi
-    if jq -R -s -e '[split("\n")[] | fromjson? | select(
-        .type == "item.completed" and .item.type == "agent_message" and ((.item.text // "") | length > 0))] | length > 0' \
-        "$art/stream.jsonl" >/dev/null 2>&1; then
-      attempt_output_started=true
+    if is_sandcastle_sandbox "$sandbox"; then
+      attempt_usage="$(jq -c '.usage // {}' "$art/sandcastle-result.json" 2>/dev/null || printf '{}')"
+      if jq -e '.status == "ok"' "$art/sandcastle-result.json" >/dev/null 2>&1; then
+        attempt_output_started=true
+      fi
+      if jq -e '.usage | type == "object"' "$art/sandcastle-result.json" >/dev/null 2>&1; then
+        attempt_usage_status=known
+        cost_model_has_pricing "$attempt" && attempt_cost_status=known
+      fi
+    else
+      if jq -R -s -e '[split("\n")[] | fromjson? | select(
+          .type == "item.completed" and .item.type == "agent_message" and ((.item.text // "") | length > 0))] | length > 0' \
+          "$art/stream.jsonl" >/dev/null 2>&1; then
+        attempt_output_started=true
+      fi
+      attempt_usage="$(codex_usage "$art/stream.jsonl")"
+      if jq -R -s -e '[split("\n")[] | fromjson? | select(
+          .type == "turn.completed" and (.usage | type) == "object")] | length > 0' \
+          "$art/stream.jsonl" >/dev/null 2>&1; then
+        attempt_usage_status=known
+        cost_model_has_pricing "$attempt" && attempt_cost_status=known
+      fi
     fi
-    attempt_usage="$(codex_usage "$art/stream.jsonl")"
     attempt_cost="$(cost_from_usage "$attempt" "$attempt_usage" 2>/dev/null || echo 0)"
-    if jq -R -s -e '[split("\n")[] | fromjson? | select(
-        .type == "turn.completed" and (.usage | type) == "object")] | length > 0' \
-        "$art/stream.jsonl" >/dev/null 2>&1; then
-      attempt_usage_status=known
-      cost_model_has_pricing "$attempt" && attempt_cost_status=known
-    fi
     if [[ "$containment_failed" -eq 1 ]]; then
       attempt_terminal=failed; attempt_failure=internal
     elif [[ "$attempt_timed_out" -eq 1 ]]; then
       attempt_terminal=timed_out; attempt_failure=timed_out
-    elif [[ "$rc" -eq 0 ]] && ! jq -R -s -e \
-        '[split("\n")[] | fromjson? | select(.type == "turn.completed")] | length > 0' \
-        "$art/stream.jsonl" >/dev/null 2>&1; then
+    elif [[ "$rc" -eq 0 ]] && is_sandcastle_sandbox "$sandbox" \
+        && ! jq -e '.status == "ok"' "$art/sandcastle-result.json" >/dev/null 2>&1; then
+      attempt_terminal=failed; attempt_failure=malformed_event
+      attempt_contract_failure=1
+    elif [[ "$rc" -eq 0 ]] && ! is_sandcastle_sandbox "$sandbox" \
+        && ! jq -R -s -e \
+          '[split("\n")[] | fromjson? | select(.type == "turn.completed")] | length > 0' \
+          "$art/stream.jsonl" >/dev/null 2>&1; then
       attempt_terminal=failed; attempt_failure=malformed_event
       attempt_contract_failure=1
     elif [[ "$rc" -ne 0 ]]; then
@@ -1731,6 +1825,44 @@ aggregate_review_usage() {
   '
 }
 
+review_track_attempt_receipt() {
+  local candidate="$1" existing
+  [[ -n "$candidate" && -f "$candidate" ]] || return 0
+  for existing in ${review_attempt_receipts[@]+"${review_attempt_receipts[@]}"}; do
+    [[ "$existing" != "$candidate" ]] || return 0
+  done
+  review_attempt_receipts+=("$candidate")
+}
+
+review_canonical_metering() {
+  [[ "$#" -gt 0 ]] || { printf '%s\n' '{"reconciliation":{"usage":null,"usage_status":"unknown","usage_source":null,"known_usage":null,"known_usage_attempts":0,"cost_usd":null,"cost_status":"unknown","cost_source":null,"known_cost_usd":null,"known_cost_attempts":0,"attempt_count":0},"last":{}}'; return 0; }
+  PYTHONPATH="$_self_dir/../../legion-observability/scripts" python3 - "$@" <<'PY'
+import json
+import sys
+
+from legion_receipts import reconcile_attempts, validate_attempt
+
+attempts = []
+for index, path in enumerate(sys.argv[1:], 1):
+    with open(path, encoding="utf-8") as handle:
+        attempt = json.load(handle)
+    validate_attempt(attempt)
+    attempt = dict(attempt)
+    attempt["ordinal"] = index
+    attempts.append(attempt)
+reconciliation = reconcile_attempts(attempts)
+last = attempts[-1]
+print(json.dumps({
+    "reconciliation": reconciliation,
+    "last": {
+        "executor": last["executor"],
+        "provider": last["provider"],
+        "model": last.get("effective_model") or last.get("requested_model"),
+    },
+}, separators=(",", ":")))
+PY
+}
+
 write_review_terminal_receipt() {
   local receipt="$1" status="$2" reason="$3" model="$4" archetype="$5"
   local base_sha="$6" head_sha="$7" patch_path="$8" verdict_path="$9"
@@ -1773,12 +1905,131 @@ preserve_prompt_review_receipt() {
   printf '%s\n' "$destination"
 }
 
+validate_prompt_review_attempt() {
+  local path="$1" executor="$2" provider="$3" model="$4" run_id="$5" sandbox="$6"
+  PYTHONPATH="$_self_dir/../../legion-observability/scripts" \
+    python3 - "$path" "$executor" "$provider" "$model" "$run_id" "$sandbox" <<'PY'
+import json
+import sys
+
+from legion_receipts import validate_attempt
+
+path, executor, provider, model, run_id, sandbox = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    attempt = json.load(handle)
+validate_attempt(attempt)
+assert attempt["executor"] == executor
+assert attempt["provider"] == provider
+assert attempt["run_id"] == run_id
+assert attempt["ordinal"] == 1
+assert attempt["requested_model"] == model
+assert attempt["effective_model"] in {None, model}
+assert attempt["sandbox"] == sandbox
+assert attempt["parent_attempt_id"] is None
+assert attempt["cache_lineage"]["previous_attempt_id"] is None
+assert attempt["terminal_status"] in {"succeeded", "failed", "cancelled", "timed_out"}
+expected_usage_source = {
+    "anthropic": "claude-result",
+    "cursor": "cursor-json",
+    "opencode": "opencode-jsonl",
+}.get(provider)
+if attempt["usage_status"] == "known":
+    assert attempt["usage_source"] == expected_usage_source
+if attempt["cost_status"] == "known":
+    assert attempt["cost_source"] in {expected_usage_source, "legion-cost-table"}
+PY
+}
+
+validate_prompt_review_bundle() {
+  local attempt="$1" preflight="$2" failure="$3" lease="$4"
+  local executor="$5" provider="$6" model="$7" run_id="$8" sandbox="$9"
+  validate_prompt_review_attempt "$attempt" "$executor" "$provider" "$model" "$run_id" "$sandbox" \
+    || return 1
+  PYTHONPATH="$_self_dir/../../legion-observability/scripts" \
+    python3 - "$attempt" "$preflight" "$failure" "$lease" "$executor" \
+      "$run_id" "$sandbox" <<'PY'
+import json
+import sys
+
+from legion_receipts import validate_failure
+
+attempt_path, preflight_path, failure_path, lease_path, executor, run_id, sandbox = sys.argv[1:]
+with open(attempt_path, encoding="utf-8") as handle:
+    attempt = json.load(handle)
+with open(preflight_path, encoding="utf-8") as handle:
+    preflight = json.load(handle)
+with open(lease_path, encoding="utf-8") as handle:
+    lease = json.load(handle)
+assert preflight["schema"] == "legion.preflight.v1"
+assert preflight["executor"] == executor
+assert preflight["status"] == "supported"
+assert preflight["compatibility"]["sandbox"]["requested"] == sandbox
+assert attempt["cache_lineage"]["preflight_cache_key"] == preflight["cache"]["key"]
+identity = preflight.get("identity")
+assert identity is not None
+assert attempt["config_identity"] == identity["config_sha256"]
+assert lease["schema"] == "legion.child-execution-lease.v1"
+assert lease["status"] in {"completed", "cancelled", "timed_out", "cleanup_failed", "containment_failed"}
+if attempt["terminal_status"] == "timed_out":
+    assert lease["status"] == "timed_out"
+elif attempt["terminal_status"] == "cancelled":
+    assert lease["status"] == "cancelled"
+elif lease["status"] == "timed_out":
+    raise AssertionError("non-timeout attempt has timed-out lease")
+if failure_path:
+    with open(failure_path, encoding="utf-8") as handle:
+        failure = json.load(handle)
+    validate_failure(failure)
+    assert failure == attempt["failure"]
+    assert failure["run_id"] == run_id
+else:
+    assert attempt["failure"] is None
+PY
+}
+
+preserve_interrupted_prompt_receipts() {
+  [[ -n "$PROMPT_ATTEMPT_ART" && -n "$PROMPT_RECEIPT_DIR" && -n "$PROMPT_SHARED_ART" ]] \
+    || return 0
+  local source_preflight="$PROMPT_ATTEMPT_ART/preflight.json"
+  local source_attempt="$PROMPT_ATTEMPT_ART/attempt-$PROMPT_ATTEMPT_ORDINAL.json"
+  local source_failure="$PROMPT_ATTEMPT_ART/failure-$PROMPT_ATTEMPT_ORDINAL.json"
+  review_preflight_receipt="$(preserve_prompt_review_receipt "$source_preflight" "$REVIEW_WT_PATH" \
+    "$PROMPT_RECEIPT_DIR/preflight.json" legion.preflight.v1 2>/dev/null || true)"
+  review_attempt_receipt="$(preserve_prompt_review_receipt "$source_attempt" "$REVIEW_WT_PATH" \
+    "$PROMPT_RECEIPT_DIR/attempt.json" legion.attempt.v1 2>/dev/null || true)"
+  if [[ -n "$review_attempt_receipt" ]] && ! validate_prompt_review_attempt \
+      "$review_attempt_receipt" "$PROMPT_EXPECTED_EXECUTOR" "$PROMPT_EXPECTED_PROVIDER" \
+      "$PROMPT_EXPECTED_MODEL" "$PROMPT_RUN_ID" "$PROMPT_EXPECTED_SANDBOX"; then
+    rm -f "$review_attempt_receipt"
+    review_attempt_receipt=""
+  fi
+  review_failure_receipt=""
+  if [[ -f "$source_failure" ]]; then
+    review_failure_receipt="$(preserve_prompt_review_receipt "$source_failure" "$REVIEW_WT_PATH" \
+      "$PROMPT_RECEIPT_DIR/failure.json" legion.failure.v1 2>/dev/null || true)"
+  fi
+  review_lease_receipt="$(preserve_prompt_review_receipt "$PROMPT_LEASE_STATUS" "$REVIEW_WT_PATH" \
+    "$PROMPT_RECEIPT_DIR/lease.json" legion.child-execution-lease.v1 2>/dev/null || true)"
+  if [[ -n "$review_attempt_receipt" && -n "$review_preflight_receipt" \
+        && -n "$review_lease_receipt" ]] && ! validate_prompt_review_bundle \
+      "$review_attempt_receipt" "$review_preflight_receipt" "$review_failure_receipt" \
+      "$review_lease_receipt" "$PROMPT_EXPECTED_EXECUTOR" "$PROMPT_EXPECTED_PROVIDER" \
+      "$PROMPT_EXPECTED_MODEL" "$PROMPT_RUN_ID" "$PROMPT_EXPECTED_SANDBOX"; then
+    review_attempt_receipt=""
+  fi
+  review_track_attempt_receipt "$review_attempt_receipt"
+  [[ -z "$review_preflight_receipt" ]] || cp "$review_preflight_receipt" "$PROMPT_SHARED_ART/preflight.json"
+  [[ -z "$review_attempt_receipt" ]] || cp "$review_attempt_receipt" "$PROMPT_SHARED_ART/attempt.json"
+  [[ -z "$review_failure_receipt" ]] || cp "$review_failure_receipt" "$PROMPT_SHARED_ART/failure.json"
+  [[ -z "$review_lease_receipt" ]] || cp "$review_lease_receipt" "$PROMPT_SHARED_ART/lease.json"
+}
+
 # Review by ordinary delegation, for executors with no native review verb.
 # Writes the reviewer's answer to VERDICT_OUT; the caller's normalizer converts
 # prose into the verdict schema exactly as it already does for codex prose.
 review_invoke_prompt() {
   local ex="$1" model="$2" wt="$3" patch="$4" verdict_out="$5" stream="$6" err="$7" extra="$8"
-  local receipt_dir="$9" shared_art="${10}" attempt_runtime="${11}"
+  local receipt_dir="$9" shared_art="${10}" attempt_runtime="${11}" review_sandbox="${12}"
   local adapter adapter_bin info prompt rc=0 last receipt_contract_failed=0
   info="$(python3 "$ROUTE_BIN" --executor-info "$ex" 2>/dev/null)" || return 127
   adapter="$(jq -r '.adapter // ""' <<<"$info")"
@@ -1824,11 +2075,37 @@ $(cat "$patch")
   # whatever the caller had instead of asserting a value.
   local errexit_was_set=0
   case "$-" in *e*) errexit_was_set=1 ;; esac
+  local prompt_run_id="${RUN_ID}-${receipt_dir##*/}"
+  local prompt_art="$wt/.legion/runs/$prompt_run_id"
+  local -a adapter_args=(run --repo "$wt" "${task_args[@]}" --sandbox "$review_sandbox"
+    --run-id "$prompt_run_id" --max-runtime-seconds "$attempt_runtime" --quiet)
+  [[ -z "$model" ]] || adapter_args+=(--model "$model")
+  [[ "$adapter" != legion-claude ]] || adapter_args+=(--no-fallback)
+  PROMPT_ATTEMPT_ART="$prompt_art"
+  PROMPT_ATTEMPT_ORDINAL=1
+  PROMPT_WORKTREE="$wt/.legion/worktrees/$prompt_run_id"
+  PROMPT_RECEIPT_DIR="$receipt_dir"
+  PROMPT_SHARED_ART="$shared_art"
+  PROMPT_EXPECTED_EXECUTOR="$ex"
+  PROMPT_EXPECTED_MODEL="$model"
+  PROMPT_EXPECTED_SANDBOX="$review_sandbox"
+  PROMPT_RUN_ID="$prompt_run_id"
+  case "$adapter" in
+    legion-claude)
+      PROMPT_EXPECTED_PROVIDER=anthropic
+      PROMPT_LEASE_STATUS="$prompt_art/lease-1.json"
+      ;;
+    legion-cursor) PROMPT_EXPECTED_PROVIDER=cursor; PROMPT_LEASE_STATUS="$prompt_art/lease.json" ;;
+    legion-opencode) PROMPT_EXPECTED_PROVIDER=opencode; PROMPT_LEASE_STATUS="$prompt_art/lease.json" ;;
+    *) PROMPT_EXPECTED_PROVIDER="$ex"; PROMPT_LEASE_STATUS="$prompt_art/lease.json" ;;
+  esac
   set +e
-  ( cd "$wt" && LEGION_REVIEW_HANDOFF=1 "$adapter_bin" run --repo "$wt" "${task_args[@]}" \
-      ${model:+--model "$model"} --max-runtime-seconds "$attempt_runtime" --quiet ) \
-    </dev/null >"$stream" 2>"$err"
-  rc=$?
+  ( cd "$wt" && exec env LEGION_REVIEW_HANDOFF=1 "$adapter_bin" "${adapter_args[@]}" ) \
+    </dev/null >"$stream" 2>"$err" &
+  PROMPT_CHILD_PID=$!
+  wait "$PROMPT_CHILD_PID"; rc=$?
+  PROMPT_CHILD_RC="$rc"
+  PROMPT_CHILD_PID=""
   [[ "$errexit_was_set" -eq 0 ]] || set -e
   local source_preflight source_attempt source_failure="" source_lease=""
   source_preflight="$(jq -r '.preflight_receipt // empty' "$stream" 2>/dev/null || true)"
@@ -1846,6 +2123,13 @@ $(cat "$patch")
   fi
   review_lease_receipt="$(preserve_prompt_review_receipt "$source_lease" "$wt" \
     "$receipt_dir/lease.json" legion.child-execution-lease.v1 2>/dev/null || true)"
+  if [[ -n "$review_attempt_receipt" && -n "$review_preflight_receipt" \
+        && -n "$review_lease_receipt" ]] && ! validate_prompt_review_bundle \
+      "$review_attempt_receipt" "$review_preflight_receipt" "$review_failure_receipt" \
+      "$review_lease_receipt" "$ex" "$PROMPT_EXPECTED_PROVIDER" "$model" "$prompt_run_id" \
+      "$review_sandbox"; then
+    review_attempt_receipt=""
+  fi
   if jq -e '.status == "containment_failed"' "$stream" >/dev/null 2>&1; then
     review_containment_failed=1
     LEGION_WT_KEEP=1
@@ -1884,6 +2168,18 @@ $(cat "$patch")
     fi
     [[ -z "$last" ]] || printf '%s' "$last" >"$verdict_out"
   fi
+  PROMPT_CHILD_RC=0
+  PROMPT_LEASE_STATUS=""
+  PROMPT_ATTEMPT_ART=""
+  PROMPT_ATTEMPT_ORDINAL=0
+  PROMPT_WORKTREE=""
+  PROMPT_RECEIPT_DIR=""
+  PROMPT_SHARED_ART=""
+  PROMPT_EXPECTED_EXECUTOR=""
+  PROMPT_EXPECTED_PROVIDER=""
+  PROMPT_EXPECTED_MODEL=""
+  PROMPT_EXPECTED_SANDBOX=""
+  PROMPT_RUN_ID=""
   return "$rc"
 }
 
@@ -2195,6 +2491,7 @@ cmd_review() {
   local review_executor review_kind review_model_ref _cand _cand_n=0
   local review_preflight_receipt="" review_attempt_receipt="" review_failure_receipt=""
   local review_lease_receipt="" review_containment_failed=0 review_prompt_containment_reason=""
+  local -a review_attempt_receipts=()
   : > "$attempt_stream"
   : > "$attempt_err"
   # Activating a candidate's executor context marks this process as running
@@ -2320,6 +2617,7 @@ cmd_review() {
         "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$message"
       review_attempt_receipt="$LEGION_ADAPTER_ATTEMPT_PATH"
       review_failure_receipt="$LEGION_ADAPTER_FAILURE_PATH"
+      review_track_attempt_receipt "$review_attempt_receipt"
       native_attempt_recorded=1
       NATIVE_ATTEMPT_ART=""
       NATIVE_LEASE_STATUS=""
@@ -2387,8 +2685,9 @@ cmd_review() {
       set +e
       review_invoke_prompt "$review_executor" "$model" "$wt" "$patch_path" \
         "$attempt_verdict" "$attempt_stream" "$attempt_err" "$review_prompt" \
-        "$art/prompt-review-$_cand_n-$attempt" "$art" "$attempt_runtime"
+        "$art/prompt-review-$_cand_n-$attempt" "$art" "$attempt_runtime" "$sandbox"
       rc=$?
+      review_track_attempt_receipt "$review_attempt_receipt"
       set -e
     fi
 
@@ -2523,8 +2822,35 @@ cmd_review() {
   cp "$attempt_err" "$art/codex.err"
   [[ -s "$attempt_verdict" ]] && cp "$attempt_verdict" "$verdict_file"
   local usage cost filtered_err error_log verdict_json="null"
-  usage="$(aggregate_review_usage "$art" "$attempt")"
-  cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
+  local usage_status=known cost_status=known metering_provider=codex
+  local review_metering='{}' span_usage span_cost span_usage_status span_cost_status
+  if [[ "$review_kind" != native ]]; then
+    review_metering="$(review_canonical_metering "${review_attempt_receipts[@]}")"
+    usage="$(jq -c '.reconciliation.usage' <<<"$review_metering")"
+    cost="$(jq -c '.reconciliation.cost_usd' <<<"$review_metering")"
+    usage_status="$(jq -r '.reconciliation.usage_status' <<<"$review_metering")"
+    cost_status="$(jq -r '.reconciliation.cost_status' <<<"$review_metering")"
+    metering_provider="$(jq -r '.last.provider // empty' <<<"$review_metering")"
+    local effective_review_model actual_review_executor
+    effective_review_model="$(jq -r '.last.model // empty' <<<"$review_metering")"
+    actual_review_executor="$(jq -r '.last.executor // empty' <<<"$review_metering")"
+    [[ -z "$effective_review_model" ]] || model="$effective_review_model"
+    [[ -z "$actual_review_executor" ]] || REVIEW_EXECUTOR_LABEL="$actual_review_executor"
+    # Prompt adapters already emit and ingest their paid provider spans. The
+    # outer review span is a non-billable rollup carrying reconciliation only;
+    # assigning the same cost here would double count every review.
+    span_usage=null
+    span_cost=null
+    span_usage_status=not_applicable
+    span_cost_status=not_applicable
+  else
+    usage="$(aggregate_review_usage "$art" "$attempt")"
+    cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
+    span_usage="$usage"
+    span_cost="$cost"
+    span_usage_status="$usage_status"
+    span_cost_status="$cost_status"
+  fi
   filtered_err="$art/codex.filtered.err"
   filter_codex_stderr "$art/codex.err" "$filtered_err"
   error_log="$(error_log_summary "$art/codex.err" "$filtered_err")"
@@ -2542,6 +2868,7 @@ cmd_review() {
     --arg reason "$reason" --arg preflight "$review_preflight_receipt" \
     --arg attempt_receipt "$review_attempt_receipt" --arg failure "$review_failure_receipt" \
     --arg lease "$review_lease_receipt" \
+    --argjson metering "$review_metering" \
     --argjson attempts "$attempt" '
     {terminal_receipt:$receipt, verdict:$verdict, review_patch:$patch,
      reviewed_base_sha:$base, reviewed_head_sha:$head,
@@ -2549,10 +2876,14 @@ cmd_review() {
      preflight_receipt:(if $preflight=="" then null else $preflight end),
      attempt_receipt:(if $attempt_receipt=="" then null else $attempt_receipt end),
      failure_receipt:(if $failure=="" then null else $failure end),
-     lease_receipt:(if $lease=="" then null else $lease end)}')"
-  emit_span "codex-review" "$model" "$status" "$dur" "$cost" "$usage" \
-    "review --base $base_sha --head $head_sha" "$artifacts"
-  ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
+     lease_receipt:(if $lease=="" then null else $lease end),
+     metering_reconciliation:$metering.reconciliation,
+     rollup_only:($metering != {})}')"
+  emit_span "${REVIEW_EXECUTOR_LABEL:-codex}-review" "$model" "$status" "$dur" "$span_cost" "$span_usage" \
+    "review --base $base_sha --head $head_sha" "$artifacts" "$span_usage_status" "$span_cost_status"
+  if [[ "$review_kind" == native && "$usage_status" == known && "$cost_status" == known ]]; then
+    ingest_usage "$model" "$metering_provider" "${rc:-0}" "$usage" "$cost"
+  fi
   write_run_state "$status"
   write_run_artifact_status "$art" "$RUN_ID" \
     "$([[ "$status" == "ok" ]] && printf completed || printf failed)" \

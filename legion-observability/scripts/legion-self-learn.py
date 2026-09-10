@@ -788,7 +788,7 @@ def _validated_span(payload: Any) -> dict[str, Any] | None:
             payload.get(field), str
         ):
             return None
-    for field in ("duration_ms", "cost_usd"):
+    for field in ("duration_ms",):
         if field not in payload:
             continue
         value = payload.get(field)
@@ -799,9 +799,57 @@ def _validated_span(payload: Any) -> dict[str, Any] | None:
             or value < 0
         ):
             return None
-    for field in ("tokens", "artifacts"):
-        if field in payload and not isinstance(payload.get(field), dict):
+    for field in ("cost_usd", "known_cost_usd"):
+        if field not in payload or payload.get(field) is None:
+            continue
+        value = payload.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
             return None
+    for field in ("tokens", "known_usage"):
+        if field in payload and payload.get(field) is not None and not isinstance(payload.get(field), dict):
+            return None
+    if "artifacts" in payload and not isinstance(payload.get("artifacts"), dict):
+        return None
+    for field in ("usage_status", "cost_status"):
+        if field in payload and payload.get(field) not in {
+            "known", "partial", "unknown", "not_applicable"
+        }:
+            return None
+    for field in ("known_cost_attempts", "known_usage_attempts"):
+        if field in payload and (
+            isinstance(payload.get(field), bool)
+            or not isinstance(payload.get(field), int)
+            or payload.get(field) < 0
+        ):
+            return None
+    cost_status = payload.get("cost_status")
+    if cost_status == "known" and payload.get("cost_usd") is None:
+        return None
+    if cost_status in {"partial", "unknown", "not_applicable"} and payload.get("cost_usd") is not None:
+        return None
+    if cost_status == "partial" and (
+        payload.get("known_cost_usd") is None or payload.get("known_cost_attempts", 0) < 1
+    ):
+        return None
+    if cost_status in {"unknown", "not_applicable"} and payload.get("known_cost_usd") is not None:
+        return None
+    usage_status = payload.get("usage_status")
+    if usage_status == "known" and not isinstance(payload.get("tokens"), dict):
+        return None
+    if usage_status in {"partial", "unknown", "not_applicable"} and payload.get("tokens") is not None:
+        return None
+    if usage_status == "partial" and (
+        not isinstance(payload.get("known_usage"), dict)
+        or payload.get("known_usage_attempts", 0) < 1
+    ):
+        return None
+    if usage_status in {"unknown", "not_applicable"} and payload.get("known_usage") is not None:
+        return None
     bounded = _bounded_span_value(payload)
     if not isinstance(bounded, dict):
         return None

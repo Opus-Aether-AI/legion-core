@@ -137,6 +137,7 @@ scan_task_text() {
 
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  local usage_status="${9:-unknown}" cost_status="${10:-unknown}"
   {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
@@ -146,14 +147,16 @@ emit_span() {
       --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
       --arg executor "$executor" --arg model "$model" --arg archetype "${archetype:-}" \
       --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
-      --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-      --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
+      --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-null}" \
+      --argjson usage "${usage:-null}" --arg usage_status "$usage_status" \
+      --arg cost_status "$cost_status" --arg task "$task" --argjson artifacts "$artifacts" '
       {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id,
        parent_id:(if $parent_id=="" then null else $parent_id end),
        executor:$executor, model:$model, archetype:$archetype, task:$task, status:$status,
        target_type:(if $target_type=="" then null else $target_type end),
        target_name:(if $target_name=="" then null else $target_name end),
-       duration_ms:$dur, cost_usd:$cost, tokens:$usage, artifacts:$artifacts}' \
+       duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
+       tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
       >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
   } 2>/dev/null || true
 }
@@ -234,7 +237,8 @@ cmd_run() {
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
       {run_id:$run,executor:"deepseek",model:$model,status:"refused",reason:$reason,
        preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
-       usage:{},cost_usd:0}'
+       usage:null,tokens:null,usage_status:"not_applicable",
+       cost_usd:null,cost_status:"not_applicable"}'
     return 1
   fi
   dsh_bin="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
@@ -286,11 +290,10 @@ cmd_run() {
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
-  # dsh publishes no headless usage contract, so nothing is metered rather than
-  # something being guessed. A zero here means "not reported", and legion-report
-  # shows it as such; a fabricated number would silently enter cost totals and
-  # routing decisions that are supposed to be evidence-based.
-  local usage='{}' cost="0" result="" diff_rc=0 status="ok"
+  # dsh publishes no headless usage contract. Preserve that as unknown/null all
+  # the way through spans and aggregation; zero would falsely mean a measured
+  # free run.
+  local usage=null cost=null result="" diff_rc=0 status="ok"
   result="$(cat "$out_file" 2>/dev/null || true)"
 
   local containment_failed=0
@@ -337,7 +340,7 @@ cmd_run() {
   fi
   legion_adapter_write_attempt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
     "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
-    '{}' unknown '' 0 unknown '' "$failure_class" false "$output_started" \
+    null unknown '' null unknown '' "$failure_class" false "$output_started" \
     "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
   legion_adapter_disarm_signal_receipt
   SIGNAL_CHILD_PID=""
@@ -353,7 +356,8 @@ cmd_run() {
     '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
       dsh_profile:$profile,preflight_receipt:$preflight,attempt_receipt:$attempt,
       failure_receipt:(if $failure=="" then null else $failure end)}')"
-  emit_span "deepseek" "$reported_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+  emit_span "deepseek" "$reported_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts" \
+    unknown unknown
 
   if [[ "$do_apply" == "1" && "$status" == "ok" && -s "$art/diff.patch" ]]; then
     if git -C "$repo" apply --check "$art/diff.patch" 2>/dev/null; then
@@ -383,7 +387,9 @@ cmd_run() {
     --arg reason "$([[ "$status" == timed_out ]] && legion_adapter_lease_reason "$lease_status" || [[ "$status" == containment_failed ]] && legion_adapter_supervisor_reason "$lease_status")" \
     --arg lease "$lease_status" \
     '{run_id:$run_id, executor:$executor, model:$model, status:$status,
-      diff_path:$diff, last_message:$last, worktree:$wt, usage:$usage, cost_usd:$cost,
+      diff_path:$diff, last_message:$last, worktree:$wt,
+      usage:$usage,tokens:$usage,usage_status:"unknown",
+      cost_usd:$cost,cost_status:"unknown",
       preflight_receipt:$preflight,attempt_receipt:$attempt,
       failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
       + (if $reason=="" then {} else {reason:$reason} end)'

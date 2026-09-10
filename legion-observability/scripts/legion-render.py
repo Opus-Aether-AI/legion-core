@@ -22,6 +22,17 @@ def _fmt_money(value):
     return f"${_num(value):,.4f}"
 
 
+def _cost_text(record, width=0):
+    status = record.get("cost_status")
+    if status in {"unknown", "partial"}:
+        value = "unknown" if status == "unknown" else f">={_fmt_money(record.get('known_cost_usd'))}"
+    elif status == "not_applicable":
+        value = "n/a"
+    else:
+        value = f"{_num(record.get('cost_usd')):.4f}"
+    return f"{value:>{width}}" if width else value
+
+
 def _fmt_pct(value):
     return f"{_num(value) * 100:.1f}%"
 
@@ -34,11 +45,11 @@ def tui(d):
     for k, v in sorted(g.items()):
         out.append(
             f'{k:<22}{v.get("count",0):>6}{v.get("ok",0):>8}{v.get("success_rate",0)*100:>8.1f}%'
-            f'{v.get("cost_usd",0):>12.4f}{v.get("p50_ms",0):>9.0f}{v.get("p95_ms",0):>9.0f}'
+            f'{_cost_text(v, 12)}{v.get("p50_ms",0):>9.0f}{v.get("p95_ms",0):>9.0f}'
         )
     out.append(
         f'{"TOTAL":<22}{t.get("count",0):>6}{t.get("ok",0):>8}'
-        f'{t.get("success_rate",0)*100:>8.1f}%{t.get("cost_usd",0):>12.4f}'
+        f'{t.get("success_rate",0)*100:>8.1f}%{_cost_text(t, 12)}'
     )
     if classification.get("delegated_runs", 0):
         out.append(
@@ -73,7 +84,7 @@ def to_html(d):
             f"<td>{_fmt_int(v.get('count', 0))}</td>"
             f"<td>{_fmt_int(v.get('ok', 0))}</td>"
             f'<td><span class="status-pill {tone}">{_fmt_pct(rate)}</span></td>'
-            f"<td>{_fmt_money(v.get('cost_usd', 0))}</td>"
+            f"<td>{html.escape(_cost_text(v))}</td>"
             f"<td>{_fmt_int(v.get('p50_ms', 0))}</td>"
             f"<td>{_fmt_int(v.get('p95_ms', 0))}</td>"
             "</tr>"
@@ -182,7 +193,7 @@ def to_html(d):
       <div class="metric"><span>Total runs</span><strong>{_fmt_int(t.get("count", 0))}</strong></div>
       <div class="metric"><span>Successful runs</span><strong>{_fmt_int(t.get("ok", 0))}</strong></div>
       <div class="metric"><span>Success rate</span><strong>{_fmt_pct(t.get("success_rate", 0))}</strong></div>
-      <div class="metric"><span>Total cost</span><strong>{_fmt_money(t.get("cost_usd", 0))}</strong></div>
+      <div class="metric"><span>Total cost</span><strong>{html.escape(_cost_text(t))}</strong></div>
       {classification_metrics}
     </section>
     <section class="panel">
@@ -197,7 +208,7 @@ def to_html(d):
           </thead>
           <tbody>{''.join(rows)}</tbody>
           <tfoot>
-            <tr><th>Total</th><th>{_fmt_int(t.get("count", 0))}</th><th>{_fmt_int(t.get("ok", 0))}</th><th>{_fmt_pct(t.get("success_rate", 0))}</th><th>{_fmt_money(t.get("cost_usd", 0))}</th><th></th><th></th></tr>
+            <tr><th>Total</th><th>{_fmt_int(t.get("count", 0))}</th><th>{_fmt_int(t.get("ok", 0))}</th><th>{_fmt_pct(t.get("success_rate", 0))}</th><th>{html.escape(_cost_text(t))}</th><th></th><th></th></tr>
           </tfoot>
         </table>
       </div>

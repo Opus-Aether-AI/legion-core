@@ -47,7 +47,12 @@ def span_to_otlp(s):
     a("legion.executor", str(s.get("executor", "")))
     a("legion.model", str(s.get("model", "")))
     a("legion.status", str(s.get("status", "")))
-    a("legion.cost_usd", float(_num(s.get("cost_usd"))), "doubleValue")
+    cost_status = str(s.get("cost_status") or ("known" if s.get("cost_usd") is not None else "unknown"))
+    usage_status = str(s.get("usage_status") or ("known" if isinstance(s.get("tokens"), dict) else "unknown"))
+    a("legion.cost_status", cost_status)
+    a("legion.usage_status", usage_status)
+    if cost_status == "known" and s.get("cost_usd") is not None:
+        a("legion.cost_usd", float(_num(s.get("cost_usd"))), "doubleValue")
     tk = s.get("tokens") or {}
     if isinstance(tk, dict):
         for key in ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"):

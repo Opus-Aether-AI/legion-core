@@ -56,3 +56,23 @@ def test_html_omits_classification_cards_when_no_delegations_exist():
 
     assert "Routing classification" not in output
     assert "Unclassified cost" not in output
+
+
+def test_unknown_and_partial_costs_are_not_rendered_as_free():
+    report = _report()
+    report["groups"] = {
+        "deepseek": {"count": 1, "ok": 1, "success_rate": 1,
+                     "cost_usd": None, "cost_status": "unknown"},
+        "mixed": {"count": 2, "ok": 2, "success_rate": 1,
+                  "cost_usd": None, "cost_status": "partial", "known_cost_usd": 0.25},
+    }
+    report["total"].update(
+        {"cost_usd": None, "cost_status": "partial", "known_cost_usd": 0.25}
+    )
+
+    tui = render.tui(report)
+    html = render.to_html(report)
+    assert "unknown" in tui
+    assert ">=$0.2500" in tui
+    assert "unknown" in html
+    assert "&gt;=$0.2500" in html

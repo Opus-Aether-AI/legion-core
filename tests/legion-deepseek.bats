@@ -52,18 +52,21 @@ make_test_repo() {
     grep -Eq '^dsh active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
-@test "legion-deepseek: reports zero usage rather than inventing it" {
+@test "legion-deepseek: preserves unknown usage and cost rather than inventing free work" {
     # dsh publishes no headless usage contract. A fabricated number would flow
     # into cost reports and routing decisions that are meant to be evidence-
     # based, so the adapter meters nothing and says so.
     local repo; repo="$(make_test_repo usage1)"
     run "$LEGION_DEEPSEEK" run --task "measure me" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e '.cost_usd == 0 and (.usage | length) == 0'
+    echo "$output" | jq -e '
+      .cost_usd == null and .cost_status == "unknown"
+      and .usage == null and .tokens == null and .usage_status == "unknown"'
 
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '.cost_usd, (.tokens | length)'"
-    [ "${lines[0]}" = "0" ]
-    [ "${lines[1]}" = "0" ]
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e '
+      .cost_usd == null and .cost_status == \"unknown\"
+      and .tokens == null and .usage_status == \"unknown\"'"
+    [ "$status" -eq 0 ]
 }
 
 @test "legion-deepseek: an executor that commits its work is not lost" {

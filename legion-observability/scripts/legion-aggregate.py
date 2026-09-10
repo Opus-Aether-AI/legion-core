@@ -8,6 +8,7 @@ Tolerates malformed lines and missing fields. Pure stdlib — importable for tes
 import argparse
 import glob
 import json
+import math
 import os
 import sys
 
@@ -50,7 +51,98 @@ def load(paths):
 
 def _num(x):
     # reject bool (True is int 1), NaN (x != x), and non-numerics
-    return x if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x else 0
+    return x if (
+        isinstance(x, (int, float)) and not isinstance(x, bool)
+        and math.isfinite(x)
+    ) else 0
+
+
+def _provenance_status(span, kind):
+    status = span.get(f"{kind}_status")
+    value = span.get("cost_usd" if kind == "cost" else "tokens")
+    value_is_known = (
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(value) and value >= 0
+    ) if kind == "cost" else isinstance(value, dict)
+    if status == "known":
+        return "known" if value_is_known else "unknown"
+    if status == "partial":
+        known_value = span.get("known_cost_usd" if kind == "cost" else "known_usage")
+        known_count = span.get("known_cost_attempts" if kind == "cost" else "known_usage_attempts")
+        known_value_is_valid = (
+            isinstance(known_value, (int, float)) and not isinstance(known_value, bool)
+            and math.isfinite(known_value) and known_value >= 0
+        ) if kind == "cost" else isinstance(known_value, dict)
+        return "partial" if known_value_is_valid and _positive_count(known_count) else "unknown"
+    if status in {"unknown", "not_applicable"}:
+        return status
+    if kind == "cost":
+        return "known" if value_is_known else "unknown"
+    return "known" if value_is_known else "unknown"
+
+
+def _merged_status(known, partial, unknown, not_applicable):
+    applicable = known + partial + unknown
+    if not applicable:
+        return "not_applicable"
+    if known == applicable:
+        return "known"
+    if not known and not partial:
+        return "unknown"
+    return "partial"
+
+
+def _new_group():
+    return {
+        "count": 0, "ok": 0, "_known_cost": 0.0, "_dur": [],
+        "_cost_known": 0, "_cost_partial": 0, "_cost_unknown": 0, "_cost_na": 0,
+        "_usage_known": 0, "_usage_partial": 0, "_usage_unknown": 0, "_usage_na": 0,
+        "_known_cost_runs": 0, "_known_usage_runs": 0,
+    }
+
+
+def _record_provenance(group, span):
+    cost_status = _provenance_status(span, "cost")
+    usage_status = _provenance_status(span, "usage")
+    group[f"_cost_{'na' if cost_status == 'not_applicable' else cost_status}"] += 1
+    group[f"_usage_{'na' if usage_status == 'not_applicable' else usage_status}"] += 1
+    if cost_status == "known":
+        group["_known_cost"] += _num(span.get("cost_usd"))
+        group["_known_cost_runs"] += 1
+    elif cost_status == "partial":
+        group["_known_cost"] += _num(span.get("known_cost_usd"))
+        group["_known_cost_runs"] += _positive_count(span.get("known_cost_attempts"))
+    if usage_status == "known":
+        group["_known_usage_runs"] += 1
+    elif usage_status == "partial":
+        group["_known_usage_runs"] += _positive_count(span.get("known_usage_attempts"))
+
+
+def _positive_count(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _finalize_group(group):
+    cost_status = _merged_status(
+        group["_cost_known"], group["_cost_partial"], group["_cost_unknown"], group["_cost_na"]
+    )
+    usage_status = _merged_status(
+        group["_usage_known"], group["_usage_partial"], group["_usage_unknown"], group["_usage_na"]
+    )
+    known_cost = round(group["_known_cost"], 6)
+    return {
+        "count": group["count"],
+        "ok": group["ok"],
+        "success_rate": round(group["ok"] / group["count"], 4) if group["count"] else 0,
+        "cost_usd": known_cost if cost_status == "known" else None,
+        "cost_status": cost_status,
+        "known_cost_usd": known_cost if group["_cost_known"] or group["_cost_partial"] else None,
+        "known_cost_runs": group["_known_cost_runs"],
+        "usage_status": usage_status,
+        "known_usage_runs": group["_known_usage_runs"],
+        "p50_ms": round(percentile(group["_dur"], 50), 1),
+        "p95_ms": round(percentile(group["_dur"], 95), 1),
+    }
 
 
 def _is_synthetic_opus_baseline(span):
@@ -136,32 +228,25 @@ def aggregate(spans, by="executor", trace=""):
                 unclassified += 1
                 unclassified_cost += _num(s.get("cost_usd", 0))
         key = _archetype_group(s) if by == "archetype" else (s.get(by) or "unknown")
-        g = groups.setdefault(key, {"count": 0, "ok": 0, "cost_usd": 0.0, "_dur": []})
+        g = groups.setdefault(key, _new_group())
         g["count"] += 1
         if s.get("status") in SUCCESS_STATUSES:
             g["ok"] += 1
-        g["cost_usd"] += _num(s.get("cost_usd", 0))
+        _record_provenance(g, s)
         d = _num(s.get("duration_ms", 0))
         if d > 0:
             g["_dur"].append(d)
 
     out = {}
-    total = {"count": 0, "ok": 0, "cost_usd": 0.0}
+    total_group = _new_group()
     for k, g in groups.items():
-        durs = g.pop("_dur")
-        out[k] = {
-            "count": g["count"],
-            "ok": g["ok"],
-            "success_rate": round(g["ok"] / g["count"], 4) if g["count"] else 0,
-            "cost_usd": round(g["cost_usd"], 6),
-            "p50_ms": round(percentile(durs, 50), 1),
-            "p95_ms": round(percentile(durs, 95), 1),
-        }
-        total["count"] += g["count"]
-        total["ok"] += g["ok"]
-        total["cost_usd"] += g["cost_usd"]
-    total["success_rate"] = round(total["ok"] / total["count"], 4) if total["count"] else 0
-    total["cost_usd"] = round(total["cost_usd"], 6)
+        out[k] = _finalize_group(g)
+        for field in total_group:
+            if field == "_dur":
+                total_group[field].extend(g[field])
+            else:
+                total_group[field] += g[field]
+    total = _finalize_group(total_group)
     return {
         "by": by,
         "trace": trace_meta,

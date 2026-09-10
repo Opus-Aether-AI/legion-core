@@ -2771,6 +2771,9 @@ PY
       and (.attempt_receipt | contains("/prompt-review-"))'
     jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '.compatibility.sandbox.requested == "read-only"
+      and .compatibility.sandbox.provider_sandbox == "read-only"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
     jq -e '.schema == "legion.attempt.v1" and .executor == "cursor"
       and .terminal_status == "succeeded"' "$(echo "$output" | jq -r .attempt_receipt)"
     local art; art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
@@ -2780,6 +2783,70 @@ PY
       and .failure.class == "unavailable"' "$art/attempt-1.json"
     jq -e '.schema == "legion.failure.v1" and .class == "unavailable"' \
       "$art/failure-1.json"
+    local review_span
+    review_span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "cursor-review")')"
+    jq -e '
+      .model == "cursor-grok-4.6-high"
+      and .cost_usd == null and .cost_status == "not_applicable"
+      and .tokens == null and .usage_status == "not_applicable"
+      and .artifacts.rollup_only == true
+      and .artifacts.metering_reconciliation.attempt_count == 2
+      and .artifacts.metering_reconciliation.cost_status == "partial"
+      and .artifacts.metering_reconciliation.known_cost_usd == 0.03
+    ' <<<"$review_span"
+    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | .cost_usd // 0] | add')" = "0.03" ]
+}
+
+@test "delegate review: Claude prompt reviewer is read-only and cannot own fallback" {
+    local repo; repo="$(make_test_repo review-claude-no-fallback)"
+    export MOCK_CLAUDE_LIMIT=1
+
+    CODEX_BIN=missing-codex-for-review CURSOR_AGENT_BIN=missing-cursor-for-review \
+      OPENCODE_BIN=missing-opencode-for-review \
+      run "$DELEGATE" review --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -ne 0 ]
+    assert_mock_called claude "--permission-mode plan"
+    assert_mock_not_called legion-delegate
+    local art claude_preflight
+    art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    claude_preflight="$(find "$art" -path '*/prompt-review-*/preflight.json' -type f \
+      -exec sh -c 'jq -e '\''.executor == "claude"'\'' "$1" >/dev/null' _ {} \; -print -quit)"
+    jq -e '.executor == "claude"
+      and .compatibility.sandbox.requested == "read-only"' "$claude_preflight"
+}
+
+@test "delegate review: malformed prompt retry reconciles every paid attempt without collisions" {
+    local repo; repo="$(make_test_repo review-prompt-malformed-retry)"
+    export MOCK_CURSOR_RESULT_SEQUENCE_FILE="$TEST_TMPDIR/cursor-review-results"
+    printf '%s\n%s\n' \
+      'this is malformed but carries no rejection' \
+      '{"verdict":"approve","summary":"No blocking findings.","findings":[]}' \
+      > "$MOCK_CURSOR_RESULT_SEQUENCE_FILE"
+
+    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+      --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+    local art; art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    jq -e '.executor == "cursor" and .terminal_status == "succeeded"' \
+      "$art/prompt-review-2-1/attempt.json"
+    jq -e '.executor == "cursor" and .terminal_status == "succeeded"' \
+      "$art/prompt-review-2-2/attempt.json"
+    [ "$(jq -sr 'map(.attempt_id) | unique | length' \
+      "$art/prompt-review-2-1/attempt.json" "$art/prompt-review-2-2/attempt.json")" -eq 2 ]
+    local review_span
+    review_span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "cursor-review")')"
+    jq -e '
+      .cost_usd == null and .cost_status == "not_applicable"
+      and .artifacts.rollup_only == true
+      and .artifacts.metering_reconciliation.attempt_count == 2
+      and .artifacts.metering_reconciliation.cost_status == "known"
+      and .artifacts.metering_reconciliation.cost_usd == 0.06
+      and .artifacts.metering_reconciliation.known_cost_attempts == 2
+    ' <<<"$review_span"
+    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | .cost_usd // 0] | add')" = "0.06" ]
 }
 
 @test "delegate review: unavailable native admission falls through before provider launch" {

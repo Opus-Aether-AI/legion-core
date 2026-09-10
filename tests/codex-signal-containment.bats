@@ -64,6 +64,25 @@ assert_internal_attempt() {
   [ "$(find "$(dirname "$attempt")" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
 }
 
+install_mock_sandcastle_node() {
+  local shim="$TEST_TMPDIR/sandcastle-node" real_node
+  real_node="$(command -v node)"
+  mkdir -p "$shim"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == */sandcastle-run.mjs ]]; then' \
+    '  cat >/dev/null' \
+    '  [[ -z "${MOCK_SANDCASTLE_PID_FILE:-}" ]] || printf "%s\n" "$$" > "$MOCK_SANDCASTLE_PID_FILE"' \
+    '  [[ -z "${MOCK_SANDCASTLE_DELAY:-}" ]] || sleep "$MOCK_SANDCASTLE_DELAY"' \
+    '  printf "%s\n" '\''{"status":"ok","sandbox":"docker","branch":"HEAD","diff_path":null,"usage":{"input_tokens":4,"output_tokens":2,"cached_input_tokens":0,"reasoning_output_tokens":0}}'\''' \
+    '  exit 0' \
+    'fi' \
+    'exec "$LEGION_TEST_REAL_NODE" "$@"' > "$shim/node"
+  chmod +x "$shim/node"
+  export LEGION_TEST_REAL_NODE="$real_node"
+  export PATH="$shim:$PATH"
+}
+
 @test "native Codex run lets cleanup failure override signal cancellation" {
   local repo pid rc=0 art
   repo="$(make_repo run)"
@@ -123,4 +142,96 @@ assert_internal_attempt() {
   assert_internal_attempt "$art/resume-1/attempt-1.json"
   jq -e '.status == "failed" and .result_status == "containment_failed"' "$art/status.json"
   [ -d "$repo/.legion/worktrees/$run_id" ]
+}
+
+@test "prompt review forwards TERM to adapter and preserves its canonical receipts" {
+  local repo pid rc=0 provider_pid art attempt lease
+  repo="$(make_repo prompt-signal)"
+  export MOCK_CURSOR_DELAY=30
+  export MOCK_CURSOR_DELAY_PID_FILE="$TEST_TMPDIR/cursor-provider.pid"
+
+  CODEX_BIN=missing-codex-for-review \
+    "$DELEGATE" review --base HEAD --repo "$repo" --quiet \
+      >"$TEST_TMPDIR/prompt.out" 2>"$TEST_TMPDIR/prompt.err" &
+  pid=$!
+  for _ in $(seq 1 200); do
+    [[ -s "$MOCK_CURSOR_DELAY_PID_FILE" ]] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ -s "$MOCK_CURSOR_DELAY_PID_FILE" ]
+  provider_pid="$(cat "$MOCK_CURSOR_DELAY_PID_FILE")"
+  kill -TERM "$pid"
+  wait "$pid" || rc=$?
+
+  [ "$rc" -eq 143 ]
+  ! kill -0 "$provider_pid" 2>/dev/null
+  art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+  attempt="$(find "$art" -path '*/prompt-review-*/attempt.json' -print -quit)"
+  lease="$(find "$art" -path '*/prompt-review-*/lease.json' -print -quit)"
+  [ -f "$attempt" ]
+  [ -f "$lease" ]
+  jq -e '.executor == "cursor" and .provider == "cursor"
+    and .terminal_status == "cancelled" and .failure.class == "cancelled"' "$attempt"
+  [ "$(find "$art" -path '*/prompt-review-*/attempt.json' | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(find "$art" -path '*/prompt-review-*/failure.json' | wc -l | tr -d ' ')" -eq 1 ]
+  jq -e '.schema == "legion.child-execution-lease.v1"' "$lease"
+  jq -e '.status == "failed" and .codex_exit == 143 and .executor == "cursor-review"' \
+    "$art/terminal.json"
+  local signal_span
+  signal_span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "cursor-review")')"
+  jq -e --arg model "$(jq -r '.effective_model // .requested_model' "$attempt")" '.model == $model
+    and .cost_usd == null and .cost_status == "not_applicable"
+    and .tokens == null and .usage_status == "not_applicable"
+    and .artifacts.rollup_only == true
+    and .artifacts.metering_reconciliation.attempt_count == 1' <<<"$signal_span" || {
+      printf 'attempt=%s\npreflight=%s\nlease=%s\nspan=%s\n' \
+        "$(cat "$attempt")" "$(cat "$(dirname "$attempt")/preflight.json")" \
+        "$(cat "$lease")" "$signal_span"
+      false
+    }
+}
+
+@test "Sandcastle success envelope is a successful tracked attempt" {
+  local repo attempt
+  repo="$(make_repo sandcastle-success)"
+  install_mock_sandcastle_node
+
+  run "$DELEGATE" run --model "$CODEX_MODEL" --sandbox docker --task work \
+    --repo "$repo" --keep --quiet
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "ok"'
+  attempt="$(echo "$output" | jq -r .attempt_receipt)"
+  jq -e '.terminal_status == "succeeded" and .failure == null
+    and .usage_status == "known"' "$attempt"
+}
+
+@test "Sandcastle TERM is forwarded and terminalizes exactly once" {
+  local repo pid rc=0 child_pid art
+  repo="$(make_repo sandcastle-signal)"
+  install_mock_sandcastle_node
+  export MOCK_SANDCASTLE_DELAY=30
+  export MOCK_SANDCASTLE_PID_FILE="$TEST_TMPDIR/sandcastle.pid"
+
+  "$DELEGATE" run --model "$CODEX_MODEL" --sandbox docker --task wait \
+    --repo "$repo" --run-id sandcastle-signal --keep --quiet \
+    >"$TEST_TMPDIR/sandcastle.out" 2>"$TEST_TMPDIR/sandcastle.err" &
+  pid=$!
+  for _ in $(seq 1 200); do
+    [[ -s "$MOCK_SANDCASTLE_PID_FILE" ]] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ -s "$MOCK_SANDCASTLE_PID_FILE" ]
+  child_pid="$(cat "$MOCK_SANDCASTLE_PID_FILE")"
+  kill -TERM "$pid"
+  wait "$pid" || rc=$?
+
+  [ "$rc" -eq 143 ]
+  ! kill -0 "$child_pid" 2>/dev/null
+  art="$repo/.legion/runs/sandcastle-signal"
+  jq -e '.executor == "codex" and .terminal_status == "cancelled"' "$art/attempt-1.json"
+  [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
 }

@@ -62,18 +62,40 @@ fi
 DSH_BIN="${DSH_BIN:-}"
 DSH_PROFILE="${LEGION_DSH_PROFILE:-${DSH_PROFILE:-legion-headless}}"
 CHILD_PID=""
+SIGNAL_LEASE_STATUS=""
+SIGNAL_WORKTREE=""
 
 die() { printf 'legion-deepseek: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
 on_signal() {
-  local signum="$1"
+  local signum="$1" child_rc=0 containment_reason=""
   trap - INT TERM HUP
   if [[ -n "$CHILD_PID" ]]; then
     kill -TERM "$CHILD_PID" 2>/dev/null || true
-    wait "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || child_rc=$?
     CHILD_PID=""
   fi
   legion_adapter_write_signal_receipt "$signum"
+  if legion_adapter_supervisor_cleanup_failed "$SIGNAL_LEASE_STATUS" \
+      || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
+        '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
+        "$SIGNAL_LEASE_STATUS" >/dev/null 2>&1; }; then
+    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+  elif [[ "$child_rc" -eq 70 ]]; then
+    containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+  fi
+  if [[ -n "$containment_reason" ]]; then
+    keep=1
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" deepseek \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
   exit $((128+signum))
 }
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit' EXIT
@@ -142,6 +164,7 @@ cmd_run() {
   local do_apply=0 keep=0 dsh_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
   local max_runtime_seconds=""
   local base_commit=""
+  local reported_model="unknown"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -183,6 +206,10 @@ cmd_run() {
   local branch="legion/deepseek-$RUN_ID"
   default_model="$(legion_model_ref deepseek_default)" || die "could not resolve deepseek_default in models.toml"
   [[ -n "$model" ]] || model="$default_model"
+  # dsh exposes no effective-model contract and this adapter does not pass a
+  # model selector to the provider. Keep lifecycle, spans, and every top-level
+  # result opaque instead of presenting the routing placeholder as observed.
+  model="$reported_model"
   if [[ -n "$preset_run_id" ]]; then
     legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" ""
@@ -239,6 +266,8 @@ cmd_run() {
   note "-> ${cmd[*]} (task on argv, $(printf '%s' "$task" | wc -c | tr -d ' ') bytes)"
   local started_at ended_at output_started=false failure_class="" terminal_status=succeeded
   local lease_status="$art/lease.json"
+  SIGNAL_LEASE_STATUS="$lease_status"
+  SIGNAL_WORKTREE="$wt"
   started_at="$(_now)"
   start_ms="$(date +%s000)"
   legion_adapter_arm_signal_receipt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
@@ -250,6 +279,8 @@ cmd_run() {
   CHILD_PID=$!
   wait "$CHILD_PID"; rc=$?
   CHILD_PID=""
+  SIGNAL_LEASE_STATUS=""
+  SIGNAL_WORKTREE=""
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
@@ -316,7 +347,7 @@ cmd_run() {
     '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
       dsh_profile:$profile,preflight_receipt:$preflight,attempt_receipt:$attempt,
       failure_receipt:(if $failure=="" then null else $failure end)}')"
-  emit_span "deepseek" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+  emit_span "deepseek" "$reported_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
 
   if [[ "$do_apply" == "1" && "$status" == "ok" && -s "$art/diff.patch" ]]; then
     if git -C "$repo" apply --check "$art/diff.patch" 2>/dev/null; then
@@ -338,7 +369,7 @@ cmd_run() {
     "$base" "$archetype"
   [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
 
-  jq -cn --arg run_id "$RUN_ID" --arg executor deepseek --arg model "$model" \
+  jq -cn --arg run_id "$RUN_ID" --arg executor deepseek --arg model "$reported_model" \
     --arg status "$status" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg wt "$wt" --argjson usage "$usage" --argjson cost "$cost" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \

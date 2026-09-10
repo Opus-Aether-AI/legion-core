@@ -459,6 +459,8 @@ EOF
     grep -q 'disposition=already_current' "$consumer"
     grep -q 'status identity_conflict' "$consumer"
     grep -q 'schema:"legion.core-consumer-update.v1"' "$consumer"
+    grep -q 'candidate_is_stale=true' "$consumer"
+    grep -q 'retire_candidate=true' "$consumer"
 
     # A missing branch and an existing branch both use the same explicit lease;
     # an empty expected value means "create only if still absent".
@@ -468,12 +470,87 @@ EOF
     grep -q -- '--draft' "$consumer"
     grep -q 'gh pr ready "$existing" --undo' "$consumer"
     grep -q '.isDraft == true and .headRefOid == $head and .baseRefName == $base' "$consumer"
+    grep -q 'gh pr list --state open --head "$branch" --base "$BASE_BRANCH"' "$consumer"
+    grep -q -- '--limit 2 --json number,isDraft,headRefOid,baseRefName' "$consumer"
+    grep -q 'git push --force-with-lease="refs/heads/$branch:$EXPECTED_REMOTE_SHA" origin' "$consumer"
+    grep -q '":refs/heads/$branch"' "$consumer"
 
     # An empty validation_command must produce an explicit no-validation line,
     # never the old unconditional completion claim.
     grep -q 'if \[ -n "$VALIDATION_COMMAND" \]; then' "$consumer"
     grep -q 'Repository-owned validation command: not configured' "$consumer"
     ! grep -q '^            "Repository-owned validation completed before this PR was opened.\\n")"' "$consumer"
+}
+
+@test "consumer update retires only the exact stale draft candidate" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+    local step="$TEST_TMPDIR/retire-stale-candidate.sh"
+    local bin="$TEST_TMPDIR/retire-bin"
+    local calls="$TEST_TMPDIR/retire-calls"
+    local state_file="$TEST_TMPDIR/pr-state"
+    local stale_sha="1111111111111111111111111111111111111111"
+    mkdir -p "$bin"
+    : > "$calls"
+    printf '%s\n' OPEN > "$state_file"
+
+    awk '
+      /- name: Retire a superseded stable candidate/ { in_step = 1; next }
+      in_step && /^        run: \|/ { in_run = 1; next }
+      in_run && /^      - name:/ { exit }
+      in_run { sub(/^          /, ""); print }
+    ' "$consumer" > "$step"
+
+    cat > "$bin/git" <<'SH'
+#!/usr/bin/env bash
+printf 'git %s\n' "$*" >> "$MOCK_CALLS"
+if [ "${1:-}" = ls-remote ]; then
+  printf '%s\n' "$MOCK_REMOTE_SHA"
+  exit 0
+fi
+if [ "${1:-}" = push ]; then
+  exit 0
+fi
+exit 2
+SH
+    cat > "$bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  "pr list") printf '%s\n' "$MOCK_PRS" ;;
+  "pr view") cat "$MOCK_STATE_FILE" ;;
+  "pr close") printf '%s\n' CLOSED > "$MOCK_STATE_FILE" ;;
+  *) exit 2 ;;
+esac
+SH
+    chmod +x "$bin/git" "$bin/gh"
+
+    run env PATH="$bin:$PATH" MOCK_CALLS="$calls" MOCK_REMOTE_SHA="$stale_sha" \
+      MOCK_PRS="[{\"number\":7,\"isDraft\":true,\"headRefOid\":\"$stale_sha\",\"baseRefName\":\"main\"}]" \
+      MOCK_STATE_FILE="$state_file" EXPECTED_REMOTE_SHA="$stale_sha" \
+      UPDATE_BRANCH=chore/legion-core-latest BASE_BRANCH=main bash "$step"
+    [ "$status" -eq 0 ]
+    grep -Fq "git push --force-with-lease=refs/heads/chore/legion-core-latest:$stale_sha origin :refs/heads/chore/legion-core-latest" "$calls"
+    grep -Fq 'gh pr close 7' "$calls"
+
+    : > "$calls"
+    printf '%s\n' OPEN > "$state_file"
+    run env PATH="$bin:$PATH" MOCK_CALLS="$calls" MOCK_REMOTE_SHA="$stale_sha" \
+      MOCK_PRS="[{\"number\":7,\"isDraft\":false,\"headRefOid\":\"$stale_sha\",\"baseRefName\":\"main\"}]" \
+      MOCK_STATE_FILE="$state_file" EXPECTED_REMOTE_SHA="$stale_sha" \
+      UPDATE_BRANCH=chore/legion-core-latest BASE_BRANCH=main bash "$step"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a draft at the exact stale candidate head and base"* ]]
+    ! grep -q '^git push ' "$calls"
+
+    : > "$calls"
+    run env PATH="$bin:$PATH" MOCK_CALLS="$calls" \
+      MOCK_REMOTE_SHA=2222222222222222222222222222222222222222 MOCK_PRS='[]' \
+      MOCK_STATE_FILE="$state_file" EXPECTED_REMOTE_SHA="$stale_sha" \
+      UPDATE_BRANCH=chore/legion-core-latest BASE_BRANCH=main bash "$step"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"moved before retirement"* ]]
+    ! grep -q '^gh ' "$calls"
+    ! grep -q '^git push ' "$calls"
 }
 
 @test "recovery verifies a v0.19.0-style legacy tag with current controls" {

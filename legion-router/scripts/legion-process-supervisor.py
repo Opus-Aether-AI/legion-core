@@ -18,12 +18,14 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import fcntl
 import json
 import os
 import pwd
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -281,6 +283,106 @@ def _darwin_launch_fingerprint(command: list[str]) -> tuple[list[str], str, str,
         f'(deny file-write* (subpath "{protected_dir}"))'
     )
     return [str(sandbox_exec), "-p", profile, *command], deny_path, allow_path, str(fingerprint_dir)
+
+
+def _establish_darwin_owner_lease(
+    deny_canary: str, allow_canary: str
+) -> tuple[int, str, str]:
+    """Create a live, supervisor-held lease for one Seatbelt fingerprint.
+
+    The child receives only the path and nonce. The descriptor and exclusive
+    lock remain in this supervisor, so copied environment variables or a stale
+    receipt cannot authorize a nested supervisor after the owner exits.
+    """
+
+    nonce = secrets.token_hex(32)
+    owner_path = Path(deny_canary).parent / f".legion-supervisor-owner-{nonce}"
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(owner_path, flags, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        payload = json.dumps(
+            {
+                "schema": "legion.supervisor-owner.v1",
+                "pid": os.getpid(),
+                "nonce": nonce,
+                "deny_canary": deny_canary,
+                "allow_canary": allow_canary,
+            },
+            separators=(",", ":"),
+        ).encode()
+        os.write(descriptor, payload + b"\n")
+        os.fsync(descriptor)
+        return descriptor, str(owner_path), nonce
+    except BaseException:
+        os.close(descriptor)
+        owner_path.unlink(missing_ok=True)
+        raise
+
+
+def _verify_darwin_owner_lease(
+    owner_path: str,
+    owner_nonce: str,
+    owner_pid: str,
+    deny_canary: str,
+    allow_canary: str,
+) -> bool:
+    """Authenticate that an active outer supervisor owns this fingerprint."""
+
+    if not owner_nonce or not owner_pid.isdigit() or int(owner_pid) < 1:
+        return False
+    candidate = Path(owner_path)
+    try:
+        if candidate.is_symlink() or candidate.parent.resolve(strict=True) != Path(deny_canary).parent:
+            return False
+        check, flags = _darwin_sandbox_api()
+        if (
+            check(
+                os.getpid(),
+                b"file-write-data",
+                flags,
+                ctypes.c_char_p(str(candidate).encode()),
+            )
+            <= 0
+            or check(
+                os.getpid(),
+                b"file-write-create",
+                flags,
+                ctypes.c_char_p(str(candidate.parent).encode()),
+            )
+            <= 0
+        ):
+            return False
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(candidate, flags)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+                return False
+            payload = json.loads(os.read(descriptor, 4097))
+            if payload != {
+                "schema": "legion.supervisor-owner.v1",
+                "pid": int(owner_pid),
+                "nonce": owner_nonce,
+                "deny_canary": deny_canary,
+                "allow_canary": allow_canary,
+            }:
+                return False
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                return False
+        finally:
+            os.close(descriptor)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
 
 
 def _token_pids(token: str) -> set[int]:
@@ -813,10 +915,18 @@ def main() -> int:
     fingerprint_dir = ""
     inherited_deny = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY", "")
     inherited_allow = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY", "")
+    inherited_owner_path = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_OWNER_PATH", "")
+    inherited_owner_nonce = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_OWNER_NONCE", "")
+    inherited_owner_pid = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_OWNER_PID", "")
     inherited_fingerprint_active = False
     using_inherited = False
     if bool(inherited_deny) != bool(inherited_allow):
         print("legion-process-supervisor: incomplete inherited supervisor fingerprint", file=sys.stderr)
+        return 2
+    if len(
+        [value for value in (inherited_owner_path, inherited_owner_nonce, inherited_owner_pid) if value]
+    ) not in (0, 3):
+        print("legion-process-supervisor: incomplete inherited supervisor ownership lease", file=sys.stderr)
         return 2
     if sys.platform == "darwin" and inherited_deny:
         try:
@@ -877,9 +987,23 @@ def main() -> int:
                     os.getpid(), deny_canary.encode(), allow_canary.encode()
                 ):
                     raise ProcessInspectionError("inherited fingerprint is inactive")
+                if not _verify_darwin_owner_lease(
+                    inherited_owner_path,
+                    inherited_owner_nonce,
+                    inherited_owner_pid,
+                    deny_canary,
+                    allow_canary,
+                ):
+                    raise ProcessInspectionError(
+                        "inherited fingerprint has no active outer Legion supervisor owner"
+                    )
             except ProcessInspectionError as error:
-                print(f"legion-process-supervisor: invalid inherited supervisor fingerprint: {error}", file=sys.stderr)
-                return 2
+                reason = f"invalid inherited supervisor fingerprint: {error}"
+                _write_status(
+                    arguments.status_file, "cleanup_failed", reason, arguments.max_runtime_seconds
+                )
+                print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+                return 70
         elif not _darwin_sandbox_probe(deny_canary, allow_canary):
             print("legion-process-supervisor: Darwin sandbox inspection is unavailable", file=sys.stderr)
             return 2
@@ -913,6 +1037,22 @@ def main() -> int:
             print(f"legion-process-supervisor: cannot establish Darwin process fingerprint: {error}", file=sys.stderr)
             return 2
 
+    owner_descriptor = -1
+    owner_path = inherited_owner_path
+    owner_nonce = inherited_owner_nonce
+    if sys.platform == "darwin" and deny_canary and not using_inherited:
+        try:
+            owner_descriptor, owner_path, owner_nonce = _establish_darwin_owner_lease(
+                deny_canary, allow_canary
+            )
+        except (OSError, ValueError) as error:
+            reason = f"cannot establish active supervisor ownership lease: {error}"
+            _write_status(
+                arguments.status_file, "cleanup_failed", reason, arguments.max_runtime_seconds
+            )
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+            return 70
+
     process: Optional[subprocess.Popen[bytes]] = None
     tracker: Optional[DescendantTracker] = None
     interrupted = 0
@@ -943,6 +1083,11 @@ def main() -> int:
         if sys.platform == "darwin" and deny_canary:
             environment["LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY"] = deny_canary
             environment["LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY"] = allow_canary
+            environment["LEGION_ANCESTOR_SUPERVISOR_OWNER_PATH"] = owner_path
+            environment["LEGION_ANCESTOR_SUPERVISOR_OWNER_NONCE"] = owner_nonce
+            environment["LEGION_ANCESTOR_SUPERVISOR_OWNER_PID"] = (
+                inherited_owner_pid if using_inherited else str(os.getpid())
+            )
         process = subprocess.Popen(
             command,
             cwd=arguments.cwd,
@@ -1005,6 +1150,9 @@ def main() -> int:
             cleanup_ok = tracker.close() and cleanup_ok
         if fingerprint_dir:
             shutil.rmtree(fingerprint_dir, ignore_errors=True)
+        if owner_descriptor >= 0:
+            os.close(owner_descriptor)
+            Path(owner_path).unlink(missing_ok=True)
 
     if not cleanup_ok:
         _write_status(

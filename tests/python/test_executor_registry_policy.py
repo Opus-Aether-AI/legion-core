@@ -53,13 +53,7 @@ def test_json_schema_closes_the_complete_runtime_policy_surface():
     }
 
 
-@pytest.mark.parametrize("fallback", [False, True])
-def test_live_registry_declares_real_codex_wrapper_policy(
-    monkeypatch: pytest.MonkeyPatch, fallback: bool
-) -> None:
-    if fallback:
-        monkeypatch.setattr(registry, "tomllib", None)
-
+def test_live_registry_declares_real_codex_wrapper_policy() -> None:
     codex = registry.load_executor_registry()["codex"]
 
     assert codex["supported_sandbox_wrappers"] == ["docker", "podman", "vercel"]
@@ -76,19 +70,38 @@ def test_runtime_rejects_unknown_executor_policy_fields(field):
         )
 
 
-@pytest.mark.parametrize("fallback", [False, True])
-def test_toml_loaders_both_reject_unknown_policy_fields(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fallback: bool
-) -> None:
+def test_toml_loader_rejects_unknown_policy_fields(tmp_path: Path) -> None:
     config = tmp_path / "executors.toml"
     config.write_text(
         '[executors.fixture]\nkind = "coding"\nbilling_clas = "free"\n',
         encoding="utf-8",
     )
-    if fallback:
-        monkeypatch.setattr(registry, "tomllib", None)
-
     with pytest.raises(registry.ExecutorRegistryError, match="billing_clas"):
+        registry.load_executor_registry(config)
+
+
+@pytest.mark.parametrize(
+    ("assignment", "field", "expected"),
+    [
+        ("kind = 'coding'", "kind", "coding"),
+        ('capabilities = [\n  "primary",\n  "coding",\n]', "capabilities", ["primary", "coding"]),
+    ],
+    ids=["single-quoted-string", "multiline-array"],
+)
+def test_missing_toml_parser_never_silently_omits_valid_assignments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    assignment: str,
+    field: str,
+    expected,
+) -> None:
+    config = tmp_path / "executors.toml"
+    config.write_text(f"[executors.fixture]\n{assignment}\n", encoding="utf-8")
+    assert registry.load_executor_registry(config)["fixture"][field] == expected
+
+    monkeypatch.setattr(registry, "tomllib", None)
+
+    with pytest.raises(registry.ExecutorRegistryError, match="TOML parser unavailable"):
         registry.load_executor_registry(config)
 
 

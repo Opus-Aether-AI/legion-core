@@ -221,6 +221,7 @@ jobs:
 
           authoritative_kind=none
           authoritative_pin=''
+          candidate_is_stale=false
           if [ -n "$base_pin" ]; then
             authoritative_kind=checked_in
             authoritative_pin="$base_pin"
@@ -236,6 +237,8 @@ jobs:
               if [ "$comparison" -gt 0 ]; then
                 authoritative_kind=candidate
                 authoritative_pin="$candidate_pin"
+              elif [ "$comparison" -lt 0 ]; then
+                candidate_is_stale=true
               elif [ "$comparison" -eq 0 ] && \
                    ! diff -u \
                      <(printf '%s' "$base_pin" | jq -S '{version,tag,source_sha}') \
@@ -293,6 +296,11 @@ jobs:
             fi
           fi
 
+          retire_candidate=false
+          if [ "$disposition" = superseded ] && [ "$candidate_is_stale" = true ] && \
+             [ -n "$remote_sha" ]; then
+            retire_candidate=true
+          fi
           receipt="$(jq -cn \
             --arg status "$disposition" \
             --arg mode "$mode" \
@@ -300,14 +308,65 @@ jobs:
             --arg current "$current_version" \
             --arg branch "$UPDATE_BRANCH" \
             --arg remote_sha "$remote_sha" \
+            --argjson retire_candidate "$retire_candidate" \
             '{schema:"legion.core-consumer-update.v1",status:$status,mode:$mode,
               incoming_version:$incoming,
               current_version:(if $current == "" then null else $current end),
               branch:$branch,
-              candidate_sha:(if $remote_sha == "" then null else $remote_sha end)}')"
-          printf 'mode=%s\ndisposition=%s\nremote_sha=%s\nreceipt=%s\n' \
-            "$mode" "$disposition" "$remote_sha" "$receipt" >> "$GITHUB_OUTPUT"
+              candidate_sha:(if $remote_sha == "" then null else $remote_sha end),
+              retire_candidate:$retire_candidate}')"
+          printf 'mode=%s\ndisposition=%s\nremote_sha=%s\nretire_candidate=%s\nreceipt=%s\n' \
+            "$mode" "$disposition" "$remote_sha" "$retire_candidate" "$receipt" >> "$GITHUB_OUTPUT"
           printf '### Legion Core update receipt\n\n~~~json\n%s\n~~~\n' "$receipt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retire a superseded stable candidate
+        if: ${{ steps.arbitrate.outputs.retire_candidate == 'true' }}
+        env:
+          EXPECTED_REMOTE_SHA: ${{ steps.arbitrate.outputs.remote_sha }}
+        run: |
+          set -euo pipefail
+          branch="$UPDATE_BRANCH"
+          actual_remote="$(git ls-remote origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
+          [ -n "$EXPECTED_REMOTE_SHA" ] && [ "$actual_remote" = "$EXPECTED_REMOTE_SHA" ] || {
+            echo "::error::stale stable candidate moved before retirement; retry against the new head"
+            exit 1
+          }
+
+          pulls="$(gh pr list --state open --head "$branch" --base "$BASE_BRANCH" \
+            --limit 2 --json number,isDraft,headRefOid,baseRefName)"
+          count="$(jq -r 'if type == "array" then length else error("not an array") end' <<<"$pulls")"
+          [ "$count" -le 1 ] || {
+            echo "::error::multiple open PRs target the stable update branch; refusing ambiguous retirement"
+            exit 1
+          }
+          pr_number=''
+          if [ "$count" -eq 1 ]; then
+            printf '%s' "$pulls" | jq -e --arg head "$EXPECTED_REMOTE_SHA" \
+              --arg base "$BASE_BRANCH" \
+              '.[0].isDraft == true and .[0].headRefOid == $head and
+               .[0].baseRefName == $base' >/dev/null || {
+                echo "::error::stable update PR is not a draft at the exact stale candidate head and base"
+                exit 1
+              }
+            pr_number="$(printf '%s' "$pulls" | jq -r '.[0].number')"
+          fi
+
+          git push --force-with-lease="refs/heads/$branch:$EXPECTED_REMOTE_SHA" origin \
+            ":refs/heads/$branch"
+          if [ -n "$pr_number" ]; then
+            state="$(gh pr view "$pr_number" --json state --jq .state)"
+            if [ "$state" = OPEN ]; then
+              gh pr close "$pr_number" \
+                --comment "Closing this draft because the checked-in Legion Core baseline is newer than its candidate."
+            elif [ "$state" != CLOSED ]; then
+              echo "::error::stable update PR entered unexpected state $state during retirement"
+              exit 1
+            fi
+            [ "$(gh pr view "$pr_number" --json state --jq .state)" = CLOSED ] || {
+              echo "::error::stale stable update PR was not closed"
+              exit 1
+            }
+          fi
 
       - name: Prepare the stable candidate branch
         if: ${{ steps.arbitrate.outputs.mode != 'skip' }}

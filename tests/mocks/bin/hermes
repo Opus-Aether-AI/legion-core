@@ -6,6 +6,8 @@ if [[ "${1:-}" == "--version" ]]; then printf 'hermes 1.0.0\n'; exit 0; fi
 [[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'hermes active=%s executor=%s depth=%s run=%s name=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"
 [[ -n "${MOCK_PROVIDER_ENV_LOG:-}" ]] && printf 'hermes_home=%s\n' "${HERMES_HOME:-}" >> "$MOCK_PROVIDER_ENV_LOG"
+[[ -n "${MOCK_CHILD_DEADLINE_LOG:-}" ]] && printf 'provider=%s\n' \
+  "${LEGION_CHILD_LEASE_DEADLINE_NS:-}" >> "$MOCK_CHILD_DEADLINE_LOG"
 if [[ "$#" == 0 ]]; then : "${MOCK_HERMES_FIXTURE:?MOCK_HERMES_FIXTURE must point to a checked-in terminal-result fixture}"; cat "$MOCK_HERMES_FIXTURE"; exit 0; fi
 usage_file=""; model="fixture-hermes"
 while [[ $# -gt 0 ]]; do case "$1" in --usage-file) usage_file="$2"; shift 2;; --model) model="$2"; shift 2;; *) shift;; esac; done

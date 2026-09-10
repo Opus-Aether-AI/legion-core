@@ -8,14 +8,16 @@ which family owns a variant label, and which capabilities that family exposes.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - py<3.11
-    tomllib = None
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:  # pragma: no cover - optional py<3.11 dependency
+        tomllib = None
 
 
 # Keep this intentionally conservative legacy fallback.  It is used only when
@@ -25,6 +27,11 @@ _FALLBACK_CODING_FAMILIES = frozenset({"claude", "codex", "cursor", "opencode"})
 DEFAULT_EXECUTORS_FILE = os.path.abspath(
     os.path.join(
         os.path.dirname(__file__), "..", "..", "legion-router", "config", "executors.toml"
+    )
+)
+DEFAULT_MODELS_FILE = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__), "..", "..", "legion-router", "config", "models.toml"
     )
 )
 
@@ -68,65 +75,14 @@ _SANDBOX_WRAPPERS = frozenset({"docker", "podman", "vercel"})
 _PROVIDER_SANDBOXES = frozenset({"read-only", "workspace-write", "danger-full-access"})
 
 
-def _fallback_table(path):
-    """Read the registry fields needed here when tomllib is unavailable."""
-    table = {}
-    current = table
-    section = re.compile(r"\[([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\]")
-    with open(path, encoding="utf-8") as fh:
-        for raw_line in fh:
-            line = raw_line.split("#", 1)[0].strip()
-            if line.startswith("[") and line.endswith("]"):
-                match = section.fullmatch(line)
-                if not match:
-                    current = None
-                    continue
-                parts = match.group(1).split(".")
-                if len(parts) > 2 and parts[0] == "executors":
-                    # Legacy fallback parsing has never promoted nested tables
-                    # into executor policy. Keep ignoring them rather than
-                    # misclassifying the table name as a scalar policy field.
-                    current = None
-                    continue
-                current = table
-                for part in parts:
-                    child = current.setdefault(part, {})
-                    if not isinstance(child, dict):
-                        raise ValueError(f"table path conflicts with scalar: {part}")
-                    current = child
-                continue
-            if current is None or "=" not in line:
-                continue
-            key, value = (part.strip() for part in line.split("=", 1))
-            if current is table:
-                # A root assignment named `executors` is not an executor table.
-                # Preserve that invalid shape for the caller's fallback guard.
-                if key == "executors":
-                    table["executors"] = None
-                continue
-            # Executor routing consumes the complete scalar contract, not only
-            # ``kind``.  Python 3.9/3.10 therefore must preserve adapter,
-            # contract, and model_ref just like tomllib does on 3.11+.
-            if len(value) >= 2 and value[0] == value[-1] == '"':
-                try:
-                    current[key] = json.loads(value)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"invalid quoted TOML value for {key}") from exc
-            elif value in ("true", "false"):
-                # Capability flags (task_file) are bare booleans. Preserving only
-                # quoted strings silently dropped them on 3.9/3.10, so a
-                # capability declared in executors.toml simply vanished there and
-                # the dispatcher fell back to its pre-capability behaviour.
-                current[key] = value == "true"
-            elif value.startswith("[") and value.endswith("]"):
-                try:
-                    parsed = json.loads(value)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"invalid TOML array for {key}") from exc
-                current[key] = parsed
-            elif re.fullmatch(r"[0-9]+", value):
-                current[key] = int(value)
-    return table
+def _load_toml(path):
+    """Parse complete TOML or fail closed on Python versions without a parser."""
+    if tomllib is None:
+        raise ExecutorRegistryError(
+            "TOML parser unavailable; install tomli when running Python earlier than 3.11"
+        )
+    with open(path, "rb") as fh:
+        return tomllib.load(fh)
 
 
 def _validate_patterns(name, field, values):
@@ -274,11 +230,7 @@ def load_executor_registry(path=None):
     :func:`load_executor_families`; routing callers receive a typed failure.
     """
     registry = _registry_path(path)
-    if tomllib is None:
-        table = _fallback_table(registry)
-    else:
-        with open(registry, "rb") as fh:
-            table = tomllib.load(fh)
+    table = _load_toml(registry)
     if not isinstance(table, dict):
         raise ExecutorRegistryError("executors.toml must contain an executor table")
     if "executors" in table:
@@ -288,6 +240,24 @@ def load_executor_registry(path=None):
     if not isinstance(executors, dict):
         raise ExecutorRegistryError("executors.toml must contain an [executors] table")
     return validate_executor_registry(executors)
+
+
+def load_model_catalog(path=None):
+    """Load the trusted semantic-model catalog used for no-spend admission."""
+    catalog_path = os.path.expanduser(
+        str(path or os.environ.get("LEGION_MODELS_FILE") or DEFAULT_MODELS_FILE)
+    )
+    table = _load_toml(catalog_path)
+    models = table.get("models", table) if isinstance(table, dict) else None
+    if not isinstance(models, dict) or not models:
+        raise ExecutorRegistryError("models.toml must contain a non-empty [models] table")
+    if not all(
+        isinstance(role, str) and role
+        and isinstance(model, str) and model
+        for role, model in models.items()
+    ):
+        raise ExecutorRegistryError("models.toml must map non-empty roles to non-empty model IDs")
+    return models
 
 
 def executor_capabilities(config):

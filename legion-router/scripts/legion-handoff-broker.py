@@ -381,6 +381,18 @@ class Broker:
         self.supervisor_deny_canary = supervisor_deny_canary
         self.supervisor_allow_canary = supervisor_allow_canary
         self.max_runtime_seconds = max_runtime_seconds
+        inherited_deadline = os.environ.get("LEGION_CHILD_LEASE_DEADLINE_NS", "")
+        own_deadline_ns = time.monotonic_ns() + max_runtime_seconds * 1_000_000_000
+        try:
+            self.absolute_deadline_ns = (
+                min(own_deadline_ns, int(inherited_deadline))
+                if inherited_deadline
+                else own_deadline_ns
+            )
+        except ValueError as error:
+            raise ValueError("broker inherited child lease deadline is invalid") from error
+        if self.absolute_deadline_ns < 1:
+            raise ValueError("broker inherited child lease deadline is invalid")
         self.telemetry_dir = telemetry_dir
         self.expected_parent = expected_parent
         self.stop = threading.Event()
@@ -392,6 +404,10 @@ class Broker:
         self.active_process: Optional[subprocess.Popen[bytes]] = None
         self.cleanup_failure: Optional[str] = None
         self.control_empty = broker_root.parent / "control-empty"
+
+    def _remaining_runtime_seconds(self) -> int:
+        remaining = self.absolute_deadline_ns - time.monotonic_ns()
+        return max(0, math.ceil(remaining / 1_000_000_000))
 
     def _git(self, *args: str, cwd: Optional[Path] = None) -> bytes:
         environment = os.environ.copy()
@@ -764,7 +780,10 @@ class Broker:
                 self.used = True
 
             self._prepare_repository()
-            args = _bounded_lease_args(args, self.max_runtime_seconds)
+            remaining_runtime = self._remaining_runtime_seconds()
+            if remaining_runtime < 1:
+                raise ValueError("parent child execution lease expired before sandbox handoff")
+            args = _bounded_lease_args(args, remaining_runtime)
             command = [
                 str(self.delegate),
                 *args,
@@ -780,7 +799,7 @@ class Broker:
                 "--cwd",
                 str(self.broker_repo),
                 "--max-runtime-seconds",
-                str(self.max_runtime_seconds),
+                str(remaining_runtime),
                 "--status-file",
                 str(self.broker_root / "lease.json"),
             ]
@@ -844,6 +863,9 @@ class Broker:
             server.listen(1)
             server.settimeout(0.25)
             while not self.stop.is_set():
+                if self._remaining_runtime_seconds() < 1:
+                    self.stop.set()
+                    break
                 try:
                     connection, _ = server.accept()
                 except (TimeoutError, socket.timeout):

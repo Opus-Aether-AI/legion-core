@@ -13,6 +13,8 @@ fi
 [[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'agent active=%s executor=%s depth=%s run=%s name=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" \
   "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"
+[[ -n "${MOCK_CHILD_DEADLINE_LOG:-}" ]] && printf 'child=%s\n' \
+  "${LEGION_CHILD_LEASE_DEADLINE_NS:-}" >> "$MOCK_CHILD_DEADLINE_LOG"
 if [[ -n "${MOCK_CURSOR_ENV_LOG:-}" ]]; then
   printf 'config=%s\ndata=%s\nconfig_auth=%s\ndata_auth=%s\n' \
     "${XDG_CONFIG_HOME:-}" "${CURSOR_DATA_DIR:-}" \

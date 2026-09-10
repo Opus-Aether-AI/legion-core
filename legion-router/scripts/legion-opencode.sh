@@ -37,18 +37,40 @@ fi
 
 OPENCODE_BIN="${OPENCODE_BIN:-}"
 CHILD_PID=""
+SIGNAL_LEASE_STATUS=""
+SIGNAL_WORKTREE=""
 
 die() { printf 'legion-opencode: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
 on_signal() {
-  local signum="$1"
+  local signum="$1" child_rc=0 containment_reason=""
   trap - INT TERM HUP
   if [[ -n "$CHILD_PID" ]]; then
     kill -TERM "$CHILD_PID" 2>/dev/null || true
-    wait "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || child_rc=$?
     CHILD_PID=""
   fi
   legion_adapter_write_signal_receipt "$signum"
+  if legion_adapter_supervisor_cleanup_failed "$SIGNAL_LEASE_STATUS" \
+      || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
+        '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
+        "$SIGNAL_LEASE_STATUS" >/dev/null 2>&1; }; then
+    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+  elif [[ "$child_rc" -eq 70 ]]; then
+    containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+  fi
+  if [[ -n "$containment_reason" ]]; then
+    keep=1
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" opencode \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
   exit $((128+signum))
 }
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit' EXIT
@@ -275,6 +297,8 @@ cmd_run() {
   note "-> ${cmd[*]} (task on stdin, $(printf '%s' "$task" | wc -c | tr -d ' ') bytes)"
   local started_at ended_at output_started=false
   local lease_status="$art/lease.json"
+  SIGNAL_LEASE_STATUS="$lease_status"
+  SIGNAL_WORKTREE="$wt"
   started_at="$(_now)"
   start_ms="$(date +%s000)"
   legion_adapter_arm_signal_receipt "$art" opencode opencode 1 "$model" "" "" "" \
@@ -287,6 +311,8 @@ cmd_run() {
   CHILD_PID=$!
   wait "$CHILD_PID"; rc=$?
   CHILD_PID=""
+  SIGNAL_LEASE_STATUS=""
+  SIGNAL_WORKTREE=""
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 

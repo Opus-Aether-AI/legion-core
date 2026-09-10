@@ -32,6 +32,8 @@ LEGION_CLAUDE_TMPDIR=""
 LEGION_CLAUDE_LEASE_DEADLINE_NS=""
 LEGION_CLAUDE_LEASE_RECEIPT=""
 CHILD_PID=""
+SIGNAL_LEASE_STATUS=""
+SIGNAL_WORKTREE=""
 
 die() { printf 'legion-claude: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -41,14 +43,34 @@ cleanup_claude_on_exit() {
   [[ -z "$LEGION_CLAUDE_TMPDIR" ]] || rm -rf "$LEGION_CLAUDE_TMPDIR"
 }
 on_signal() {
-  local signum="$1"
+  local signum="$1" child_rc=0 containment_reason=""
   trap - INT TERM HUP
   if [[ -n "$CHILD_PID" ]]; then
     kill -TERM "$CHILD_PID" 2>/dev/null || true
-    wait "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || child_rc=$?
     CHILD_PID=""
   fi
   legion_adapter_write_signal_receipt "$signum"
+  if legion_adapter_supervisor_cleanup_failed "$SIGNAL_LEASE_STATUS" \
+      || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
+        '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
+        "$SIGNAL_LEASE_STATUS" >/dev/null 2>&1; }; then
+    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+  elif [[ "$child_rc" -eq 70 ]]; then
+    containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+  fi
+  if [[ -n "$containment_reason" ]]; then
+    keep=1
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" claude \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "${wt:-$repo}" "${branch:-}" "$model" "$sandbox" \
+        "$base" "$archetype" "$effort" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
   exit $((128+signum))
 }
 trap cleanup_claude_on_exit EXIT
@@ -553,6 +575,8 @@ cmd_run() {
     local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
     attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
     local lease_status="$contract_art/lease-$chain_idx.json"
+    SIGNAL_LEASE_STATUS="$lease_status"
+    SIGNAL_WORKTREE="${wt:-$repo}"
     legion_adapter_arm_signal_receipt "$contract_art" claude anthropic "$chain_idx" \
       "$attempt_model" "" "$effort" "$effort" "$sandbox" "$attempt_started_at" \
       "$attempt_start_ms" "$out_file"
@@ -567,6 +591,8 @@ cmd_run() {
     CHILD_PID=$!
     wait "$CHILD_PID"; rc=$?
     CHILD_PID=""
+    SIGNAL_LEASE_STATUS=""
+    SIGNAL_WORKTREE=""
     set -e
     attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
     attempt_duration=$((attempt_end_ms-attempt_start_ms))

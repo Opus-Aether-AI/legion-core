@@ -104,7 +104,8 @@ legion-preflight --json --executor codex --sandbox read-only \
 
 The result is `supported`, `untested`, `incompatible`, or `unavailable`.
 Unknown versions remain visibly `untested`; known-bad versions/configurations
-and undeclared capabilities are incompatible. Cache identity includes the
+and undeclared capabilities are incompatible. Only `supported` admits a
+provider launch; every other state fails closed before spend. Cache identity includes the
 resolved executable path, its SHA-256 digest, and a fingerprint of only the
 registry-declared relevant environment/files. Binary or configuration changes
 therefore force a new local version probe. The cache and output retain hashes,

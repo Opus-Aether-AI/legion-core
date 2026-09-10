@@ -6,6 +6,8 @@ if [[ "${1:-}" == "--version" ]]; then printf 'pi 1.0.0\n'; exit 0; fi
 [[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'pi active=%s executor=%s depth=%s run=%s name=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"
 [[ -n "${MOCK_PROVIDER_ENV_LOG:-}" ]] && printf 'pi_dir=%s\n' "${PI_CODING_AGENT_DIR:-}" >> "$MOCK_PROVIDER_ENV_LOG"
+[[ -n "${MOCK_CHILD_DEADLINE_LOG:-}" ]] && printf 'provider=%s\n' \
+  "${LEGION_CHILD_LEASE_DEADLINE_NS:-}" >> "$MOCK_CHILD_DEADLINE_LOG"
 if [[ -n "${MOCK_PROVIDER_SECURITY_ENV_LOG:-}" ]]; then
   printf 'path=%s\ndocker_host=%s\ncontainer_host=%s\nssh_auth_sock=%s\n' \
     "$PATH" "${DOCKER_HOST:-}" "${CONTAINER_HOST:-}" "${SSH_AUTH_SOCK:-}" \

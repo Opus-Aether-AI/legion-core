@@ -148,6 +148,9 @@ NATIVE_ATTEMPT_STREAM=""
 NATIVE_ATTEMPT_LAST_MESSAGE=""
 NATIVE_ATTEMPT_STARTED_AT=""
 NATIVE_ATTEMPT_START_MS=0
+NATIVE_LEASE_STATUS=""
+NATIVE_RESUME_ART=""
+NATIVE_RESUME_WT=""
 child_lease_tighten_deadline() {
   local runtime_seconds="$1" inherited="${CHILD_LEASE_DEADLINE_NS:-${LEGION_CHILD_LEASE_DEADLINE_NS:-}}"
   if [[ -n "$inherited" && ( ! "$inherited" =~ ^[1-9][0-9]*$ ) ]]; then
@@ -190,23 +193,24 @@ terminate_process_tree() {
   kill -TERM "$pid" 2>/dev/null || true
 }
 write_interrupted_review_receipt() {
+  local terminal_status="${1:-failed}" terminal_reason="${2:-interrupted}" provider_exit="${3:-143}"
   [[ -n "$REVIEW_RECEIPT_PATH" ]] || return 0
   mkdir -p "$(dirname "$REVIEW_RECEIPT_PATH")"
   jq -cn \
     --arg schema "legion.review-terminal.v1" --arg run "$REVIEW_RECEIPT_RUN_ID" \
-    --arg status "failed" --arg reason "interrupted" \
+    --arg status "$terminal_status" --arg reason "$terminal_reason" \
     --arg model "$REVIEW_RECEIPT_MODEL" --arg archetype "$REVIEW_RECEIPT_ARCHETYPE" \
     --arg base "$REVIEW_RECEIPT_BASE_SHA" --arg head "$REVIEW_RECEIPT_HEAD_SHA" \
     --arg patch "$REVIEW_RECEIPT_PATCH" --arg completed "$(_now)" \
     --arg rexec "${REVIEW_EXECUTOR_LABEL:-codex}" \
     --argjson attempts "$REVIEW_RECEIPT_ATTEMPT" \
-    --argjson max_attempts "$REVIEW_RECEIPT_MAX_ATTEMPTS" '
+    --argjson max_attempts "$REVIEW_RECEIPT_MAX_ATTEMPTS" --argjson provider_exit "$provider_exit" '
     {schema:$schema, run_id:$run, status:$status, reason:$reason,
      executor:($rexec + "-review"), model:$model,
      archetype:(if $archetype=="" then null else $archetype end),
      reviewed_base_sha:$base, reviewed_head_sha:$head,
      review_patch:$patch, verdict_path:null,
-     attempts:$attempts, max_attempts:$max_attempts, codex_exit:143,
+     attempts:$attempts, max_attempts:$max_attempts, codex_exit:$provider_exit,
      completed_at:$completed}' \
     > "$REVIEW_RECEIPT_PATH.tmp.$$" 2>/dev/null &&
     mv -f "$REVIEW_RECEIPT_PATH.tmp.$$" "$REVIEW_RECEIPT_PATH" 2>/dev/null || true
@@ -251,6 +255,7 @@ write_interrupted_native_attempt() {
 }
 terminalize_interrupted_native_run() {
   local interrupted_art="$1" interrupted_executor="$2" interrupted_model="$3"
+  local terminal_status="${4:-failed}" terminal_reason="${5:-interrupted}" provider_exit="${6:-143}"
   [[ "$interrupted_executor" == codex && -n "$interrupted_art" ]] || return 0
   local usage cost end_ms dur artifacts
   usage="$(codex_usage "$NATIVE_ATTEMPT_STREAM" 2>/dev/null || printf '{}')"
@@ -260,15 +265,16 @@ terminalize_interrupted_native_run() {
   artifacts="$(jq -cn \
     --arg wt "${LEGION_WT_PATH:-}" --arg stream "$NATIVE_ATTEMPT_STREAM" \
     --arg attempt "${LEGION_ADAPTER_ATTEMPT_PATH:-}" \
-    --arg failure "${LEGION_ADAPTER_FAILURE_PATH:-}" '
-    {worktree:$wt,stream:$stream,reason:"interrupted",
+    --arg failure "${LEGION_ADAPTER_FAILURE_PATH:-}" \
+    --arg reason "$terminal_reason" '
+    {worktree:$wt,stream:$stream,reason:$reason,
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end)}' 2>/dev/null || printf '{}')"
-  emit_span codex "$interrupted_model" failed "$dur" "$cost" "$usage" "${task:-}" "$artifacts" || true
-  ingest_usage "$interrupted_model" codex 143 "$usage" "$cost" || true
-  write_run_state failed || true
+  emit_span codex "$interrupted_model" "$terminal_status" "$dur" "$cost" "$usage" "${task:-}" "$artifacts" || true
+  ingest_usage "$interrupted_model" codex "$provider_exit" "$usage" "$cost" || true
+  write_run_state "$terminal_status" || true
   write_run_artifact_status "$interrupted_art" "$RUN_ID" failed \
-    "${LEGION_WT_PATH:-}" "" failed || true
+    "${LEGION_WT_PATH:-}" "" "$terminal_status" || true
   declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
 }
 on_terminating_signal() {
@@ -276,13 +282,39 @@ on_terminating_signal() {
   local interrupted_native_art="${NATIVE_ATTEMPT_ART:-}"
   local interrupted_native_executor="${NATIVE_ATTEMPT_EXECUTOR:-}"
   local interrupted_native_model="${NATIVE_ATTEMPT_MODEL:-}"
+  local interrupted_native_ordinal="${NATIVE_ATTEMPT_ORDINAL:-0}"
+  local child_rc=0 terminal_status=failed terminal_reason=interrupted provider_exit=143
   kill_codex_child
-  [[ -n "${CODEX_CHILD_PID:-}" ]] && wait "$CODEX_CHILD_PID" 2>/dev/null || true
+  if [[ -n "${CODEX_CHILD_PID:-}" ]]; then
+    wait "$CODEX_CHILD_PID" 2>/dev/null || child_rc=$?
+  fi
   CODEX_CHILD_PID=""
+  if legion_adapter_supervisor_cleanup_failed "$NATIVE_LEASE_STATUS" \
+      || { [[ -f "$NATIVE_LEASE_STATUS" ]] && jq -e \
+        '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
+        "$NATIVE_LEASE_STATUS" >/dev/null 2>&1; }; then
+    terminal_status=containment_failed
+    provider_exit=70
+    terminal_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; worktree retained: ${LEGION_WT_PATH:-${REVIEW_WT_PATH:-}})"
+  elif [[ "$child_rc" -eq 70 ]]; then
+    terminal_status=containment_failed
+    provider_exit=70
+    terminal_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $NATIVE_LEASE_STATUS; worktree retained: ${LEGION_WT_PATH:-${REVIEW_WT_PATH:-}})"
+  fi
   write_interrupted_native_attempt
+  if [[ "$terminal_status" == containment_failed && -n "$interrupted_native_art" && "$interrupted_native_ordinal" -gt 0 ]]; then
+    LEGION_WT_KEEP=1
+    legion_adapter_fail_recorded_attempt "$interrupted_native_art" "$interrupted_native_executor" \
+      "$interrupted_native_ordinal" internal 70 "$terminal_reason" || true
+    if [[ "$interrupted_native_executor" == codex-resume && -n "$NATIVE_RESUME_ART" ]]; then
+      write_run_artifact_status "$NATIVE_RESUME_ART" "$RUN_ID" failed \
+        "$NATIVE_RESUME_WT" "" containment_failed || true
+    fi
+  fi
   terminalize_interrupted_native_run "$interrupted_native_art" \
-    "$interrupted_native_executor" "$interrupted_native_model"
-  write_interrupted_review_receipt
+    "$interrupted_native_executor" "$interrupted_native_model" \
+    "$terminal_status" "$terminal_reason" "$provider_exit"
+  write_interrupted_review_receipt "$terminal_status" "$terminal_reason" "$provider_exit"
   if [[ -n "$REVIEW_ART_PATH" && -n "${RUN_ID:-}" ]]; then
     local usage cost end_ms dur artifacts
     usage="$(aggregate_review_usage "$REVIEW_ART_PATH" "$REVIEW_RECEIPT_ATTEMPT" 2>/dev/null || printf '{}')"
@@ -292,19 +324,20 @@ on_terminating_signal() {
     [[ "$dur" -ge 0 ]] || dur=0
     artifacts="$(jq -cn --arg receipt "$REVIEW_RECEIPT_PATH" \
       --arg patch "$REVIEW_RECEIPT_PATCH" --arg base "$REVIEW_RECEIPT_BASE_SHA" \
-      --arg head "$REVIEW_RECEIPT_HEAD_SHA" \
+      --arg head "$REVIEW_RECEIPT_HEAD_SHA" --arg reason "$terminal_reason" \
       '{terminal_receipt:$receipt, review_patch:$patch,
         reviewed_base_sha:$base, reviewed_head_sha:$head,
-        reason:"interrupted", attempts:'"${REVIEW_RECEIPT_ATTEMPT:-0}"'}' 2>/dev/null || printf '{}')"
-    emit_span "${REVIEW_EXECUTOR_LABEL:-codex}-review" "$REVIEW_RECEIPT_MODEL" "failed" "$dur" "$cost" "$usage" \
+        reason:$reason, attempts:'"${REVIEW_RECEIPT_ATTEMPT:-0}"'}' \
+      2>/dev/null || printf '{}')"
+    emit_span "${REVIEW_EXECUTOR_LABEL:-codex}-review" "$REVIEW_RECEIPT_MODEL" "$terminal_status" "$dur" "$cost" "$usage" \
       "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" "$artifacts" || true
-    ingest_usage "$REVIEW_RECEIPT_MODEL" "codex" 143 "$usage" "$cost" || true
-    write_run_state failed || true
+    ingest_usage "$REVIEW_RECEIPT_MODEL" "codex" "$provider_exit" "$usage" "$cost" || true
+    write_run_state "$terminal_status" || true
     declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
     write_run_artifact_status "$REVIEW_ART_PATH" "$RUN_ID" "failed" \
-      "$REVIEW_WT_PATH" "" "failed" || true
+      "$REVIEW_WT_PATH" "" "$terminal_status" || true
   fi
-  exit 143   # 128 + SIGTERM; EXIT trap still runs (sandbox teardown)
+  exit "$provider_exit"
 }
 trap on_terminating_signal INT TERM HUP
 
@@ -430,6 +463,7 @@ error_log_summary() {
 # Reads $sandbox $wt $effort $task $art from the calling function.
 run_codex() {
   local lease_status="$art/lease-$attempt_ordinal.json"
+  NATIVE_LEASE_STATUS="$lease_status"
   local -a supervisor=(python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt"
     --max-runtime-seconds "$attempt_runtime" --status-file "$lease_status" --)
   set +e
@@ -448,6 +482,7 @@ run_codex() {
   # orphaning it; wait's status is codex's exit (== the old PIPESTATUS[1]).
   wait "$CODEX_CHILD_PID"; rc=$?
   CODEX_CHILD_PID=""
+  NATIVE_LEASE_STATUS=""
   set -e
 }
 
@@ -2302,6 +2337,7 @@ cmd_review() {
     codex_review_args+=(--output-schema "$REVIEW_SCHEMA" -o "$attempt_verdict")
     if [[ "$review_kind" == "native" ]]; then
       local attempt_lease="$art/attempt-$attempt.lease.json"
+      NATIVE_LEASE_STATUS="$attempt_lease"
       review_lease_receipt="$attempt_lease"
       native_attempt_started_at="$(_now)"
       native_attempt_start_ms="$(date +%s000)"
@@ -2323,6 +2359,7 @@ cmd_review() {
       CODEX_CHILD_PID=$!
       wait "$CODEX_CHILD_PID"; rc=$?
       CODEX_CHILD_PID=""
+      NATIVE_LEASE_STATUS=""
       set -e
       native_attempt_end_ms="$(date +%s000)"
       native_attempt_ended_at="$(_now)"
@@ -2629,6 +2666,7 @@ cmd_resume() {
   started_at="$(_now)"; start_ms="$(date +%s000)"
   note "→ codex exec resume $thread_id (run $run)"
   local lease_status="$art/resume-lease.json"
+  NATIVE_LEASE_STATUS="$lease_status"
   local -a resume_supervisor=(python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt"
     --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" --status-file "$lease_status" --)
   NATIVE_ATTEMPT_ART="$resume_art"
@@ -2641,6 +2679,8 @@ cmd_resume() {
   NATIVE_ATTEMPT_LAST_MESSAGE="$art/resume-last-message.txt"
   NATIVE_ATTEMPT_STARTED_AT="$started_at"
   NATIVE_ATTEMPT_START_MS="$start_ms"
+  NATIVE_RESUME_ART="$art"
+  NATIVE_RESUME_WT="$wt"
   set +e
   if [[ -n "$effort" ]]; then
     printf '%s' "$task" | ( cd "$wt" && "${resume_supervisor[@]}" "$CODEX_BIN" exec resume "$thread_id" --json \
@@ -2657,6 +2697,8 @@ cmd_resume() {
   # is the codex subshell's exit (== the old PIPESTATUS[1]).
   wait "$CODEX_CHILD_PID"; rc=$?
   CODEX_CHILD_PID=""
+  NATIVE_LEASE_STATUS=""
+  NATIVE_RESUME_ART=""
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 

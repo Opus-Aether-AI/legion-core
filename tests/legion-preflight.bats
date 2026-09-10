@@ -78,9 +78,32 @@ SH
 
 @test "legion-preflight: unknown versions are untested and never launch the provider" {
   FIXTURE_VERSION=9.9.9 run "$PREFLIGHT" --json --executor fixture --model fixture-model
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   echo "$output" | jq -e '.status == "untested" and .identity.version == "9.9.9"'
   [ ! -e "$PROVIDER_CALL_LOG" ]
+}
+
+@test "adapter contract rejects an untested receipt even if a faulty preflight exits zero" {
+  local fake_root="$TEST_TMPDIR/fake-core" art="$TEST_TMPDIR/art"
+  mkdir -p "$fake_root/legion-router/bin"
+  cat > "$fake_root/legion-router/bin/legion-preflight" <<'SH'
+#!/usr/bin/env bash
+jq -cn '{schema:"legion.preflight.v1",status:"untested",reason:"fixture",
+  identity:null,cache:{hit:false,key:null},compatibility:{}}'
+exit 0
+SH
+  chmod +x "$fake_root/legion-router/bin/legion-preflight"
+
+  run env FAKE_ROOT="$fake_root" ART="$art" CONTRACT="$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" \
+    bash -c '
+      source "$CONTRACT"
+      legion_adapter_contract_root() { printf "%s\n" "$FAKE_ROOT"; }
+      legion_adapter_preflight fixture "$ART" workspace-write stdin fixture-model
+    '
+
+  [ "$status" -ne 0 ]
+  jq -e '.schema == "legion.preflight.v1" and .status == "untested"' \
+    "$art/fixture-preflight.json"
 }
 
 @test "legion-preflight: premium model requires explicit consent without provider launch" {

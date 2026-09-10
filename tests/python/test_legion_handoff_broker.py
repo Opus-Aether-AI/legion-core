@@ -86,6 +86,34 @@ def test_broker_inherits_or_lowers_but_never_raises_parent_lease() -> None:
         )
 
 
+def test_broker_uses_remaining_monotonic_parent_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "LEGION_CHILD_LEASE_DEADLINE_NS", str(time.monotonic_ns() + 1_100_000_000)
+    )
+    broker = BROKER.Broker(
+        socket_path=tmp_path / "broker.sock",
+        token="token",
+        delegate=tmp_path / "delegate",
+        source_repo=tmp_path,
+        broker_root=tmp_path / "root",
+        base_sha="deadbeef",
+        sandbox_bin=Path("/usr/bin/true"),
+        sandbox_kind="bwrap",
+        supervisor=MODULE_PATH,
+        supervisor_deny_canary=tmp_path / "deny",
+        supervisor_allow_canary=tmp_path / "allow",
+        telemetry_dir=None,
+        expected_parent="parent",
+        max_runtime_seconds=30,
+    )
+    assert broker._remaining_runtime_seconds() in {1, 2}
+    assert BROKER._bounded_lease_args(
+        ["run", "--executor", "cursor"], broker._remaining_runtime_seconds()
+    )[-1] in {"1", "2"}
+
+
 def test_short_telemetry_append_rolls_back_the_partial_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     destination = tmp_path / "spans.jsonl"
     destination.write_bytes(b"existing\n")

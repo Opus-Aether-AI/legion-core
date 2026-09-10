@@ -89,7 +89,7 @@ def test_live_codex_registry_normalizes_sandcastle_wrapper_to_provider_sandbox(
         sandbox=wrapper,
     )
 
-    assert result["status"] == "untested"
+    assert result["status"] == "supported"
     assert result["compatibility"]["sandbox"] == {
         "requested": wrapper,
         "provider_sandbox": "workspace-write",
@@ -143,3 +143,91 @@ def test_misspelled_policy_cannot_downgrade_preflight_to_untested(
     assert result["compatibility"] == {}
     assert "unknown policy field" in result["reason"]
     assert field in result["reason"]
+
+
+def test_untested_model_and_version_are_not_admitted(tmp_path: Path) -> None:
+    binary = executable(tmp_path / "fixture", version="9.9.9")
+    config = registry(
+        tmp_path / "executors.toml",
+        binary,
+        provider_sandboxes='["read-only", "workspace-write"]',
+    )
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'version_policy = "closed"\n', 'version_policy = "open"\n'
+        ) + 'supported_model_patterns = ["^fixture-"]\n',
+        encoding="utf-8",
+    )
+    result = preflight.preflight(
+        "fixture",
+        registry_path=config,
+        cache_dir=tmp_path / "cache",
+        env={"HOME": str(tmp_path / "home"), "PATH": os.environ["PATH"]},
+        model="fixture-model",
+    )
+
+    assert result["status"] == "untested"
+    assert result["compatibility"]["model"]["status"] == "supported"
+    assert result["compatibility"]["version"]["status"] == "untested"
+
+    binary = executable(tmp_path / "fixture", version="1.2.3")
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'supported_model_patterns = ["^fixture-"]\n', ""
+        ),
+        encoding="utf-8",
+    )
+    result = preflight.preflight(
+        "fixture",
+        registry_path=config,
+        cache_dir=tmp_path / "model-cache",
+        env={"HOME": str(tmp_path / "home"), "PATH": os.environ["PATH"]},
+        model="unconfigured-alias",
+    )
+    assert result["status"] == "untested"
+    assert result["compatibility"]["model"]["status"] == "untested"
+    assert result["compatibility"]["version"]["status"] == "supported"
+
+
+def test_claude_catalog_aliases_are_supported_and_premium_aliases_require_consent(
+    tmp_path: Path,
+) -> None:
+    binary = executable(tmp_path / "claude")
+    environment = {"HOME": str(tmp_path / "home"), "PATH": os.environ["PATH"]}
+    models = preflight.load_model_catalog()
+
+    ordinary = preflight.preflight(
+        "claude",
+        binary_override=str(binary),
+        cache_dir=tmp_path / "ordinary-cache",
+        env=environment,
+        model="claude_default",
+    )
+    assert ordinary["status"] == "supported"
+    assert ordinary["compatibility"]["model"]["policy_model"] == models["claude_default"]
+
+    refused = preflight.preflight(
+        "claude",
+        binary_override=str(binary),
+        cache_dir=tmp_path / "refused-cache",
+        env=environment,
+        model="claude_frontier",
+    )
+    assert refused["status"] == "incompatible"
+    assert refused["identity"] is None
+    assert refused["compatibility"]["billing"] == {
+        "class": "premium_credit",
+        "explicit_consent_required": True,
+        "status": "incompatible",
+    }
+
+    admitted = preflight.preflight(
+        "claude",
+        binary_override=str(binary),
+        cache_dir=tmp_path / "admitted-cache",
+        env=environment,
+        model="claude_frontier",
+        explicit_consent=True,
+    )
+    assert admitted["status"] == "supported"
+    assert admitted["compatibility"]["model"]["policy_model"] == models["claude_frontier"]

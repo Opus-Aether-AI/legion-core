@@ -240,7 +240,7 @@ def test_network_only_seatbelt_host_without_run_unique_canaries_fails_closed(tmp
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt inheritance is Darwin-only")
-def test_active_inherited_fingerprint_uses_ancestor_tracking_boundary(tmp_path: Path) -> None:
+def test_caller_chosen_active_fingerprint_without_supervisor_owner_fails_closed(tmp_path: Path) -> None:
     deny_canary = tmp_path / "deny"
     allow_canary = tmp_path / "allow"
     pid_file = tmp_path / "detached.pid"
@@ -293,23 +293,111 @@ os.execve("/bin/sleep", ["sleep", "30"], {})
         env=environment,
         timeout=8,
     )
-    child_pid = 0
-    try:
-        assert result.returncode == 0, result.stderr.decode(errors="replace")
-        assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "completed"
-        assert pid_file.exists()
-        child_pid = int(pid_file.read_text(encoding="utf-8"))
-        # A nested supervisor cannot enumerate the host under the inherited
-        # policy. The verified outer supervisor owns fingerprint-wide cleanup;
-        # this direct fixture has no such ancestor, so clean up its daemon here.
-        os.kill(child_pid, 0)
-    finally:
-        if child_pid:
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            assert wait_gone(child_pid)
+    assert result.returncode == 70, result.stderr.decode(errors="replace")
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["status"] == "cleanup_failed"
+    assert "active outer Legion supervisor owner" in receipt["reason"]
+    assert not pid_file.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt inheritance is Darwin-only")
+def test_stale_forged_owner_receipt_cannot_authorize_nested_launch(tmp_path: Path) -> None:
+    fingerprint = tmp_path / "fingerprint"
+    fingerprint.mkdir()
+    deny_canary = fingerprint / "deny"
+    allow_canary = fingerprint / "allow"
+    owner_nonce = "a" * 64
+    owner_path = fingerprint / f".legion-supervisor-owner-{owner_nonce}"
+    launched = tmp_path / "launched"
+    status_file = tmp_path / "forged-owner.json"
+    deny_canary.touch()
+    allow_canary.touch()
+    owner_path.write_text(
+        json.dumps(
+            {
+                "schema": "legion.supervisor-owner.v1",
+                "pid": os.getpid(),
+                "nonce": owner_nonce,
+                "deny_canary": str(deny_canary),
+                "allow_canary": str(allow_canary),
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    owner_path.chmod(0o600)
+    profile = (
+        '(version 1)(allow default)'
+        f'(deny file-read* (literal "{deny_canary}"))'
+        f'(deny file-write* (subpath "{fingerprint}"))'
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY": str(deny_canary),
+            "LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY": str(allow_canary),
+            "LEGION_ANCESTOR_SUPERVISOR_OWNER_PATH": str(owner_path),
+            "LEGION_ANCESTOR_SUPERVISOR_OWNER_NONCE": owner_nonce,
+            "LEGION_ANCESTOR_SUPERVISOR_OWNER_PID": str(os.getpid()),
+        }
+    )
+    result = subprocess.run(
+        [
+            "/usr/bin/sandbox-exec",
+            "-p",
+            profile,
+            sys.executable,
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "2",
+            "--status-file",
+            str(status_file),
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(launched)!r}).touch()",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=environment,
+        timeout=8,
+    )
+    assert result.returncode == 70, result.stderr.decode(errors="replace")
+    assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "cleanup_failed"
+    assert not launched.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt inheritance is Darwin-only")
+def test_nested_supervisor_accepts_live_outer_owner_lease(tmp_path: Path) -> None:
+    inner_status = tmp_path / "inner.json"
+    launched = tmp_path / "inner-launched"
+    result, outer_receipt, _elapsed = run_supervised(
+        tmp_path,
+        3,
+        [
+            sys.executable,
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "2",
+            "--status-file",
+            str(inner_status),
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(launched)!r}).touch()",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert outer_receipt["status"] == "completed"
+    assert json.loads(inner_status.read_text(encoding="utf-8"))["status"] == "completed"
+    assert launched.exists()
 
 
 def test_repeated_cancel_at_deadline_writes_one_terminal_outcome(tmp_path: Path) -> None:

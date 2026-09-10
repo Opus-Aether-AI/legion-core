@@ -161,17 +161,19 @@ assert_signal_receipt() {
   done
 }
 
-@test "Pi and Hermes let signal cleanup failure override cancellation" {
-  local adapter repo run_id result_file pid rc art
+@test "every native adapter lets signal cleanup failure override cancellation" {
+  local adapter repo run_id result_file pid rc art lease
   install_signal_cleanup_failed_python
-  for adapter in pi hermes; do
+  for adapter in claude cursor opencode deepseek pi hermes; do
     repo="$(make_test_repo "signal-cleanup-$adapter")"
     run_id="signal-cleanup-$adapter"
     result_file="$TEST_TMPDIR/$adapter-signal-cleanup.out"
     export LEGION_TEST_SUPERVISOR_STARTED="$TEST_TMPDIR/$adapter-supervisor-started"
+    local -a extra_args=()
+    [[ "$adapter" != claude ]] || extra_args+=(--no-fallback)
     PI_BIN=pi HERMES_BIN=hermes \
       "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task wait --repo "$repo" \
-        --run-id "$run_id" --quiet > "$result_file" 2>/dev/null &
+        --run-id "$run_id" --quiet "${extra_args[@]}" > "$result_file" 2>/dev/null &
     pid=$!
     for _ in $(seq 1 200); do
       [[ -f "$LEGION_TEST_SUPERVISOR_STARTED" ]] && break
@@ -183,9 +185,13 @@ assert_signal_receipt() {
     rc=0; wait "$pid" || rc=$?
     [ "$rc" -eq 70 ]
     art="$repo/.legion/runs/$run_id"
-    jq -e '.status == "cleanup_failed" and (.reason | contains("signal drain failed"))' "$art/lease.json"
+    lease="$(find "$art" -maxdepth 1 -name 'lease*.json' -print -quit)"
+    [ -n "$lease" ]
+    jq -e '.status == "cleanup_failed" and (.reason | contains("signal drain failed"))' "$lease"
     jq -e '.terminal_status == "failed" and .failure.class == "internal"
       and (.failure.message | contains("worktree retained"))' "$art/attempt-1.json"
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
     jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
     [ -d "$repo/.legion/worktrees/$run_id" ]
   done

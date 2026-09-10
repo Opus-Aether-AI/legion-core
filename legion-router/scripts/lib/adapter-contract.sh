@@ -155,7 +155,7 @@ legion_adapter_preflight() {
   LEGION_ADAPTER_PREFLIGHT_REASON="$(jq -r '.reason' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   LEGION_ADAPTER_CONFIG_IDENTITY="$(jq -r '.identity.config_sha256 // empty' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   LEGION_ADAPTER_PREFLIGHT_CACHE_KEY="$(jq -r '.cache.key // empty' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
-  [[ "$rc" -eq 0 && ( "$LEGION_ADAPTER_PREFLIGHT_STATUS" == supported || "$LEGION_ADAPTER_PREFLIGHT_STATUS" == untested ) ]]
+  [[ "$rc" -eq 0 && "$LEGION_ADAPTER_PREFLIGHT_STATUS" == supported ]]
 }
 
 legion_adapter_write_attempt() {
@@ -171,8 +171,78 @@ legion_adapter_write_attempt() {
   local attempt_path="$art/attempt-$ordinal.json" failure_path="$art/failure-$ordinal.json"
   local tmp="$attempt_path.tmp.$$" failure_json=null usage_json=null cost_json=null
 
-  if [[ "$usage_status" == known ]]; then usage_json="$usage"; fi
-  if [[ "$cost_status" == known ]]; then cost_json="$cost"; fi
+  case "$usage_status" in
+    known)
+      if [[ -n "$usage_source" ]] && usage_json="$(jq -cSse '
+        if length == 1
+           and (.[0] | type == "object"
+                and all(keys[]; length > 0)
+                and all(.[]; type == "number"
+                            and (isnan | not)
+                            and (isinfinite | not)
+                            and . >= 0
+                            and . == floor
+                            and (tostring | test("^(0|[1-9][0-9]*)$"))))
+        then .[0]
+        else error("invalid provider usage")
+        end
+      ' <<<"$usage" 2>/dev/null)"; then
+        :
+      else
+        printf '%s\n' \
+          'legion adapter receipt: invalid known usage; recording usage as unknown' >&2
+        usage_status=unknown
+        usage_source=""
+        usage_json=null
+      fi
+      ;;
+    unknown|not_applicable)
+      usage_source=""
+      usage_json=null
+      ;;
+    *)
+      printf 'legion adapter receipt: invalid usage status %q; recording usage as unknown\n' \
+        "$usage_status" >&2
+      usage_status=unknown
+      usage_source=""
+      usage_json=null
+      ;;
+  esac
+
+  case "$cost_status" in
+    known)
+      if [[ -n "$cost_source" ]] && cost_json="$(jq -cse '
+        if length == 1
+           and (.[0] | type == "number"
+                and (isnan | not)
+                and (isinfinite | not)
+                and . >= 0)
+        then .[0]
+        else error("invalid provider cost")
+        end
+      ' <<<"$cost" 2>/dev/null)"; then
+        :
+      else
+        printf '%s\n' \
+          'legion adapter receipt: invalid known cost; recording cost as unknown' >&2
+        cost_status=unknown
+        cost_source=""
+        cost_json=null
+      fi
+      ;;
+    unknown|not_applicable)
+      cost_source=""
+      cost_json=null
+      ;;
+    *)
+      printf 'legion adapter receipt: invalid cost status %q; recording cost as unknown\n' \
+        "$cost_status" >&2
+      cost_status=unknown
+      cost_source=""
+      cost_json=null
+      ;;
+  esac
+
   if [[ -n "$failure_class" ]]; then
     failure_json="$(jq -cn \
       --arg id "$failure_id" --arg run "$RUN_ID" --arg attempt "$attempt_id" \

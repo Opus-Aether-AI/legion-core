@@ -29,7 +29,7 @@ make_test_repo() {
     MOCK_CONTEXT_LOG="$context" run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e --arg m "$OPENCODE_DEFAULT" '.status == "ok" and .executor == "opencode" and .model == $m'
-    jq -e '.schema == "legion.preflight.v1" and .status == "untested"' \
+    jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
     jq -e '.schema == "legion.attempt.v1" and .terminal_status == "succeeded" and .usage_status == "known" and .cost_status == "known"' \
       "$(echo "$output" | jq -r .attempt_receipt)"

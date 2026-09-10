@@ -211,7 +211,7 @@ SH
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
     echo "$output" | jq -e '.model == "test-model-beta"'
-    jq -e '.schema == "legion.preflight.v1" and .status == "untested"' \
+    jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
     jq -e '
       .schema == "legion.attempt.v1" and .terminal_status == "succeeded"
@@ -1530,7 +1530,7 @@ $run_error" ]
       and (.attempt_receipt | type) == "string"
       and .failure_receipt == null
     '
-    jq -e '.schema == "legion.preflight.v1" and (.status == "supported" or .status == "untested")' \
+    jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
     jq -e '.schema == "legion.attempt.v1" and .executor == "codex-review"
       and .terminal_status == "succeeded" and .usage_status == "known"' \
@@ -2341,7 +2341,7 @@ PY
   echo "$output" | jq -e '.status == "ok" and .thread_id == "mock-thread-0001"
     and (.preflight_receipt | type) == "string"
     and (.attempt_receipt | type) == "string" and .failure_receipt == null'
-  jq -e '.schema == "legion.preflight.v1" and (.status == "supported" or .status == "untested")' \
+  jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
     "$(echo "$output" | jq -r .preflight_receipt)"
   jq -e '.schema == "legion.attempt.v1" and .executor == "codex-resume"
     and .terminal_status == "succeeded"

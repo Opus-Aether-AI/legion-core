@@ -63,8 +63,9 @@ supported_read_modes = ["provider-tools"]
 supported_task_transports = ["stdin"]
 # Claude accepts configured aliases as well as public ids; the adapter cannot
 # prove that an arbitrary configured alias is supported without a paid call.
-# Omit a pattern so requested models are admitted as untested, not falsely
-# certified or rejected. Premium Fable ids remain policy-gated below.
+# With no public pattern, only this executor's trusted models.toml roles and
+# concrete role values are supported. Other aliases remain visibly untested and
+# fail admission before spend. Premium Fable ids remain policy-gated below.
 supported_efforts = ["low", "medium", "high", "max"]
 billing_class = "metered"
 requires_explicit_consent = false

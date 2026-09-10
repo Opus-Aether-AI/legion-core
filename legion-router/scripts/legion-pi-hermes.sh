@@ -26,7 +26,7 @@ case "$ADAPTER_KIND" in pi|hermes) ;; *) printf 'invalid Legion adapter kind\n' 
 ADAPTER="legion-$ADAPTER_KIND"
 PROVIDER_BIN="${PI_BIN:-pi}"
 [[ "$ADAPTER_KIND" == hermes ]] && PROVIDER_BIN="${HERMES_BIN:-hermes}"
-RUN_ID="" CHILD_PID="" KEEP=0 WT="" WT_RECORD="" BRANCH="" REPO="" ART=""
+RUN_ID="" CHILD_PID="" CHILD_WAIT_RC=0 KEEP=0 WT="" WT_RECORD="" BRANCH="" REPO="" ART=""
 WT_CREATED=0 BRANCH_CREATED=0
 BROKER_PID="" BROKER_SOCKET_DIR="" BROKER_SOCKET="" BROKER_TOKEN="" BROKER_ROOT="" BROKER_RC=0
 CONTROL_EMPTY_DIR="" SANITIZED_PROVIDER_PATH=""
@@ -37,9 +37,37 @@ PROVIDER_OUT="" PROVIDER_ERR="" PROVIDER_USAGE=""
 PROVIDER_OUT_ID="" PROVIDER_ERR_ID="" PROVIDER_USAGE_ID=""
 FS_SANDBOX_BIN="" FS_SANDBOX_KIND=""
 MAX_RUNTIME_SECONDS=""
+CHILD_LEASE_DEADLINE_NS=""
 PRIVATE_RUNTIME_DIR="" PI_PRIVATE_AGENT_DIR="" HERMES_PRIVATE_HOME=""
 FS_SANDBOX_COMMAND=()
 DELEGATE_BLOCK_PATHS=()
+
+establish_child_lease_deadline() {
+  local inherited="${LEGION_CHILD_LEASE_DEADLINE_NS:-}"
+  [[ -z "$inherited" || "$inherited" =~ ^[1-9][0-9]*$ ]] \
+    || die 'invalid inherited child lease deadline'
+  CHILD_LEASE_DEADLINE_NS="$(python3 - "$MAX_RUNTIME_SECONDS" "$inherited" <<'PY'
+import sys
+import time
+
+deadline = time.monotonic_ns() + int(sys.argv[1]) * 1_000_000_000
+if sys.argv[2]:
+    deadline = min(deadline, int(sys.argv[2]))
+print(deadline)
+PY
+)" || die 'unable to establish child execution deadline'
+  export LEGION_CHILD_LEASE_DEADLINE_NS="$CHILD_LEASE_DEADLINE_NS"
+}
+
+remaining_child_lease_seconds() {
+  python3 - "$CHILD_LEASE_DEADLINE_NS" <<'PY'
+import sys
+import time
+
+remaining = int(sys.argv[1]) - time.monotonic_ns()
+print(max(0, (remaining + 999_999_999) // 1_000_000_000))
+PY
+}
 
 die() { printf '%s: %s\n' "$ADAPTER" "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == 1 ]] || printf '%s\n' "$*" >&2; }
@@ -84,7 +112,8 @@ stop_child() {
   local i=0
   while kill -0 "$CHILD_PID" 2>/dev/null && (( i < 140 )); do sleep 0.05; i=$((i + 1)); done
   kill -KILL "$CHILD_PID" 2>/dev/null || true
-  wait "$CHILD_PID" 2>/dev/null || true
+  CHILD_WAIT_RC=0
+  wait "$CHILD_PID" 2>/dev/null || CHILD_WAIT_RC=$?
   CHILD_PID=""
 }
 stop_handoff_broker() {
@@ -104,8 +133,13 @@ on_signal() {
   trap - INT TERM HUP
   stop_child
   stop_handoff_broker
-  if legion_adapter_supervisor_cleanup_failed "${ART:-}/lease.json"; then
+  if legion_adapter_supervisor_cleanup_failed "${ART:-}/lease.json" \
+      || { [[ -f "${ART:-}/lease.json" ]] && jq -e \
+        '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
+        "${ART:-}/lease.json" >/dev/null 2>&1; }; then
     containment_reason="$(legion_adapter_supervisor_reason "$ART/lease.json") (evidence: $ART/lease.json; worktree retained: $WT_RECORD)"
+  elif [[ "$CHILD_WAIT_RC" -eq 70 ]]; then
+    containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $ART/lease.json; worktree retained: $WT_RECORD)"
   elif [[ "$BROKER_RC" -eq 70 ]]; then
     containment_reason="handoff broker reported incomplete descendant cleanup (evidence: $ART/broker.err; worktree retained: $WT_RECORD)"
   fi
@@ -574,7 +608,7 @@ capture_trusted_diff() {
 }
 
 start_handoff_broker() {
-  local helper="$_self_dir/legion-handoff-broker.py" delegate="$_self_dir/../bin/legion-delegate" supervisor="$_self_dir/legion-process-supervisor.py" i supervisor_nonce
+  local helper="$_self_dir/legion-handoff-broker.py" delegate="$_self_dir/../bin/legion-delegate" supervisor="$_self_dir/legion-process-supervisor.py" i supervisor_nonce broker_runtime
   [[ -x "$helper" && -x "$delegate" && -x "$supervisor" ]] || die 'trusted Legion handoff broker is unavailable'
   BROKER_RC=0
   BROKER_SOCKET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/legion-broker.XXXXXX")" || die 'unable to allocate handoff broker socket directory'
@@ -599,11 +633,13 @@ start_handoff_broker() {
   cp "$helper" "$ART/broker-bin/legion-delegate"
   chmod 755 "$ART/broker-bin/legion-delegate"
   prepare_delegate_boundary
+  broker_runtime="$(remaining_child_lease_seconds)"
+  [[ "$broker_runtime" -ge 1 ]] || die 'child execution lease expired before handoff broker launch'
   python3 "$helper" serve --socket "$BROKER_SOCKET" --token "$BROKER_TOKEN" \
     --delegate "$delegate" --source-repo "$REPO" --broker-root "$BROKER_ROOT" --base-sha "$BASE_SHA" \
     --sandbox-bin "$FS_SANDBOX_BIN" --sandbox-kind "$FS_SANDBOX_KIND" \
     --supervisor "$supervisor" \
-    --max-runtime-seconds "$MAX_RUNTIME_SECONDS" \
+    --max-runtime-seconds "$broker_runtime" \
     --supervisor-deny-canary "$TARGET_SUPERVISOR_DENY_CANARY" \
     --supervisor-allow-canary "$TARGET_SUPERVISOR_ALLOW_CANARY" \
     --telemetry-dir "${LEGION_TELEMETRY_DIR:-}" --expected-parent "$RUN_ID" \
@@ -677,8 +713,11 @@ run_provider() {
     invocation+=("HERMES_HOME=$HERMES_PRIVATE_HOME")
   fi
   invocation+=("${FS_SANDBOX_COMMAND[@]}" "$@")
+  local provider_runtime
+  provider_runtime="$(remaining_child_lease_seconds)"
+  [[ "$provider_runtime" -ge 1 ]] || die 'child execution lease expired before provider launch'
   local -a supervisor_args=(python3 "$supervisor" --cwd "$WT"
-    --max-runtime-seconds "$MAX_RUNTIME_SECONDS" --status-file "$ART/lease.json")
+    --max-runtime-seconds "$provider_runtime" --status-file "$ART/lease.json")
   if [[ "$FS_SANDBOX_KIND" == sandbox-exec ]]; then
     supervisor_args+=(--darwin-sandbox-deny-canary "$SUPERVISOR_DENY_CANARY" \
       --darwin-sandbox-allow-canary "$SUPERVISOR_ALLOW_CANARY")
@@ -710,6 +749,7 @@ cmd_run() {
   legion_require_top_level_executor "$ADAPTER_KIND" || return $?
   legion_adapter_resolve_lease "$ADAPTER_KIND" "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
   MAX_RUNTIME_SECONDS="$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
+  establish_child_lease_deadline
   [[ -z "$PRESET_RUN_ID" ]] || { declare -F legion_write_adapter_run_state >/dev/null 2>&1 || die 'run: --run-id requires lifecycle-state support'; legion_validate_run_id "$PRESET_RUN_ID" || die "run: invalid --run-id '$PRESET_RUN_ID'"; }
   MODEL="$explicit_model"; [[ -n "$MODEL" ]] || MODEL="$(legion_model_ref "${ADAPTER_KIND}_default")" || die "could not resolve ${ADAPTER_KIND}_default"
   if [[ "$ADAPTER_KIND" == pi && "$MODEL" =~ :(off|minimal|low|medium|high|xhigh|max)$ ]]; then

@@ -14,11 +14,15 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 
-from legion_executor_registry import ExecutorRegistryError, load_executor_registry
+from legion_executor_registry import (
+    ExecutorRegistryError,
+    load_executor_registry,
+    load_model_catalog,
+)
 
 
 SCHEMA = "legion.preflight.v1"
-PASSING_STATES = frozenset({"supported", "untested"})
+PASSING_STATES = frozenset({"supported"})
 
 
 def _sha256_bytes(value):
@@ -153,7 +157,23 @@ def _matches_any(value, patterns):
     return value is not None and any(re.search(pattern, value) for pattern in patterns)
 
 
-def _compatibility(config, request, env):
+def _trusted_model_policy(executor, requested_model, models):
+    """Resolve only catalog roles owned by this executor family."""
+    prefix = f"{executor}_"
+    owned = {
+        role: model
+        for role, model in models.items()
+        if isinstance(role, str) and role.startswith(prefix)
+    }
+    if requested_model in owned:
+        return owned[requested_model], requested_model
+    if requested_model in owned.values():
+        roles = sorted(role for role, model in owned.items() if model == requested_model)
+        return requested_model, roles[0] if roles else None
+    return requested_model, None
+
+
+def _compatibility(executor, config, request, env, models):
     checks = {}
     failures = []
     for request_name, registry_name in (
@@ -196,13 +216,22 @@ def _compatibility(config, request, env):
     model = request.get("model")
     model_patterns = config.get("supported_model_patterns")
     model_state = "not_requested"
+    policy_model = model
+    model_ref = None
     if model is not None:
-        model_state = "untested" if model_patterns is None else (
-            "supported" if _matches_any(model, model_patterns) else "incompatible"
-        )
+        policy_model, model_ref = _trusted_model_policy(executor, model, models)
+        if model_patterns is None:
+            model_state = "supported" if model_ref is not None else "untested"
+        else:
+            model_state = "supported" if _matches_any(policy_model, model_patterns) else "incompatible"
         if model_state == "incompatible":
             failures.append(f"unsupported model '{model}'")
-    checks["model"] = {"requested": model, "status": model_state}
+    checks["model"] = {
+        "requested": model,
+        "policy_model": policy_model,
+        "model_ref": model_ref,
+        "status": model_state,
+    }
 
     missing = [name for name in config.get("required_config_env", []) if not env.get(name)]
     checks["configuration"] = {"missing": missing, "status": "unavailable" if missing else "supported"}
@@ -220,10 +249,12 @@ def _compatibility(config, request, env):
             failures.append(f"known-bad configuration in {name}")
 
     consent_patterns = config.get("explicit_consent_model_patterns", [])
-    consent_required = bool(config.get("requires_explicit_consent")) or _matches_any(model, consent_patterns)
+    consent_required = bool(config.get("requires_explicit_consent")) or _matches_any(
+        policy_model, consent_patterns
+    )
     consent_ok = not consent_required or bool(request.get("explicit_consent"))
     checks["billing"] = {
-        "class": "premium_credit" if _matches_any(model, consent_patterns) else config.get("billing_class", "unknown"),
+        "class": "premium_credit" if _matches_any(policy_model, consent_patterns) else config.get("billing_class", "unknown"),
         "explicit_consent_required": consent_required,
         "status": "supported" if consent_ok else "incompatible",
     }
@@ -232,7 +263,7 @@ def _compatibility(config, request, env):
     return checks, failures
 
 
-def preflight(executor, *, registry_path=None, cache_dir=None, env=None,
+def preflight(executor, *, registry_path=None, models_path=None, cache_dir=None, env=None,
               binary_override=None, **request):
     env = dict(os.environ if env is None else env)
     checked_at = _utc_now()
@@ -253,7 +284,13 @@ def preflight(executor, *, registry_path=None, cache_dir=None, env=None,
     config = dict(config)
     if binary_override:
         config["binary"] = binary_override
-    checks, failures = _compatibility(config, request, env)
+    try:
+        models = load_model_catalog(models_path)
+    except (OSError, ExecutorRegistryError, ValueError) as exc:
+        return {"schema": SCHEMA, "checked_at": checked_at, "executor": executor,
+                "status": "unavailable", "reason": f"invalid model catalog: {exc}",
+                "identity": None, "cache": {"hit": False, "key": None}, "compatibility": {}}
+    checks, failures = _compatibility(executor, config, request, env, models)
     missing_config = checks.get("configuration", {}).get("status") == "unavailable"
     if failures:
         return {"schema": SCHEMA, "checked_at": checked_at, "executor": executor,
@@ -282,24 +319,36 @@ def preflight(executor, *, registry_path=None, cache_dir=None, env=None,
         executable, config, cache_dir, binary_digest, config_digest, env
     )
     known_bad_version = _matches_any(version, config.get("known_bad_version_patterns", []))
-    supported_version = _matches_any(version, config.get("supported_version_patterns", []))
+    version_patterns = config.get("supported_version_patterns", [])
+    supported_version = _matches_any(version, version_patterns)
+    open_version = (
+        config.get("version_policy") == "open"
+        and not version_patterns
+        and version is not None
+    )
     if known_bad_version:
         failures.append(f"known-bad executor version '{version}'")
     elif config.get("version_policy", "open") == "closed" and not supported_version:
         failures.append(f"unsupported executor version '{version or 'unknown'}'")
+    checks["version"] = {
+        "discovered": version,
+        "status": "supported" if supported_version or open_version else "untested",
+    }
 
+    untested_checks = sorted(
+        name
+        for name, check in checks.items()
+        if isinstance(check, dict) and check.get("status") == "untested"
+    )
     if failures:
         status = "incompatible"
-    elif supported_version and not any(
-        isinstance(check, dict) and check.get("status") == "untested"
-        for check in checks.values()
-    ):
+    elif not untested_checks:
         status = "supported"
     else:
         status = "untested"
     reason = "; ".join(failures) if failures else (
         "declared capabilities and version are supported" if status == "supported"
-        else "executor is available but its version is not declared tested"
+        else "executor is available but policy is untested for: " + ", ".join(untested_checks)
     )
     return {
         "schema": SCHEMA, "checked_at": checked_at, "executor": executor,
@@ -315,6 +364,7 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true", required=True)
     parser.add_argument("--executor", required=True)
     parser.add_argument("--executors-file")
+    parser.add_argument("--models-file")
     parser.add_argument("--cache-dir")
     parser.add_argument("--sandbox")
     parser.add_argument("--read-mode")
@@ -325,7 +375,8 @@ def main(argv=None):
     parser.add_argument("--binary")
     args = parser.parse_args(argv)
     result = preflight(
-        args.executor, registry_path=args.executors_file, cache_dir=args.cache_dir,
+        args.executor, registry_path=args.executors_file, models_path=args.models_file,
+        cache_dir=args.cache_dir,
         sandbox=args.sandbox, read_mode=args.read_mode, task_transport=args.task_transport,
         model=args.model, effort=args.effort, explicit_consent=args.explicit_consent,
         binary_override=args.binary,

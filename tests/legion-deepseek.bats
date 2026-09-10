@@ -8,7 +8,6 @@ setup() {
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
     export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
     export LEGION_DEEPSEEK="$REPO_ROOT/legion-router/bin/legion-deepseek"
-    DEEPSEEK_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref deepseek_default)"
 }
 
 make_test_repo() {
@@ -28,9 +27,9 @@ make_test_repo() {
     local context="$TEST_TMPDIR/context.log"
     MOCK_CONTEXT_LOG="$context" run "$LEGION_DEEPSEEK" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e --arg m "$DEEPSEEK_DEFAULT" \
-        '.status == "ok" and .executor == "deepseek" and .model == $m'
-    jq -e '.schema == "legion.preflight.v1" and .status == "untested"' \
+    echo "$output" | jq -e \
+        '.status == "ok" and .executor == "deepseek" and .model == "unknown"'
+    jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
     jq -e '
       .schema == "legion.attempt.v1" and .terminal_status == "succeeded"
@@ -48,8 +47,8 @@ make_test_repo() {
     # difference between a working adapter and one that opens a web server.
     assert_mock_called dsh "--profile legion-headless"
 
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
-    [ "$output" = "deepseek" ]
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '[.executor,.model] | join(\"|\")'"
+    [ "$output" = "deepseek|unknown" ]
     grep -Eq '^dsh active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 

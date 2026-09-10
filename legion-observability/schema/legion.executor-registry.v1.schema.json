@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/legion-observability/schema/legion.executor-registry.v1.schema.json",
+  "title": "legion.executor-registry.v1",
+  "description": "The backwards-compatible executor capability and admission registry represented by executors.toml.",
+  "type": "object",
+  "required": ["executors"],
+  "properties": {
+    "schema": {"enum": ["legion.executor-registry.v1"]},
+    "executors": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/executor"}
+    }
+  },
+  "$defs": {
+    "executor": {
+      "type": "object",
+      "properties": {
+        "kind": {"type": "string"}, "adapter": {"type": "string"},
+        "contract": {"enum": ["", "native", "diff", "prompt"]},
+        "model_ref": {"type": "string"}, "binary": {"type": "string"},
+        "version_args": {"$ref": "#/$defs/stringArray"},
+        "version_regex": {"type": "string"}, "version_policy": {"enum": ["open", "closed"]},
+        "supported_version_patterns": {"$ref": "#/$defs/stringArray"},
+        "known_bad_version_patterns": {"$ref": "#/$defs/stringArray"},
+        "config_fingerprint_env": {"$ref": "#/$defs/stringArray"},
+        "config_fingerprint_files": {"$ref": "#/$defs/stringArray"},
+        "required_config_env": {"$ref": "#/$defs/stringArray"},
+        "supported_config_env": {"$ref": "#/$defs/stringArray"},
+        "known_bad_config_env": {"$ref": "#/$defs/stringArray"},
+        "supported_sandboxes": {"$ref": "#/$defs/stringArray"},
+        "supported_read_modes": {"$ref": "#/$defs/stringArray"},
+        "supported_task_transports": {"$ref": "#/$defs/stringArray"},
+        "supported_model_patterns": {"$ref": "#/$defs/stringArray"},
+        "supported_efforts": {"$ref": "#/$defs/stringArray"},
+        "billing_class": {"enum": ["free", "local", "metered", "premium_credit", "unknown"]},
+        "requires_explicit_consent": {"type": "boolean"},
+        "explicit_consent_model_patterns": {"$ref": "#/$defs/stringArray"},
+        "usage_reliability": {"enum": ["provider_reported", "estimated", "unavailable", "unknown"]},
+        "usage_source": {"type": "string"},
+        "cost_reliability": {"enum": ["provider_reported", "computed", "estimated", "unavailable", "unknown"]},
+        "cost_source": {"type": "string"},
+        "cancellation": {"enum": ["none", "process", "process_group", "provider", "unknown"]},
+        "max_runtime_seconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "stringArray": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

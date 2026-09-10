@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/legion-observability/schema/legion.preflight.v1.schema.json",
+  "title": "legion.preflight.v1",
+  "description": "A no-spend local executor availability and compatibility decision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "checked_at", "executor", "status", "reason", "identity", "cache", "compatibility"],
+  "properties": {
+    "schema": {"const": "legion.preflight.v1"},
+    "checked_at": {"type": "string", "minLength": 1},
+    "executor": {"type": "string", "minLength": 1},
+    "status": {"enum": ["supported", "untested", "incompatible", "unavailable"]},
+    "reason": {"type": "string", "minLength": 1},
+    "identity": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["executable_path", "binary_sha256", "config_sha256", "version", "version_raw"],
+          "properties": {
+            "executable_path": {"type": "string", "minLength": 1},
+            "binary_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "config_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "version": {"type": ["string", "null"]},
+            "version_raw": {"type": ["string", "null"]}
+          }
+        }
+      ]
+    },
+    "cache": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hit", "key"],
+      "properties": {"hit": {"type": "boolean"}, "key": {"type": ["string", "null"]}}
+    },
+    "compatibility": {"type": "object"}
+  }
+}

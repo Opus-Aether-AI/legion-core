@@ -240,7 +240,7 @@ def test_network_only_seatbelt_host_without_run_unique_canaries_fails_closed(tmp
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt inheritance is Darwin-only")
-def test_active_inherited_fingerprint_is_reused_for_tracking(tmp_path: Path) -> None:
+def test_active_inherited_fingerprint_uses_ancestor_tracking_boundary(tmp_path: Path) -> None:
     deny_canary = tmp_path / "deny"
     allow_canary = tmp_path / "allow"
     pid_file = tmp_path / "detached.pid"
@@ -293,10 +293,23 @@ os.execve("/bin/sleep", ["sleep", "30"], {})
         env=environment,
         timeout=8,
     )
-    assert result.returncode == 0, result.stderr.decode(errors="replace")
-    assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "completed"
-    assert pid_file.exists()
-    assert wait_gone(int(pid_file.read_text(encoding="utf-8")))
+    child_pid = 0
+    try:
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "completed"
+        assert pid_file.exists()
+        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        # A nested supervisor cannot enumerate the host under the inherited
+        # policy. The verified outer supervisor owns fingerprint-wide cleanup;
+        # this direct fixture has no such ancestor, so clean up its daemon here.
+        os.kill(child_pid, 0)
+    finally:
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            assert wait_gone(child_pid)
 
 
 def test_repeated_cancel_at_deadline_writes_one_terminal_outcome(tmp_path: Path) -> None:

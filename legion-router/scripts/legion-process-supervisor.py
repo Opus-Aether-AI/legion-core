@@ -814,6 +814,7 @@ def main() -> int:
     inherited_deny = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY", "")
     inherited_allow = os.environ.get("LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY", "")
     inherited_fingerprint_active = False
+    using_inherited = False
     if bool(inherited_deny) != bool(inherited_allow):
         print("legion-process-supervisor: incomplete inherited supervisor fingerprint", file=sys.stderr)
         return 2
@@ -831,9 +832,10 @@ def main() -> int:
         # without actually running under that policy. Such a pair grants no
         # trust: fall through to a fresh direct-launch fingerprint instead.
         # An active inherited pair is the outer supervisor's run-unique process
-        # identity. Reuse it for discovery as well as for deciding not to nest
-        # sandbox-exec. Merely observing an arbitrary restrictive host sandbox
-        # is not enough to distinguish this run from unrelated siblings.
+        # identity. Verify and propagate it rather than nesting sandbox-exec.
+        # The outer supervisor remains responsible for fingerprint-wide
+        # discovery: this nested process is deliberately denied the host-wide
+        # process listing that such discovery requires.
         if inherited_fingerprint_active and not deny_canary:
             deny_canary = inherited_deny
             allow_canary = inherited_allow
@@ -950,7 +952,12 @@ def main() -> int:
             env=environment,
             start_new_session=True,
         )
-        tracker = DescendantTracker(process.pid, supervisor_token, deny_canary, allow_canary)
+        tracker = DescendantTracker(
+            process.pid,
+            supervisor_token,
+            "" if using_inherited else deny_canary,
+            "" if using_inherited else allow_canary,
+        )
         tracker.start()
         deadline = time.monotonic() + arguments.max_runtime_seconds
         if absolute_deadline_ns is not None:

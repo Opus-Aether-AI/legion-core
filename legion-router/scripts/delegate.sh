@@ -125,6 +125,8 @@ trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legio
 # stream.jsonl still growing). Best-effort: TERM the tracked child plus any codex
 # grandchild (review/resume wrap it in a `( cd … && codex )` subshell).
 CODEX_CHILD_PID=""
+CODEX_SIGNAL_CHILD_PID=""
+CODEX_CHILD_RC=0
 CHILD_LEASE_DEADLINE_NS=""
 REVIEW_RECEIPT_PATH=""
 REVIEW_RECEIPT_RUN_ID=""
@@ -283,7 +285,8 @@ on_terminating_signal() {
   local interrupted_native_executor="${NATIVE_ATTEMPT_EXECUTOR:-}"
   local interrupted_native_model="${NATIVE_ATTEMPT_MODEL:-}"
   local interrupted_native_ordinal="${NATIVE_ATTEMPT_ORDINAL:-0}"
-  local child_rc=0 terminal_status=failed terminal_reason=interrupted provider_exit=143
+  local child_rc="$CODEX_CHILD_RC" terminal_status=failed terminal_reason=interrupted provider_exit=143
+  local supervised_pid="${CODEX_SIGNAL_CHILD_PID:-unknown}"
   kill_codex_child
   if [[ -n "${CODEX_CHILD_PID:-}" ]]; then
     wait "$CODEX_CHILD_PID" 2>/dev/null || child_rc=$?
@@ -295,7 +298,7 @@ on_terminating_signal() {
         "$NATIVE_LEASE_STATUS" >/dev/null 2>&1; }; then
     terminal_status=containment_failed
     provider_exit=70
-    terminal_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; worktree retained: ${LEGION_WT_PATH:-${REVIEW_WT_PATH:-}})"
+    terminal_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: ${LEGION_WT_PATH:-${REVIEW_WT_PATH:-}})"
   elif [[ "$child_rc" -eq 70 ]]; then
     terminal_status=containment_failed
     provider_exit=70
@@ -472,17 +475,19 @@ run_codex() {
         --skip-git-repo-check -c "model_reasoning_effort=$effort" -o "$art/last-message.txt" - \
         >"$art/stream.jsonl" 2>"$art/codex.err" &
     CODEX_CHILD_PID=$!
+    CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
   else
     printf '%s' "$task" | "${supervisor[@]}" "$CODEX_BIN" exec --json -m "$1" -s "$sandbox" -C "$wt" \
         --skip-git-repo-check -o "$art/last-message.txt" - \
         >"$art/stream.jsonl" 2>"$art/codex.err" &
     CODEX_CHILD_PID=$!
+    CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
   fi
   # Backgrounded + waited so on_terminating_signal can reap codex instead of
   # orphaning it; wait's status is codex's exit (== the old PIPESTATUS[1]).
   wait "$CODEX_CHILD_PID"; rc=$?
+  CODEX_CHILD_RC="$rc"
   CODEX_CHILD_PID=""
-  NATIVE_LEASE_STATUS=""
   set -e
 }
 
@@ -1428,6 +1433,9 @@ cmd_run() {
       "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" \
       "${lease_reason:-$(error_log_summary "$art/codex.err" "$art/codex.err")}"
     NATIVE_ATTEMPT_ART=""
+    NATIVE_LEASE_STATUS=""
+    CODEX_SIGNAL_CHILD_PID=""
+    CODEX_CHILD_RC=0
     [[ "$containment_failed" -ne 1 ]] || break
     [[ "$attempt_timed_out" -ne 1 ]] || break
     [[ "$rc" -eq 0 ]] && break
@@ -1838,6 +1846,14 @@ $(cat "$patch")
   fi
   review_lease_receipt="$(preserve_prompt_review_receipt "$source_lease" "$wt" \
     "$receipt_dir/lease.json" legion.child-execution-lease.v1 2>/dev/null || true)"
+  if jq -e '.status == "containment_failed"' "$stream" >/dev/null 2>&1; then
+    review_containment_failed=1
+    LEGION_WT_KEEP=1
+    local adapter_reason
+    adapter_reason="$(jq -r '.reason // "prompt reviewer reported containment failure"' "$stream")"
+    review_prompt_containment_reason="$adapter_reason (evidence: ${review_lease_receipt:-$receipt_dir/lease.json}; worktree retained: $wt)"
+    rc=70
+  fi
   if [[ -z "$review_preflight_receipt" || -z "$review_attempt_receipt" || -z "$review_lease_receipt" ||
         ( -n "$source_failure" && -z "$review_failure_receipt" ) ]]; then
     receipt_contract_failed=1
@@ -2178,7 +2194,7 @@ cmd_review() {
   local attempt_verdict="$art/attempt-0.verdict.json"
   local review_executor review_kind review_model_ref _cand _cand_n=0
   local review_preflight_receipt="" review_attempt_receipt="" review_failure_receipt=""
-  local review_lease_receipt="" review_containment_failed=0
+  local review_lease_receipt="" review_containment_failed=0 review_prompt_containment_reason=""
   : > "$attempt_stream"
   : > "$attempt_err"
   # Activating a candidate's executor context marks this process as running
@@ -2306,6 +2322,9 @@ cmd_review() {
       review_failure_receipt="$LEGION_ADAPTER_FAILURE_PATH"
       native_attempt_recorded=1
       NATIVE_ATTEMPT_ART=""
+      NATIVE_LEASE_STATUS=""
+      CODEX_SIGNAL_CHILD_PID=""
+      CODEX_CHILD_RC=0
     }
     note "→ $review_executor review attempt $attempt/$max_attempts (base $base_sha, head $head_sha)"
     local -a codex_review_args=(exec -s "$sandbox" review --base "$base_sha")
@@ -2357,9 +2376,10 @@ cmd_review() {
           --status-file "$attempt_lease" -- "$CODEX_BIN" "${codex_review_args[@]}" ) \
         </dev/null >"$attempt_stream" 2>"$attempt_err" &
       CODEX_CHILD_PID=$!
+      CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
       wait "$CODEX_CHILD_PID"; rc=$?
+      CODEX_CHILD_RC="$rc"
       CODEX_CHILD_PID=""
-      NATIVE_LEASE_STATUS=""
       set -e
       native_attempt_end_ms="$(date +%s000)"
       native_attempt_ended_at="$(_now)"
@@ -2378,6 +2398,12 @@ cmd_review() {
       status="containment_failed"
       reason="$(legion_adapter_supervisor_reason "$attempt_lease") (evidence: $attempt_lease; worktree retained: $wt)"
       record_native_review_attempt failed internal false "$reason"
+      break
+    fi
+    if [[ "$review_kind" != "native" && "$review_containment_failed" -eq 1 ]]; then
+      LEGION_WT_KEEP=1
+      status="containment_failed"
+      reason="$review_prompt_containment_reason"
       break
     fi
     if [[ "$review_kind" == "native" ]] && legion_adapter_supervisor_timed_out "$attempt_lease"; then
@@ -2687,18 +2713,19 @@ cmd_resume() {
         -m "$model" -c "model_reasoning_effort=$effort" --skip-git-repo-check \
         -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err" &
     CODEX_CHILD_PID=$!
+    CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
   else
     printf '%s' "$task" | ( cd "$wt" && "${resume_supervisor[@]}" "$CODEX_BIN" exec resume "$thread_id" --json \
         -m "$model" --skip-git-repo-check \
         -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err" &
     CODEX_CHILD_PID=$!
+    CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
   fi
   # Backgrounded + waited so on_terminating_signal can reap codex; wait's status
   # is the codex subshell's exit (== the old PIPESTATUS[1]).
   wait "$CODEX_CHILD_PID"; rc=$?
+  CODEX_CHILD_RC="$rc"
   CODEX_CHILD_PID=""
-  NATIVE_LEASE_STATUS=""
-  NATIVE_RESUME_ART=""
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
@@ -2758,6 +2785,10 @@ cmd_resume() {
     "$([[ "$cost_status" == known ]] && printf legion-cost-table)" "$failure_class" false \
     "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$reason"
   NATIVE_ATTEMPT_ART=""
+  NATIVE_LEASE_STATUS=""
+  NATIVE_RESUME_ART=""
+  CODEX_SIGNAL_CHILD_PID=""
+  CODEX_CHILD_RC=0
 
   emit_span "codex-resume" "$model" "$status" "$dur" "$cost" "$usage" "resume $run: $task" \
     "$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg lease "$lease_status" \

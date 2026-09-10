@@ -71,6 +71,7 @@ _ENUM_FIELDS = {
 }
 _INTEGER_FIELDS = frozenset({"max_runtime_seconds"})
 _EXECUTOR_FIELDS = _STRING_FIELDS | _BOOL_FIELDS | _STRING_LIST_FIELDS | _INTEGER_FIELDS
+_REGISTRY_FIELDS = frozenset({"schema", "executors"})
 _SANDBOX_WRAPPERS = frozenset({"docker", "podman", "vercel"})
 _PROVIDER_SANDBOXES = frozenset({"read-only", "workspace-write", "danger-full-access"})
 
@@ -234,6 +235,11 @@ def load_executor_registry(path=None):
     if not isinstance(table, dict):
         raise ExecutorRegistryError("executors.toml must contain an executor table")
     if "executors" in table:
+        unknown = sorted(set(table) - _REGISTRY_FIELDS)
+        if unknown:
+            raise ExecutorRegistryError(
+                f"executors.toml has unknown top-level field(s): {', '.join(unknown)}"
+            )
         if "schema" in table and table["schema"] != "legion.executor-registry.v1":
             raise ExecutorRegistryError("executors.toml has an unsupported schema")
     executors = table.get("executors", table)

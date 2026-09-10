@@ -161,6 +161,25 @@ assert_signal_receipt() {
   done
 }
 
+@test "prompt review propagates adapter containment failure and retains evidence" {
+  local repo result_file worktree lease
+  repo="$(make_test_repo prompt-review-containment)"
+  result_file="$TEST_TMPDIR/prompt-review-containment.out"
+  install_cleanup_failed_python
+
+  CODEX_BIN=missing-codex-for-review \
+    "$REPO_ROOT/legion-router/bin/legion-delegate" review --base HEAD \
+      --repo "$repo" --quiet >"$result_file" 2>/dev/null || true
+
+  jq -e '.status == "containment_failed" and (.reason | contains("forced cleanup evidence"))' \
+    "$result_file"
+  worktree="$(jq -r '.worktree' "$result_file")"
+  [ -d "$worktree" ]
+  lease="$(jq -r '.lease_receipt' "$result_file")"
+  [ -f "$lease" ]
+  jq -e '.status == "cleanup_failed"' "$lease"
+}
+
 @test "every native adapter lets signal cleanup failure override cancellation" {
   local adapter repo run_id result_file pid rc art lease
   install_signal_cleanup_failed_python

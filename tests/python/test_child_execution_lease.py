@@ -128,6 +128,25 @@ def test_inherited_absolute_deadline_clamps_relative_allowance(tmp_path: Path) -
     assert elapsed < 4
 
 
+def test_expired_inherited_deadline_refuses_before_child_launch(tmp_path: Path) -> None:
+    launched = tmp_path / "launched"
+    environment = os.environ.copy()
+    environment["LEGION_CHILD_LEASE_DEADLINE_NS"] = str(time.monotonic_ns() - 1)
+    result, receipt, elapsed = run_supervised(
+        tmp_path,
+        10,
+        [sys.executable, "-c", f"from pathlib import Path; Path({str(launched)!r}).touch()"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=environment,
+    )
+    assert result.returncode == 124
+    assert receipt["status"] == "timed_out"
+    assert "before launch" in receipt["reason"]
+    assert not launched.exists()
+    assert elapsed < 1
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt fingerprints are Darwin-only")
 def test_inactive_inherited_fingerprint_cannot_disable_direct_launch(tmp_path: Path) -> None:
     deny_canary = tmp_path / "deny"

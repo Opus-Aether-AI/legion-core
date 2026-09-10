@@ -461,6 +461,7 @@ EOF
     grep -q 'schema:"legion.core-consumer-update.v1"' "$consumer"
     grep -q 'candidate_is_stale=true' "$consumer"
     grep -q 'retire_candidate=true' "$consumer"
+    grep -q 'superseded|already_current)' "$consumer"
 
     # A missing branch and an existing branch both use the same explicit lease;
     # an empty expected value means "create only if still absent".
@@ -494,7 +495,7 @@ EOF
     printf '%s\n' OPEN > "$state_file"
 
     awk '
-      /- name: Retire a superseded stable candidate/ { in_step = 1; next }
+      /- name: Retire a stale stable candidate/ { in_step = 1; next }
       in_step && /^        run: \|/ { in_run = 1; next }
       in_run && /^      - name:/ { exit }
       in_run { sub(/^          /, ""); print }
@@ -551,6 +552,40 @@ SH
     [[ "$output" == *"moved before retirement"* ]]
     ! grep -q '^gh ' "$calls"
     ! grep -q '^git push ' "$calls"
+}
+
+@test "consumer update retires stale candidates for both terminal no-op dispositions" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+    local decision="$TEST_TMPDIR/retire-stale-decision.sh"
+
+    awk '
+      /^          retire_candidate=false$/ { in_block = 1 }
+      in_block && /^          receipt=/ { exit }
+      in_block { sub(/^          /, ""); print }
+    ' "$consumer" > "$decision"
+    printf '%s\n' 'printf "%s\n" "$retire_candidate"' >> "$decision"
+
+    for disposition in superseded already_current; do
+        run env disposition="$disposition" candidate_is_stale=true remote_sha=1111111 \
+          bash "$decision"
+        [ "$status" -eq 0 ]
+        [ "$output" = true ]
+    done
+
+    run env disposition=update_required candidate_is_stale=true remote_sha=1111111 \
+      bash "$decision"
+    [ "$status" -eq 0 ]
+    [ "$output" = false ]
+
+    run env disposition=already_current candidate_is_stale=false remote_sha=1111111 \
+      bash "$decision"
+    [ "$status" -eq 0 ]
+    [ "$output" = false ]
+
+    run env disposition=already_current candidate_is_stale=true remote_sha='' \
+      bash "$decision"
+    [ "$status" -eq 0 ]
+    [ "$output" = false ]
 }
 
 @test "recovery verifies a v0.19.0-style legacy tag with current controls" {

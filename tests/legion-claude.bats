@@ -38,6 +38,9 @@ make_test_repo() {
       .schema == "legion.attempt.v1" and .terminal_status == "succeeded"
       and .usage_status == "known" and .cost_status == "known"' \
       "$(echo "$output" | jq -r .attempt_receipt)"
+    lease="$(echo "$output" | jq -r .lease_receipt)"
+    [ -n "$lease" ]
+    jq -e '.schema == "legion.child-execution-lease.v1" and .status == "completed"' "$lease"
 
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '[.executor, .archetype] | @tsv'"
     [ "$status" -eq 0 ]
@@ -305,6 +308,25 @@ make_test_repo() {
       and (.reason | contains("expired after 3 seconds"))'
     [ "$(grep -c '^claude -p ' "$MOCK_CALL_LOG")" -eq 2 ]
     assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: inherited child lease only lowers the local deadline" {
+    local repo inherited started elapsed
+    repo="$(make_test_repo inherited-deadline)"
+    inherited="$(python3 - <<'PY'
+import time
+print(time.monotonic_ns() + 1_000_000_000)
+PY
+)"
+    started="$SECONDS"
+    LEGION_CHILD_LEASE_DEADLINE_NS="$inherited" MOCK_CLAUDE_DELAY=30 \
+      run "$LEGION_CLAUDE" run --task x --repo "$repo" \
+        --max-runtime-seconds 10 --no-fallback --quiet
+    elapsed=$((SECONDS-started))
+
+    [ "$status" -eq 1 ]
+    [ "$elapsed" -lt 5 ]
+    echo "$output" | jq -e '.status == "timed_out" and (.lease_receipt | length > 0)'
 }
 
 @test "legion-claude: environment archetype survives Codex fallback" {

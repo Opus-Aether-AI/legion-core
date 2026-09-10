@@ -36,6 +36,7 @@ def test_json_schema_closes_the_complete_runtime_policy_surface():
 
     assert schema["additionalProperties"] is False
     assert executor["additionalProperties"] is False
+    assert set(schema["properties"]) == registry._REGISTRY_FIELDS
     assert set(executor["properties"]) == registry._EXECUTOR_FIELDS
     assert set(executor["properties"]["supported_sandbox_wrappers"]["items"]["enum"]) == {
         "docker",
@@ -77,6 +78,36 @@ def test_toml_loader_rejects_unknown_policy_fields(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(registry.ExecutorRegistryError, match="billing_clas"):
+        registry.load_executor_registry(config)
+
+
+@pytest.mark.parametrize(
+    ("contents", "unknown"),
+    [
+        (
+            'scheam = "legion.executor-registry.v1"\n'
+            '[executors.fixture]\nkind = "coding"\n',
+            "scheam",
+        ),
+        (
+            'schema = "legion.executor-registry.v1"\n'
+            '[executors.fixture]\nkind = "coding"\n'
+            '[metadata]\nowner = "platform"\n',
+            "metadata",
+        ),
+    ],
+    ids=["typo", "misplaced-table"],
+)
+def test_toml_loader_rejects_unknown_top_level_fields(
+    tmp_path: Path, contents: str, unknown: str
+) -> None:
+    config = tmp_path / "executors.toml"
+    config.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(
+        registry.ExecutorRegistryError,
+        match=rf"unknown top-level field.*{unknown}",
+    ):
         registry.load_executor_registry(config)
 
 

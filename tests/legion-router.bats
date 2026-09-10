@@ -391,8 +391,10 @@ SH
           --task "make a scoped edit" --repo "$repo" --quiet
 
       [ "$status" -ne 0 ]
-      echo "$output" | jq -e '.status == "failed"'
-      [[ "$output" == *"handoff broker failed closed with exit 70"* ]]
+      echo "$output" | jq -e '.status == "containment_failed" and (.reason | contains("broker.err"))'
+      local retained
+      retained="$(echo "$output" | jq -r '.worktree')"
+      [ -d "$retained" ]
     done
 }
 

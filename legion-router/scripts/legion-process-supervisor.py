@@ -909,6 +909,13 @@ def main() -> int:
         except ValueError:
             print("legion-process-supervisor: invalid inherited child lease deadline", file=sys.stderr)
             return 2
+        if absolute_deadline_ns <= time.monotonic_ns():
+            reason = "inherited child lease deadline expired before launch"
+            _write_status(
+                arguments.status_file, "timed_out", reason, arguments.max_runtime_seconds
+            )
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+            return 124
 
     deny_canary = arguments.darwin_sandbox_deny_canary
     allow_canary = arguments.darwin_sandbox_allow_canary

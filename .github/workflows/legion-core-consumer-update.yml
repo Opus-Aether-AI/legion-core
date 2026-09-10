@@ -297,9 +297,12 @@ jobs:
           fi
 
           retire_candidate=false
-          if [ "$disposition" = superseded ] && [ "$candidate_is_stale" = true ] && \
-             [ -n "$remote_sha" ]; then
-            retire_candidate=true
+          if [ "$candidate_is_stale" = true ] && [ -n "$remote_sha" ]; then
+            case "$disposition" in
+              superseded|already_current)
+                retire_candidate=true
+                ;;
+            esac
           fi
           receipt="$(jq -cn \
             --arg status "$disposition" \
@@ -319,7 +322,7 @@ jobs:
             "$mode" "$disposition" "$remote_sha" "$retire_candidate" "$receipt" >> "$GITHUB_OUTPUT"
           printf '### Legion Core update receipt\n\n~~~json\n%s\n~~~\n' "$receipt" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Retire a superseded stable candidate
+      - name: Retire a stale stable candidate
         if: ${{ steps.arbitrate.outputs.retire_candidate == 'true' }}
         env:
           EXPECTED_REMOTE_SHA: ${{ steps.arbitrate.outputs.remote_sha }}

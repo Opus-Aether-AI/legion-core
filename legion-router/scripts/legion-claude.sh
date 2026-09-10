@@ -34,6 +34,8 @@ LEGION_CLAUDE_LEASE_RECEIPT=""
 CHILD_PID=""
 SIGNAL_LEASE_STATUS=""
 SIGNAL_WORKTREE=""
+SIGNAL_CHILD_PID=""
+SIGNAL_CHILD_RC=0
 
 die() { printf 'legion-claude: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -43,7 +45,7 @@ cleanup_claude_on_exit() {
   [[ -z "$LEGION_CLAUDE_TMPDIR" ]] || rm -rf "$LEGION_CLAUDE_TMPDIR"
 }
 on_signal() {
-  local signum="$1" child_rc=0 containment_reason=""
+  local signum="$1" child_rc="$SIGNAL_CHILD_RC" containment_reason="" supervised_pid="${SIGNAL_CHILD_PID:-unknown}"
   trap - INT TERM HUP
   if [[ -n "$CHILD_PID" ]]; then
     kill -TERM "$CHILD_PID" 2>/dev/null || true
@@ -55,7 +57,7 @@ on_signal() {
       || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
         '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
         "$SIGNAL_LEASE_STATUS" >/dev/null 2>&1; }; then
-    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: $SIGNAL_WORKTREE)"
   elif [[ "$child_rc" -eq 70 ]]; then
     containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
   fi
@@ -178,14 +180,21 @@ is_limit_text() {
 }
 
 claude_start_lease_deadline() {
-  [[ -n "$LEGION_CLAUDE_LEASE_DEADLINE_NS" ]] && return 0
-  LEGION_CLAUDE_LEASE_DEADLINE_NS="$(python3 - "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" <<'PY'
+  local inherited="${LEGION_CHILD_LEASE_DEADLINE_NS:-}"
+  [[ -z "$inherited" || "$inherited" =~ ^[1-9][0-9]*$ ]] \
+    || die "invalid inherited child lease deadline"
+  LEGION_CLAUDE_LEASE_DEADLINE_NS="$(python3 - "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+    "$LEGION_CLAUDE_LEASE_DEADLINE_NS" "$inherited" <<'PY'
 import sys
 import time
 
-print(time.monotonic_ns() + int(sys.argv[1]) * 1_000_000_000)
+deadline = time.monotonic_ns() + int(sys.argv[1]) * 1_000_000_000
+for candidate in sys.argv[2:]:
+    if candidate:
+        deadline = min(deadline, int(candidate))
+print(deadline)
 PY
-)"
+)" || die "invalid inherited child lease deadline"
   # Descendant supervisors clamp their relative allowance to this exact
   # monotonic boundary, so rounding the shell-facing seconds up cannot extend
   # the total lease across model or executor transitions.
@@ -575,6 +584,7 @@ cmd_run() {
     local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
     attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
     local lease_status="$contract_art/lease-$chain_idx.json"
+    LEGION_CLAUDE_LEASE_RECEIPT="$lease_status"
     SIGNAL_LEASE_STATUS="$lease_status"
     SIGNAL_WORKTREE="${wt:-$repo}"
     legion_adapter_arm_signal_receipt "$contract_art" claude anthropic "$chain_idx" \
@@ -589,10 +599,10 @@ cmd_run() {
         --status-file "$lease_status" -- "${claude_cmd[@]}"
     ) < <(printf '%s' "$task") >"$out_file" 2>"$err_file" &
     CHILD_PID=$!
+    SIGNAL_CHILD_PID="$CHILD_PID"
     wait "$CHILD_PID"; rc=$?
+    SIGNAL_CHILD_RC="$rc"
     CHILD_PID=""
-    SIGNAL_LEASE_STATUS=""
-    SIGNAL_WORKTREE=""
     set -e
     attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
     attempt_duration=$((attempt_end_ms-attempt_start_ms))
@@ -648,6 +658,10 @@ cmd_run() {
       "$attempt_output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" \
       "${lease_reason:-$attempt_result}"
     legion_adapter_disarm_signal_receipt
+    SIGNAL_CHILD_PID=""
+    SIGNAL_CHILD_RC=0
+    SIGNAL_LEASE_STATUS=""
+    SIGNAL_WORKTREE=""
     [[ "$lease_timed_out" -ne 1 && "$containment_failed" -ne 1 ]] || break
     if [[ "$permission_refused" -eq 1 || "$any_output_started" -eq 1 ]]; then
       declined_final=0

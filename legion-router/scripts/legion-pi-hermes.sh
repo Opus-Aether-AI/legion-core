@@ -27,6 +27,7 @@ ADAPTER="legion-$ADAPTER_KIND"
 PROVIDER_BIN="${PI_BIN:-pi}"
 [[ "$ADAPTER_KIND" == hermes ]] && PROVIDER_BIN="${HERMES_BIN:-hermes}"
 RUN_ID="" CHILD_PID="" CHILD_WAIT_RC=0 KEEP=0 WT="" WT_RECORD="" BRANCH="" REPO="" ART=""
+SIGNAL_CHILD_PID=""
 WT_CREATED=0 BRANCH_CREATED=0
 BROKER_PID="" BROKER_SOCKET_DIR="" BROKER_SOCKET="" BROKER_TOKEN="" BROKER_ROOT="" BROKER_RC=0
 CONTROL_EMPTY_DIR="" SANITIZED_PROVIDER_PATH=""
@@ -129,7 +130,7 @@ stop_handoff_broker() {
   BROKER_PID=""
 }
 on_signal() {
-  local signum="$1" containment_reason=""
+  local signum="$1" containment_reason="" supervised_pid="${SIGNAL_CHILD_PID:-unknown}"
   trap - INT TERM HUP
   stop_child
   stop_handoff_broker
@@ -137,7 +138,7 @@ on_signal() {
       || { [[ -f "${ART:-}/lease.json" ]] && jq -e \
         '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
         "${ART:-}/lease.json" >/dev/null 2>&1; }; then
-    containment_reason="$(legion_adapter_supervisor_reason "$ART/lease.json") (evidence: $ART/lease.json; worktree retained: $WT_RECORD)"
+    containment_reason="$(legion_adapter_supervisor_reason "$ART/lease.json") (evidence: $ART/lease.json; supervisor pid: $supervised_pid; worktree retained: $WT_RECORD)"
   elif [[ "$CHILD_WAIT_RC" -eq 70 ]]; then
     containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $ART/lease.json; worktree retained: $WT_RECORD)"
   elif [[ "$BROKER_RC" -eq 70 ]]; then
@@ -725,7 +726,9 @@ run_provider() {
   supervisor_args+=(-- "${invocation[@]}")
   "${supervisor_args[@]}" >"$out" 2>"$err" &
   CHILD_PID=$!
+  SIGNAL_CHILD_PID="$CHILD_PID"
   set +e; wait "$CHILD_PID"; PROVIDER_RC=$?; set -e
+  CHILD_WAIT_RC="$PROVIDER_RC"
   CHILD_PID=""
 }
 
@@ -842,6 +845,11 @@ cmd_run() {
   if [[ "$BROKER_RC" -ne 0 ]]; then
     status=failed
     result="${result:+$result$'\n'}handoff broker failed closed with exit $BROKER_RC; inspect $ART/broker.err"
+    if [[ "$BROKER_RC" -eq 70 ]]; then
+      containment_failed=1
+      KEEP=1
+      lease_reason="handoff broker reported incomplete descendant cleanup (evidence: $ART/broker.err; worktree retained: $WT_RECORD)"
+    fi
   fi
   if ! jq -en --argjson value "$cost" '$value | type == "number" and . >= 0' >/dev/null 2>&1; then cost=0; terminal_ok=0; fi
   if [[ "$containment_failed" -ne 1 ]] && ! capture_trusted_diff "$diff"; then
@@ -930,6 +938,8 @@ cmd_run() {
     "$failure_class" false "$output_started" \
     "$([[ "$PROVIDER_RC" -eq 0 ]] || printf '%s' "$PROVIDER_RC")" "$result"
   legion_adapter_disarm_signal_receipt
+  SIGNAL_CHILD_PID=""
+  CHILD_WAIT_RC=0
   local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg reason "$lease_reason" --arg lease "$ART/lease.json" \

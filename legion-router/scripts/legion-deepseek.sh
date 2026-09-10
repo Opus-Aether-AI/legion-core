@@ -64,11 +64,13 @@ DSH_PROFILE="${LEGION_DSH_PROFILE:-${DSH_PROFILE:-legion-headless}}"
 CHILD_PID=""
 SIGNAL_LEASE_STATUS=""
 SIGNAL_WORKTREE=""
+SIGNAL_CHILD_PID=""
+SIGNAL_CHILD_RC=0
 
 die() { printf 'legion-deepseek: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
 on_signal() {
-  local signum="$1" child_rc=0 containment_reason=""
+  local signum="$1" child_rc="$SIGNAL_CHILD_RC" containment_reason="" supervised_pid="${SIGNAL_CHILD_PID:-unknown}"
   trap - INT TERM HUP
   if [[ -n "$CHILD_PID" ]]; then
     kill -TERM "$CHILD_PID" 2>/dev/null || true
@@ -80,7 +82,7 @@ on_signal() {
       || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
         '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
         "$SIGNAL_LEASE_STATUS" >/dev/null 2>&1; }; then
-    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: $SIGNAL_WORKTREE)"
   elif [[ "$child_rc" -eq 70 ]]; then
     containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
   fi
@@ -277,10 +279,10 @@ cmd_run() {
       --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
       --status-file "$lease_status" -- "${cmd[@]}" "$task" ) >"$out_file" 2>"$err_file" &
   CHILD_PID=$!
+  SIGNAL_CHILD_PID="$CHILD_PID"
   wait "$CHILD_PID"; rc=$?
+  SIGNAL_CHILD_RC="$rc"
   CHILD_PID=""
-  SIGNAL_LEASE_STATUS=""
-  SIGNAL_WORKTREE=""
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
@@ -338,6 +340,10 @@ cmd_run() {
     '{}' unknown '' 0 unknown '' "$failure_class" false "$output_started" \
     "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
   legion_adapter_disarm_signal_receipt
+  SIGNAL_CHILD_PID=""
+  SIGNAL_CHILD_RC=0
+  SIGNAL_LEASE_STATUS=""
+  SIGNAL_WORKTREE=""
 
   local artifacts
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \

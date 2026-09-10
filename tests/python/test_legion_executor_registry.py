@@ -89,7 +89,7 @@ def test_toml_parser_preserves_complete_routing_contract(tmp_path):
     }
 
 
-def test_toml_parser_ignores_root_metadata_in_nested_registry(tmp_path):
+def test_toml_parser_rejects_root_metadata_in_nested_registry(tmp_path):
     path = tmp_path / "executors.toml"
     path.write_text(
         '[executors.codex]\nkind = "coding"\n\n'
@@ -97,7 +97,10 @@ def test_toml_parser_ignores_root_metadata_in_nested_registry(tmp_path):
         encoding="utf-8",
     )
 
-    assert registry.load_coding_executor_families(path) == {"codex"}
+    with pytest.raises(
+        registry.ExecutorRegistryError, match="unknown top-level field.*metadata"
+    ):
+        registry.load_executor_registry(path)
 
 
 def test_valid_primary_only_registry_stays_empty(tmp_path):

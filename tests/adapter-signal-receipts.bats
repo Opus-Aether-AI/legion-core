@@ -117,7 +117,7 @@ assert_signal_receipt() {
 }
 
 @test "Hermes attempt receipt preserves estimated-cost provenance" {
-  local repo output_json attempt
+  local repo output_json attempt span
   repo="$(make_test_repo hermes-provenance)"
   run env HERMES_BIN=hermes "$REPO_ROOT/legion-router/bin/legion-hermes" run \
     --model openai/fixture-hermes --task edit --repo "$repo" --quiet
@@ -128,6 +128,26 @@ assert_signal_receipt() {
     .cost_usd == 0.002 and .cost_status == "known"
     and .cost_source == "hermes-usage-file:estimated:official_docs_snapshot"
   ' "$attempt"
+  span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "hermes")')"
+  jq -e --argjson attempt "$(cat "$attempt")" '
+    .tokens == $attempt.usage and .usage_status == $attempt.usage_status
+    and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
+  ' <<<"$span"
+}
+
+@test "Pi span preserves its canonical attempt metering exactly" {
+  local repo output_json attempt span
+  repo="$(make_test_repo pi-provenance)"
+  run env PI_BIN=pi "$REPO_ROOT/legion-router/bin/legion-pi" run \
+    --model openai/fixture-model --task edit --repo "$repo" --quiet
+  [ "$status" -eq 0 ]
+  output_json="$output"
+  attempt="$(jq -r '.attempt_receipt' <<<"$output_json")"
+  span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "pi")')"
+  jq -e --argjson attempt "$(cat "$attempt")" '
+    .tokens == $attempt.usage and .usage_status == $attempt.usage_status
+    and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
+  ' <<<"$span"
 }
 
 @test "cleanup-failed sidecars retain their distinct supervisor reason" {

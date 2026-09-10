@@ -34,10 +34,12 @@ make_test_repo() {
     echo "$output" | jq -e '.executor == "claude"'
     echo "$output" | jq -e '.result == "CLAUDE_OK_OUTPUT"'
     echo "$output" | jq -e '.fell_back == false'
+    local attempt span
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
     jq -e '
       .schema == "legion.attempt.v1" and .terminal_status == "succeeded"
       and .usage_status == "known" and .cost_status == "known"' \
-      "$(echo "$output" | jq -r .attempt_receipt)"
+      "$attempt"
     lease="$(echo "$output" | jq -r .lease_receipt)"
     [ -n "$lease" ]
     jq -e '.schema == "legion.child-execution-lease.v1" and .status == "completed"' "$lease"
@@ -45,6 +47,11 @@ make_test_repo() {
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '[.executor, .archetype] | @tsv'"
     [ "$status" -eq 0 ]
     [ "$output" = $'claude\tfinal-review' ]
+    span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "claude")')"
+    jq -e --argjson attempt "$(cat "$attempt")" '
+      .tokens == $attempt.usage and .usage_status == $attempt.usage_status
+      and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
+    ' <<<"$span"
     grep -Eq '^claude active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
@@ -506,6 +513,17 @@ PY
     # 100k input tokens at the default role's rate, so the reported total
     # must exceed a single call's.
     echo "$output" | jq -e '.cost_usd > 0.12'
+    local art provider_spans
+    art="$(dirname "$(echo "$output" | jq -r .attempt_receipt)")"
+    provider_spans="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c \
+      'select(.executor == "claude")')"
+    [ "$(wc -l <<<"$provider_spans" | tr -d ' ')" -eq 2 ]
+    jq -e --argjson attempt "$(cat "$art/attempt-1.json")" '
+      select(.artifacts.intermediate_attempt == true)
+      | .tokens == $attempt.usage and .usage_status == $attempt.usage_status
+        and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
+    ' <<<"$provider_spans"
+    [ "$(jq -s '[.[].cost_usd // 0] | add > 0.12' <<<"$provider_spans")" = true ]
     # The chain is legible in the record rather than only in the logs.
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '.artifacts.declined_models // empty'"
     [ "$output" = "$CLAUDE_DEFAULT" ]

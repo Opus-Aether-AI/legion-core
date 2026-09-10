@@ -31,8 +31,10 @@ make_test_repo() {
     echo "$output" | jq -e --arg model "$CURSOR_DEFAULT" '.status == "ok" and .executor == "cursor" and .model == $model'
     jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
+    local attempt span
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
     jq -e '.schema == "legion.attempt.v1" and .terminal_status == "succeeded" and .usage_status == "known"' \
-      "$(echo "$output" | jq -r .attempt_receipt)"
+      "$attempt"
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
     grep -q "MOCK_CURSOR_CHANGE" "$diff"
@@ -40,6 +42,11 @@ make_test_repo() {
 
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$output" = "cursor" ]
+    span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "cursor")')"
+    jq -e --argjson attempt "$(cat "$attempt")" '
+      .tokens == $attempt.usage and .usage_status == $attempt.usage_status
+      and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
+    ' <<<"$span"
     grep -Eq '^agent active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 

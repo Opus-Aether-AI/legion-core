@@ -197,12 +197,43 @@ def test_load_spans_latest_ts_wins_and_sums_cost_and_tokens(tmp_path):
 
     assert spans["run-1"]["status"] == "ok"
     assert spans["run-1"]["cost_usd"] == 1.0
+    assert spans["run-1"]["cost_status"] == "known"
+    assert spans["run-1"]["known_cost_attempts"] == 2
     assert spans["run-1"]["tokens"] == {
         "input_tokens": 30,
         "cached_input_tokens": 3,
         "output_tokens": 6,
         "reasoning_output_tokens": 9,
     }
+
+
+def test_console_index_preserves_unknown_and_partial_metering(tmp_path):
+    spans_dir = tmp_path / "spans"
+    known = _span("mixed", cost_usd=0)
+    known.update({"cost_status": "known", "usage_status": "known"})
+    unknown = _span("mixed", ts="2026-06-15T10:11:00Z", cost_usd=None, tokens={})
+    unknown.update({"cost_status": "unknown", "tokens": None, "usage_status": "unknown"})
+    _write_spans(spans_dir, known, unknown)
+
+    span = indexer.load_spans(str(spans_dir))["mixed"]
+    assert span["cost_usd"] is None
+    assert span["cost_status"] == "partial"
+    assert span["known_cost_usd"] == 0
+    assert span["known_cost_attempts"] == 1
+    assert span["tokens"] is None
+    assert span["usage_status"] == "partial"
+    assert span["known_usage_attempts"] == 1
+
+    run = indexer._build_run(_record("mixed", phase="ok"), span)
+    assert run["cost_usd"] is None
+    assert run["cost_status"] == "partial"
+    assert run["known_cost_usd"] == 0
+    assert run["tokens_total"] is None
+    assert run["known_tokens_total"] == 0
+    assert indexer._format_cost(
+        run["cost_usd"], run["cost_status"], run["known_cost_usd"]
+    ) == ">=0.0000"
+    assert indexer._format_cost(None, "unknown") == "unknown"
 
 
 def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
@@ -288,11 +319,12 @@ def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
     assert snapshot["aggregates"]["by_status"] == {"awaiting_human": 1, "failed": 1, "done": 1}
     # by_model carries COST (+ run count), not just a count (the "$16 vs $1" bug).
     assert snapshot["aggregates"]["by_model"] == {
-        "test-model-alpha": {"runs": 1, "cost_usd": 1.5},
-        "test-model-alpha-mini": {"runs": 1, "cost_usd": 2.0},
-        "test-model-opus": {"runs": 1, "cost_usd": 3.0},
+        "test-model-alpha": {"runs": 1, "cost_usd": 1.5, "cost_status": "known", "known_cost_usd": 1.5, "known_cost_attempts": 1},
+        "test-model-alpha-mini": {"runs": 1, "cost_usd": 2.0, "cost_status": "known", "known_cost_usd": 2.0, "known_cost_attempts": 1},
+        "test-model-opus": {"runs": 1, "cost_usd": 3.0, "cost_status": "known", "known_cost_usd": 3.0, "known_cost_attempts": 1},
     }
     assert snapshot["aggregates"]["total_cost_usd"] == 6.5
+    assert snapshot["aggregates"]["total_cost_status"] == "known"
     assert snapshot["aggregates"]["running"] == 0
     assert snapshot["aggregates"]["awaiting_human"] == 1
 

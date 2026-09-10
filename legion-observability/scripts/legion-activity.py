@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -49,7 +50,7 @@ DEFAULT_ROOT = legion_state.default_log_root()
 def _num(value: Any) -> float:
     if isinstance(value, bool):
         return 0.0
-    if isinstance(value, (int, float)) and value == value:
+    if isinstance(value, (int, float)) and math.isfinite(value):
         return float(value)
     return 0.0
 
@@ -389,14 +390,66 @@ def run_cost(run_dir: str, model: Any, costs: dict[str, Any]) -> float:
     return cost_for(model, activity.get("usage"), costs)
 
 
-def load_span_costs(spans_dir: str) -> dict[str, float]:
-    """run_id -> total cost_usd from the DURABLE spans. The stream lives in the
+def _span_cost_status(span: dict[str, Any]) -> str:
+    value = span.get("cost_usd")
+    numeric = (
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(value) and value >= 0
+    )
+    status = span.get("cost_status")
+    if status == "known":
+        return "known" if numeric else "unknown"
+    if status == "partial":
+        lower = span.get("known_cost_usd")
+        count = span.get("known_cost_attempts")
+        return "partial" if (
+            isinstance(lower, (int, float)) and not isinstance(lower, bool)
+            and math.isfinite(lower) and lower >= 0 and _num(count) >= 1
+        ) else "unknown"
+    if status in {"unknown", "not_applicable"}:
+        return status
+    return "known" if numeric else "unknown"
+
+
+def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    known = partial = unknown = known_count = 0
+    subtotal = 0.0
+    for record in records:
+        status = _span_cost_status(record)
+        if status == "known":
+            known += 1
+            known_count += int(_num(record.get("known_cost_attempts"))) or 1
+            subtotal += _num(record.get("cost_usd"))
+        elif status == "partial":
+            partial += 1
+            known_count += int(_num(record.get("known_cost_attempts")))
+            subtotal += _num(record.get("known_cost_usd"))
+        elif status == "unknown":
+            unknown += 1
+    applicable = known + partial + unknown
+    status = (
+        "not_applicable" if not applicable else
+        "known" if known == applicable else
+        "unknown" if not known and not partial else
+        "partial"
+    )
+    subtotal = round(subtotal, 6)
+    return {
+        "cost_usd": subtotal if status == "known" else None,
+        "cost_status": status,
+        "known_cost_usd": subtotal if known_count else None,
+        "known_cost_attempts": known_count,
+    }
+
+
+def load_span_costs(spans_dir: str) -> dict[str, dict[str, Any]]:
+    """run_id -> provenance-aware cost summary from the DURABLE spans. The stream lives in the
     repo's ephemeral .legion/runs/ and gets cleaned; the span (in
     ~/.claude/logs/legion/spans/) persists. Used as the cost fallback so a run
     whose stream is gone still shows its real cost (sum across resume spans)."""
-    costs: dict[str, float] = {}
+    spans: dict[str, list[dict[str, Any]]] = {}
     if not spans_dir or not os.path.isdir(spans_dir):
-        return costs
+        return {}
     for name in sorted(os.listdir(spans_dir)):
         if not name.endswith(".jsonl"):
             continue
@@ -412,25 +465,41 @@ def load_span_costs(spans_dir: str) -> dict[str, float]:
                         continue
                     rid = span.get("run_id")
                     if isinstance(rid, str):
-                        costs[rid] = round(costs.get(rid, 0.0) + _num(span.get("cost_usd")), 6)
+                        spans.setdefault(rid, []).append(span)
         except OSError:
             continue
-    return costs
+    return {run_id: _cost_summary(records) for run_id, records in spans.items()}
 
 
 def enrich_run(
     record: dict[str, Any],
     run_dir: str,
     costs: dict[str, Any],
-    span_costs: dict[str, float] | None = None,
+    span_costs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Attach activity and cost to a registry record. Cost prefers the run's own
     stream usage; when the stream is gone, falls back to the durable span cost."""
     activity = _parse_streams(_stream_paths(run_dir)) if run_dir else _empty_activity()
     model = record.get("model") or record.get("resolved_model")
     run_id = record.get("run_id")
-    stream_cost = round(cost_for(model, activity.get("usage"), costs), 6)
-    cost = stream_cost if stream_cost > 0 else round(_num((span_costs or {}).get(run_id)), 6)
+    if activity != _empty_activity():
+        stream_cost = round(cost_for(model, activity.get("usage"), costs), 6)
+        metering = {
+            "cost_usd": stream_cost,
+            "cost_status": "known",
+            "known_cost_usd": stream_cost,
+            "known_cost_attempts": 1,
+        }
+    else:
+        durable = (span_costs or {}).get(run_id)
+        if isinstance(durable, dict):
+            metering = dict(durable)
+        elif isinstance(durable, (int, float)) and not isinstance(durable, bool):
+            metering = {"cost_usd": round(float(durable), 6), "cost_status": "known",
+                        "known_cost_usd": round(float(durable), 6), "known_cost_attempts": 1}
+        else:
+            metering = {"cost_usd": None, "cost_status": "unknown",
+                        "known_cost_usd": None, "known_cost_attempts": 0}
     return {
         "run_id": run_id,
         "model": model,
@@ -441,7 +510,7 @@ def enrich_run(
         "branch": record.get("branch"),
         "repo_root": record.get("repo_root"),
         "phase": _dict(record.get("lifecycle")).get("phase"),
-        "cost_usd": cost,
+        **metering,
         "activity": {
             "tools": activity.get("tools", []),
             "files": activity.get("files", []),
@@ -468,7 +537,7 @@ def group_by_session(enriched_runs: list[dict[str, Any]]) -> list[dict[str, Any]
                 "runs": [],
                 "worktrees": set(),
                 "run_count": 0,
-                "cost_usd": 0.0,
+                "_cost_records": [],
                 "statuses": {},
                 "_tool_counts": Counter(),
             },
@@ -480,7 +549,7 @@ def group_by_session(enriched_runs: list[dict[str, Any]]) -> list[dict[str, Any]
         if wt:
             group["worktrees"].add(wt)
         group["run_count"] += 1
-        group["cost_usd"] += _num(run.get("cost_usd"))
+        group["_cost_records"].append(run)
         phase = _string(run.get("phase")) or "unknown"
         group["statuses"][phase] = group["statuses"].get(phase, 0) + 1
         for tool in _dict(run.get("activity")).get("tools", []):
@@ -493,14 +562,14 @@ def group_by_session(enriched_runs: list[dict[str, Any]]) -> list[dict[str, Any]
         tool_counts = group.pop("_tool_counts")
         group["runs"] = sorted(run_id for run_id in group["runs"] if run_id)
         group["worktrees"] = sorted(group["worktrees"])
-        group["cost_usd"] = round(group["cost_usd"], 6)
+        group.update(_cost_summary(group.pop("_cost_records")))
         group["tools"] = [
             {"name": name, "count": count}
             for name, count in sorted(tool_counts.items(), key=lambda item: (-item[1], item[0]))
         ]
         results.append(group)
 
-    return sorted(results, key=lambda group: (-_num(group.get("cost_usd")), group.get("session") or ""))
+    return sorted(results, key=lambda group: (-_num(group.get("known_cost_usd")), group.get("session") or ""))
 
 
 def load_registry(directory: str) -> list[dict[str, Any]]:
@@ -554,23 +623,22 @@ def build_activity(
         enrich_run(record, _resolve_run_dir(record, runs_root), costs, span_costs)
         for record in load_registry(registry_dir)
     ]
-    runs.sort(key=lambda run: (-_num(run.get("cost_usd")), str(run.get("run_id") or "")))
+    runs.sort(key=lambda run: (-_num(run.get("known_cost_usd")), str(run.get("run_id") or "")))
 
-    total_cost = 0.0
     tool_totals: Counter[str] = Counter()
     for run in runs:
-        total_cost += _num(run.get("cost_usd"))
         for tool in _dict(run.get("activity")).get("tools", []):
             name = _string(_dict(tool).get("name"))
             if name:
                 tool_totals[name] += int(_num(_dict(tool).get("count")))
 
+    total_cost = _cost_summary(runs)
     return {
         "generated_at": _iso_utc(),
         "runs": runs,
         "sessions": group_by_session(runs),
         "totals": {
-            "cost_usd": round(total_cost, 6),
+            **total_cost,
             "runs": len(runs),
             "tools": _sorted_tool_totals(tool_totals),
         },
@@ -586,7 +654,11 @@ def _short(text: Any, width: int) -> str:
     return value[: width - 3] + "..."
 
 
-def _format_cost(value: Any) -> str:
+def _format_cost(value: Any, status: Any = None, known: Any = None) -> str:
+    if status == "partial":
+        return f">={_num(known):.6f}"
+    if status in {"unknown", "not_applicable"} or value is None:
+        return str(status or "unknown")
     return f"{_num(value):.6f}"
 
 
@@ -614,7 +686,10 @@ def _render_runs(snapshot: dict[str, Any]) -> str:
                 _short(run.get("run_id"), 16),
                 _short(run.get("phase"), 12),
                 _short(run.get("model"), 16),
-                _format_cost(run.get("cost_usd")),
+                _format_cost(
+                    run.get("cost_usd"), run.get("cost_status"),
+                    run.get("known_cost_usd"),
+                ),
                 _short(_dict(run.get("activity")).get("summary"), 28),
                 _short(run.get("worktree_dir") or "(no worktree)", 28),
             ]
@@ -640,7 +715,10 @@ def _render_worktrees(snapshot: dict[str, Any]) -> str:
                 _short(group.get("session"), 24),
                 str(int(_num(group.get("run_count")))),
                 str(len(group.get("worktrees", []))),
-                _format_cost(group.get("cost_usd")),
+                _format_cost(
+                    group.get("cost_usd"), group.get("cost_status"),
+                    group.get("known_cost_usd"),
+                ),
                 _short(tools, 28),
                 _short(statuses, 22),
             ]

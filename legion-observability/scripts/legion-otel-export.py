@@ -8,6 +8,7 @@ importable for tests. Turns a multi-agent run (spans sharing trace_id) into a tr
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -15,7 +16,16 @@ from datetime import datetime, timezone
 
 def _num(x):
     # reject bool / NaN / non-numerics so a malformed span can't crash the export
-    return x if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x else 0
+    return x if (
+        isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    ) else 0
+
+
+def _nonnegative_number(x):
+    return (
+        isinstance(x, (int, float)) and not isinstance(x, bool)
+        and math.isfinite(x) and x >= 0
+    )
 
 
 def _hex(seed, nbytes):
@@ -47,12 +57,18 @@ def span_to_otlp(s):
     a("legion.executor", str(s.get("executor", "")))
     a("legion.model", str(s.get("model", "")))
     a("legion.status", str(s.get("status", "")))
-    cost_status = str(s.get("cost_status") or ("known" if s.get("cost_usd") is not None else "unknown"))
+    cost_status = str(s.get("cost_status") or (
+        "known" if _nonnegative_number(s.get("cost_usd")) else "unknown"
+    ))
     usage_status = str(s.get("usage_status") or ("known" if isinstance(s.get("tokens"), dict) else "unknown"))
     a("legion.cost_status", cost_status)
     a("legion.usage_status", usage_status)
     if cost_status == "known" and s.get("cost_usd") is not None:
         a("legion.cost_usd", float(_num(s.get("cost_usd"))), "doubleValue")
+    elif cost_status == "partial":
+        if s.get("known_cost_usd") is not None:
+            a("legion.known_cost_usd", float(_num(s.get("known_cost_usd"))), "doubleValue")
+        a("legion.known_cost_attempts", int(_num(s.get("known_cost_attempts"))), "intValue")
     tk = s.get("tokens") or {}
     if isinstance(tk, dict):
         for key in ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"):
@@ -61,6 +77,16 @@ def span_to_otlp(s):
                     a(f"legion.tokens.{key}", int(tk[key]), "intValue")
                 except (ValueError, TypeError):
                     pass
+    if usage_status == "partial":
+        known_usage = s.get("known_usage")
+        if isinstance(known_usage, dict):
+            a("legion.known_usage", json.dumps(known_usage, sort_keys=True, separators=(",", ":")))
+            for key, value in sorted(known_usage.items()):
+                try:
+                    a(f"legion.known_tokens.{key}", int(value), "intValue")
+                except (ValueError, TypeError):
+                    pass
+        a("legion.known_usage_attempts", int(_num(s.get("known_usage_attempts"))), "intValue")
     parent = s.get("parent_id")
     span = {
         "traceId": trace_id,

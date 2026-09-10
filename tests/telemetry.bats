@@ -109,6 +109,18 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
+@test "telemetry: validate enforces cost and usage provenance conditionals" {
+  local base='{"schema":"legion.span.v1","ts":"t","run_id":"r","executor":"e","model":"m","status":"ok"}'
+  run bash -c "jq -c '. + {cost_usd:null,cost_status:\"unknown\",tokens:null,usage_status:\"unknown\"}' <<<'$base' | '$TEL' validate -"
+  [ "$status" -eq 0 ]
+  run bash -c "jq -c '. + {cost_usd:0,cost_status:\"unknown\",tokens:null,usage_status:\"unknown\"}' <<<'$base' | '$TEL' validate -"
+  [ "$status" -eq 1 ]
+  run bash -c "jq -c '. + {cost_usd:null,cost_status:\"partial\",known_cost_usd:0,known_cost_attempts:1,tokens:null,usage_status:\"partial\",known_usage:{input_tokens:0},known_usage_attempts:1}' <<<'$base' | '$TEL' validate -"
+  [ "$status" -eq 0 ]
+  run bash -c "jq -c '. + {cost_usd:null,cost_status:\"known\",tokens:null,usage_status:\"known\"}' <<<'$base' | '$TEL' validate -"
+  [ "$status" -eq 1 ]
+}
+
 @test "telemetry: validate rejects a non-string archetype" {
   run bash -c "printf '%s\n' '{\"schema\":\"legion.span.v1\",\"ts\":\"t\",\"run_id\":\"r\",\"executor\":\"codex\",\"model\":\"m\",\"archetype\":7,\"status\":\"ok\"}' | '$TEL' validate -"
   [ "$status" -eq 1 ]

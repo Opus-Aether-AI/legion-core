@@ -193,7 +193,7 @@ install_mock_sandcastle_node() {
 }
 
 @test "Sandcastle success envelope is a successful tracked attempt" {
-  local repo attempt
+  local repo attempt span
   repo="$(make_repo sandcastle-success)"
   install_mock_sandcastle_node
 
@@ -205,6 +205,11 @@ install_mock_sandcastle_node() {
   attempt="$(echo "$output" | jq -r .attempt_receipt)"
   jq -e '.terminal_status == "succeeded" and .failure == null
     and .usage_status == "known"' "$attempt"
+  span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "codex")')"
+  jq -e --argjson attempt "$(cat "$attempt")" '
+    .tokens == $attempt.usage and .usage_status == $attempt.usage_status
+    and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
+  ' <<<"$span"
 }
 
 @test "Sandcastle TERM is forwarded and terminalizes exactly once" {

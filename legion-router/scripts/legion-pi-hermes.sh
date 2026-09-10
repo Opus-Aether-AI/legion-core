@@ -172,6 +172,7 @@ write_state() {
 }
 emit_span() {
   local status="$1" duration="$2" cost="$3" usage="$4" task="$5" artifacts="$6"
+  local usage_status="${7:-known}" cost_status="${8:-known}"
   local trace_bin="$_self_dir/../../legion-observability/bin/legion-trace"
   if [[ ! -x "$trace_bin" ]]; then
     note "warning: canonical legion-trace emitter is unavailable; span was not emitted"
@@ -181,8 +182,8 @@ emit_span() {
       --executor "$ADAPTER_KIND" --model "$MODEL" --status "$status" \
       --run-id "$RUN_ID" --trace-id "${LEGION_TRACE_ID:-$RUN_ID}" \
       --parent-id "${LEGION_PARENT_ID:-}" --archetype "$ARCHETYPE" \
-      --duration-ms "$duration" --cost "$cost" --task "$task" \
-      --tokens "$usage" --artifacts "$artifacts") \
+      --duration-ms "$duration" --cost "$cost" --cost-status "$cost_status" --task "$task" \
+      --tokens "$usage" --usage-status "$usage_status" --artifacts "$artifacts") \
       > /dev/null 2>>"$ART/telemetry.err"; then
     note "warning: canonical Legion span emission failed; inspect $ART/telemetry.err"
   fi
@@ -947,7 +948,13 @@ cmd_run() {
       preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end),
       lease_receipt:$lease} + $cost_provenance
       + (if $reason=="" then {} else {lease_reason:$reason} end)')"
-  emit_span "$status" "$duration" "$cost" "$usage" "$task" "$artifacts"
+  local span_usage span_cost span_usage_status span_cost_status
+  span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  emit_span "$status" "$duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    "$span_usage_status" "$span_cost_status"
   if [[ "$apply" == 1 && "$status" == ok && -s "$diff" ]]; then
     if git -C "$REPO" apply --check "$diff"; then git -C "$REPO" apply "$diff"; else note "diff did not apply cleanly; left in $diff"; fi
   fi

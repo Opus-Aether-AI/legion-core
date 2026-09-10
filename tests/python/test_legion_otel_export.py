@@ -39,8 +39,9 @@ def test_span_to_otlp_tolerates_nonnumeric_duration_and_cost():
                          "ts": "2026-06-15T00:00:00Z", "duration_ms": "oops",
                          "cost_usd": {}, "tokens": {}})
     assert o["endTimeUnixNano"] == o["startTimeUnixNano"]  # bad duration -> 0
-    cost = [x for x in o["attributes"] if x["key"] == "legion.cost_usd"][0]["value"]["doubleValue"]
-    assert cost == 0.0
+    attributes = {item["key"]: item["value"] for item in o["attributes"]}
+    assert attributes["legion.cost_status"]["stringValue"] == "unknown"
+    assert "legion.cost_usd" not in attributes
 
 
 def test_ts_nanos_naive_is_assumed_utc():
@@ -82,6 +83,23 @@ def test_unknown_metering_is_not_exported_as_free_cost():
     assert attributes["legion.cost_status"]["stringValue"] == "unknown"
     assert attributes["legion.usage_status"]["stringValue"] == "unknown"
     assert "legion.cost_usd" not in attributes
+
+
+def test_partial_metering_exports_lower_bound_values_and_counts():
+    span = oe.span_to_otlp({
+        "schema": "legion.span.v1", "run_id": "partial-metering", "executor": "review",
+        "model": "mixed", "status": "ok", "cost_usd": None, "cost_status": "partial",
+        "known_cost_usd": 0.25, "known_cost_attempts": 1, "tokens": None,
+        "usage_status": "partial", "known_usage": {"input_tokens": 7},
+        "known_usage_attempts": 1,
+    })
+    attributes = {item["key"]: item["value"] for item in span["attributes"]}
+    assert "legion.cost_usd" not in attributes
+    assert attributes["legion.known_cost_usd"]["doubleValue"] == 0.25
+    assert attributes["legion.known_cost_attempts"]["intValue"] == 1
+    assert attributes["legion.known_usage"]["stringValue"] == '{"input_tokens":7}'
+    assert attributes["legion.known_tokens.input_tokens"]["intValue"] == 7
+    assert attributes["legion.known_usage_attempts"]["intValue"] == 1
 
 
 def _to_jsonl(d):

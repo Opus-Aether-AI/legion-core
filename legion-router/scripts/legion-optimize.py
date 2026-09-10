@@ -15,6 +15,7 @@ import argparse
 import ast
 import glob
 import json
+import math
 import os
 import sys
 
@@ -154,7 +155,7 @@ def _nonnegative_num(value):
         return None
     if not isinstance(value, (int, float)):
         return None
-    if value != value:  # NaN
+    if not math.isfinite(value):
         return None
     value = float(value)
     return value if value >= 0 else None
@@ -270,6 +271,8 @@ def stats_by_arch_route(spans):
                 "runs": 0,
                 "_success": 0,
                 "_cost": 0.0,
+                "_known_cost_runs": 0,
+                "_unknown_cost_runs": 0,
                 "_dur": [],
                 "_executor": executor,
                 "_model": model,
@@ -279,7 +282,15 @@ def stats_by_arch_route(spans):
         if span.get("status") in SUCCESS_STATUSES:
             bucket["_success"] += 1
         cost = _nonnegative_num(span.get("cost_usd"))
-        bucket["_cost"] += 0.0 if cost is None else cost
+        cost_status = span.get("cost_status")
+        # Backward compatibility: before provenance fields existed, a finite
+        # non-negative numeric cost was the only representation of known cost.
+        cost_known = cost is not None and cost_status in (None, "known")
+        if cost_known:
+            bucket["_cost"] += cost
+            bucket["_known_cost_runs"] += 1
+        else:
+            bucket["_unknown_cost_runs"] += 1
         duration = _nonnegative_num(span.get("duration_ms"))
         if duration is not None:
             bucket["_dur"].append(duration)
@@ -290,12 +301,24 @@ def stats_by_arch_route(spans):
         for route, bucket in models.items():
             runs = bucket["runs"]
             durs = bucket["_dur"]
+            known_cost_runs = bucket["_known_cost_runs"]
+            cost_status = (
+                "known" if known_cost_runs == runs
+                else "partial" if known_cost_runs
+                else "unknown"
+            )
             out[archetype][route] = {
                 "executor": bucket["_executor"],
                 "model": bucket["_model"],
                 "runs": runs,
                 "success_rate": round(bucket["_success"] / runs, 4) if runs else 0.0,
-                "mean_cost": round(bucket["_cost"] / runs, 6) if runs else 0.0,
+                "mean_cost": (
+                    round(bucket["_cost"] / runs, 6) if cost_status == "known" and runs
+                    else None
+                ),
+                "cost_status": cost_status,
+                "known_cost_usd": round(bucket["_cost"], 6) if known_cost_runs else None,
+                "known_cost_runs": known_cost_runs,
                 "p50_ms": round(percentile(durs, 50), 1),
                 "p95_ms": round(percentile(durs, 95), 1),
             }
@@ -359,8 +382,20 @@ def _eligible_routes(stats_for_arch, min_samples):
     return {
         route: stats
         for route, stats in (stats_for_arch or {}).items()
-        if isinstance(stats, dict) and stats.get("runs", 0) >= min_samples
+        if (
+            isinstance(stats, dict)
+            and stats.get("runs", 0) >= min_samples
+            and _route_cost_is_known(stats)
+        )
     }
+
+
+def _route_cost_is_known(stats):
+    status = stats.get("cost_status")
+    mean_cost = _nonnegative_num(stats.get("mean_cost"))
+    if status is None:
+        return mean_cost is not None
+    return status == "known" and mean_cost is not None
 
 
 def _pick_lowest_cost(candidates):
@@ -392,6 +427,7 @@ def propose(
         else None
     )
     current = stats_for_arch.get(current_route) if current_route else None
+    current_cost_known = current is None or _route_cost_is_known(current)
     quality_bar = None
     eligible = _eligible_routes(stats_for_arch, min_samples)
     if current_executor and not allow_executor_switch:
@@ -446,6 +482,8 @@ def propose(
     # the gate, wrongly blocking a genuinely Pareto-valid cheaper model.
     def _passes(s):
         return current is None or (
+            current_cost_known
+            and
             s["success_rate"] >= current["success_rate"]
             and s["mean_cost"] <= current["mean_cost"] + cost_eps
         )

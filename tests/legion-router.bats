@@ -95,6 +95,30 @@ SH
     export PATH="$shim_dir:$PATH"
 }
 
+# Simulate a supervisor that returned after the provider ran but lost its
+# durable lease sidecar. The prompt reviewer must not treat the provider's
+# otherwise valid answer/attempt as safe enough to continue or approve.
+install_missing_lease_supervisor_shim() {
+    local shim_dir="$TEST_TMPDIR/missing-lease-python" real_python
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    printf '%s\n' \
+      '#!/usr/bin/env bash' \
+      'if [[ "${1:-}" == */legion-process-supervisor.py ]]; then' \
+      '  status_file=""' \
+      '  for ((i=1; i <= $#; i++)); do' \
+      '    if [[ "${!i}" == --status-file ]]; then j=$((i + 1)); status_file="${!j}"; break; fi' \
+      '  done' \
+      '  "$LEGION_TEST_REAL_PYTHON" "$@"; rc=$?' \
+      '  [[ -z "$status_file" ]] || rm -f "$status_file"' \
+      '  exit "$rc"' \
+      'fi' \
+      'exec "$LEGION_TEST_REAL_PYTHON" "$@"' > "$shim_dir/python3"
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export PATH="$shim_dir:$PATH"
+}
+
 install_refused_fallback_preflight_shim() {
     local shim_dir="$TEST_TMPDIR/refused-fallback-python" real_python
     real_python="$(command -v python3)"
@@ -2784,7 +2808,16 @@ PY
       and .failure.class == "unavailable"' "$art/attempt-1.json"
     jq -e '.schema == "legion.failure.v1" and .class == "unavailable"' \
       "$art/failure-1.json"
-    local review_span
+    local review_span provider_span
+    provider_span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c \
+      'select(.artifacts.provider_attempt == true and .executor == "codex-review")')"
+    jq -e --argjson attempt "$(cat "$art/attempt-1.json")" '
+      .tokens == $attempt.usage and .usage_status == $attempt.usage_status
+      and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
+      and (.artifacts.attempt_receipt | endswith("/attempt-1.json"))
+    ' <<<"$provider_span"
+    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s \
+      '[.[] | select(.artifacts.provider_attempt == true and .executor == "codex-review")] | length')" -eq 1 ]
     review_span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "cursor-review")')"
     jq -e --arg model "$CURSOR_DEFAULT" '
       .model == $model
@@ -2801,6 +2834,7 @@ PY
 @test "delegate review: Claude prompt reviewer is read-only and cannot own fallback" {
     local repo; repo="$(make_test_repo review-claude-no-fallback)"
     export MOCK_CLAUDE_LIMIT=1
+    export LEGION_CLAUDE_FALLBACK_MODELS=model-b
 
     CODEX_BIN=missing-codex-for-review CURSOR_AGENT_BIN=missing-cursor-for-review \
       OPENCODE_BIN=missing-opencode-for-review \
@@ -2808,6 +2842,8 @@ PY
 
     [ "$status" -ne 0 ]
     assert_mock_called claude "--permission-mode plan"
+    [ "$(grep -Ec '^claude -p ' "$MOCK_CALL_LOG")" -eq 1 ]
+    ! grep -q -- '--model model-b' "$MOCK_CALL_LOG"
     assert_mock_not_called legion-delegate
     local art claude_preflight
     art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
@@ -2868,6 +2904,24 @@ PY
       "$art/codex-preflight.json"
     [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
     assert_mock_called agent "-p --output-format json"
+}
+
+@test "delegate review: a launched prompt reviewer without a durable lease fails closed" {
+    local repo art
+    repo="$(make_test_repo review-missing-prompt-lease)"
+    export MOCK_CURSOR_RESULT='{"verdict":"approve","summary":"No blocking findings.","findings":[]}'
+    install_missing_lease_supervisor_shim
+
+    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+      --repo "$repo" --quiet
+
+    [ "$status" -eq 70 ]
+    echo "$output" | jq -e '.status == "containment_failed"
+      and (.reason | contains("without a valid durable attempt/lease receipt"))'
+    art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    [ -f "$art/prompt-review-2-1/attempt.json" ]
+    [ ! -f "$art/prompt-review-2-1/lease.json" ]
+    [ -d "$(echo "$output" | jq -r .worktree)" ]
 }
 
 @test "delegate review: incompatible native admission stops reviewer selection" {

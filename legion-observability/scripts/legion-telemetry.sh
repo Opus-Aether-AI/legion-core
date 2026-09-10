@@ -25,6 +25,8 @@ emit() {
   local archetype="${LEGION_ARCHETYPE:-}"
   local target_type="${LEGION_TARGET_TYPE:-}" target_name="${LEGION_TARGET_NAME:-}"
   local cost=0 dur=0 tokens="{}" artifacts="{}"
+  local cost_status=known usage_status=known known_cost=null known_cost_attempts=0
+  local known_usage=null known_usage_attempts=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --executor)    executor="$2"; shift 2 ;;
@@ -36,8 +38,14 @@ emit() {
       --parent-id)   parent_id="$2"; shift 2 ;;
       --archetype)   archetype="$2"; shift 2 ;;
       --cost)        cost="$2"; shift 2 ;;
+      --cost-status) cost_status="$2"; shift 2 ;;
+      --known-cost) known_cost="$2"; shift 2 ;;
+      --known-cost-attempts) known_cost_attempts="$2"; shift 2 ;;
       --duration-ms) dur="$2"; shift 2 ;;
       --tokens)      tokens="$2"; shift 2 ;;
+      --usage-status) usage_status="$2"; shift 2 ;;
+      --known-usage) known_usage="$2"; shift 2 ;;
+      --known-usage-attempts) known_usage_attempts="$2"; shift 2 ;;
       --artifacts)   artifacts="$2"; shift 2 ;;
       --target-type) target_type="$2"; shift 2 ;;
       --target-name) target_name="$2"; shift 2 ;;
@@ -55,8 +63,13 @@ emit() {
     --arg ex "$executor" --arg model "$model" --arg archetype "$archetype" \
     --arg task "$task" --arg status "$status" \
     --arg target_type "$target_type" --arg target_name "$target_name" \
-    --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-    --argjson tokens "$tokens" --argjson artifacts "$artifacts" '
+    --argjson dur "${dur:-0}" --argjson cost "${cost:-null}" \
+    --arg cost_status "$cost_status" --argjson known_cost "${known_cost:-null}" \
+    --argjson known_cost_attempts "${known_cost_attempts:-0}" \
+    --argjson tokens "${tokens:-null}" --arg usage_status "$usage_status" \
+    --argjson known_usage "${known_usage:-null}" \
+    --argjson known_usage_attempts "${known_usage_attempts:-0}" \
+    --argjson artifacts "$artifacts" '
     {schema:"legion.span.v1", ts:$ts, run_id:$run, trace_id:$trace,
      parent_id:(if $parent=="" then null else $parent end),
      executor:$ex, model:$model,
@@ -64,7 +77,14 @@ emit() {
      task:$task, status:$status,
      target_type:(if $target_type=="" then null else $target_type end),
      target_name:(if $target_name=="" then null else $target_name end),
-     duration_ms:$dur, cost_usd:$cost, tokens:$tokens, artifacts:$artifacts}')"
+     duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
+     tokens:$tokens, usage_status:$usage_status, artifacts:$artifacts}
+    + (if $cost_status == "partial" then
+         {known_cost_usd:$known_cost,known_cost_attempts:$known_cost_attempts}
+       else {} end)
+    + (if $usage_status == "partial" then
+         {known_usage:$known_usage,known_usage_attempts:$known_usage_attempts}
+       else {} end)')"
 
   mkdir -p "$LEGION_TELEMETRY_DIR"
   printf '%s\n' "$span" >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
@@ -80,6 +100,32 @@ validate() {
     [[ -z "$line" ]] && continue
     n=$((n + 1))
 	    if ! printf '%s' "$line" | jq -e '
+	        def nonnegative_number: type == "number" and isfinite and . >= 0;
+	        def positive_integer: type == "number" and isfinite and . >= 1 and . == floor;
+	        def valid_cost_provenance:
+	          if has("cost_status") | not then
+	            (has("cost_usd") | not) or (.cost_usd == null) or (.cost_usd | nonnegative_number)
+	          elif .cost_status == "known" then
+	            (.cost_usd | nonnegative_number)
+	          elif .cost_status == "partial" then
+	            .cost_usd == null
+	            and (.known_cost_usd | nonnegative_number)
+	            and (.known_cost_attempts | positive_integer)
+	          elif (.cost_status == "unknown" or .cost_status == "not_applicable") then
+	            .cost_usd == null and ((has("known_cost_usd") | not) or .known_cost_usd == null)
+	          else false end;
+	        def valid_usage_provenance:
+	          if has("usage_status") | not then
+	            (has("tokens") | not) or (.tokens == null) or (.tokens | type == "object")
+	          elif .usage_status == "known" then
+	            (.tokens | type == "object")
+	          elif .usage_status == "partial" then
+	            .tokens == null
+	            and (.known_usage | type == "object")
+	            and (.known_usage_attempts | positive_integer)
+	          elif (.usage_status == "unknown" or .usage_status == "not_applicable") then
+	            .tokens == null and ((has("known_usage") | not) or .known_usage == null)
+	          else false end;
 	        .schema == "legion.span.v1"
 	        and (.ts | type == "string")
 	        and (.run_id | type == "string")
@@ -88,7 +134,8 @@ validate() {
 	        and ((.archetype == null) or (.archetype | type == "string"))
 	        and (.status | IN("ok", "failed", "error", "over_budget", "blocked", "timed_out", "containment_failed"))
 	        and ((.duration_ms // 0) | type == "number" and . >= 0)
-	        and ((.cost_usd // 0) | type == "number" and . >= 0)
+	        and valid_cost_provenance
+	        and valid_usage_provenance
 	        and ((.target_type == null) or (.target_type | type == "string"))
 	        and ((.target_name == null) or (.target_name | type == "string"))' >/dev/null 2>&1; then
       echo "invalid span (line $n): $line" >&2

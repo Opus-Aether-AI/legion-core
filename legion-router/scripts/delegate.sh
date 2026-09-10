@@ -280,9 +280,15 @@ terminalize_interrupted_native_run() {
   local interrupted_art="$1" interrupted_executor="$2" interrupted_model="$3"
   local terminal_status="${4:-failed}" terminal_reason="${5:-interrupted}" provider_exit="${6:-143}"
   [[ "$interrupted_executor" == codex && -n "$interrupted_art" ]] || return 0
-  local usage cost end_ms dur artifacts
-  usage="$(codex_usage "$NATIVE_ATTEMPT_STREAM" 2>/dev/null || printf '{}')"
-  cost="$(cost_from_usage "$interrupted_model" "$usage" 2>/dev/null || printf 0)"
+  local usage cost usage_status=unknown cost_status=unknown end_ms dur artifacts
+  if [[ -n "${LEGION_ADAPTER_ATTEMPT_PATH:-}" && -f "$LEGION_ADAPTER_ATTEMPT_PATH" ]]; then
+    usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  else
+    usage=null; cost=null
+  fi
   end_ms="$(date +%s000)"
   dur=$((end_ms-NATIVE_ATTEMPT_START_MS)); [[ "$dur" -ge 0 ]] || dur=0
   artifacts="$(jq -cn \
@@ -293,8 +299,11 @@ terminalize_interrupted_native_run() {
     {worktree:$wt,stream:$stream,reason:$reason,
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end)}' 2>/dev/null || printf '{}')"
-  emit_span codex "$interrupted_model" "$terminal_status" "$dur" "$cost" "$usage" "${task:-}" "$artifacts" || true
-  ingest_usage "$interrupted_model" codex "$provider_exit" "$usage" "$cost" || true
+  emit_span codex "$interrupted_model" "$terminal_status" "$dur" "$cost" "$usage" "${task:-}" "$artifacts" \
+    "$usage_status" "$cost_status" || true
+  if [[ "$usage_status" == known && "$cost_status" == known ]]; then
+    ingest_usage "$interrupted_model" codex "$provider_exit" "$usage" "$cost" || true
+  fi
   write_run_state "$terminal_status" || true
   write_run_artifact_status "$interrupted_art" "$RUN_ID" failed \
     "${LEGION_WT_PATH:-}" "" "$terminal_status" || true
@@ -339,6 +348,14 @@ on_terminating_signal() {
     terminal_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $NATIVE_LEASE_STATUS; worktree retained: $signal_worktree)"
   fi
   write_interrupted_native_attempt
+  if [[ "$interrupted_native_executor" == codex-review && "$interrupted_native_ordinal" -gt 0 ]]; then
+    review_track_attempt_receipt \
+      "$interrupted_native_art/attempt-$interrupted_native_ordinal.json"
+    emit_native_review_provider_span \
+      "$interrupted_native_art/attempt-$interrupted_native_ordinal.json" \
+      "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" \
+      "$NATIVE_LEASE_STATUS" || true
+  fi
   if [[ -n "${PROMPT_ATTEMPT_ART:-}" ]]; then
     preserve_interrupted_prompt_receipts
   fi
@@ -359,23 +376,18 @@ on_terminating_signal() {
   if [[ -n "$REVIEW_ART_PATH" && -n "${RUN_ID:-}" ]]; then
     local usage cost end_ms dur artifacts signal_metering='{}'
     local span_usage span_cost span_usage_status=known span_cost_status=known
-    if [[ -n "${PROMPT_ATTEMPT_ART:-}" ]]; then
-      signal_metering="$(review_canonical_metering \
-        ${review_attempt_receipts[@]+"${review_attempt_receipts[@]}"} 2>/dev/null || printf '{}')"
-      usage="$(jq -c '.reconciliation.usage // null' <<<"$signal_metering")"
-      cost="$(jq -c '.reconciliation.cost_usd // null' <<<"$signal_metering")"
-      local signal_executor signal_model
-      signal_executor="$(jq -r '.last.executor // empty' <<<"$signal_metering")"
-      signal_model="$(jq -r '.last.model // empty' <<<"$signal_metering")"
-      [[ -z "$signal_executor" ]] || REVIEW_EXECUTOR_LABEL="$signal_executor"
-      [[ -z "$signal_model" ]] || REVIEW_RECEIPT_MODEL="$signal_model"
-      span_usage=null; span_cost=null
-      span_usage_status=not_applicable; span_cost_status=not_applicable
-    else
-      usage="$(aggregate_review_usage "$REVIEW_ART_PATH" "$REVIEW_RECEIPT_ATTEMPT" 2>/dev/null || printf '{}')"
-      cost="$(cost_from_usage "$REVIEW_RECEIPT_MODEL" "$usage" 2>/dev/null || printf '0')"
-      span_usage="$usage"; span_cost="$cost"
-    fi
+    signal_metering="$(review_canonical_metering \
+      ${review_attempt_receipts[@]+"${review_attempt_receipts[@]}"} 2>/dev/null || printf '{}')"
+    usage="$(jq -c '.reconciliation.usage // null' <<<"$signal_metering")"
+    cost="$(jq -c '.reconciliation.cost_usd // null' <<<"$signal_metering")"
+    local signal_executor signal_model
+    signal_executor="$(jq -r '.last.executor // empty' <<<"$signal_metering")"
+    signal_model="$(jq -r '.last.model // empty' <<<"$signal_metering")"
+    signal_executor="${signal_executor%-review}"
+    [[ -z "$signal_executor" ]] || REVIEW_EXECUTOR_LABEL="$signal_executor"
+    [[ -z "$signal_model" ]] || REVIEW_RECEIPT_MODEL="$signal_model"
+    span_usage=null; span_cost=null
+    span_usage_status=not_applicable; span_cost_status=not_applicable
     end_ms="$(date +%s000)"
     dur=$(( end_ms - REVIEW_START_MS ))
     [[ "$dur" -ge 0 ]] || dur=0
@@ -398,9 +410,6 @@ on_terminating_signal() {
     emit_span "${REVIEW_EXECUTOR_LABEL:-codex}-review" "$REVIEW_RECEIPT_MODEL" "$terminal_status" "$dur" "$span_cost" "$span_usage" \
       "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" "$artifacts" \
       "$span_usage_status" "$span_cost_status" || true
-    if [[ -z "${PROMPT_ATTEMPT_ART:-}" ]]; then
-      ingest_usage "$REVIEW_RECEIPT_MODEL" "codex" "$provider_exit" "$usage" "$cost" || true
-    fi
     write_run_state "$terminal_status" || true
     declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
     write_run_artifact_status "$REVIEW_ART_PATH" "$RUN_ID" "failed" \
@@ -1676,8 +1685,16 @@ cmd_run() {
       failure_receipt:(if $failure=="" then null else $failure end),
       lease_receipt:(if $lease=="" then null else $lease end),
       copied_secret_names:$copied_secret_names} + $task_evidence')"
-  emit_span "codex" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
-  ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
+  local span_usage span_cost span_usage_status span_cost_status
+  span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  emit_span "codex" "$model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    "$span_usage_status" "$span_cost_status"
+  if [[ "$span_usage_status" == known && "$span_cost_status" == known ]]; then
+    ingest_usage "$model" "codex" "${rc:-0}" "$span_usage" "$span_cost"
+  fi
   write_run_state "$status"
   declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
 
@@ -1861,6 +1878,37 @@ print(json.dumps({
     },
 }, separators=(",", ":")))
 PY
+}
+
+emit_native_review_provider_span() {
+  local attempt_path="$1" task_text="$2" lease_path="${3:-}"
+  [[ -n "$attempt_path" && -f "$attempt_path" ]] || return 0
+  # Both the normal path and a pending signal trap may observe the atomically
+  # committed attempt. A directory creation is the exactly-once publication
+  # claim, so either path may safely finish the provider span without duplicates.
+  mkdir "$attempt_path.span-emitted" 2>/dev/null || return 0
+  local executor model terminal span_status duration usage cost usage_status cost_status artifacts
+  executor="$(jq -r '.executor' "$attempt_path")"
+  model="$(jq -r '.effective_model // .requested_model // "unknown"' "$attempt_path")"
+  terminal="$(jq -r '.terminal_status' "$attempt_path")"
+  duration="$(jq -r '.duration_ms' "$attempt_path")"
+  usage="$(jq -c '.usage' "$attempt_path")"
+  cost="$(jq -c '.cost_usd' "$attempt_path")"
+  usage_status="$(jq -r '.usage_status' "$attempt_path")"
+  cost_status="$(jq -r '.cost_status' "$attempt_path")"
+  case "$terminal" in
+    succeeded) span_status=ok ;;
+    timed_out) span_status=timed_out ;;
+    *) span_status=failed ;;
+  esac
+  artifacts="$(jq -cn --arg attempt "$attempt_path" --arg lease "$lease_path" \
+    '{provider_attempt:true,attempt_receipt:$attempt,
+      lease_receipt:(if $lease=="" then null else $lease end)}')"
+  emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
+    "$task_text" "$artifacts" "$usage_status" "$cost_status"
+  if [[ "$usage_status" == known && "$cost_status" == known ]]; then
+    ingest_usage "$model" openai 0 "$usage" "$cost"
+  fi
 }
 
 write_review_terminal_receipt() {
@@ -2079,8 +2127,15 @@ $(cat "$patch")
   local prompt_art="$wt/.legion/runs/$prompt_run_id"
   local -a adapter_args=(run --repo "$wt" "${task_args[@]}" --sandbox "$review_sandbox"
     --run-id "$prompt_run_id" --max-runtime-seconds "$attempt_runtime" --quiet)
+  local -a adapter_env=(LEGION_REVIEW_HANDOFF=1)
   [[ -z "$model" ]] || adapter_args+=(--model "$model")
-  [[ "$adapter" != legion-claude ]] || adapter_args+=(--no-fallback)
+  if [[ "$adapter" == legion-claude ]]; then
+    adapter_args+=(--no-fallback)
+    # --no-fallback disables cross-harness fallback. Clear the independently
+    # inherited same-vendor chain as well so this candidate is exactly one
+    # provider attempt and the outer reviewer walk remains the sole fallback owner.
+    adapter_env+=(LEGION_CLAUDE_FALLBACK_MODELS=)
+  fi
   PROMPT_ATTEMPT_ART="$prompt_art"
   PROMPT_ATTEMPT_ORDINAL=1
   PROMPT_WORKTREE="$wt/.legion/worktrees/$prompt_run_id"
@@ -2100,7 +2155,7 @@ $(cat "$patch")
     *) PROMPT_EXPECTED_PROVIDER="$ex"; PROMPT_LEASE_STATUS="$prompt_art/lease.json" ;;
   esac
   set +e
-  ( cd "$wt" && exec env LEGION_REVIEW_HANDOFF=1 "$adapter_bin" "${adapter_args[@]}" ) \
+  ( cd "$wt" && exec env "${adapter_env[@]}" "$adapter_bin" "${adapter_args[@]}" ) \
     </dev/null >"$stream" 2>"$err" &
   PROMPT_CHILD_PID=$!
   wait "$PROMPT_CHILD_PID"; rc=$?
@@ -2138,11 +2193,30 @@ $(cat "$patch")
     review_prompt_containment_reason="$adapter_reason (evidence: ${review_lease_receipt:-$receipt_dir/lease.json}; worktree retained: $wt)"
     rc=70
   fi
+  local preflight_no_spend_unavailable=0
+  if [[ -n "$review_preflight_receipt" && -z "$source_attempt" && -z "$source_failure" \
+        && -z "$source_lease" ]] && jq -e --arg executor "$ex" --arg model "$model" \
+        --arg sandbox "$review_sandbox" '
+      .schema == "legion.preflight.v1" and .executor == $executor
+      and .status == "unavailable" and .identity == null
+      # Binary-unavailable preflight exits before compatibility probing, so its
+      # compatibility object is empty. If those fields are present they must
+      # still agree with this exact candidate; absence is the expected no-launch
+      # form and cannot conceal a paid attempt because all execution receipts
+      # and the lease are required to be absent above.
+      and ((.compatibility.model.requested? // $model) == $model)
+      and ((.compatibility.sandbox.requested? // $sandbox) == $sandbox)
+    ' "$review_preflight_receipt" >/dev/null 2>&1; then
+    preflight_no_spend_unavailable=1
+  fi
   if [[ -z "$review_preflight_receipt" || -z "$review_attempt_receipt" || -z "$review_lease_receipt" ||
         ( -n "$source_failure" && -z "$review_failure_receipt" ) ]]; then
     receipt_contract_failed=1
-    if [[ "$rc" -eq 0 ]]; then
-      printf 'prompt reviewer returned success without durable admission/attempt/lease receipts\n' >> "$err"
+    if [[ "$preflight_no_spend_unavailable" -ne 1 ]]; then
+      review_containment_failed=1
+      LEGION_WT_KEEP=1
+      review_prompt_containment_reason="prompt reviewer launched or claimed execution without a valid durable attempt/lease receipt (evidence: $receipt_dir; worktree retained: $wt)"
+      printf '%s\n' "$review_prompt_containment_reason" >> "$err"
       rc=70
     fi
   else
@@ -2618,6 +2692,8 @@ cmd_review() {
       review_attempt_receipt="$LEGION_ADAPTER_ATTEMPT_PATH"
       review_failure_receipt="$LEGION_ADAPTER_FAILURE_PATH"
       review_track_attempt_receipt "$review_attempt_receipt"
+      emit_native_review_provider_span "$review_attempt_receipt" \
+        "review --base $base_sha --head $head_sha" "$attempt_lease"
       native_attempt_recorded=1
       NATIVE_ATTEMPT_ART=""
       NATIVE_LEASE_STATUS=""
@@ -2822,35 +2898,25 @@ cmd_review() {
   cp "$attempt_err" "$art/codex.err"
   [[ -s "$attempt_verdict" ]] && cp "$attempt_verdict" "$verdict_file"
   local usage cost filtered_err error_log verdict_json="null"
-  local usage_status=known cost_status=known metering_provider=codex
+  local usage_status=unknown cost_status=unknown
   local review_metering='{}' span_usage span_cost span_usage_status span_cost_status
-  if [[ "$review_kind" != native ]]; then
-    review_metering="$(review_canonical_metering "${review_attempt_receipts[@]}")"
-    usage="$(jq -c '.reconciliation.usage' <<<"$review_metering")"
-    cost="$(jq -c '.reconciliation.cost_usd' <<<"$review_metering")"
-    usage_status="$(jq -r '.reconciliation.usage_status' <<<"$review_metering")"
-    cost_status="$(jq -r '.reconciliation.cost_status' <<<"$review_metering")"
-    metering_provider="$(jq -r '.last.provider // empty' <<<"$review_metering")"
-    local effective_review_model actual_review_executor
-    effective_review_model="$(jq -r '.last.model // empty' <<<"$review_metering")"
-    actual_review_executor="$(jq -r '.last.executor // empty' <<<"$review_metering")"
-    [[ -z "$effective_review_model" ]] || model="$effective_review_model"
-    [[ -z "$actual_review_executor" ]] || REVIEW_EXECUTOR_LABEL="$actual_review_executor"
-    # Prompt adapters already emit and ingest their paid provider spans. The
-    # outer review span is a non-billable rollup carrying reconciliation only;
-    # assigning the same cost here would double count every review.
-    span_usage=null
-    span_cost=null
-    span_usage_status=not_applicable
-    span_cost_status=not_applicable
-  else
-    usage="$(aggregate_review_usage "$art" "$attempt")"
-    cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
-    span_usage="$usage"
-    span_cost="$cost"
-    span_usage_status="$usage_status"
-    span_cost_status="$cost_status"
-  fi
+  review_metering="$(review_canonical_metering "${review_attempt_receipts[@]}")"
+  usage="$(jq -c '.reconciliation.usage' <<<"$review_metering")"
+  cost="$(jq -c '.reconciliation.cost_usd' <<<"$review_metering")"
+  usage_status="$(jq -r '.reconciliation.usage_status' <<<"$review_metering")"
+  cost_status="$(jq -r '.reconciliation.cost_status' <<<"$review_metering")"
+  local effective_review_model actual_review_executor
+  effective_review_model="$(jq -r '.last.model // empty' <<<"$review_metering")"
+  actual_review_executor="$(jq -r '.last.executor // empty' <<<"$review_metering")"
+  [[ -z "$effective_review_model" ]] || model="$effective_review_model"
+  actual_review_executor="${actual_review_executor%-review}"
+  [[ -z "$actual_review_executor" ]] || REVIEW_EXECUTOR_LABEL="$actual_review_executor"
+  # Every paid attempt has its own provider span. This outer review span is a
+  # non-billable rollup for verdict/lifecycle provenance only.
+  span_usage=null
+  span_cost=null
+  span_usage_status=not_applicable
+  span_cost_status=not_applicable
   filtered_err="$art/codex.filtered.err"
   filter_codex_stderr "$art/codex.err" "$filtered_err"
   error_log="$(error_log_summary "$art/codex.err" "$filtered_err")"
@@ -2881,9 +2947,6 @@ cmd_review() {
      rollup_only:($metering != {})}')"
   emit_span "${REVIEW_EXECUTOR_LABEL:-codex}-review" "$model" "$status" "$dur" "$span_cost" "$span_usage" \
     "review --base $base_sha --head $head_sha" "$artifacts" "$span_usage_status" "$span_cost_status"
-  if [[ "$review_kind" == native && "$usage_status" == known && "$cost_status" == known ]]; then
-    ingest_usage "$model" "$metering_provider" "${rc:-0}" "$usage" "$cost"
-  fi
   write_run_state "$status"
   write_run_artifact_status "$art" "$RUN_ID" \
     "$([[ "$status" == "ok" ]] && printf completed || printf failed)" \
@@ -2920,7 +2983,13 @@ cmd_review() {
      lease_receipt:(if $lease=="" then null else $lease end),worktree:$wt,
      attempts:$attempts, max_attempts:$max_attempts,
      verdict:$verdict, error_log:$error_log, usage:$usage, cost_usd:$cost}'
-  [[ "$status" == "ok" ]] || exit 1
+  if [[ "$status" != "ok" ]]; then
+    # A missing or invalid post-launch receipt is a containment/provenance
+    # failure, not an ordinary reviewer rejection. Preserve the supervisor's
+    # reserved exit so callers cannot accidentally downgrade it to retryable.
+    [[ "$status" != "containment_failed" ]] || exit 70
+    exit 1
+  fi
 }
 
 # ── resume (continue a kept codex session for iterative refinement) ──
@@ -3121,13 +3190,21 @@ cmd_resume() {
   CODEX_SIGNAL_CHILD_PID=""
   CODEX_CHILD_RC=0
 
-  emit_span "codex-resume" "$model" "$status" "$dur" "$cost" "$usage" "resume $run: $task" \
+  local span_usage span_cost span_usage_status span_cost_status
+  span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  emit_span "codex-resume" "$model" "$status" "$dur" "$span_cost" "$span_usage" "resume $run: $task" \
     "$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg lease "$lease_status" \
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
       --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
       '{worktree:$wt, diff:$diff, lease_receipt:$lease,preflight_receipt:$preflight,
-        attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)}')"
-  ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
+        attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end)}')" \
+    "$span_usage_status" "$span_cost_status"
+  if [[ "$span_usage_status" == known && "$span_cost_status" == known ]]; then
+    ingest_usage "$model" "codex" "${rc:-0}" "$span_usage" "$span_cost"
+  fi
 
   if [[ "$status" == "timed_out" ]]; then
     with_git_worktree_lock "$repo" \

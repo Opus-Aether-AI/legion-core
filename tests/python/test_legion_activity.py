@@ -171,6 +171,33 @@ def test_enrich_run_falls_back_to_span_cost_when_stream_is_gone():
     assert enriched["cost_usd"] == 0.4242  # from the durable span, stream absent
 
 
+def test_activity_preserves_partial_durable_cost_as_a_lower_bound(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "2026-09-11.jsonl").write_text("\n".join([
+        json.dumps({"schema": "legion.span.v1", "run_id": "mixed",
+                    "cost_usd": 0, "cost_status": "known"}),
+        json.dumps({"schema": "legion.span.v1", "run_id": "mixed",
+                    "cost_usd": None, "cost_status": "unknown"}),
+    ]) + "\n")
+    summaries = activity.load_span_costs(str(spans))
+    assert summaries["mixed"] == {
+        "cost_usd": None,
+        "cost_status": "partial",
+        "known_cost_usd": 0,
+        "known_cost_attempts": 1,
+    }
+    rec = {"run_id": "mixed", "model": "test-model-alpha", "lifecycle": {"phase": "ok"}}
+    enriched = activity.enrich_run(rec, "", _costs_payload(), span_costs=summaries)
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "partial"
+    assert enriched["known_cost_usd"] == 0
+    assert activity._format_cost(
+        enriched["cost_usd"], enriched["cost_status"], enriched["known_cost_usd"]
+    ) == ">=0.000000"
+    assert activity._format_cost(None, "unknown") == "unknown"
+
+
 def test_group_by_session_merges_a_fanouts_agents_across_their_worktrees():
     # A session (trace_id) = one fan-out that spawned N agents in N ephemeral
     # worktrees. Grouping by trace_id collects them; grouping by worktree would be 1:1.

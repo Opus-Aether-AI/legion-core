@@ -80,7 +80,7 @@ PY
   wait "$delay_pid"
 fi
 
-cursor_result=CURSOR_OK_OUTPUT
+cursor_result="${MOCK_CURSOR_RESULT:-CURSOR_OK_OUTPUT}"
 if [[ "${MOCK_CURSOR_FAST_DAEMON:-0}" == 1 ]]; then
   daemon_pid="$(python3 <<'PY'
 import os
@@ -111,5 +111,6 @@ if [[ "$force" -eq 1 || "${MOCK_CURSOR_WRITE_IN_PLAN:-0}" == "1" ]]; then
   printf 'mock-cursor-change by %s\n' "$model" >> MOCK_CURSOR_CHANGE.txt
 fi
 
-printf '{"result":"%s","model":"%s","total_cost_usd":0.03,"usage":{"input_tokens":500,"output_tokens":25}}\n' \
-  "$cursor_result" "$model"
+jq -cn --arg result "$cursor_result" --arg model "$model" '
+  {result:$result,model:$model,total_cost_usd:0.03,
+   usage:{input_tokens:500,output_tokens:25}}'

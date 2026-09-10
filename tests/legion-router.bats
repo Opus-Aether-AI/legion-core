@@ -1287,7 +1287,8 @@ $run_error" ]
     [ "$status" -ne 0 ]
     [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
     [[ "$output" != *"invalid --sandbox"* ]]
-    assert_mock_not_called codex
+    assert_mock_called codex "--version"
+    [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
 }
 
 @test "delegate run: podman and vercel sandbox values parse as Sandcastle modes" {
@@ -1726,6 +1727,8 @@ $run_error" ]
     interrupted_attempt="$(dirname "$receipt")/attempt-1.json"
     jq -e '.schema == "legion.attempt.v1" and .terminal_status == "cancelled"
       and .failure.class == "cancelled"' "$interrupted_attempt"
+    [ "$(find "$(dirname "$receipt")" -maxdepth 1 -type f -name 'attempt-[0-9]*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    [ "$(find "$(dirname "$receipt")" -maxdepth 1 -type f -name 'failure-[0-9]*.json' | wc -l | tr -d ' ')" -eq 1 ]
     jq -e '.kind == "review" and .lifecycle.phase == "failed"' "$registry"
     jq -e '.status == "failed" and .result_status == "failed"' \
       "$(dirname "$receipt")/status.json"
@@ -1733,6 +1736,40 @@ $run_error" ]
       'select(.run_id == \"$run_id\" and .executor == \"codex-review\" and .status == \"failed\")'"
     [ "$status" -eq 0 ]
     [ "$(find "$repo/.legion/worktrees" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
+}
+
+@test "delegate run: interruption writes one cancelled attempt and terminalizes state" {
+    local repo pid_file stdout stderr run_pid run_rc run_dir run_id registry
+    repo="$(make_test_repo run-interrupt)"
+    pid_file="$TEST_TMPDIR/run-interrupt-child.pid"
+    stdout="$TEST_TMPDIR/run-interrupt.out"
+    stderr="$TEST_TMPDIR/run-interrupt.err"
+
+    MOCK_CODEX_DELAY=30 MOCK_CODEX_DELAY_PID_FILE="$pid_file" \
+      "$DELEGATE" run --model test-model-beta --task x --repo "$repo" --quiet \
+      >"$stdout" 2>"$stderr" &
+    run_pid=$!
+    for _ in {1..100}; do
+      [[ -s "$pid_file" ]] && break
+      sleep 0.02
+    done
+    [ -s "$pid_file" ]
+
+    kill -TERM "$run_pid"
+    run_rc=0
+    wait "$run_pid" || run_rc=$?
+    [ "$run_rc" -eq 143 ]
+
+    run_dir="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    run_id="$(basename "$run_dir")"
+    registry="$LEGION_REGISTRY_DIR/$run_id.json"
+    jq -e '.terminal_status == "cancelled" and .failure.class == "cancelled"' \
+      "$run_dir/attempt-1.json"
+    [ "$(find "$run_dir" -maxdepth 1 -type f -name 'attempt-[0-9]*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    [ "$(find "$run_dir" -maxdepth 1 -type f -name 'failure-[0-9]*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    jq -e '.kind == "run" and .lifecycle.phase == "failed"' "$registry"
+    jq -e '.status == "failed" and .result_status == "failed"' "$run_dir/status.json"
+    ! kill -0 "$(cat "$pid_file")" 2>/dev/null
 }
 
 @test "delegate run: auto-cleans the worktree but preserves the diff (no --keep)" {
@@ -1844,6 +1881,30 @@ $run_error" ]
   echo "$output" | jq -e '.status == "ok" and .model == "test-model-beta"'
   [ -s "$route_env" ]
   ! grep -Eq 'pre=1|executor=codex|fallback=test-model-beta' "$route_env"
+}
+
+@test "delegate run: every paid Codex fallback is re-admitted under one absolute lease" {
+  local repo precision workhorse art
+  repo="$(make_test_repo codex-fallback-admission-lease)"
+  precision="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_precision)"
+  workhorse="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
+
+  MOCK_CODEX_QUOTA_FAIL="$precision" MOCK_CODEX_DELAY=2 \
+    run "$DELEGATE" run --archetype migration --task x --repo "$repo" \
+      --max-runtime-seconds 3 --quiet
+
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.status == "timed_out"'
+  art="$(dirname "$(echo "$output" | jq -r .attempt_receipt)")"
+  jq -e --arg model "$precision" \
+    '.schema == "legion.preflight.v1" and .compatibility.model.requested == $model' \
+    "$art/codex-preflight-1.json"
+  jq -e --arg model "$workhorse" \
+    '.schema == "legion.preflight.v1" and .compatibility.model.requested == $model' \
+    "$art/codex-preflight-2.json"
+  jq -e '.terminal_status == "failed" and .failure.class == "quota"' "$art/attempt-1.json"
+  jq -e '.terminal_status == "timed_out" and .failure.class == "timed_out"' "$art/attempt-2.json"
+  [ "$(grep -c '^codex exec ' "$MOCK_CALL_LOG")" -eq 2 ]
 }
 
 @test "delegate run: --archetype routing to executor=self is refused" {
@@ -2440,6 +2501,7 @@ $run_error" ]
 @test "delegate review: a reviewer with no quota falls through to the next candidate" {
     local repo; repo="$(make_test_repo review-quota-fallback)"
     export MOCK_CODEX_REVIEW_QUOTA=1
+    export MOCK_CURSOR_RESULT='{"verdict":"approve","summary":"No blocking findings.","findings":[]}'
 
     run "$DELEGATE" review --base HEAD --repo "$repo" --quiet
 
@@ -2447,18 +2509,38 @@ $run_error" ]
     [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -ge 1 ]
     [[ "$output" != *'"reason":"review-failed"'* ]] || \
       { echo "review failed outright instead of falling through"; false; }
+    echo "$output" | jq -e '.status == "ok"
+      and (.preflight_receipt | contains("/prompt-review-"))
+      and (.attempt_receipt | contains("/prompt-review-"))'
+    jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '.schema == "legion.attempt.v1" and .executor == "cursor"
+      and .terminal_status == "succeeded"' "$(echo "$output" | jq -r .attempt_receipt)"
+    local art; art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    jq -e '.executor == "cursor"' "$art/attempt.json"
+    [ ! -e "$art/failure.json" ]
+    jq -e '.executor == "codex-review" and .terminal_status == "failed"
+      and .failure.class == "unavailable"' "$art/attempt-1.json"
+    jq -e '.schema == "legion.failure.v1" and .class == "unavailable"' \
+      "$art/failure-1.json"
 }
 
 @test "delegate review: unavailable native admission falls through before provider launch" {
     local repo; repo="$(make_test_repo review-admission-unavailable)"
+    export MOCK_CURSOR_RESULT='{"verdict":"approve","summary":"No blocking findings.","findings":[]}'
 
     CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
       --repo "$repo" --quiet
 
     [ -n "$output" ]
-    echo "$output" | jq -e '.preflight_receipt != null'
-    jq -e '.schema == "legion.preflight.v1" and .status == "unavailable"' \
+    echo "$output" | jq -e '.status == "ok"
+      and (.preflight_receipt | contains("/prompt-review-"))
+      and (.attempt_receipt | contains("/prompt-review-"))'
+    jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
+    local art; art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    jq -e '.schema == "legion.preflight.v1" and .status == "unavailable"' \
+      "$art/codex-preflight.json"
     [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
     assert_mock_called agent "-p --output-format json"
 }

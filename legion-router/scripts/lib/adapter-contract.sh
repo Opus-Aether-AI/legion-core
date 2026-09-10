@@ -188,6 +188,10 @@ legion_adapter_write_attempt() {
     cp "$failure_path" "$art/failure.json"
     LEGION_ADAPTER_FAILURE_PATH="$failure_path"
   else
+    # failure.json is a mutable alias for the latest provider attempt. Preserve
+    # numbered failures as history, but never let a successful retry inherit a
+    # stale failure alias or shell-side pointer from the previous attempt.
+    rm -f "$art/failure.json"
     # shellcheck disable=SC2034
     LEGION_ADAPTER_FAILURE_PATH=""
   fi

@@ -70,6 +70,54 @@ repos_file_for_repo() {
     python3 "$REPO_ROOT/legion-observability/scripts/legion_state.py" --repo "$1" --field repos_file
 }
 
+# Replace only supervisor invocations with deterministic cleanup_failed evidence;
+# every other Python call still reaches the real interpreter.
+install_cleanup_failed_supervisor_shim() {
+    local shim_dir="$TEST_TMPDIR/cleanup-failed-python" real_python
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  status_file=""
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == --status-file ]]; then status_file="$2"; break; fi
+    shift
+  done
+  printf '%s\n' '{"schema":"legion.child-execution-lease.v1","status":"cleanup_failed","reason":"forced cleanup evidence","max_runtime_seconds":30}' > "$status_file"
+  exit 70
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export PATH="$shim_dir:$PATH"
+}
+
+install_refused_fallback_preflight_shim() {
+    local shim_dir="$TEST_TMPDIR/refused-fallback-python" real_python
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion_preflight.py ]]; then
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == --model ]]; then
+      j=$((i + 1))
+      if [[ "${!j}" == refused-fallback ]]; then
+        printf '%s\n' '{"schema":"legion.preflight.v1","executor":"codex","status":"incompatible","reason":"forced fallback refusal","identity":null,"cache":{"hit":false,"key":null},"compatibility":{}}'
+        exit 1
+      fi
+    fi
+  done
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export PATH="$shim_dir:$PATH"
+}
+
 # ── codex-json parser ────────────────────────────────────────────────
 @test "codex-json: thread-id from fixture" {
     run "$LIB/codex-json.sh" thread-id "$FIXTURE"
@@ -1404,6 +1452,37 @@ $run_error" ]
     [ "$output" = "0" ]
 }
 
+@test "delegate native run and review retain containment-failed worktrees with lease evidence" {
+    local repo run_wt review_repo review_wt
+    install_cleanup_failed_supervisor_shim
+
+    repo="$(make_test_repo run-cleanup-failed)"
+    run "$DELEGATE" run --model test-model-beta --task x --repo "$repo" \
+      --max-runtime-seconds 30 --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "containment_failed"
+      and (.reason | contains("forced cleanup evidence"))
+      and (.lease_receipt | type) == "string"'
+    run_wt="$(echo "$output" | jq -r .worktree)"
+    [ -d "$run_wt" ]
+    jq -e '.terminal_status == "failed" and .failure.class == "internal"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.status == "cleanup_failed"' "$(echo "$output" | jq -r .lease_receipt)"
+
+    review_repo="$(make_test_repo review-cleanup-failed)"
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$review_repo" \
+      --max-runtime-seconds 30 --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "containment_failed"
+      and (.reason | contains("forced cleanup evidence"))
+      and (.lease_receipt | type) == "string"'
+    review_wt="$(echo "$output" | jq -r .worktree)"
+    [ -d "$review_wt" ]
+    jq -e '.terminal_status == "failed" and .failure.class == "internal"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.status == "cleanup_failed"' "$(echo "$output" | jq -r .lease_receipt)"
+}
+
 @test "delegate run: --budget-tokens marks over_budget when exceeded" {
     local repo; repo="$(make_test_repo run7)"
     # mock reports 1000+200+50+10 ~ 1060 total; budget 100 -> over
@@ -1510,6 +1589,7 @@ $run_error" ]
     echo "$output" | jq -e --arg base "$base_sha" '
       .status == "ok" and .attempts == 2 and .max_attempts == 2
       and .reviewed_base_sha == $base and .reviewed_head_sha == $base
+      and .failure_receipt == null
       and .usage.input_tokens == 1100
       and .usage.cached_input_tokens == 220
       and .usage.output_tokens == 55
@@ -1518,6 +1598,54 @@ $run_error" ]
     [ "$(grep -Fc "codex exec -s read-only review --base $base_sha" "$MOCK_CALL_LOG")" -eq 2 ]
     jq -e '.status == "ok" and .attempts == 2 and .max_attempts == 2' \
       "$(echo "$output" | jq -r .terminal_receipt)"
+    local art; art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    [ -f "$art/failure-1.json" ]
+    [ ! -e "$art/failure.json" ]
+    jq -e '.terminal_status == "succeeded" and .failure == null' "$art/attempt.json"
+}
+
+@test "delegate review: retries share one absolute child lease" {
+    local repo started elapsed
+    repo="$(make_test_repo review-shared-retry-lease)"
+    export MOCK_CODEX_REVIEW_INVALID_VERDICTS=1
+    export MOCK_CODEX_REVIEW_INVALID_VERDICT_ATTEMPT_FILE="$TEST_TMPDIR/review-shared-lease-attempts"
+    export MOCK_CODEX_REVIEW_DELAY=2
+    started="$SECONDS"
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" \
+      --max-runtime-seconds 3 --max-attempts 2 --quiet
+    elapsed=$((SECONDS - started))
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "timed_out" and .attempts == 2'
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 2 ]
+    local art; art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    jq -e '.status == "timed_out" and .max_runtime_seconds < 3' \
+      "$art/attempt-2.lease.json"
+    [ "$elapsed" -lt 6 ]
+}
+
+@test "delegate review: fallback candidates share one absolute child lease" {
+    local repo started elapsed
+    repo="$(make_test_repo review-shared-candidate-lease)"
+    export MOCK_CODEX_REVIEW_DELAY=2
+    export MOCK_CODEX_REVIEW_EXIT=1
+    export MOCK_CODEX_STDERR='Authentication required. Please run login first.'
+    export MOCK_CURSOR_DELAY=30
+    export MOCK_CURSOR_RESULT='{"verdict":"approve","summary":"No findings.","findings":[]}'
+    started="$SECONDS"
+
+    run "$DELEGATE" review --base HEAD --repo "$repo" \
+      --max-runtime-seconds 3 --max-attempts 1 --quiet
+    elapsed=$((SECONDS - started))
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "timed_out"'
+    [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
+    assert_mock_called agent "-p --output-format json"
+    jq -e '.status == "timed_out" and .max_runtime_seconds < 3' \
+      "$(echo "$output" | jq -r .lease_receipt)"
+    [ "$elapsed" -lt 6 ]
 }
 
 @test "delegate review: fails closed on a schema-invalid verdict" {
@@ -1772,6 +1900,49 @@ $run_error" ]
     ! kill -0 "$(cat "$pid_file")" 2>/dev/null
 }
 
+@test "delegate native signal writer never overwrites an already completed attempt" {
+    local helper art
+    helper="$TEST_TMPDIR/native-signal-guard.sh"
+    art="$TEST_TMPDIR/native-signal-art"
+    mkdir -p "$art"
+    printf '%s\n' '{"schema":"legion.attempt.v1","terminal_status":"succeeded"}' > "$art/attempt-1.json"
+    {
+      sed -n '/^write_interrupted_native_attempt()/,/^}/p' "$DELEGATE"
+      printf '%s\n' \
+        'NATIVE_ATTEMPT_ART="$1"' \
+        'NATIVE_ATTEMPT_ORDINAL=1' \
+        'write_interrupted_native_attempt'
+    } > "$helper"
+
+    run bash "$helper" "$art"
+
+    [ "$status" -eq 0 ]
+    jq -e '.terminal_status == "succeeded"' "$art/attempt-1.json"
+    [ ! -e "$art/failure-1.json" ]
+}
+
+@test "adapter receipts clear the mutable failure alias after a successful retry" {
+    local art="$TEST_TMPDIR/receipt-retry"
+    mkdir -p "$art"
+
+    run bash -c '
+      source "$1"
+      RUN_ID=retry-run
+      legion_adapter_write_attempt "$2" codex openai 1 first "" "" "" workspace-write \
+        failed 2026-01-01T00:00:00Z 2026-01-01T00:00:01Z 1000 \
+        "{}" unknown "" 0 unknown "" provider true false 1 failed
+      legion_adapter_write_attempt "$2" codex openai 2 second "" "" "" workspace-write \
+        succeeded 2026-01-01T00:00:01Z 2026-01-01T00:00:02Z 1000 \
+        "{}" unknown "" 0 unknown "" "" false true "" ""
+      [[ -z "$LEGION_ADAPTER_FAILURE_PATH" ]]
+    ' _ "$LIB/adapter-contract.sh" "$art"
+
+    [ "$status" -eq 0 ]
+    [ -f "$art/failure-1.json" ]
+    [ ! -e "$art/failure.json" ]
+    jq -e '.terminal_status == "succeeded" and .failure == null' "$art/attempt.json"
+}
+
 @test "delegate run: auto-cleans the worktree but preserves the diff (no --keep)" {
     local repo; repo="$(make_test_repo cln0)"
     out="$("$DELEGATE" run --model test-model-beta --task "x" --repo "$repo" --quiet)"
@@ -1865,6 +2036,21 @@ $run_error" ]
   echo "$output" | jq -e '.model == "test-model-beta"'
 }
 
+@test "delegate run: model-less DeepSeek dispatch leaves profile model selection opaque" {
+  local repo preflight
+  repo="$(make_test_repo deepseek-model-less)"
+
+  run "$DELEGATE" run --executor deepseek --task x --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "ok" and .executor == "deepseek"'
+  preflight="$(echo "$output" | jq -r .preflight_receipt)"
+  jq -e '.executor == "deepseek"
+    and .compatibility.model.requested == null
+    and .compatibility.model.status == "not_requested"' "$preflight"
+  assert_mock_called dsh "--profile"
+}
+
 @test "delegate run: a pre-resolved route preserves its fallback without resolving again" {
   local repo; repo="$(make_test_repo pre-resolved-route)"
   local route_env="$TEST_TMPDIR/pre-resolved-worker-env.log"
@@ -1878,9 +2064,37 @@ $run_error" ]
       --reasoning-effort high --task x --repo "$repo" --quiet
 
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.status == "ok" and .model == "test-model-beta"'
+  echo "$output" | jq -e '.status == "ok" and .model == "test-model-beta"
+    and .failure_receipt == null'
+  local art; art="$(dirname "$(echo "$output" | jq -r .attempt_receipt)")"
+  [ -f "$art/failure-1.json" ]
+  [ ! -e "$art/failure.json" ]
   [ -s "$route_env" ]
   ! grep -Eq 'pre=1|executor=codex|fallback=test-model-beta' "$route_env"
+}
+
+@test "delegate run: a refused fallback never replaces the paid model identity" {
+  local repo art
+  repo="$(make_test_repo refused-fallback-identity)"
+  install_refused_fallback_preflight_shim
+
+  LEGION_ROUTE_PRE_RESOLVED=1 \
+    LEGION_RESOLVED_EXECUTOR=codex \
+    LEGION_RESOLVED_FALLBACK=refused-fallback \
+    MOCK_CODEX_QUOTA_FAIL="$CODEX_WORKHORSE" \
+    run "$DELEGATE" run --archetype route-does-not-exist \
+      --executor codex --model "$CODEX_WORKHORSE" \
+      --sandbox workspace-write --reasoning-effort high --task x --repo "$repo" --quiet
+
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e --arg paid "$CODEX_WORKHORSE" '
+    .status == "failed" and .model == $paid'
+  art="$(dirname "$(echo "$output" | jq -r .attempt_receipt)")"
+  jq -e --arg paid "$CODEX_WORKHORSE" \
+    '.requested_model == $paid and .failure.class == "quota"' "$art/attempt-1.json"
+  jq -e '.status == "incompatible" and .reason == "forced fallback refusal"' \
+    "$art/codex-preflight-2.json"
+  [ "$(grep -c '^codex exec ' "$MOCK_CALL_LOG")" -eq 1 ]
 }
 
 @test "delegate run: every paid Codex fallback is re-admitted under one absolute lease" {
@@ -1905,6 +2119,26 @@ $run_error" ]
   jq -e '.terminal_status == "failed" and .failure.class == "quota"' "$art/attempt-1.json"
   jq -e '.terminal_status == "timed_out" and .failure.class == "timed_out"' "$art/attempt-2.json"
   [ "$(grep -c '^codex exec ' "$MOCK_CALL_LOG")" -eq 2 ]
+}
+
+@test "delegate run: inherited Codex deadline can lower but never be raised" {
+  local repo inherited started elapsed
+  repo="$(make_test_repo codex-inherited-lease)"
+  inherited="$(python3 - <<'PY'
+import time
+print(time.monotonic_ns() + 1_000_000_000)
+PY
+)"
+  started="$SECONDS"
+
+  LEGION_CHILD_LEASE_DEADLINE_NS="$inherited" MOCK_CODEX_DELAY=30 \
+    run "$DELEGATE" run --model test-model-beta --task x --repo "$repo" \
+      --max-runtime-seconds 30 --quiet
+  elapsed=$((SECONDS - started))
+
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.status == "timed_out"'
+  [ "$elapsed" -lt 5 ]
 }
 
 @test "delegate run: --archetype routing to executor=self is refused" {
@@ -2188,6 +2422,27 @@ $run_error" ]
   ! git -C "$repo" show-ref --verify --quiet "refs/heads/legion/delegate-$rid"
   child="$(cat "$pid_file")"
   ! kill -0 "$child" 2>/dev/null
+}
+
+@test "delegate resume: cleanup failure is internal and retains the kept worktree" {
+  local repo rid wt
+  repo="$(make_test_repo resume-cleanup-failed)"
+  out="$("$DELEGATE" run --model test-model-alpha --task initial --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+  install_cleanup_failed_supervisor_shim
+
+  run "$DELEGATE" resume --run "$rid" --task follow-up --repo "$repo" \
+    --max-runtime-seconds 30 --quiet
+
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.status == "containment_failed"
+    and (.reason | contains("forced cleanup evidence"))
+    and (.lease_receipt | type) == "string"'
+  wt="$(echo "$output" | jq -r .worktree)"
+  [ -d "$wt" ]
+  jq -e '.terminal_status == "failed" and .failure.class == "internal"' \
+    "$(echo "$output" | jq -r .attempt_receipt)"
+  jq -e '.status == "cleanup_failed"' "$(echo "$output" | jq -r .lease_receipt)"
 }
 
 @test "delegate resume: restores the original routing archetype in telemetry" {

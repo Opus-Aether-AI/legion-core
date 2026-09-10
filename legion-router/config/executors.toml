@@ -22,7 +22,8 @@
 #                        (--archetype/--model/--sandbox/--base/--apply/--keep)
 #               prompt — prompt executor, returns text; args: --task/--model/--repo
 #               ""     — primary-only, no coding adapter
-#   model_ref default model role (see models.toml); empty for primary-only.
+#   model_ref default model role (see models.toml); empty for primary-only or
+#             adapters whose provider profile selects the model opaquely.
 #   acp       true when this executor can be driven over the Agent Client
 #             Protocol instead of its bespoke adapter. Every executor here is in
 #             the ACP registry, so one client reaches all of them -- and the
@@ -243,7 +244,7 @@ review_model_ref = ""
 kind = "primary coding"
 adapter = "legion-deepseek"
 contract = "diff"
-model_ref = "deepseek_default"
+model_ref = ""
 
 [executors.hermes]
 acp = false

@@ -125,7 +125,7 @@ trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legio
 # stream.jsonl still growing). Best-effort: TERM the tracked child plus any codex
 # grandchild (review/resume wrap it in a `( cd … && codex )` subshell).
 CODEX_CHILD_PID=""
-CODEX_LEASE_DEADLINE_NS=""
+CHILD_LEASE_DEADLINE_NS=""
 REVIEW_RECEIPT_PATH=""
 REVIEW_RECEIPT_RUN_ID=""
 REVIEW_RECEIPT_MODEL=""
@@ -148,19 +148,28 @@ NATIVE_ATTEMPT_STREAM=""
 NATIVE_ATTEMPT_LAST_MESSAGE=""
 NATIVE_ATTEMPT_STARTED_AT=""
 NATIVE_ATTEMPT_START_MS=0
-codex_start_lease_deadline() {
-  [[ -n "$CODEX_LEASE_DEADLINE_NS" ]] && return 0
-  CODEX_LEASE_DEADLINE_NS="$(python3 - "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" <<'PY'
+child_lease_tighten_deadline() {
+  local runtime_seconds="$1" inherited="${CHILD_LEASE_DEADLINE_NS:-${LEGION_CHILD_LEASE_DEADLINE_NS:-}}"
+  if [[ -n "$inherited" && ( ! "$inherited" =~ ^[1-9][0-9]*$ ) ]]; then
+    die "invalid inherited child lease deadline"
+  fi
+  CHILD_LEASE_DEADLINE_NS="$(python3 - "$runtime_seconds" "$inherited" <<'PY'
 import sys
 import time
 
-print(time.monotonic_ns() + int(sys.argv[1]) * 1_000_000_000)
+own_deadline = time.monotonic_ns() + int(sys.argv[1]) * 1_000_000_000
+if sys.argv[2]:
+    inherited = int(sys.argv[2])
+    if inherited < 1:
+        raise ValueError("invalid inherited child lease deadline")
+    own_deadline = min(own_deadline, inherited)
+print(own_deadline)
 PY
-)"
-  export LEGION_CHILD_LEASE_DEADLINE_NS="$CODEX_LEASE_DEADLINE_NS"
+)" || die "invalid inherited child lease deadline"
+  export LEGION_CHILD_LEASE_DEADLINE_NS="$CHILD_LEASE_DEADLINE_NS"
 }
-codex_remaining_lease_seconds() {
-  python3 - "$CODEX_LEASE_DEADLINE_NS" <<'PY'
+child_lease_remaining_seconds() {
+  python3 - "$CHILD_LEASE_DEADLINE_NS" <<'PY'
 import sys
 import time
 
@@ -204,6 +213,14 @@ write_interrupted_review_receipt() {
 }
 write_interrupted_native_attempt() {
   [[ -n "$NATIVE_ATTEMPT_ART" && "$NATIVE_ATTEMPT_ORDINAL" -gt 0 ]] || return 0
+  # The provider may have completed and atomically published its receipt just
+  # before Bash dispatches a pending signal trap. That terminal outcome wins;
+  # never rewrite it as cancelled merely because the in-memory guard has not
+  # yet been disarmed.
+  if [[ -f "$NATIVE_ATTEMPT_ART/attempt-$NATIVE_ATTEMPT_ORDINAL.json" ]]; then
+    NATIVE_ATTEMPT_ART=""
+    return 0
+  fi
   local ended_at end_ms duration usage cost output_started=false
   local usage_status=unknown cost_status=unknown
   ended_at="$(_now)"; end_ms="$(date +%s000)"
@@ -693,7 +710,7 @@ write_run_state() {
       printf '{"repo_root":%s,"seen_at":"%s"}\n' "$(jq -Rn --arg r "$repo" '$r')" "$now" >> "$LEGION_REPOS_FILE"
     fi
   } 2>/dev/null || true
-  case "$phase" in ok|failed|error|over_budget|cancelled|timed_out) prune_run_registry ;; esac
+  case "$phase" in ok|failed|error|over_budget|cancelled|timed_out|containment_failed) prune_run_registry ;; esac
   return 0
 }
 
@@ -712,7 +729,7 @@ prune_run_registry() {
     [[ -n "$f" ]] || continue
     phase="$(jq -r '.lifecycle.phase // ""' "$f" 2>/dev/null)"
     case "$phase" in
-      ok|failed|error|over_budget|cancelled|timed_out) rm -f "$f" 2>/dev/null ;;
+      ok|failed|error|over_budget|cancelled|timed_out|containment_failed) rm -f "$f" 2>/dev/null ;;
     esac
   done < <(find "$LEGION_REGISTRY_DIR" -maxdepth 1 -name '*.json' -type f -mtime +"$retain_days" 2>/dev/null)
 }
@@ -1269,8 +1286,9 @@ cmd_run() {
   legion_activate_executor_context "$RUN_ID" codex
   local start_ms end_ms dur rc=0 used_model="" attempt_ordinal=0 attempt_contract_failure=0
   local candidate_ordinal=0 lease_exhausted=0 fallback_admission_refused=0
+  local containment_failed=0 lease_receipt=""
   start_ms="$(date +%s000)"
-  codex_start_lease_deadline
+  child_lease_tighten_deadline "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
   # Try the chosen model, then the archetype's fallback chain on a quota/rate-limit error.
   local model_list="$model"
   [[ -n "$r_fallback" ]] && model_list="$model_list,$r_fallback"
@@ -1289,7 +1307,6 @@ cmd_run() {
         fi
         note "⚠ $attempt failed admission — refusing fallback spend"
         fallback_admission_refused=1
-        used_model="$attempt"
         rc=1
         break
       fi
@@ -1297,7 +1314,7 @@ cmd_run() {
     fi
     cp "$LEGION_ADAPTER_PREFLIGHT_PATH" "$art/codex-preflight-$candidate_ordinal.json"
     local attempt_runtime
-    attempt_runtime="$(codex_remaining_lease_seconds)"
+    attempt_runtime="$(child_lease_remaining_seconds)"
     if [[ "$attempt_runtime" -lt 1 ]]; then
       lease_exhausted=1
       break
@@ -1328,7 +1345,11 @@ cmd_run() {
     local attempt_output_started=false attempt_usage attempt_cost attempt_usage_status=unknown
     local attempt_cost_status=unknown attempt_failure="" attempt_retryable=false attempt_terminal=succeeded
     local attempt_timed_out=0 lease_status="$art/lease-$attempt_ordinal.json" lease_reason=""
-    if legion_adapter_supervisor_timed_out "$lease_status"; then
+    lease_receipt="$lease_status"
+    if legion_adapter_supervisor_cleanup_failed "$lease_status"; then
+      containment_failed=1
+      lease_reason="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+    elif legion_adapter_supervisor_timed_out "$lease_status"; then
       attempt_timed_out=1
       lease_reason="$(legion_adapter_lease_reason "$lease_status")"
     fi
@@ -1345,7 +1366,9 @@ cmd_run() {
       attempt_usage_status=known
       cost_model_has_pricing "$attempt" && attempt_cost_status=known
     fi
-    if [[ "$attempt_timed_out" -eq 1 ]]; then
+    if [[ "$containment_failed" -eq 1 ]]; then
+      attempt_terminal=failed; attempt_failure=internal
+    elif [[ "$attempt_timed_out" -eq 1 ]]; then
       attempt_terminal=timed_out; attempt_failure=timed_out
     elif [[ "$rc" -eq 0 ]] && ! jq -R -s -e \
         '[split("\n")[] | fromjson? | select(.type == "turn.completed")] | length > 0' \
@@ -1370,6 +1393,7 @@ cmd_run() {
       "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" \
       "${lease_reason:-$(error_log_summary "$art/codex.err" "$art/codex.err")}"
     NATIVE_ATTEMPT_ART=""
+    [[ "$containment_failed" -ne 1 ]] || break
     [[ "$attempt_timed_out" -ne 1 ]] || break
     [[ "$rc" -eq 0 ]] && break
     if [[ "$attempt_output_started" == true ]]; then
@@ -1421,7 +1445,9 @@ cmd_run() {
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
 
   local diff_rc=0
-  if ! is_sandcastle_sandbox "$sandbox"; then
+  if [[ "$containment_failed" -eq 1 ]]; then
+    : > "$art/diff.patch"
+  elif ! is_sandcastle_sandbox "$sandbox"; then
     cleanup_generated_diff_noise "$wt"
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
     # Diff against the BASE, not HEAD. `diff --cached` alone compares the index
@@ -1471,7 +1497,11 @@ cmd_run() {
   local total_tokens status="ok"
   total_tokens="$(jq -r '((.input_tokens//0)+(.output_tokens//0)+(.reasoning_output_tokens//0)) | floor' <<<"$usage" 2>/dev/null || echo 0)"
   [[ "$total_tokens" =~ ^[0-9]+$ ]] || total_tokens=0   # guard: never let a non-int abort the -gt test
-  if [[ "$lease_exhausted" -eq 1 ]]; then
+  if [[ "$containment_failed" -eq 1 ]]; then
+    status="containment_failed"
+    keep=1
+    LEGION_WT_KEEP=1
+  elif [[ "$lease_exhausted" -eq 1 ]]; then
     status="timed_out"
     keep=0
   elif [[ "$fallback_admission_refused" -eq 1 ]]; then
@@ -1502,10 +1532,12 @@ cmd_run() {
   local task_evidence; task_evidence="$(record_task_evidence "$task" "$repo" "$RUN_ID")"
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" --arg stream "$art/stream.jsonl" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg lease "$lease_receipt" \
     --argjson copied_secret_names "$copied_secret_names" --argjson task_evidence "$task_evidence" \
     '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream,
       preflight_receipt:$preflight,attempt_receipt:$attempt,
       failure_receipt:(if $failure=="" then null else $failure end),
+      lease_receipt:(if $lease=="" then null else $lease end),
       copied_secret_names:$copied_secret_names} + $task_evidence')"
   emit_span "codex" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
@@ -1538,14 +1570,15 @@ cmd_run() {
   fi
 
   local lifecycle_status="completed"
-  case "$status" in failed|error|timed_out) lifecycle_status="failed" ;; esac
+  case "$status" in failed|error|timed_out|containment_failed) lifecycle_status="failed" ;; esac
   write_run_artifact_status "$art" "$RUN_ID" "$lifecycle_status" "$wt_report" "" "$status"
 
   jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-0}" --arg run "$RUN_ID" --argjson rc "${rc:-0}" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    --arg reason "$([[ "$status" == timed_out ]] && { \
+    --arg lease "$lease_receipt" \
+    --arg reason "$([[ "$status" == containment_failed ]] && printf '%s' "$lease_reason" || [[ "$status" == timed_out ]] && { \
       if [[ "$lease_exhausted" -eq 1 ]]; then \
         printf 'child execution lease expired after %s seconds' "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"; \
       else \
@@ -1555,7 +1588,8 @@ cmd_run() {
     {run_id:$run, status:$status, executor:"codex", model:$model, thread_id:$thread, codex_exit:$rc,
      worktree:$wt, diff_path:$diff, last_message_path:$last, error_log:$error_log, usage:$usage, cost_usd:$cost,
      preflight_receipt:$preflight,attempt_receipt:$attempt,
-     failure_receipt:(if $failure=="" then null else $failure end)}
+     failure_receipt:(if $failure=="" then null else $failure end),
+     lease_receipt:(if $lease=="" then null else $lease end)}
      + (if $reason=="" then {} else {reason:$reason} end)'
   # over_budget produced a usable diff (budget is advisory — codex can't be pre-empted),
   # so it exits 0; only a real failure/error is non-zero (M1: graceful degradation).
@@ -1701,7 +1735,7 @@ preserve_prompt_review_receipt() {
 # prose into the verdict schema exactly as it already does for codex prose.
 review_invoke_prompt() {
   local ex="$1" model="$2" wt="$3" patch="$4" verdict_out="$5" stream="$6" err="$7" extra="$8"
-  local receipt_dir="$9" shared_art="${10}"
+  local receipt_dir="$9" shared_art="${10}" attempt_runtime="${11}"
   local adapter adapter_bin info prompt rc=0 last receipt_contract_failed=0
   info="$(python3 "$ROUTE_BIN" --executor-info "$ex" 2>/dev/null)" || return 127
   adapter="$(jq -r '.adapter // ""' <<<"$info")"
@@ -1749,14 +1783,15 @@ $(cat "$patch")
   case "$-" in *e*) errexit_was_set=1 ;; esac
   set +e
   ( cd "$wt" && LEGION_REVIEW_HANDOFF=1 "$adapter_bin" run --repo "$wt" "${task_args[@]}" \
-      ${model:+--model "$model"} --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" --quiet ) \
+      ${model:+--model "$model"} --max-runtime-seconds "$attempt_runtime" --quiet ) \
     </dev/null >"$stream" 2>"$err"
   rc=$?
   [[ "$errexit_was_set" -eq 0 ]] || set -e
-  local source_preflight source_attempt source_failure=""
+  local source_preflight source_attempt source_failure="" source_lease=""
   source_preflight="$(jq -r '.preflight_receipt // empty' "$stream" 2>/dev/null || true)"
   source_attempt="$(jq -r '.attempt_receipt // empty' "$stream" 2>/dev/null || true)"
   source_failure="$(jq -r '.failure_receipt // empty' "$stream" 2>/dev/null || true)"
+  source_lease="$(jq -r '.lease_receipt // empty' "$stream" 2>/dev/null || true)"
   review_preflight_receipt="$(preserve_prompt_review_receipt "$source_preflight" "$wt" \
     "$receipt_dir/preflight.json" legion.preflight.v1 2>/dev/null || true)"
   review_attempt_receipt="$(preserve_prompt_review_receipt "$source_attempt" "$wt" \
@@ -1766,11 +1801,13 @@ $(cat "$patch")
     review_failure_receipt="$(preserve_prompt_review_receipt "$source_failure" "$wt" \
       "$receipt_dir/failure.json" legion.failure.v1 2>/dev/null || true)"
   fi
-  if [[ -z "$review_preflight_receipt" || -z "$review_attempt_receipt" ||
+  review_lease_receipt="$(preserve_prompt_review_receipt "$source_lease" "$wt" \
+    "$receipt_dir/lease.json" legion.child-execution-lease.v1 2>/dev/null || true)"
+  if [[ -z "$review_preflight_receipt" || -z "$review_attempt_receipt" || -z "$review_lease_receipt" ||
         ( -n "$source_failure" && -z "$review_failure_receipt" ) ]]; then
     receipt_contract_failed=1
     if [[ "$rc" -eq 0 ]]; then
-      printf 'prompt reviewer returned success without durable admission/attempt receipts\n' >> "$err"
+      printf 'prompt reviewer returned success without durable admission/attempt/lease receipts\n' >> "$err"
       rc=70
     fi
   else
@@ -1779,6 +1816,7 @@ $(cat "$patch")
     # fallback does not make either executor's spend disappear.
     cp "$review_preflight_receipt" "$shared_art/preflight.json"
     cp "$review_attempt_receipt" "$shared_art/attempt.json"
+    cp "$review_lease_receipt" "$shared_art/lease.json"
     if [[ -n "$review_failure_receipt" ]]; then
       cp "$review_failure_receipt" "$shared_art/failure.json"
     else
@@ -2105,6 +2143,7 @@ cmd_review() {
   local attempt_verdict="$art/attempt-0.verdict.json"
   local review_executor review_kind review_model_ref _cand _cand_n=0
   local review_preflight_receipt="" review_attempt_receipt="" review_failure_receipt=""
+  local review_lease_receipt="" review_containment_failed=0
   : > "$attempt_stream"
   : > "$attempt_err"
   # Activating a candidate's executor context marks this process as running
@@ -2132,6 +2171,7 @@ cmd_review() {
     review_preflight_receipt=""
     review_attempt_receipt=""
     review_failure_receipt=""
+    review_lease_receipt=""
     if [[ "$_cand_n" -eq 1 && -n "$explicit_review_model" ]]; then
       model="$explicit_review_model"
     else
@@ -2160,6 +2200,7 @@ cmd_review() {
     fi
     legion_adapter_resolve_lease "$review_executor" "$max_runtime_seconds" \
       || die "$LEGION_ADAPTER_LEASE_REASON"
+    child_lease_tighten_deadline "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
     if [[ "$review_kind" == "native" ]]; then
       LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID=""
       if ! legion_adapter_preflight codex "$art" "$sandbox" stdin "$model" "$effort" 0 "$CODEX_BIN"; then
@@ -2183,6 +2224,16 @@ cmd_review() {
     REVIEW_RECEIPT_MODEL="$model"
     status="failed"; reason="review-failed"
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    local attempt_runtime
+    attempt_runtime="$(child_lease_remaining_seconds)"
+    if [[ "$attempt_runtime" -lt 1 ]]; then
+      attempt=$((attempt - 1))
+      REVIEW_RECEIPT_ATTEMPT="$attempt"
+      status="timed_out"
+      reason="shared child execution lease expired before the next review attempt"
+      rc=124
+      break
+    fi
     REVIEW_RECEIPT_ATTEMPT="$attempt"
     attempt_stream="$art/attempt-$attempt.stream.jsonl"
     attempt_err="$art/attempt-$attempt.codex.err"
@@ -2217,7 +2268,7 @@ cmd_review() {
         "$failure" "$retryable" "$output_started" \
         "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$message"
       review_attempt_receipt="$LEGION_ADAPTER_ATTEMPT_PATH"
-      [[ -z "$LEGION_ADAPTER_FAILURE_PATH" ]] || review_failure_receipt="$LEGION_ADAPTER_FAILURE_PATH"
+      review_failure_receipt="$LEGION_ADAPTER_FAILURE_PATH"
       native_attempt_recorded=1
       NATIVE_ATTEMPT_ART=""
     }
@@ -2251,6 +2302,7 @@ cmd_review() {
     codex_review_args+=(--output-schema "$REVIEW_SCHEMA" -o "$attempt_verdict")
     if [[ "$review_kind" == "native" ]]; then
       local attempt_lease="$art/attempt-$attempt.lease.json"
+      review_lease_receipt="$attempt_lease"
       native_attempt_started_at="$(_now)"
       native_attempt_start_ms="$(date +%s000)"
       NATIVE_ATTEMPT_ART="$art"
@@ -2265,7 +2317,7 @@ cmd_review() {
       NATIVE_ATTEMPT_START_MS="$native_attempt_start_ms"
       set +e
       ( cd "$wt" && python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
-          --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+          --max-runtime-seconds "$attempt_runtime" \
           --status-file "$attempt_lease" -- "$CODEX_BIN" "${codex_review_args[@]}" ) \
         </dev/null >"$attempt_stream" 2>"$attempt_err" &
       CODEX_CHILD_PID=$!
@@ -2278,11 +2330,19 @@ cmd_review() {
       set +e
       review_invoke_prompt "$review_executor" "$model" "$wt" "$patch_path" \
         "$attempt_verdict" "$attempt_stream" "$attempt_err" "$review_prompt" \
-        "$art/prompt-review-$_cand_n-$attempt" "$art"
+        "$art/prompt-review-$_cand_n-$attempt" "$art" "$attempt_runtime"
       rc=$?
       set -e
     fi
 
+    if [[ "$review_kind" == "native" ]] && legion_adapter_supervisor_cleanup_failed "$attempt_lease"; then
+      review_containment_failed=1
+      LEGION_WT_KEEP=1
+      status="containment_failed"
+      reason="$(legion_adapter_supervisor_reason "$attempt_lease") (evidence: $attempt_lease; worktree retained: $wt)"
+      record_native_review_attempt failed internal false "$reason"
+      break
+    fi
     if [[ "$review_kind" == "native" ]] && legion_adapter_supervisor_timed_out "$attempt_lease"; then
       status="timed_out"
       reason="$(legion_adapter_lease_reason "$attempt_lease")"
@@ -2386,7 +2446,7 @@ cmd_review() {
     if [[ "$status" == "ok" ]]; then
       break
     fi
-    [[ "$status" != "timed_out" ]] || break
+    [[ "$status" != "timed_out" && "$status" != "containment_failed" ]] || break
     if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
       note "⚠ reviewer '$review_executor' is unavailable (exit $rc); trying the next candidate"
       reason="reviewer-unavailable"
@@ -2418,13 +2478,15 @@ cmd_review() {
     --arg patch "$patch_path" --arg base "$base_sha" --arg head "$head_sha" \
     --arg reason "$reason" --arg preflight "$review_preflight_receipt" \
     --arg attempt_receipt "$review_attempt_receipt" --arg failure "$review_failure_receipt" \
+    --arg lease "$review_lease_receipt" \
     --argjson attempts "$attempt" '
     {terminal_receipt:$receipt, verdict:$verdict, review_patch:$patch,
      reviewed_base_sha:$base, reviewed_head_sha:$head,
      reason:$reason, attempts:$attempts,
      preflight_receipt:(if $preflight=="" then null else $preflight end),
      attempt_receipt:(if $attempt_receipt=="" then null else $attempt_receipt end),
-     failure_receipt:(if $failure=="" then null else $failure end)}')"
+     failure_receipt:(if $failure=="" then null else $failure end),
+     lease_receipt:(if $lease=="" then null else $lease end)}')"
   emit_span "codex-review" "$model" "$status" "$dur" "$cost" "$usage" \
     "review --base $base_sha --head $head_sha" "$artifacts"
   ingest_usage "$model" "codex" "${rc:-0}" "$usage" "$cost"
@@ -2433,11 +2495,15 @@ cmd_review() {
     "$([[ "$status" == "ok" ]] && printf completed || printf failed)" \
     "$wt" "" "$status"
 
-  with_git_worktree_lock "$repo" \
-    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
-  with_git_worktree_lock "$repo" \
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
-  LEGION_WT_PATH=""
+  local wt_report="$wt"
+  if [[ "$review_containment_failed" -ne 1 ]]; then
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    wt_report="(removed after review)"
+    LEGION_WT_PATH=""
+  fi
   REVIEW_RECEIPT_PATH=""
   REVIEW_ART_PATH=""
   REVIEW_WT_PATH=""
@@ -2447,7 +2513,7 @@ cmd_review() {
     --arg run "$RUN_ID" --arg receipt "$receipt" --arg patch "$patch_path" \
     --arg base "$base_sha" --arg head "$head_sha" --arg error_log "$error_log" \
     --arg preflight "$review_preflight_receipt" --arg attempt_receipt "$review_attempt_receipt" \
-    --arg failure "$review_failure_receipt" \
+    --arg failure "$review_failure_receipt" --arg lease "$review_lease_receipt" --arg wt "$wt_report" \
     --argjson attempts "$attempt" --argjson max_attempts "$max_attempts" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" \
     --argjson verdict "$verdict_json" '
@@ -2457,6 +2523,7 @@ cmd_review() {
      preflight_receipt:(if $preflight=="" then null else $preflight end),
      attempt_receipt:(if $attempt_receipt=="" then null else $attempt_receipt end),
      failure_receipt:(if $failure=="" then null else $failure end),
+     lease_receipt:(if $lease=="" then null else $lease end),worktree:$wt,
      attempts:$attempts, max_attempts:$max_attempts,
      verdict:$verdict, error_log:$error_log, usage:$usage, cost_usd:$cost}'
   [[ "$status" == "ok" ]] || exit 1
@@ -2593,17 +2660,26 @@ cmd_resume() {
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
-  local usage cost diff_rc=0 status="ok" reason="" wt_report="$wt"
+  local usage cost diff_rc=0 status="ok" reason="" wt_report="$wt" containment_failed=0
   usage="$(codex_usage "$art/resume-stream.jsonl")"
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
-  cleanup_generated_diff_noise "$wt"
-  git -C "$wt" add -A 2>/dev/null || diff_rc=1
-  git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
-  if legion_adapter_supervisor_timed_out "$lease_status"; then
+  if legion_adapter_supervisor_cleanup_failed "$lease_status"; then
+    containment_failed=1
+    LEGION_WT_KEEP=1
+    status="containment_failed"
+    reason="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+  elif legion_adapter_supervisor_timed_out "$lease_status"; then
     status="timed_out"
     reason="$(legion_adapter_lease_reason "$lease_status")"
   elif [[ "$rc" -ne 0 ]]; then
     status="failed"
+  fi
+  if [[ "$containment_failed" -eq 1 ]]; then
+    : > "$art/diff.patch"
+  else
+    cleanup_generated_diff_noise "$wt"
+    git -C "$wt" add -A 2>/dev/null || diff_rc=1
+    git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
   fi
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
 
@@ -2625,6 +2701,8 @@ cmd_resume() {
     terminal_status=failed
     if [[ "$status" == timed_out ]]; then
       terminal_status=timed_out; failure_class=timed_out
+    elif [[ "$status" == containment_failed ]]; then
+      failure_class=internal
     elif [[ "$rc" -ne 0 ]]; then
       failure_class=provider
     else
@@ -2654,19 +2732,21 @@ cmd_resume() {
     with_git_worktree_lock "$repo" git -C "$repo" worktree prune >/dev/null 2>&1 || true
     wt_report="(removed after child execution lease timeout)"
     write_run_artifact_status "$art" "$run" "failed" "$wt_report" "" "$status"
+  elif [[ "$status" == "containment_failed" ]]; then
+    write_run_artifact_status "$art" "$run" "failed" "$wt_report" "" "$status"
   fi
 
   jq -cn --arg status "$status" --arg model "$model" --arg archetype "$archetype" \
     --arg thread "$thread_id" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg run "$run" --arg reason "$reason" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
-    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" --arg lease "$lease_status" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" '
     {run_id:$run, status:$status, model:$model,
      archetype:(if $archetype=="" then null else $archetype end),
      thread_id:$thread, worktree:$wt, diff_path:$diff, usage:$usage, cost_usd:$cost,
      preflight_receipt:$preflight,attempt_receipt:$attempt,
-     failure_receipt:(if $failure=="" then null else $failure end)}
+     failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
      + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == "ok" ]] || exit 1
 }

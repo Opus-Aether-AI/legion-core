@@ -769,9 +769,9 @@ def main() -> int:
         except ProcessInspectionError as error:
             print(f"legion-process-supervisor: invalid inherited supervisor fingerprint: {error}", file=sys.stderr)
             return 2
-        if not ancestor_contained:
-            print("legion-process-supervisor: inherited supervisor fingerprint is not active", file=sys.stderr)
-            return 2
+        # Test shims and stale caller environments may carry a well-formed pair
+        # without actually running under that policy. Such a pair grants no
+        # trust: fall through to a fresh direct-launch fingerprint instead.
     if bool(deny_canary) != bool(allow_canary):
         print("legion-process-supervisor: both Darwin sandbox canaries are required", file=sys.stderr)
         return 2

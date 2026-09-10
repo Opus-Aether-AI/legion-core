@@ -829,7 +829,7 @@ PY
 
     /usr/bin/sandbox-exec -p \
       "(version 1)(allow default)(deny file-read* (subpath \"$temp_root\"))" \
-      /bin/sleep 20 &
+      /bin/sleep 120 &
     unrelated=$!
 
     for attempt in 1 2 3 4 5; do

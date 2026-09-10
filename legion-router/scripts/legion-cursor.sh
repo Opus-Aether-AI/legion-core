@@ -199,7 +199,14 @@ cmd_run() {
   legion_adapter_resolve_lease cursor "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  if ! legion_adapter_preflight cursor "$art" "$sandbox" argv "$model" "" 0 "$CURSOR_AGENT_BIN"; then
+  # Resolve the documented aliases before admission so the shared preflight
+  # fingerprints the exact executable that will be launched. Passing an empty
+  # override made it check the registry's `agent` even when only the supported
+  # `cursor-agent` alias was installed.
+  if ! agent_bin="$(resolve_cursor_bin)"; then
+    agent_bin="${CURSOR_AGENT_BIN:-agent}"
+  fi
+  if ! legion_adapter_preflight cursor "$art" "$sandbox" argv "$model" "" 0 "$agent_bin"; then
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       failed "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
       "$base" "$archetype"

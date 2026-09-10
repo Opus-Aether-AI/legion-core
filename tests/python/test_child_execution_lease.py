@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 
 ROOT = Path(__file__).parents[2]
 SUPERVISOR = ROOT / "legion-router" / "scripts" / "legion-process-supervisor.py"
@@ -110,6 +112,22 @@ def test_infinite_output_is_bounded_by_same_lease(tmp_path: Path) -> None:
     assert elapsed < 6
 
 
+def test_inherited_absolute_deadline_clamps_relative_allowance(tmp_path: Path) -> None:
+    environment = os.environ.copy()
+    environment["LEGION_CHILD_LEASE_DEADLINE_NS"] = str(time.monotonic_ns() + 300_000_000)
+    result, receipt, elapsed = run_supervised(
+        tmp_path,
+        10,
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=environment,
+    )
+    assert result.returncode == 124
+    assert receipt["status"] == "timed_out"
+    assert elapsed < 4
+
+
 def test_repeated_cancel_at_deadline_writes_one_terminal_outcome(tmp_path: Path) -> None:
     status_file = tmp_path / "race.json"
     process = subprocess.Popen(
@@ -142,3 +160,44 @@ def test_repeated_cancel_at_deadline_writes_one_terminal_outcome(tmp_path: Path)
     receipt = json.loads(records[0])
     assert receipt["status"] in {"cancelled", "timed_out"}
     assert process.returncode in {143, 124}
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt fingerprints are Darwin-only")
+def test_direct_launch_reaps_rapid_reparent_after_environment_is_shed(tmp_path: Path) -> None:
+    """No adapter-supplied canaries are needed for a direct supervised launch."""
+
+    unrelated = subprocess.Popen(["/bin/sleep", "30"])
+    try:
+        for ordinal in range(5):
+            pid_file = tmp_path / f"rapid-{ordinal}.pid"
+            program = """
+import os, sys
+if os.fork() != 0:
+    os._exit(0)
+os.setsid()
+if os.fork() != 0:
+    os._exit(0)
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    stream.write(str(os.getpid()))
+null = os.open("/dev/null", os.O_RDWR)
+for descriptor in (0, 1, 2):
+    os.dup2(null, descriptor)
+if null > 2:
+    os.close(null)
+os.execve("/bin/sleep", ["sleep", "30"], {})
+"""
+            result, receipt, _elapsed = run_supervised(
+                tmp_path,
+                5,
+                [sys.executable, "-c", program, str(pid_file)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            assert result.returncode == 0, result.stderr.decode(errors="replace")
+            assert receipt["status"] == "completed"
+            assert pid_file.is_file()
+            assert wait_gone(int(pid_file.read_text(encoding="utf-8")))
+        assert not process_is_gone(unrelated.pid)
+    finally:
+        unrelated.terminate()
+        unrelated.wait(timeout=2)

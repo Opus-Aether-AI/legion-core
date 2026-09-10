@@ -1,7 +1,7 @@
 {
   "name": "legion-opencode-mode",
   "description": "The decision guide for an opencode-primary Legion session. It keeps the active primary inline where it has context and routes bounded work by the configured archetype and model role, rather than assuming a default secondary harness.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "author": {
     "name": "legion-core"
   },

@@ -43,6 +43,26 @@ make_test_repo() {
     grep -Eq '^agent active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
+@test "legion-cursor: resolves cursor-agent alias before shared preflight" {
+    local repo alias_bin
+    repo="$(make_test_repo cursor-agent-alias)"
+    alias_bin="$TEST_TMPDIR/cursor-agent-only"
+    mkdir -p "$alias_bin"
+    cp "$BATS_TEST_DIRNAME/mocks/bin/agent" "$alias_bin/cursor-agent"
+    chmod +x "$alias_bin/cursor-agent"
+
+    PATH="$alias_bin:$(path_without agent)" run "$LEGION_CURSOR" run \
+      --task "do the thing" --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok"'
+    local resolved_alias; resolved_alias="$(cd "$alias_bin" && pwd -P)/cursor-agent"
+    jq -e --arg binary "$resolved_alias" \
+      '.schema == "legion.preflight.v1" and .identity.executable_path == $binary' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    assert_mock_called agent "-p --output-format json"
+}
+
 @test "legion-cursor: timeout reaps a setsid child and terminalizes exactly once" {
     local repo run_id pid_file child attempt failure
     repo="$(make_test_repo lease-timeout)"

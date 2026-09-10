@@ -228,6 +228,85 @@ make_test_repo() {
     assert_mock_called legion-delegate "--archetype final-review"
 }
 
+@test "legion-claude: fallback preserves Claude attempts and exposes Codex aliases" {
+    local repo run_id art final_attempt
+    repo="$(make_test_repo fallback-receipts)"
+    run_id="fallback-receipts-claude"
+
+    MOCK_CLAUDE_LIMIT=1 MOCK_DELEGATE_WRITE_RECEIPTS=1 \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --quiet
+
+    [ "$status" -eq 0 ]
+    art="$repo/.legion/runs/$run_id"
+    final_attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    [ "$final_attempt" = "$art/attempt-1.json" ]
+    jq -e '.executor == "codex" and .terminal_status == "succeeded"' "$final_attempt"
+    jq -e '.executor == "codex"' "$art/attempt.json"
+    jq -e '.executor == "claude" and .failure.class == "quota"' "$art/claude/attempt-1.json"
+    jq -e '.class == "quota"' "$art/claude/failure-1.json"
+    [ ! -e "$art/failure.json" ]
+    echo "$output" | jq -e '
+      .run_id == "fallback-receipts-claude"
+      and .executor == "codex" and .result == "GPT_FALLBACK"
+      and (.last_message_path | endswith("/last-message.txt"))
+      and .fell_back == true and .fell_back_reason == "claude_limit"
+      and .failure_receipt == null'
+}
+
+@test "legion-claude: real Codex fallback reconciles the shared run directory" {
+    local repo run_id art final_attempt
+    repo="$(make_test_repo real-fallback-receipts)"
+    run_id="real-fallback-receipts-claude"
+
+    PATH="$(path_without legion-delegate)" \
+      CLAUDE_BIN="$BATS_TEST_DIRNAME/mocks/bin/claude" MOCK_CLAUDE_LIMIT=1 \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --quiet
+
+    [ "$status" -eq 0 ]
+    art="$repo/.legion/runs/$run_id"
+    final_attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    [ "$final_attempt" = "$art/attempt-1.json" ]
+    jq -e '.executor == "codex" and .terminal_status == "succeeded"' "$final_attempt"
+    jq -e '.executor == "claude" and .failure.class == "quota"' "$art/claude/attempt-1.json"
+    echo "$output" | jq -e '
+      .run_id == "real-fallback-receipts-claude"
+      and .executor == "codex" and (.result | length > 0)
+      and (.last_message_path | endswith("/last-message.txt"))
+      and .fell_back == true and .fell_back_reason == "claude_limit"'
+}
+
+@test "legion-claude: Codex fallback receives only the remaining absolute lease" {
+    local repo fallback_runtime
+    repo="$(make_test_repo fallback-deadline)"
+
+    MOCK_CLAUDE_LIMIT=1 MOCK_CLAUDE_DELAY=1 \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --max-runtime-seconds 4 --quiet
+
+    [ "$status" -eq 0 ]
+    fallback_runtime="$(sed -n 's/^legion-delegate .*--max-runtime-seconds \([0-9][0-9]*\).*/\1/p' "$MOCK_CALL_LOG")"
+    [[ "$fallback_runtime" =~ ^[1-3]$ ]]
+    echo "$output" | jq -e '.executor == "codex" and .fell_back == true'
+}
+
+@test "legion-claude: same-vendor retries share one absolute lease" {
+    local repo
+    repo="$(make_test_repo model-chain-deadline)"
+
+    MOCK_CLAUDE_DECLINE_MODELS="model-a,model-b" MOCK_CLAUDE_DELAY=2 \
+      run "$LEGION_CLAUDE" run --task x --model model-a \
+        --fallback-models model-b --repo "$repo" --max-runtime-seconds 3 --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .executor == "claude" and .status == "timed_out"
+      and (.reason | contains("expired after 3 seconds"))'
+    [ "$(grep -c '^claude -p ' "$MOCK_CALL_LOG")" -eq 2 ]
+    assert_mock_not_called legion-delegate
+}
+
 @test "legion-claude: environment archetype survives Codex fallback" {
     local repo; repo="$(make_test_repo fb-env-archetype)"
     LEGION_ARCHETYPE=security-review MOCK_CLAUDE_LIMIT=1 \

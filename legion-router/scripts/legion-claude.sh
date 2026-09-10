@@ -29,6 +29,7 @@ fi
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 LEGION_CLAUDE_TMPDIR=""
+LEGION_CLAUDE_LEASE_DEADLINE_NS=""
 
 die() { printf 'legion-claude: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -138,6 +139,57 @@ is_limit_text() {
   printf '%s' "$1" | grep -qiE 'usage limit|rate.?limit|quota|exceeded|too many requests|overloaded|capacity|reached your'
 }
 
+claude_start_lease_deadline() {
+  [[ -n "$LEGION_CLAUDE_LEASE_DEADLINE_NS" ]] && return 0
+  LEGION_CLAUDE_LEASE_DEADLINE_NS="$(python3 - "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" <<'PY'
+import sys
+import time
+
+print(time.monotonic_ns() + int(sys.argv[1]) * 1_000_000_000)
+PY
+)"
+  # Descendant supervisors clamp their relative allowance to this exact
+  # monotonic boundary, so rounding the shell-facing seconds up cannot extend
+  # the total lease across model or executor transitions.
+  export LEGION_CHILD_LEASE_DEADLINE_NS="$LEGION_CLAUDE_LEASE_DEADLINE_NS"
+}
+
+claude_remaining_lease_seconds() {
+  python3 - "$LEGION_CLAUDE_LEASE_DEADLINE_NS" <<'PY'
+import sys
+import time
+
+remaining = int(sys.argv[1]) - time.monotonic_ns()
+# The supervisor accepts whole relative seconds but also clamps to the exported
+# nanosecond deadline. Ceiling preserves usable sub-second time without allowing
+# a retry or fallback to extend the absolute boundary.
+print(max(0, (remaining + 999_999_999) // 1_000_000_000))
+PY
+}
+
+archive_claude_fallback_receipts() {
+  local art="$1" archive="$1/claude" path name
+  mkdir -p "$archive"
+  for path in "$art"/attempt-*.json "$art"/failure-*.json; do
+    [[ -f "$path" ]] || continue
+    name="${path##*/}"
+    [[ "$name" =~ ^(attempt|failure)-[0-9]+\.json$ ]] || continue
+    mv -f "$path" "$archive/$name"
+  done
+  if [[ -n "${LEGION_ADAPTER_ATTEMPT_PATH:-}" ]]; then
+    name="${LEGION_ADAPTER_ATTEMPT_PATH##*/}"
+    [[ -f "$archive/$name" ]] && LEGION_ADAPTER_ATTEMPT_PATH="$archive/$name"
+  fi
+  if [[ -n "${LEGION_ADAPTER_FAILURE_PATH:-}" ]]; then
+    name="${LEGION_ADAPTER_FAILURE_PATH##*/}"
+    [[ -f "$archive/$name" ]] && LEGION_ADAPTER_FAILURE_PATH="$archive/$name"
+  fi
+  # These are mutable aliases, not attempt evidence. The fallback owns them
+  # once invoked; deleting them first prevents a preflight-only Codex failure
+  # from falsely exposing the last Claude failure as its terminal receipt.
+  rm -f "$art/attempt.json" "$art/failure.json"
+}
+
 resolve_delegate_bin() {
   if command -v legion-delegate >/dev/null 2>&1; then
     command -v legion-delegate
@@ -174,11 +226,24 @@ emit_terminal_json() {
 
 run_fallback() {
   local reason="$1" task="$2" model="$3" repo="$4" sandbox="$5" base="$6"
-  local delegate_bin out rc fallback_status fallback_model fallback_usage fallback_cost fallback_result last_path
+  local delegate_bin out rc fallback_status fallback_model fallback_runtime fallback_result last_path
   local -a fallback_args
   local fallback_art="$repo/.legion/runs/$RUN_ID"
   local fallback_wt="$repo/.legion/worktrees/$RUN_ID"
   local fallback_branch="legion/delegate-$RUN_ID"
+
+  archive_claude_fallback_receipts "$fallback_art"
+  claude_start_lease_deadline
+  fallback_runtime="$(claude_remaining_lease_seconds)"
+  if [[ "$fallback_runtime" -lt 1 ]]; then
+    reason="child execution lease expired after $LEGION_ADAPTER_MAX_RUNTIME_SECONDS seconds"
+    [[ -z "${preset_run_id:-}" ]] || legion_write_adapter_run_state \
+      timed_out "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
+      "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
+    [[ -z "${preset_run_id:-}" ]] || legion_disarm_adopted_run_guard
+    emit_terminal_json "claude" "$model" "timed_out" "$reason" "{}" 0 false "$reason"
+    return 1
+  fi
 
   delegate_bin="$(resolve_delegate_bin)" || {
     [[ -z "${preset_run_id:-}" ]] || legion_write_adapter_run_state \
@@ -200,22 +265,19 @@ run_fallback() {
   set +e
   fallback_args=(run --executor codex --model "$model" --task "$task" --repo "$repo"
     --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID"
-    --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS")
+    --max-runtime-seconds "$fallback_runtime")
   [[ -z "${archetype:-}" ]] || fallback_args+=(--archetype "$archetype")
   [[ "${QUIET:-0}" != "1" ]] || fallback_args+=(--quiet)
   out="$("$delegate_bin" "${fallback_args[@]}")"
   rc=$?
   set -e
 
-  fallback_status="$(jq -r '.status // "failed"' <<<"$out" 2>/dev/null || printf 'failed')"
-  fallback_model="$(jq -r '.model // empty' <<<"$out" 2>/dev/null || true)"
+  fallback_status="$(jq -r 'if type == "object" then (.status // "failed") else "failed" end' <<<"$out" 2>/dev/null || printf 'failed')"
+  fallback_model="$(jq -r 'if type == "object" then (.model // empty) else empty end' <<<"$out" 2>/dev/null || true)"
   [[ -n "$fallback_model" ]] || fallback_model="$model"
-  fallback_usage="$(jq -c '.usage // {}' <<<"$out" 2>/dev/null || printf '{}')"
-  fallback_cost="$(jq -r '.cost_usd // 0' <<<"$out" 2>/dev/null || printf '0')"
-  fallback_result="$(jq -r '.result // .last_message // empty' <<<"$out" 2>/dev/null || true)"
-
+  fallback_result="$(jq -r 'if type == "object" then (.result // .last_message // empty) else empty end' <<<"$out" 2>/dev/null || true)"
   if [[ -z "$fallback_result" ]]; then
-    last_path="$(jq -r '.last_message_path // empty' <<<"$out" 2>/dev/null || true)"
+    last_path="$(jq -r 'if type == "object" then (.last_message_path // empty) else empty end' <<<"$out" 2>/dev/null || true)"
     if [[ -n "$last_path" && -f "$last_path" ]]; then
       fallback_result="$(cat "$last_path")"
     fi
@@ -225,7 +287,17 @@ run_fallback() {
     "$fallback_status" "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
     "$fallback_model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
   [[ -z "${preset_run_id:-}" ]] || legion_disarm_adopted_run_guard
-  emit_terminal_json "codex" "$fallback_model" "$fallback_status" "$fallback_result" "$fallback_usage" "$fallback_cost" true "$reason"
+  if jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1; then
+    jq -c --arg fallback_reason "$reason" --arg fallback_result "$fallback_result" '
+      . + {fell_back:true, fell_back_reason:$fallback_reason}
+      | if ((.reason? // "") == "") then .reason=$fallback_reason else . end
+      | if ((.result? // "") == "") and ($fallback_result != "")
+        then .result=$fallback_result else . end
+    ' <<<"$out"
+  else
+    emit_terminal_json "codex" "$fallback_model" "failed" "" "{}" 0 true "$reason"
+    rc=1
+  fi
   return "$rc"
 }
 
@@ -451,6 +523,14 @@ cmd_run() {
     fi
     [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
     [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
+    claude_start_lease_deadline
+    local attempt_runtime
+    attempt_runtime="$(claude_remaining_lease_seconds)"
+    if [[ "$attempt_runtime" -lt 1 ]]; then
+      lease_timed_out=1
+      lease_reason="child execution lease expired after $LEGION_ADAPTER_MAX_RUNTIME_SECONDS seconds"
+      break
+    fi
     note "→ ${claude_cmd[*]}"
     local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
     attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
@@ -460,7 +540,7 @@ cmd_run() {
       legion_activate_executor_context "$RUN_ID" claude
       cd "${wt:-$repo}"
       python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "${wt:-$repo}" \
-        --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+        --max-runtime-seconds "$attempt_runtime" \
         --status-file "$lease_status" -- "${claude_cmd[@]}"
     ) >"$out_file" 2>"$err_file"
     rc=${PIPESTATUS[1]}
@@ -491,7 +571,7 @@ cmd_run() {
     [[ ! -s "$err_file" ]] || attempt_combined="${attempt_combined}"$'\n'"$(cat "$err_file")"
     if legion_adapter_supervisor_timed_out "$lease_status"; then
       lease_timed_out=1
-      lease_reason="$(legion_adapter_lease_reason "$lease_status")"
+      lease_reason="child execution lease expired after $LEGION_ADAPTER_MAX_RUNTIME_SECONDS seconds"
       attempt_terminal=timed_out; attempt_failure=timed_out
     elif [[ "$rc" -eq 0 && "$attempt_is_error" != true ]] && ! claude_model_declined "$out_file" "$err_file"; then
       attempt_terminal=succeeded; attempt_failure=""
@@ -687,6 +767,13 @@ cmd_run() {
 
   if [[ "$allow_fallback" -eq 1 && "$any_output_started" -eq 0 && "$permission_refused" -eq 0 ]]; then
     status="$([[ "$reason" == "claude_limit" ]] && printf blocked || printf failed)"
+    archive_claude_fallback_receipts "$contract_art"
+    artifacts="$(jq -c \
+      --arg attempt "${LEGION_ADAPTER_ATTEMPT_PATH:-}" \
+      --arg failure "${LEGION_ADAPTER_FAILURE_PATH:-}" '
+      .attempt_receipt=(if $attempt=="" then null else $attempt end)
+      | .failure_receipt=(if $failure=="" then null else $failure end)
+    ' <<<"$artifacts")"
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
     note "⚠ Claude failed ($reason): falling back to $fallback_model"
     run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"

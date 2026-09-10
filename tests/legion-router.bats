@@ -1437,7 +1437,15 @@ $run_error" ]
     echo "$output" | jq -e --arg sha "$base_sha" '
       .reviewed_base_sha == $sha and .reviewed_head_sha == $sha
       and .attempts == 1 and .max_attempts == 2
+      and (.preflight_receipt | type) == "string"
+      and (.attempt_receipt | type) == "string"
+      and .failure_receipt == null
     '
+    jq -e '.schema == "legion.preflight.v1" and (.status == "supported" or .status == "untested")' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '.schema == "legion.attempt.v1" and .executor == "codex-review"
+      and .terminal_status == "succeeded" and .usage_status == "known"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
     assert_mock_called codex "exec -s read-only review --base $base_sha"
     assert_mock_called codex "-c developer_instructions=\"Review only the immutable diff $base_sha...$base_sha. Verify the learned idempotency guardrail.\""
     assert_mock_called codex "Review only the immutable diff $base_sha...$base_sha."
@@ -1630,6 +1638,10 @@ $run_error" ]
       and .attempts == 1 and .verdict == null
     '
     [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 1 ]
+    jq -e '.terminal_status == "failed" and .failure.class == "malformed_event"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.schema == "legion.failure.v1" and .class == "malformed_event"' \
+      "$(echo "$output" | jq -r .failure_receipt)"
     jq -e '
       .status == "failed" and .reason == "missing-verdict"
       and .attempts == 1 and .verdict_path == null
@@ -1701,6 +1713,10 @@ $run_error" ]
       and (.reviewed_head_sha | length == 40)
       and (.completed_at | length > 0)
     ' "$receipt"
+    local interrupted_attempt
+    interrupted_attempt="$(dirname "$receipt")/attempt-1.json"
+    jq -e '.schema == "legion.attempt.v1" and .terminal_status == "cancelled"
+      and .failure.class == "cancelled"' "$interrupted_attempt"
     jq -e '.kind == "review" and .lifecycle.phase == "failed"' "$registry"
     jq -e '.status == "failed" and .result_status == "failed"' \
       "$(dirname "$receipt")/status.json"
@@ -2018,8 +2034,66 @@ $run_error" ]
   rid="$(echo "$out" | jq -r .run_id)"
   run "$DELEGATE" resume --run "$rid" --task "follow up" --repo "$repo" --quiet
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.status == "ok" and .thread_id == "mock-thread-0001"'
+  echo "$output" | jq -e '.status == "ok" and .thread_id == "mock-thread-0001"
+    and (.preflight_receipt | type) == "string"
+    and (.attempt_receipt | type) == "string" and .failure_receipt == null'
+  jq -e '.schema == "legion.preflight.v1" and (.status == "supported" or .status == "untested")' \
+    "$(echo "$output" | jq -r .preflight_receipt)"
+  jq -e '.schema == "legion.attempt.v1" and .executor == "codex-resume"
+    and .terminal_status == "succeeded"
+    and (.cache_lineage.previous_attempt_id | type) == "string"' \
+    "$(echo "$output" | jq -r .attempt_receipt)"
   assert_mock_called codex "exec resume mock-thread-0001"
+}
+
+@test "delegate resume: unavailable admission refuses before another provider launch" {
+  local repo rid
+  repo="$(make_test_repo resume-admission-unavailable)"
+  out="$("$DELEGATE" run --model test-model-alpha --task initial --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+
+  CODEX_BIN=missing-codex-for-resume run "$DELEGATE" resume --run "$rid" \
+    --task "follow up" --repo "$repo" --quiet
+
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.status == "refused"
+    and (.reason | contains("binary not found"))
+    and .attempt_receipt == null and .failure_receipt == null'
+  jq -e '.schema == "legion.preflight.v1" and .status == "unavailable"' \
+    "$(echo "$output" | jq -r .preflight_receipt)"
+  [ "$(grep -Fc "codex exec resume" "$MOCK_CALL_LOG" || true)" -eq 0 ]
+}
+
+@test "delegate resume: provider failure writes attempt and failure receipts" {
+  local repo rid
+  repo="$(make_test_repo resume-provider-failure)"
+  out="$("$DELEGATE" run --model test-model-alpha --task initial --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+
+  MOCK_CODEX_FAIL=1 run "$DELEGATE" resume --run "$rid" --task "follow up" \
+    --repo "$repo" --quiet
+
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.status == "failed"'
+  jq -e '.schema == "legion.attempt.v1" and .terminal_status == "failed"
+    and .failure.class == "provider"' "$(echo "$output" | jq -r .attempt_receipt)"
+  jq -e '.schema == "legion.failure.v1" and .class == "provider"' \
+    "$(echo "$output" | jq -r .failure_receipt)"
+}
+
+@test "delegate resume: admission preserves the kept run's read-only sandbox" {
+  local repo rid
+  repo="$(make_test_repo resume-read-only-admission)"
+  out="$("$DELEGATE" run --model test-model-alpha --sandbox read-only \
+    --task initial --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+
+  run "$DELEGATE" resume --run "$rid" --task "follow up" --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  jq -e '.compatibility.sandbox.requested == "read-only"' \
+    "$(echo "$output" | jq -r .preflight_receipt)"
+  jq -e '.sandbox == "read-only"' "$(echo "$output" | jq -r .attempt_receipt)"
 }
 
 @test "delegate resume: child lease timeout removes the kept worktree and branch" {
@@ -2366,6 +2440,50 @@ $run_error" ]
       { echo "review failed outright instead of falling through"; false; }
 }
 
+@test "delegate review: unavailable native admission falls through before provider launch" {
+    local repo; repo="$(make_test_repo review-admission-unavailable)"
+
+    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+      --repo "$repo" --quiet
+
+    [ -n "$output" ]
+    echo "$output" | jq -e '.preflight_receipt != null'
+    jq -e '.schema == "legion.preflight.v1" and .status == "unavailable"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
+    assert_mock_called agent "-p --output-format json"
+}
+
+@test "delegate review: incompatible native admission stops reviewer selection" {
+    local repo; repo="$(make_test_repo review-admission-incompatible)"
+
+    run "$DELEGATE" review --model test-model-beta --reasoning-effort ultra \
+      --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "refused" and .attempts == 0
+      and (.reason | contains("unsupported effort"))
+      and .attempt_receipt == null and .failure_receipt == null'
+    jq -e '.schema == "legion.preflight.v1" and .status == "incompatible"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    assert_mock_not_called codex
+    assert_mock_not_called agent
+}
+
+@test "delegate review: substantive route refusal stops reviewer selection" {
+    local repo; repo="$(make_test_repo review-route-refusal)"
+
+    LEGION_ACTIVE=1 LEGION_EXECUTOR=1 LEGION_DEPTH=1 \
+      LEGION_EXECUTOR_NAME=claude LEGION_RUN_ID=parent-review \
+      run "$DELEGATE" review --base HEAD --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "refused"
+      and .reason == "nested-delegation-requires-explicit-executor"
+      and .attempts == 0'
+    [ "$(grep -Ec '^(codex exec|agent -p) ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
+}
+
 @test "delegate review: a real rejection is never retried on another executor" {
     # The safety invariant behind the fallback: only an UNREACHABLE reviewer
     # yields to the next candidate. A reviewer that ran and rejected ends the
@@ -2558,6 +2676,33 @@ $run_error" ]
 
     run bash "$helper" "$err" "$out"
     [ "$status" -eq 0 ]
+}
+
+@test "delegate review: shared admission receipt distinguishes unavailable from incompatible" {
+    local helper err out unavailable_receipt incompatible_receipt
+    helper="$BATS_TEST_TMPDIR/probe-admission.sh"
+    err="$BATS_TEST_TMPDIR/admission.err"
+    out="$BATS_TEST_TMPDIR/admission.json"
+    unavailable_receipt="$BATS_TEST_TMPDIR/unavailable-preflight.json"
+    incompatible_receipt="$BATS_TEST_TMPDIR/incompatible-preflight.json"
+    : > "$err"
+    printf '{"schema":"legion.preflight.v1","status":"unavailable"}\n' > "$unavailable_receipt"
+    printf '{"schema":"legion.preflight.v1","status":"incompatible"}\n' > "$incompatible_receipt"
+    {
+      sed -n '/^review_executor_unavailable()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/delegate.sh"
+      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+    } > "$helper"
+
+    jq -cn --arg receipt "$unavailable_receipt" \
+      '{status:"refused",reason:"binary missing",preflight_receipt:$receipt}' > "$out"
+    run bash "$helper" "$err" "$out"
+    [ "$status" -eq 0 ]
+
+    jq -cn --arg receipt "$incompatible_receipt" \
+      '{status:"refused",reason:"policy refused",preflight_receipt:$receipt}' > "$out"
+    run bash "$helper" "$err" "$out"
+    [ "$status" -ne 0 ]
 }
 
 @test "delegate review: a clean adapter result is not treated as unavailable" {

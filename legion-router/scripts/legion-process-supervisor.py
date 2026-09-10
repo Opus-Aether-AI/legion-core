@@ -4,9 +4,10 @@
 Process groups and bare PIDs are insufficient: a child may call ``setsid()``,
 and either identifier can be reused after exit. The supervisor therefore keeps
 kernel-bound process identities (Darwin unique IDs plus PID-version tokens, or
-Linux pidfds). Production macOS callers additionally provide a random inherited
+Linux pidfds). Every macOS launch additionally receives a random inherited
 Seatbelt-policy fingerprint, which remains observable after a rapid child
-reparenting sheds every user-space identity channel.
+reparenting sheds every user-space identity channel. Callers that already apply
+a filesystem sandbox may supply its fingerprint canaries instead.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import errno
 import json
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -192,13 +194,41 @@ def _darwin_sandbox_probe(deny_canary: str, allow_canary: str) -> bool:
         return False
 
 
+def _darwin_launch_fingerprint(command: list[str]) -> tuple[list[str], str, str, str]:
+    """Apply a unique inherited Seatbelt fingerprint to one direct launch."""
+
+    sandbox_exec = Path("/usr/bin/sandbox-exec")
+    if not sandbox_exec.is_file():
+        raise ProcessInspectionError("Darwin sandbox-exec is unavailable")
+    fingerprint_dir = Path(tempfile.mkdtemp(prefix="legion-supervisor-fingerprint."))
+    fingerprint_dir.chmod(0o700)
+    deny_canary = fingerprint_dir / "deny"
+    allow_canary = fingerprint_dir / "allow"
+    deny_canary.touch(mode=0o600)
+    allow_canary.touch(mode=0o600)
+    deny_path = str(deny_canary.resolve(strict=True))
+    allow_path = str(allow_canary.resolve(strict=True))
+    # tempfile-generated paths do not contain quotes on Darwin. Still escape
+    # both SBPL string metacharacters so a caller-controlled TMPDIR cannot alter
+    # the policy that identifies this launch.
+    literal = deny_path.replace("\\", "\\\\").replace('"', '\\"')
+    protected_dir = (
+        str(fingerprint_dir.resolve(strict=True)).replace("\\", "\\\\").replace('"', '\\"')
+    )
+    profile = (
+        f'(version 1)(allow default)(deny file-read* (literal "{literal}"))'
+        f'(deny file-write* (subpath "{protected_dir}"))'
+    )
+    return [str(sandbox_exec), "-p", profile, *command], deny_path, allow_path, str(fingerprint_dir)
+
+
 def _token_pids(token: str) -> set[int]:
     marker = f"LEGION_SUPERVISOR_TOKEN={token}".encode()
     result: set[int] = set()
     if sys.platform == "darwin":
         # KERN_PROCARGS2 does not reliably expose another process's
-        # environment on current macOS. Production sandboxed runs use the
-        # unforgeable Seatbelt fingerprint below instead.
+        # environment on current macOS. Supervised runs use the inherited
+        # Seatbelt fingerprint below instead.
         return result
 
     proc = Path("/proc")
@@ -706,8 +736,20 @@ def main() -> int:
         print("legion-process-supervisor: command is required", file=sys.stderr)
         return 2
 
+    absolute_deadline_ns: Optional[int] = None
+    inherited_deadline = os.environ.get("LEGION_CHILD_LEASE_DEADLINE_NS", "")
+    if inherited_deadline:
+        try:
+            absolute_deadline_ns = int(inherited_deadline)
+            if absolute_deadline_ns < 1:
+                raise ValueError
+        except ValueError:
+            print("legion-process-supervisor: invalid inherited child lease deadline", file=sys.stderr)
+            return 2
+
     deny_canary = arguments.darwin_sandbox_deny_canary
     allow_canary = arguments.darwin_sandbox_allow_canary
+    fingerprint_dir = ""
     if bool(deny_canary) != bool(allow_canary):
         print("legion-process-supervisor: both Darwin sandbox canaries are required", file=sys.stderr)
         return 2
@@ -732,6 +774,17 @@ def main() -> int:
         allow_canary = str(allow_path)
         if not _darwin_sandbox_probe(deny_canary, allow_canary):
             print("legion-process-supervisor: Darwin sandbox inspection is unavailable", file=sys.stderr)
+            return 2
+
+    if sys.platform == "darwin" and not deny_canary:
+        try:
+            command, deny_canary, allow_canary, fingerprint_dir = _darwin_launch_fingerprint(command)
+            if not _darwin_sandbox_probe(deny_canary, allow_canary):
+                raise ProcessInspectionError("Darwin sandbox inspection is unavailable")
+        except (OSError, ProcessInspectionError) as error:
+            if fingerprint_dir:
+                shutil.rmtree(fingerprint_dir, ignore_errors=True)
+            print(f"legion-process-supervisor: cannot establish Darwin process fingerprint: {error}", file=sys.stderr)
             return 2
 
     process: Optional[subprocess.Popen[bytes]] = None
@@ -773,6 +826,8 @@ def main() -> int:
         tracker = DescendantTracker(process.pid, supervisor_token, deny_canary, allow_canary)
         tracker.start()
         deadline = time.monotonic() + arguments.max_runtime_seconds
+        if absolute_deadline_ns is not None:
+            deadline = min(deadline, absolute_deadline_ns / 1_000_000_000)
         while process.poll() is None:
             tracker.raise_if_error()
             now = time.monotonic()
@@ -814,6 +869,8 @@ def main() -> int:
             if not cleanup_attempted:
                 cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
             cleanup_ok = tracker.close() and cleanup_ok
+        if fingerprint_dir:
+            shutil.rmtree(fingerprint_dir, ignore_errors=True)
 
     if not cleanup_ok:
         _write_status(

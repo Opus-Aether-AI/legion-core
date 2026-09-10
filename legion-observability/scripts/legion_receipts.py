@@ -102,6 +102,14 @@ def _validate_cache_lineage(value):
             _require_string(f"cache_lineage.{name}", item)
 
 
+def _validate_terminal_failure(terminal_status, failure):
+    if terminal_status == "succeeded":
+        if failure is not None:
+            raise ValueError("successful attempts cannot contain a typed failure")
+    elif failure is None:
+        raise ValueError("non-successful attempts require a typed failure")
+
+
 def failure_receipt(*, run_id, attempt_id, failure_class, retryable, output_started,
                     provider_code=None, message=None, failure_id=None, ts=None):
     _require_string("run_id", run_id)
@@ -178,6 +186,7 @@ def attempt_receipt(*, run_id, ordinal, executor, provider, config_identity,
     _validate_provenance("usage", usage, usage_status, usage_source, aggregate=child_attempts is not None)
     _validate_provenance("cost", cost_usd, cost_status, cost_source, aggregate=child_attempts is not None)
     _validate_cache_lineage(cache_lineage)
+    _validate_terminal_failure(terminal_status, failure)
     if failure is not None:
         validate_failure(failure)
         if failure["run_id"] != run_id:
@@ -186,8 +195,6 @@ def attempt_receipt(*, run_id, ordinal, executor, provider, config_identity,
             raise ValueError("failure attempt_id does not match attempt")
         if failure["output_started"] != output_started:
             raise ValueError("failure output_started does not match attempt")
-    elif terminal_status != "succeeded":
-        raise ValueError("non-successful attempts require a typed failure")
     actual_attempt_id = attempt_id or (failure["attempt_id"] if failure is not None else _identifier("attempt"))
     if child_attempts is not None:
         if any(child["run_id"] != run_id for child in child_attempts):
@@ -298,14 +305,13 @@ def validate_attempt(receipt):
     if isinstance(receipt["duration_ms"], bool) or not isinstance(receipt["duration_ms"], (int, float)) \
             or receipt["duration_ms"] < 0:
         raise ValueError("duration_ms must be non-negative")
+    _validate_terminal_failure(receipt["terminal_status"], receipt["failure"])
     if receipt["failure"] is not None:
         validate_failure(receipt["failure"])
         if receipt["failure"]["run_id"] != receipt["run_id"] \
                 or receipt["failure"]["attempt_id"] != receipt["attempt_id"] \
                 or receipt["failure"]["output_started"] != receipt["output_started"]:
             raise ValueError("failure lineage does not match attempt")
-    elif receipt["terminal_status"] != "succeeded":
-        raise ValueError("non-successful attempts require a typed failure")
     if receipt["attempt_kind"] not in {"provider", "aggregate"}:
         raise ValueError("attempt_kind must be provider or aggregate")
     if receipt["attempt_kind"] == "provider":

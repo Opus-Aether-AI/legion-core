@@ -67,12 +67,49 @@ set -euo pipefail
 [[ "${1:-}" == -f && -f "${2:-}" ]]
 shift 2
 receipt="$3"
-provider="$5"
-jq -cn --arg token "$LEGION_PROVIDER_LAUNCH_TOKEN" --arg executable "$provider" '
-  {schema:"legion.provider-launch.v1",status:"launch_failed",token:$token,
+provider="$6"
+jq -cn --arg executable "$provider" '
+  {schema:"legion.provider-launch.v1",status:"launch_failed",token:"untrusted",
    executable_path:$executable,reason:"malformed fixture",errno:2,extra:true}
 ' > "$receipt"
 exit 127
+SH
+  chmod +x "$shim_dir/sandbox-exec"
+  export LEGION_FS_SANDBOX_BIN="$shim_dir/sandbox-exec"
+}
+
+install_pending_launch_sandbox() {
+  local shim_dir="$TEST_TMPDIR/pending-sandbox"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/sandbox-exec" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == -f && -f "${2:-}" ]]
+shift 2
+receipt="$3"
+token_file="$4"
+provider="$6"
+python3 - "$receipt" "$provider" "$token_file" <<'PY'
+import hashlib
+import hmac
+import json
+from pathlib import Path
+import sys
+
+path, executable, token_path = sys.argv[1:]
+token = Path(token_path).read_text(encoding="ascii").strip()
+Path(token_path).unlink()
+payload = {
+    "schema": "legion.provider-launch.v1",
+    "status": "pending",
+    "executable_path": executable,
+}
+encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+payload["auth"] = hmac.new(token.encode(), encoded, hashlib.sha256).hexdigest()
+Path(path).write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+: > "$MOCK_PENDING_LAUNCH_READY"
+sleep 30
 SH
   chmod +x "$shim_dir/sandbox-exec"
   export LEGION_FS_SANDBOX_BIN="$shim_dir/sandbox-exec"
@@ -241,7 +278,8 @@ assert_typed_pre_provider_timeout() {
     jq -e '.status == "completed" and .child_exit_code == 127' "$lease"
     jq -e --arg executable "$provider" '
       .schema == "legion.provider-launch.v1" and .status == "launch_failed"
-      and .executable_path == $executable and (.token | length == 64)
+      and .executable_path == $executable and (.auth | length == 64)
+      and (has("token") | not)
       and (has("child_exit_code") | not)
     ' "$launch"
     art="$repo/.legion/runs/$run_id"
@@ -300,7 +338,7 @@ SH
   done
 }
 
-@test "malformed inner no-launch evidence fails closed as a provider attempt" {
+@test "malformed inner no-launch evidence is containment failure with conservative spend" {
   local repo result attempt launch
   repo="$(make_test_repo malformed)"
   install_malformed_launch_sandbox
@@ -310,17 +348,65 @@ SH
   [ "$status" -ne 0 ]
   result="$output"
   echo "$result" | jq -e '
-    .status == "failed" and .provider_exit == 127
+    .status == "containment_failed" and .provider_exit == 127
     and (.attempt_receipt | type == "string")
     and (.failure_receipt | type == "string")
-    and .provider_launch_receipt == null
+    and .usage == null and .tokens == null and .usage_status == "unknown"
+    and .cost_usd == null and .cost_status == "unknown"
+    and (.provider_launch_receipt | type == "string")
+    and (.reason | contains("provider launch evidence remained malformed"))
+    and (.worktree | contains("malformed-launch"))
   '
   attempt="$(echo "$result" | jq -r '.attempt_receipt')"
-  jq -e '.terminal_status == "failed" and .failure.class == "provider"' "$attempt"
+  jq -e '.terminal_status == "failed" and .failure.class == "internal"' "$attempt"
   launch="$(dirname "$(echo "$result" | jq -r '.lease_receipt')")/tmp/provider-launch.json"
   jq -e '.status == "launch_failed" and .extra == true' "$launch"
+  [ "$(find "$(dirname "$launch")/.." -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(find "$(dirname "$launch")/.." -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
   jq -s -e '[.[] | select(.artifacts.provider_attempt == true)] | length == 1' \
     "$LEGION_TELEMETRY_DIR"/*.jsonl
+}
+
+@test "Pi and Hermes signals in the pending launch window fail containment without spend" {
+  local adapter signal adapter_signal repo run_id result_file error_file pid rc art launch
+  for adapter_signal in pi:TERM hermes:HUP; do
+    adapter="${adapter_signal%%:*}"
+    signal="${adapter_signal##*:}"
+    repo="$(make_test_repo "pending-signal-$adapter")"
+    run_id="pending-signal-$adapter"
+    result_file="$TEST_TMPDIR/$adapter-pending-signal.json"
+    error_file="$TEST_TMPDIR/$adapter-pending-signal.err"
+    export MOCK_PENDING_LAUNCH_READY="$TEST_TMPDIR/$adapter-pending-launch-ready"
+    install_pending_launch_sandbox
+    PI_BIN=pi HERMES_BIN=hermes \
+      "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task inspect \
+        --repo "$repo" --run-id "$run_id" --quiet > "$result_file" 2> "$error_file" &
+    pid=$!
+    for _ in $(seq 1 200); do
+      [[ -f "$MOCK_PENDING_LAUNCH_READY" ]] && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    [ -f "$MOCK_PENDING_LAUNCH_READY" ]
+    kill -"$signal" "$pid"
+    rc=0; wait "$pid" || rc=$?
+    [ "$rc" -eq 70 ]
+    [ ! -s "$result_file" ]
+    art="$repo/.legion/runs/$run_id"
+    launch="$art/tmp/provider-launch.json"
+    jq -e '.schema == "legion.provider-launch.v1" and .status == "pending"
+      and (.auth | type == "string" and length == 64) and (has("token") | not)' "$launch"
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
+    [ -d "$repo/.legion/worktrees/$run_id" ]
+    assert_mock_not_called "$adapter"
+  done
+  if compgen -G "$LEGION_TELEMETRY_DIR/*.jsonl" >/dev/null; then
+    run jq -s -e '[.[] | select(.artifacts.provider_attempt == true)] | length > 0' \
+      "$LEGION_TELEMETRY_DIR"/*.jsonl
+    [ "$status" -ne 0 ]
+  fi
 }
 
 @test "Hermes terminal metering follows its canonical attempt receipt" {
@@ -364,7 +450,7 @@ SH
 }
 
 @test "a provider that really launches and exits 127 remains a billable attempt" {
-  local repo provider result attempt lease
+  local repo provider result attempt lease launch
   repo="$(make_test_repo provider-127)"
   provider="$TEST_TMPDIR/pi-exits-127"
   printf '%s\n' \
@@ -372,6 +458,7 @@ SH
     'if [[ "${1:-}" == --version ]]; then printf "pi 1.0.0\n"; exit 0; fi' \
     'exit 127' > "$provider"
   chmod +x "$provider"
+  provider="$(cd "${provider%/*}" && pwd -P)/${provider##*/}"
 
   run env PI_BIN="$provider" "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
     --repo "$repo" --run-id provider-exits-127 --quiet
@@ -387,5 +474,12 @@ SH
   jq -e '.terminal_status == "failed" and .failure.class == "provider"' "$attempt"
   lease="$(echo "$result" | jq -r '.lease_receipt')"
   jq -e '.status == "completed" and .child_exit_code == 127' "$lease"
-  [ ! -e "$(dirname "$lease")/tmp/provider-launch.json" ]
+  launch="$(dirname "$lease")/tmp/provider-launch.json"
+  jq -e --arg executable "$provider" '
+    .schema == "legion.provider-launch.v1" and .status == "started"
+    and .executable_path == $executable
+    and (.provider_pid | type == "number" and . >= 1)
+    and (.auth | type == "string" and length == 64)
+    and (has("token") | not)
+  ' "$launch"
 }

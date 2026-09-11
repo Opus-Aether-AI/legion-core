@@ -208,6 +208,16 @@ remaining = int(sys.argv[1]) - time.monotonic_ns()
 print(max(0, (remaining + 999_999_999) // 1_000_000_000))
 PY
 }
+write_strict_no_launch_lease() {
+  local path="$1" reason="$2" runtime="$3" tmp=""
+  tmp="$(mktemp "${path}.tmp.XXXXXX")" || return 1
+  jq -cn --arg reason "$reason" --argjson runtime "$runtime" '
+    {schema:"legion.child-execution-lease.v1",status:"launch_failed",
+     reason:$reason,max_runtime_seconds:$runtime}
+  ' > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$path"
+}
 kill_codex_child() {
   local pid="${CODEX_CHILD_PID:-}"
   [[ -n "$pid" ]] || return 0
@@ -2196,11 +2206,26 @@ cmd_run() {
     cp "$LEGION_ADAPTER_PREFLIGHT_PATH" "$art/codex-preflight-$candidate_ordinal.json"
     local attempt_runtime
     attempt_runtime="$(child_lease_remaining_seconds)"
+    used_model="$attempt"
     if [[ "$attempt_runtime" -lt 1 ]]; then
       lease_exhausted=1
+      rc=124
+      lease_receipt="$art/lease-$((attempt_ordinal + 1)).json"
+      lease_reason="child execution lease expired before provider launch"
+      if ! write_strict_no_launch_lease "$lease_receipt" "$lease_reason" \
+          "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"; then
+        containment_failed=1
+        LEGION_WT_KEEP=1
+        lease_reason="unable to persist authenticated no-launch lease evidence (expected: $lease_receipt; worktree retained: $wt)"
+      fi
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      rm -f "$art/attempt.json" "$art/failure.json"
+      : > "$art/stream.jsonl"
+      : > "$art/last-message.txt"
+      : > "$art/codex.err"
       break
     fi
-    used_model="$attempt"
     attempt_ordinal=$((attempt_ordinal + 1))
     local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
     attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
@@ -3557,6 +3582,12 @@ cmd_review() {
   for _cand in "${review_candidates[@]}"; do
     _cand_n=$((_cand_n + 1))
     IFS='|' read -r review_executor review_kind review_model_ref <<< "$_cand"
+    # Stable aliases describe only the current candidate. Immutable numbered
+    # receipts and review_attempt_receipts retain all prior paid attempts, but a
+    # later preflight/lease/setup/launch no-spend stop must not inherit them.
+    rm -f "$art/attempt.json" "$art/failure.json"
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
     review_preflight_receipt=""
     review_attempt_receipt=""
     review_failure_receipt=""

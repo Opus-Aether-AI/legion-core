@@ -160,6 +160,36 @@ SH
     export PATH="$shim_dir:$PATH"
 }
 
+install_exhausted_remaining_seconds_python_shim() {
+    local shim_dir="$TEST_TMPDIR/exhausted-remaining-python" real_python
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+  cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == - ]]; then
+  source_file="$(mktemp)"
+  trap 'rm -f "$source_file"' EXIT
+  cat > "$source_file"
+  if grep -q 'remaining = int(sys.argv\[1\]) - time.monotonic_ns()' "$source_file"; then
+    count=0
+    [[ ! -f "$LEGION_TEST_REMAINING_COUNT_FILE" ]] || count="$(cat "$LEGION_TEST_REMAINING_COUNT_FILE")"
+    printf '%s\n' "$((count + 1))" > "$LEGION_TEST_REMAINING_COUNT_FILE"
+    value="$(printf '%s\n' "${LEGION_TEST_REMAINING_VALUES:-0}" | cut -d, -f"$((count + 1))")"
+    [[ -n "$value" ]] || value=0
+    printf '%s\n' "$value"
+    exit 0
+  fi
+  exec "$LEGION_TEST_REAL_PYTHON" "$@" < "$source_file"
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export LEGION_TEST_REMAINING_COUNT_FILE="$TEST_TMPDIR/remaining-seconds-count"
+    : > "$LEGION_TEST_REMAINING_COUNT_FILE"
+    export PATH="$shim_dir:$PATH"
+}
+
 # Simulate a supervisor that returned after the provider ran but lost its
 # durable lease sidecar. The prompt reviewer must not treat the provider's
 # otherwise valid answer/attempt as safe enough to continue or approve.
@@ -2704,7 +2734,8 @@ case "$incarnation" in
 esac
 jq -cn --argjson pid "$$" --arg incarnation "$collision" \
   '{schema:"legion.native-provider-span-claim.v1",publisher_pid:$pid,
-    publisher_incarnation:$incarnation,token:"prior"}' > "$lock"
+    publisher_incarnation:$incarnation,
+    token:"111111111111111111111111111111111111111111111111"}' > "$lock"
 native_provider_span_claim "$attempt"
 jq -e --arg incarnation "$incarnation" '.publisher_incarnation == $incarnation' "$lock"
 native_provider_span_release "$attempt"
@@ -3129,6 +3160,63 @@ PY
   [ "$status" -eq 1 ]
   echo "$output" | jq -e '.status == "timed_out"'
   [ "$elapsed" -lt 5 ]
+}
+
+@test "delegate run: an exhausted lease before first launch has canonical no-launch identity" {
+  local repo result lease run_id
+  repo="$(make_test_repo codex-prelaunch-exhausted-lease)"
+  install_exhausted_remaining_seconds_python_shim
+
+  run "$DELEGATE" run --model test-model-beta --task x --repo "$repo" \
+    --max-runtime-seconds 30 --quiet
+
+  [ "$status" -eq 1 ]
+  result="$(printf '%s\n' "$output" | tail -n 1)"
+  echo "$result" | jq -e '.status == "timed_out"
+    and .model == "test-model-beta" and .codex_exit == 124
+    and .attempt_receipt == null and .failure_receipt == null
+    and (.lease_receipt | type == "string" and length > 0)
+    and (.reason | contains("child execution lease expired"))'
+  lease="$(echo "$result" | jq -r .lease_receipt)"
+  jq -e '.schema == "legion.child-execution-lease.v1"
+    and .status == "launch_failed"
+    and (.reason | contains("expired before provider launch"))
+    and .max_runtime_seconds == 30
+    and (has("child_exit_code") | not)
+    and ((keys_unsorted - ["schema","status","reason","max_runtime_seconds"]) | length == 0)' \
+    "$lease"
+  run_id="$(echo "$result" | jq -r .run_id)"
+  [ ! -e "$repo/.legion/runs/$run_id/attempt.json" ]
+  [ ! -e "$repo/.legion/runs/$run_id/failure.json" ]
+  [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
+}
+
+@test "delegate run: fallback candidate lease exhaustion retains prior spend and current no-launch identity" {
+  local repo result art lease
+  repo="$(make_test_repo codex-fallback-prelaunch-exhausted)"
+  install_exhausted_remaining_seconds_python_shim
+  export LEGION_TEST_REMAINING_VALUES=30,0
+
+  LEGION_ROUTE_PRE_RESOLVED=1 LEGION_RESOLVED_EXECUTOR=codex \
+    LEGION_RESOLVED_FALLBACK=test-model-beta MOCK_CODEX_QUOTA_FAIL="$CODEX_WORKHORSE" \
+    run "$DELEGATE" run --archetype route-does-not-exist --executor codex \
+      --model "$CODEX_WORKHORSE" --sandbox workspace-write --reasoning-effort high \
+      --task x --repo "$repo" --max-runtime-seconds 30 --quiet
+
+  [ "$status" -eq 1 ]
+  result="$(printf '%s\n' "$output" | tail -n 1)"
+  echo "$result" | jq -e '.status == "timed_out"
+    and .model == "test-model-beta" and .codex_exit == 124
+    and .attempt_receipt == null and .failure_receipt == null
+    and .metering_reconciliation.attempt_count == 1'
+  lease="$(echo "$result" | jq -r .lease_receipt)"
+  art="$(dirname "$lease")"
+  jq -e '.status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+  jq -e --arg paid "$CODEX_WORKHORSE" '
+    .requested_model == $paid and .failure.class == "quota"' "$art/attempt-1.json"
+  [ ! -e "$art/attempt.json" ]
+  [ ! -e "$art/failure.json" ]
+  [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 1 ]
 }
 
 @test "delegate run: --archetype routing to executor=self is refused" {
@@ -4041,7 +4129,7 @@ PY
     export LEGION_TEST_LAUNCH_FAIL_EXECUTABLE=agent
     install_launch_failed_supervisor_shim
 
-    CODEX_BIN=missing-codex-for-review OPENCODE_BIN=missing-opencode-for-review \
+    MOCK_CODEX_REVIEW_QUOTA=1 OPENCODE_BIN=missing-opencode-for-review \
       CLAUDE_BIN=missing-claude-for-review run "$DELEGATE" review --base HEAD \
         --repo "$repo" --quiet
 
@@ -4054,6 +4142,10 @@ PY
     jq -e '.schema == "legion.child-execution-lease.v1" and .status == "launch_failed"' "$lease"
     [ ! -f "$(dirname "$lease")/attempt.json" ]
     [ ! -f "$(dirname "$lease")/failure.json" ]
+    [ ! -e "$art/attempt.json" ]
+    [ ! -e "$art/failure.json" ]
+    jq -e '.executor == "codex-review" and .failure.class == "unavailable"' \
+      "$art/attempt-1.json"
     [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s \
       '[.[] | select(.artifacts.provider_attempt == true and .executor == "cursor")] | length')" -eq 0 ]
     # A launch failure is candidate-local: the outer walk must advance rather
@@ -4203,11 +4295,11 @@ SH
 }
 
 @test "delegate review: authenticated untested prompt preflight is a zero-attempt refusal" {
-    local repo preflight
+    local repo preflight art
     repo="$(make_test_repo review-prompt-admission-untested)"
     install_authenticated_untested_preflight_shim cursor "$CURSOR_DEFAULT"
 
-    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+    MOCK_CODEX_REVIEW_QUOTA=1 run "$DELEGATE" review --base HEAD \
       --repo "$repo" --quiet
 
     [ "$status" -eq 1 ]
@@ -4218,6 +4310,17 @@ SH
     jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"
       and .status == "untested" and (.identity | type) == "object"
       and .compatibility.version.status == "untested"' "$preflight"
+    art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    [ ! -e "$art/attempt.json" ]
+    [ ! -e "$art/failure.json" ]
+    jq -e '.executor == "codex-review" and .failure.class == "unavailable"' \
+      "$art/attempt-1.json"
+    local run_id
+    run_id="$(echo "$output" | jq -r .run_id)"
+    jq -s -e --arg run "$run_id" '
+      any(.[]; .run_id == $run and .artifacts.rollup_only == true
+        and .artifacts.metering_reconciliation.attempt_count == 1)
+    ' "$LEGION_TELEMETRY_DIR"/*.jsonl
     assert_mock_not_called agent
     assert_mock_not_called opencode
     assert_mock_not_called claude

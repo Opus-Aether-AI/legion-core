@@ -477,10 +477,17 @@ SH
     lease="$(find "$art" -maxdepth 1 -name 'lease*.json' -print -quit)"
     [ -n "$lease" ]
     jq -e '.status == "cleanup_failed" and (.reason | contains("signal drain failed"))' "$lease"
-    jq -e '.terminal_status == "failed" and .failure.class == "internal"
-      and (.failure.message | contains("worktree retained"))' "$art/attempt-1.json"
-    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
-    [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    if [[ "$adapter" == pi || "$adapter" == hermes ]]; then
+      # Their authenticated inner launch boundary proves this fixture never
+      # reached a provider, even though outer descendant cleanup failed.
+      [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+      [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    else
+      jq -e '.terminal_status == "failed" and .failure.class == "internal"
+        and (.failure.message | contains("worktree retained"))' "$art/attempt-1.json"
+      [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+      [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    fi
     jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
     [ -d "$repo/.legion/worktrees/$run_id" ]
   done

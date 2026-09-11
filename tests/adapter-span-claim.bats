@@ -157,7 +157,8 @@ teardown() {
     esac
     jq -cn --argjson pid "$$" --arg incarnation "$collision" \
       '\''{schema:"legion.provider-span-claim.v1",publisher_pid:$pid,
-          publisher_incarnation:$incarnation,token:"prior"}'\'' > "$claim/owner.json"
+          publisher_incarnation:$incarnation,
+          token:"111111111111111111111111111111111111111111111111"}'\'' > "$claim/owner.json"
     legion_adapter_claim_provider_span "$attempt"
     jq -e --arg incarnation "$incarnation" \
       '\''.publisher_incarnation == $incarnation'\'' "$claim/owner.json"

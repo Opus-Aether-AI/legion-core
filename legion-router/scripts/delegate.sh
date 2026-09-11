@@ -943,15 +943,64 @@ native_provider_span_claim() {
     : > "$claim/committed"
     return 2
   fi
-  # shlock's link(2)-based transition atomically replaces a stale owner. Two
-  # reclaimers therefore cannot unlink one another's newly acquired live lock.
-  # On platforms without shlock, acquire only a fresh lock via O_EXCL and leave
-  # stale recovery fail-closed rather than using a racy read/unlink/write cycle.
-  if command -v shlock >/dev/null 2>&1; then
-    shlock -p "$$" -f "$lock" >/dev/null 2>&1 || return 1
-  else
-    ( set -C; printf '%s\n' "$$" > "$lock" ) 2>/dev/null || return 1
-  fi
+  # Serialize both fresh acquisition and stale-owner replacement on the stable
+  # lock inode. This is portable across the macOS and Linux runners; relying on
+  # the macOS-only shlock utility left Linux unable to recover any stale claim.
+  # O_NOFOLLOW plus the regular-file check keeps an artifact-path substitution
+  # from turning the lock operation into an arbitrary file write.
+  local lock_outcome
+  lock_outcome="$(python3 - "$lock" "$$" <<'PY'
+import fcntl
+import os
+import stat
+import sys
+
+path, owner_text = sys.argv[1:]
+owner_pid = int(owner_text)
+flags = os.O_RDWR | os.O_CREAT
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+try:
+    descriptor = os.open(path, flags, 0o600)
+except OSError:
+    raise SystemExit(1)
+try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise SystemExit(1)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("busy")
+        raise SystemExit(0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    raw_owner = os.read(descriptor, 64).decode("ascii", errors="strict").strip()
+    prior_pid = None
+    if raw_owner:
+        if not raw_owner.isdigit() or int(raw_owner) < 1:
+            print("busy")
+            raise SystemExit(0)
+        prior_pid = int(raw_owner)
+    if prior_pid is not None and prior_pid != owner_pid:
+        try:
+            os.kill(prior_pid, 0)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            print("busy")
+            raise SystemExit(0)
+        else:
+            print("busy")
+            raise SystemExit(0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    os.ftruncate(descriptor, 0)
+    os.write(descriptor, f"{owner_pid}\n".encode("ascii"))
+    os.fsync(descriptor)
+    print("acquired")
+finally:
+    os.close(descriptor)
+PY
+)" || return 1
+  [[ "$lock_outcome" == acquired ]] || return 1
   # The prior owner may have appended just before it died. Reconcile after
   # acquiring ownership so telemetry, rather than a marker directory, wins.
   if native_provider_span_is_recorded "$attempt_path"; then

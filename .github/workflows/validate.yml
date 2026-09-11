@@ -408,6 +408,7 @@ jobs:
             --exclude-pattern=/tests/ \
             coverage-output \
             bats \
+              tests/bin-path.bats \
               tests/conventional-title.bats \
               tests/install.bats \
               tests/legion-primary-setup.bats \

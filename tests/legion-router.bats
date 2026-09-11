@@ -80,12 +80,31 @@ install_cleanup_failed_supervisor_shim() {
     cat > "$shim_dir/python3" <<'SH'
 #!/usr/bin/env bash
 if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
-  status_file=""
+  status_file=""; launch_gate=""; launch_token=""; max_runtime=30
   while [[ $# -gt 0 ]]; do
-    if [[ "$1" == --status-file ]]; then status_file="$2"; break; fi
-    shift
+    case "$1" in
+      --status-file) status_file="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime="$2"; shift 2 ;;
+      --launch-gate-file) launch_gate="$2"; shift 2 ;;
+      --launch-gate-token) launch_token="$2"; shift 2 ;;
+      *) shift ;;
+    esac
   done
-  printf '%s\n' '{"schema":"legion.child-execution-lease.v1","status":"cleanup_failed","reason":"forced cleanup evidence","max_runtime_seconds":30}' > "$status_file"
+  temp="$(mktemp "${launch_gate%/*}/.cleanup-ready.XXXXXX")"
+  jq -cn --arg token "$launch_token" --argjson pid "$$" \
+    '{schema:"legion.child-launch-gate.v1",status:"ready",token:$token,supervisor_pid:$pid}' > "$temp"
+  chmod 600 "$temp"; mv -f "$temp" "$launch_gate"
+  for ((i = 0; i < 500; i++)); do
+    jq -e --arg token "$launch_token" --argjson pid "$$" \
+      '.status == "go" and .token == $token and .supervisor_pid == $pid' "$launch_gate" >/dev/null 2>&1 && break
+    sleep 0.02
+  done
+  temp="$(mktemp "${launch_gate%/*}/.cleanup-started.XXXXXX")"
+  jq -cn --arg token "$launch_token" --argjson pid "$$" \
+    '{schema:"legion.child-launch-gate.v1",status:"started",token:$token,supervisor_pid:$pid,child_pid:$pid}' > "$temp"
+  chmod 600 "$temp"; mv -f "$temp" "$launch_gate"
+  jq -cn --argjson runtime "$max_runtime" \
+    '{schema:"legion.child-execution-lease.v1",status:"cleanup_failed",reason:"forced cleanup evidence",max_runtime_seconds:$runtime}' > "$status_file"
   exit 70
 fi
 exec "$LEGION_TEST_REAL_PYTHON" "$@"
@@ -3225,9 +3244,13 @@ SH
   precision="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_precision)"
   workhorse="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
 
-  MOCK_CODEX_QUOTA_FAIL="$precision" MOCK_CODEX_DELAY=2 \
+  # Leave enough admission margin for the authenticated ready/go/started
+  # handshake while ensuring the second paid attempt outlives the one shared
+  # absolute lease. Integer-second deadline rounding can consume nearly one
+  # second before the first provider starts on a loaded runner.
+  MOCK_CODEX_QUOTA_FAIL="$precision" MOCK_CODEX_DELAY=4 \
     run "$DELEGATE" run --archetype migration --task x --repo "$repo" \
-      --max-runtime-seconds 3 --quiet
+      --max-runtime-seconds 7 --quiet
 
   [ "$status" -eq 1 ]
   echo "$output" | jq -e '.status == "timed_out"'
@@ -4425,11 +4448,11 @@ SH
 }
 
 @test "delegate review: authenticated prompt incompatibility is a zero-attempt refusal" {
-    local repo preflight
+    local repo preflight art terminal run_id
     repo="$(make_test_repo review-prompt-admission-incompatible)"
     install_authenticated_incompatible_preflight_shim cursor "$CURSOR_DEFAULT"
 
-    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+    MOCK_CODEX_REVIEW_QUOTA=1 run "$DELEGATE" review --base HEAD \
       --repo "$repo" --quiet
 
     [ "$status" -eq 1 ]
@@ -4441,13 +4464,25 @@ SH
     jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"
       and .status == "incompatible" and .identity == null
       and .compatibility.model.status == "incompatible"' "$preflight"
+    art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    terminal="$art/terminal.json"
+    jq -e --arg model "$CURSOR_DEFAULT" '
+      .executor == "cursor-review" and .model == $model' "$terminal"
+    jq -e '.executor == "codex-review" and .failure.class == "unavailable"' \
+      "$art/attempt-1.json"
+    run_id="$(echo "$output" | jq -r .run_id)"
+    jq -s -e --arg run "$run_id" --arg model "$CURSOR_DEFAULT" '
+      any(.[]; .run_id == $run and .artifacts.rollup_only == true
+        and .executor == "cursor-review" and .model == $model
+        and .artifacts.metering_reconciliation.attempt_count == 1)
+    ' "$LEGION_TELEMETRY_DIR"/*.jsonl
     assert_mock_not_called agent
     assert_mock_not_called opencode
     assert_mock_not_called claude
 }
 
 @test "delegate review: authenticated untested prompt preflight is a zero-attempt refusal" {
-    local repo preflight art
+    local repo preflight art terminal
     repo="$(make_test_repo review-prompt-admission-untested)"
     install_authenticated_untested_preflight_shim cursor "$CURSOR_DEFAULT"
 
@@ -4463,14 +4498,18 @@ SH
       and .status == "untested" and (.identity | type) == "object"
       and .compatibility.version.status == "untested"' "$preflight"
     art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
+    terminal="$art/terminal.json"
     [ ! -e "$art/attempt.json" ]
     [ ! -e "$art/failure.json" ]
+    jq -e --arg model "$CURSOR_DEFAULT" '
+      .executor == "cursor-review" and .model == $model' "$terminal"
     jq -e '.executor == "codex-review" and .failure.class == "unavailable"' \
       "$art/attempt-1.json"
     local run_id
     run_id="$(echo "$output" | jq -r .run_id)"
     jq -s -e --arg run "$run_id" '
       any(.[]; .run_id == $run and .artifacts.rollup_only == true
+        and .executor == "cursor-review"
         and .artifacts.metering_reconciliation.attempt_count == 1)
     ' "$LEGION_TELEMETRY_DIR"/*.jsonl
     assert_mock_not_called agent

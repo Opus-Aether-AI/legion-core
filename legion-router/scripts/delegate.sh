@@ -151,6 +151,7 @@ NATIVE_ATTEMPT_LAST_MESSAGE=""
 NATIVE_ATTEMPT_STARTED_AT=""
 NATIVE_ATTEMPT_START_MS=0
 NATIVE_ATTEMPT_LAUNCHED=0
+NATIVE_LAUNCH_GATE_UNRESOLVED=0
 NATIVE_PROVIDER_SPAN_CLAIM_TOKEN=""
 NATIVE_LEASE_STATUS=""
 NATIVE_RESUME_ART=""
@@ -165,6 +166,8 @@ TERMINATING_SIGNAL_ACTIVE=0
 SANDCASTLE_SETUP_REFUSED=0
 SANDCASTLE_PROVIDER_MARKER=""
 SANDCASTLE_PROVIDER_TOKEN=""
+SANDCASTLE_CONTAINMENT_FAILED=0
+SANDCASTLE_CONTAINMENT_REASON=""
 PROMPT_CHILD_PID=""
 PROMPT_CHILD_RC=0
 PROMPT_ATTEMPT_LAUNCHED=0
@@ -213,6 +216,16 @@ write_strict_no_launch_lease() {
   tmp="$(mktemp "${path}.tmp.XXXXXX")" || return 1
   jq -cn --arg reason "$reason" --argjson runtime "$runtime" '
     {schema:"legion.child-execution-lease.v1",status:"launch_failed",
+     reason:$reason,max_runtime_seconds:$runtime}
+  ' > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$path"
+}
+write_strict_containment_lease() {
+  local path="$1" reason="$2" runtime="$3" tmp=""
+  tmp="$(mktemp "${path}.tmp.XXXXXX")" || return 1
+  jq -cn --arg reason "$reason" --argjson runtime "$runtime" '
+    {schema:"legion.child-execution-lease.v1",status:"cleanup_failed",
      reason:$reason,max_runtime_seconds:$runtime}
   ' > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
@@ -378,6 +391,7 @@ terminalize_interrupted_native_resume() {
 on_terminating_signal() {
   trap - INT TERM HUP
   TERMINATING_SIGNAL_ACTIVE=1
+  local caught_signal="${1:-TERM}"
   local interrupted_native_art="${NATIVE_ATTEMPT_ART:-}"
   local interrupted_native_executor="${NATIVE_ATTEMPT_EXECUTOR:-}"
   local interrupted_native_model="${NATIVE_ATTEMPT_MODEL:-}"
@@ -385,6 +399,7 @@ on_terminating_signal() {
   local interrupted_native_launched="${NATIVE_ATTEMPT_LAUNCHED:-0}"
   local interrupted_native_sandbox="${NATIVE_ATTEMPT_SANDBOX:-}"
   local child_rc="$CODEX_CHILD_RC" terminal_status=failed terminal_reason=interrupted provider_exit=143
+  case "$caught_signal" in HUP) provider_exit=129 ;; INT) provider_exit=130 ;; esac
   local supervised_pid="${CODEX_SIGNAL_CHILD_PID:-unknown}"
   local signal_worktree="${LEGION_WT_PATH:-${REVIEW_WT_PATH:-}}"
   if [[ "$NATIVE_RUN_ROLLUP_COMMITTED" -eq 1 ]]; then
@@ -449,8 +464,16 @@ on_terminating_signal() {
     terminal_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: $signal_worktree)"
   elif legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
     terminal_status=failed
-    provider_exit=1
     terminal_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (no provider launched; evidence: $NATIVE_LEASE_STATUS)"
+    if [[ "$interrupted_native_executor" == codex-review \
+        && "$interrupted_native_launched" -ne 1 ]]; then
+      REVIEW_RECEIPT_ATTEMPT="${#review_attempt_receipts[@]}"
+      review_attempt_receipt=""
+      review_failure_receipt=""
+    fi
+    if [[ "$terminal_reason" != *"cancelled by SIG"* ]]; then
+      provider_exit=1
+    fi
   elif [[ "$child_rc" -eq 70 ]]; then
     terminal_status=containment_failed
     provider_exit=70
@@ -693,11 +716,44 @@ error_log_summary() {
 
 # Run codex exec for one model into $art files; sets the caller's $rc (dynamic scope).
 # Reads $sandbox $wt $effort $task $art from the calling function.
+complete_native_supervisor_launch_gate() {
+  local lease_status="$1" launch_gate="$2" runtime="$3" worktree="$4"
+  NATIVE_LAUNCH_GATE_UNRESOLVED=0
+  legion_adapter_complete_supervisor_launch_gate \
+    "$CODEX_CHILD_PID" "$lease_status" NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL
+  case "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" in
+    started)
+      NATIVE_ATTEMPT_LAUNCHED=1
+      ;;
+    launch_failed)
+      NATIVE_ATTEMPT_LAUNCHED=0
+      ;;
+    *)
+      # The gate proves the supervisor installed its handlers before it could
+      # create a child. Signal only that supervisor and let it own descendant
+      # cleanup; an unauthenticated state can never authorize paid accounting.
+      kill -TERM "$CODEX_CHILD_PID" 2>/dev/null || true
+      wait "$CODEX_CHILD_PID" 2>/dev/null || true
+      CODEX_CHILD_PID=""
+      CODEX_CHILD_RC=70
+      NATIVE_ATTEMPT_LAUNCHED=0
+      NATIVE_LAUNCH_GATE_UNRESOLVED=1
+      LEGION_WT_KEEP=1
+      legion_adapter_write_launch_gate_containment_lease \
+        "$lease_status" "$launch_gate" "$worktree" "$runtime" || true
+      ;;
+  esac
+}
+
 run_codex() {
   local lease_status="$art/lease-$attempt_ordinal.json"
+  local launch_gate="$art/native-launch-gate-$attempt_ordinal.json"
   NATIVE_LEASE_STATUS="$lease_status"
+  legion_adapter_prepare_supervisor_launch_gate "$launch_gate" \
+    || die 'unable to prepare trusted native supervisor launch gate'
   local -a supervisor=(python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt"
-    --max-runtime-seconds "$attempt_runtime" --status-file "$lease_status" --)
+    --max-runtime-seconds "$attempt_runtime" --status-file "$lease_status"
+    --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" --)
   set +e
   native_span_publication_begin
   if [[ -n "$effort" ]]; then
@@ -713,13 +769,18 @@ run_codex() {
     CODEX_CHILD_PID=$!
     CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
   fi
-  NATIVE_ATTEMPT_LAUNCHED=1
+  complete_native_supervisor_launch_gate "$lease_status" "$launch_gate" \
+    "$attempt_runtime" "$wt"
   native_span_publication_end
   # Backgrounded + waited so on_terminating_signal can reap codex instead of
   # orphaning it; wait's status is codex's exit (== the old PIPESTATUS[1]).
-  wait "$CODEX_CHILD_PID"; rc=$?
-  CODEX_CHILD_RC="$rc"
-  CODEX_CHILD_PID=""
+  if [[ -n "$CODEX_CHILD_PID" ]]; then
+    wait "$CODEX_CHILD_PID"; rc=$?
+    CODEX_CHILD_RC="$rc"
+    CODEX_CHILD_PID=""
+  else
+    rc=70
+  fi
   set -e
 }
 
@@ -764,6 +825,8 @@ run_sandcastle() {
   local node_bin python_bin sandcastle_script provider_wrapper_dir provider_wrapper
   local provider_launcher provider_marker
   SANDCASTLE_SETUP_REFUSED=0
+  SANDCASTLE_CONTAINMENT_FAILED=0
+  SANDCASTLE_CONTAINMENT_REASON=""
   node_bin="$(command -v node 2>/dev/null || true)"
   [[ -n "$node_bin" ]] || {
     printf 'legion-delegate: node is required for --sandbox %s. Run: npm i -D @ai-hero/sandcastle\n' "$sandbox" >&2
@@ -854,24 +917,43 @@ PY
       effort:(if $effort=="" then null else $effort end)}' > "$input"
   set +e
   native_span_publication_begin
+  local lease_status="$art/lease-$attempt_ordinal.json"
+  local launch_gate="$art/sandcastle-supervisor-launch-gate-$attempt_ordinal.json"
+  legion_adapter_prepare_supervisor_launch_gate "$launch_gate" \
+    || die 'unable to prepare trusted Sandcastle supervisor launch gate'
   python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
     --max-runtime-seconds "$attempt_runtime" \
-    --status-file "$art/lease-$attempt_ordinal.json" -- \
+    --status-file "$lease_status" \
+    --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" -- \
     env "PATH=$provider_wrapper_dir:$PATH" "$node_bin" "$sandcastle_script" < "$input" \
     >"$art/sandcastle-result.json" 2>"$art/codex.err" &
   CODEX_CHILD_PID=$!
   CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
-  NATIVE_ATTEMPT_LAUNCHED=1
+  complete_native_supervisor_launch_gate "$lease_status" "$launch_gate" \
+    "$attempt_runtime" "$wt"
   native_span_publication_end
-  wait "$CODEX_CHILD_PID"; rc=$?
-  CODEX_CHILD_RC="$rc"
-  CODEX_CHILD_PID=""
+  if [[ -n "$CODEX_CHILD_PID" ]]; then
+    wait "$CODEX_CHILD_PID"; rc=$?
+    CODEX_CHILD_RC="$rc"
+    CODEX_CHILD_PID=""
+  else
+    rc=70
+  fi
   set -e
   # Sandcastle can fail while importing/configuring its backend with many exit
   # codes and messages. The trusted codex launcher marker distinguishes every
   # such no-spend setup failure from a real provider process that later failed.
   local provider_launch_status
   provider_launch_status="$(sandcastle_provider_launch_status)"
+  if [[ "$NATIVE_LAUNCH_GATE_UNRESOLVED" -eq 1 \
+      || "$provider_launch_status" == pending || "$provider_launch_status" == malformed ]]; then
+    SANDCASTLE_CONTAINMENT_FAILED=1
+    LEGION_WT_KEEP=1
+    rc=70
+    SANDCASTLE_CONTAINMENT_REASON="Sandcastle provider launch evidence is $provider_launch_status after supervisor drain (evidence: ${SANDCASTLE_PROVIDER_MARKER:-absent}; lease: $lease_status; worktree retained: $wt)"
+    write_strict_containment_lease "$lease_status" "$SANDCASTLE_CONTAINMENT_REASON" \
+      "$attempt_runtime" || SANDCASTLE_CONTAINMENT_REASON+="; strict containment sidecar could not be persisted"
+  fi
   if [[ "$rc" -ne 0 \
       && ( "$provider_launch_status" == absent || "$provider_launch_status" == not-started ) ]] \
       && ! legion_adapter_supervisor_timed_out "$art/lease-$attempt_ordinal.json" \
@@ -2278,6 +2360,21 @@ cmd_run() {
       run_codex "$attempt"
     fi
     attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
+    if [[ "$NATIVE_LAUNCH_GATE_UNRESOLVED" -eq 1 \
+        || "$SANDCASTLE_CONTAINMENT_FAILED" -eq 1 ]]; then
+      containment_failed=1
+      lease_receipt="$NATIVE_LEASE_STATUS"
+      lease_reason="${SANDCASTLE_CONTAINMENT_REASON:-$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS")}"
+      LEGION_WT_KEEP=1
+      rm -f "$art/attempt.json" "$art/failure.json"
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      NATIVE_ATTEMPT_ART=""
+      NATIVE_ATTEMPT_LAUNCHED=0
+      CODEX_SIGNAL_CHILD_PID=""
+      CODEX_CHILD_RC=0
+      break
+    fi
     if legion_adapter_supervisor_cleanup_failed_before_launch "$NATIVE_LEASE_STATUS"; then
       containment_failed=1
       lease_receipt="$NATIVE_LEASE_STATUS"
@@ -2461,6 +2558,13 @@ cmd_run() {
   known_usage_attempts="$(jq -r '.reconciliation.known_usage_attempts' <<<"$native_metering")"
   known_cost="$(jq -c '.reconciliation.known_cost_usd' <<<"$native_metering")"
   known_cost_attempts="$(jq -r '.reconciliation.known_cost_attempts' <<<"$native_metering")"
+  if [[ "$NATIVE_LAUNCH_GATE_UNRESOLVED" -eq 1 \
+      || "$SANDCASTLE_CONTAINMENT_FAILED" -eq 1 ]]; then
+    usage=null
+    cost=null
+    usage_status=unknown
+    cost_status=unknown
+  fi
 
   local diff_rc=0
   if [[ "$containment_failed" -eq 1 ]]; then
@@ -3662,6 +3766,10 @@ cmd_review() {
       note "⚠ reviewer '$review_executor' has no resolvable model ($review_model_ref); trying the next candidate"
       continue
     fi
+    # Terminal identity belongs to the candidate currently being admitted,
+    # independently of any earlier paid attempts retained for reconciliation.
+    REVIEW_EXECUTOR_LABEL="$review_executor"
+    REVIEW_RECEIPT_MODEL="$model"
     [[ "$_cand_n" -eq 1 ]] || note "→ falling back to reviewer '$review_executor'"
     review_restore_caller_context
     local route_admission="" route_admission_rc=0
@@ -3833,8 +3941,11 @@ cmd_review() {
     codex_review_args+=(--output-schema "$REVIEW_SCHEMA" -o "$attempt_verdict")
     if [[ "$review_kind" == "native" ]]; then
       local attempt_lease="$art/attempt-$attempt.lease.json"
+      local attempt_launch_gate="$art/native-review-launch-gate-$attempt.json"
       NATIVE_LEASE_STATUS="$attempt_lease"
       review_lease_receipt="$attempt_lease"
+      legion_adapter_prepare_supervisor_launch_gate "$attempt_launch_gate" \
+        || die 'unable to prepare trusted native review supervisor launch gate'
       native_attempt_started_at="$(_now)"
       native_attempt_start_ms="$(date +%s000)"
       NATIVE_ATTEMPT_ART="$art"
@@ -3850,21 +3961,43 @@ cmd_review() {
       NATIVE_ATTEMPT_LAUNCHED=0
       set +e
       native_span_publication_begin
-      ( cd "$wt" && python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+      ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
           --max-runtime-seconds "$attempt_runtime" \
-          --status-file "$attempt_lease" -- "$CODEX_BIN" "${codex_review_args[@]}" ) \
+          --status-file "$attempt_lease" \
+          --launch-gate-file "$attempt_launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" \
+          -- "$CODEX_BIN" "${codex_review_args[@]}" ) \
         </dev/null >"$attempt_stream" 2>"$attempt_err" &
       CODEX_CHILD_PID=$!
       CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
-      NATIVE_ATTEMPT_LAUNCHED=1
+      complete_native_supervisor_launch_gate "$attempt_lease" "$attempt_launch_gate" \
+        "$attempt_runtime" "$wt"
       native_span_publication_end
-      wait "$CODEX_CHILD_PID"; rc=$?
-      CODEX_CHILD_RC="$rc"
-      CODEX_CHILD_PID=""
+      if [[ -n "$CODEX_CHILD_PID" ]]; then
+        wait "$CODEX_CHILD_PID"; rc=$?
+        CODEX_CHILD_RC="$rc"
+        CODEX_CHILD_PID=""
+      else
+        rc=70
+      fi
       set -e
       native_attempt_end_ms="$(date +%s000)"
       native_attempt_ended_at="$(_now)"
-      if legion_adapter_supervisor_cleanup_failed_before_launch "$attempt_lease"; then
+      if [[ "$NATIVE_LAUNCH_GATE_UNRESOLVED" -eq 1 ]]; then
+        review_containment_failed=1
+        LEGION_WT_KEEP=1
+        status="containment_failed"
+        reason="$(legion_adapter_supervisor_reason "$attempt_lease") (evidence: $attempt_lease; worktree retained: $wt)"
+        attempt=$((attempt - 1))
+        REVIEW_RECEIPT_ATTEMPT="$attempt"
+        review_attempt_receipt=""
+        review_failure_receipt=""
+        NATIVE_ATTEMPT_ART=""
+        NATIVE_ATTEMPT_LAUNCHED=0
+        NATIVE_LEASE_STATUS=""
+        CODEX_SIGNAL_CHILD_PID=""
+        CODEX_CHILD_RC=0
+        break
+      elif legion_adapter_supervisor_cleanup_failed_before_launch "$attempt_lease"; then
         review_containment_failed=1
         LEGION_WT_KEEP=1
         status="containment_failed"
@@ -4074,12 +4207,6 @@ cmd_review() {
     usage_status=not_applicable
     cost_status=not_applicable
   fi
-  local effective_review_model actual_review_executor
-  effective_review_model="$(jq -r '.last.model // empty' <<<"$review_metering")"
-  actual_review_executor="$(jq -r '.last.executor // empty' <<<"$review_metering")"
-  [[ -z "$effective_review_model" ]] || model="$effective_review_model"
-  actual_review_executor="${actual_review_executor%-review}"
-  [[ -z "$actual_review_executor" ]] || REVIEW_EXECUTOR_LABEL="$actual_review_executor"
   # Every paid attempt has its own provider span. This outer review span is a
   # non-billable rollup for verdict/lifecycle provenance only.
   span_usage=null
@@ -4275,9 +4402,13 @@ cmd_resume() {
   started_at="$(_now)"; start_ms="$(date +%s000)"
   note "→ codex exec resume $thread_id (run $run)"
   local lease_status="$resume_art/lease-$resume_ordinal.json"
+  local resume_launch_gate="$resume_art/launch-gate-$resume_ordinal.json"
   NATIVE_LEASE_STATUS="$lease_status"
+  legion_adapter_prepare_supervisor_launch_gate "$resume_launch_gate" \
+    || die 'unable to prepare trusted native resume supervisor launch gate'
   local -a resume_supervisor=(python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt"
-    --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" --status-file "$lease_status" --)
+    --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" --status-file "$lease_status"
+    --launch-gate-file "$resume_launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" --)
   NATIVE_ATTEMPT_ART="$resume_art"
   NATIVE_ATTEMPT_EXECUTOR="codex-resume"
   NATIVE_ATTEMPT_ORDINAL="$resume_ordinal"
@@ -4294,33 +4425,50 @@ cmd_resume() {
   set +e
   native_span_publication_begin
   if [[ -n "$effort" ]]; then
-    printf '%s' "$task" | ( cd "$wt" && "${resume_supervisor[@]}" "$CODEX_BIN" exec resume "$thread_id" --json \
+    printf '%s' "$task" | ( cd "$wt" && exec "${resume_supervisor[@]}" "$CODEX_BIN" exec resume "$thread_id" --json \
         -m "$model" -c "model_reasoning_effort=$effort" --skip-git-repo-check \
         -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err" &
     CODEX_CHILD_PID=$!
     CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
   else
-    printf '%s' "$task" | ( cd "$wt" && "${resume_supervisor[@]}" "$CODEX_BIN" exec resume "$thread_id" --json \
+    printf '%s' "$task" | ( cd "$wt" && exec "${resume_supervisor[@]}" "$CODEX_BIN" exec resume "$thread_id" --json \
         -m "$model" --skip-git-repo-check \
         -o "$art/resume-last-message.txt" - ) >"$art/resume-stream.jsonl" 2>"$art/resume.err" &
     CODEX_CHILD_PID=$!
     CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
   fi
-  NATIVE_ATTEMPT_LAUNCHED=1
+  complete_native_supervisor_launch_gate "$lease_status" "$resume_launch_gate" \
+    "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" "$wt"
   native_span_publication_end
   # Backgrounded + waited so on_terminating_signal can reap codex; wait's status
   # is the codex subshell's exit (== the old PIPESTATUS[1]).
-  wait "$CODEX_CHILD_PID"; rc=$?
-  CODEX_CHILD_RC="$rc"
-  CODEX_CHILD_PID=""
+  if [[ -n "$CODEX_CHILD_PID" ]]; then
+    wait "$CODEX_CHILD_PID"; rc=$?
+    CODEX_CHILD_RC="$rc"
+    CODEX_CHILD_PID=""
+  else
+    rc=70
+  fi
   set -e
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
   local usage cost diff_rc=0 status="ok" reason="" wt_report="$wt" containment_failed=0
-  local launch_failed=0
+  local launch_failed=0 accounting_suppressed=0
   usage="$(codex_usage "$art/resume-stream.jsonl")"
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
-  if legion_adapter_supervisor_cleanup_failed "$lease_status"; then
+  if [[ "$NATIVE_LAUNCH_GATE_UNRESOLVED" -eq 1 ]]; then
+    containment_failed=1
+    accounting_suppressed=1
+    LEGION_WT_KEEP=1
+    status="containment_failed"
+    reason="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+    usage=null
+    cost=null
+    NATIVE_ATTEMPT_ART=""
+    NATIVE_ATTEMPT_LAUNCHED=0
+    CODEX_SIGNAL_CHILD_PID=""
+    CODEX_CHILD_RC=0
+  elif legion_adapter_supervisor_cleanup_failed "$lease_status"; then
     containment_failed=1
     LEGION_WT_KEEP=1
     status="containment_failed"
@@ -4391,7 +4539,12 @@ cmd_resume() {
   fi
   local terminal_usage=null terminal_cost=null
   local terminal_usage_status=not_applicable terminal_cost_status=not_applicable
-  if [[ "$launch_failed" -ne 1 ]]; then
+  if [[ "$accounting_suppressed" -eq 1 ]]; then
+    terminal_usage_status=unknown
+    terminal_cost_status=unknown
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
+  elif [[ "$launch_failed" -ne 1 ]]; then
     legion_adapter_write_attempt "$resume_art" codex-resume openai "$resume_ordinal" \
       "$model" "" "$effort" "$effort" "$resume_sandbox" "$terminal_status" \
       "$started_at" "$ended_at" "$dur" "$usage" "$usage_status" \

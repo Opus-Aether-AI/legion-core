@@ -89,6 +89,32 @@ teardown() {
   [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 1 ]
 }
 
+@test "valid JSON non-object claim owners are malformed and reclaimable" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    base="$2"
+    index=0
+    for payload in "[]" "null"; do
+      index=$((index + 1))
+      attempt="$base-$index.json"
+      printf "{}\n" > "$attempt"
+      mkdir -p "$attempt.provider-span-emitted"
+      printf "%s\n" "$payload" > "$attempt.provider-span-emitted/owner.json"
+      legion_adapter_claim_provider_span "$attempt"
+      jq -e "type == \"object\"
+        and .schema == \"legion.provider-span-claim.v1\"
+        and (.publisher_pid | type) == \"number\"
+        and (.publisher_incarnation | type) == \"string\"
+        and (.token | test(\"^[0-9a-f]{48}$\"))" \
+        "$attempt.provider-span-emitted/owner.json" >/dev/null
+      legion_adapter_release_provider_span_claim "$attempt"
+    done
+  ' _ "$CONTRACT" "$TEST_TMPDIR/non-object-owner"
+
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
 @test "concurrent publishers reconcile to exactly one durable provider span" {
   local calls="$TEST_TMPDIR/concurrent-calls" pid rc=0
   local -a pids=()

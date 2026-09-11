@@ -203,6 +203,11 @@ legion_adapter_complete_supervisor_launch_gate() {
     and .token == $token and .supervisor_pid == $pid
   ' "$gate" >/dev/null 2>&1 || return 0
   pending="${!pending_name:-}"
+  case "$pending" in
+    HUP) pending=1 ;;
+    INT) pending=2 ;;
+    TERM) pending=15 ;;
+  esac
   [[ -z "$pending" ]] || decision=cancel
   temp="$(mktemp "${gate%/*}/.launch-gate-decision.XXXXXX")" || return 0
   if ! jq -cn --arg status "$decision" --arg token "$token" \
@@ -246,10 +251,9 @@ legion_adapter_complete_supervisor_launch_gate() {
 # supervisor, replace any weaker sidecar with a strict containment receipt and
 # emit a machine-readable terminal envelope. Unknown is intentional here: the
 # failed gate cannot prove either spend or no-spend.
-legion_adapter_terminalize_launch_gate_containment() {
-  local executor="$1" model="$2" run_id="$3" preflight="$4"
-  local lease_path="$5" gate_path="$6" worktree="$7" max_runtime="$8"
-  local directory temp="" reason lease_receipt=""
+legion_adapter_write_launch_gate_containment_lease() {
+  local lease_path="$1" gate_path="$2" worktree="$3" max_runtime="$4"
+  local directory temp="" reason
   directory="${lease_path%/*}"
   reason="supervisor launch-gate authentication or handshake failed; launch state unresolved (gate: $gate_path; evidence: $lease_path; worktree retained: $worktree)"
   if [[ -n "$lease_path" && "$directory" != "$lease_path" && -d "$directory" \
@@ -263,9 +267,22 @@ legion_adapter_terminalize_launch_gate_containment() {
       && chmod 600 "$temp" \
       && mv -f "$temp" "$lease_path" \
       && legion_adapter_supervisor_cleanup_failed "$lease_path"; then
-    lease_receipt="$lease_path"
+    return 0
   else
     [[ -z "$temp" ]] || rm -f "$temp"
+    return 1
+  fi
+}
+
+legion_adapter_terminalize_launch_gate_containment() {
+  local executor="$1" model="$2" run_id="$3" preflight="$4"
+  local lease_path="$5" gate_path="$6" worktree="$7" max_runtime="$8"
+  local reason lease_receipt=""
+  reason="supervisor launch-gate authentication or handshake failed; launch state unresolved (gate: $gate_path; evidence: $lease_path; worktree retained: $worktree)"
+  if legion_adapter_write_launch_gate_containment_lease \
+      "$lease_path" "$gate_path" "$worktree" "$max_runtime"; then
+    lease_receipt="$lease_path"
+  else
     reason="$reason; strict containment sidecar could not be persisted"
   fi
   jq -cn --arg run "$run_id" --arg executor "$executor" --arg model "$model" \
@@ -649,7 +666,8 @@ with os.fdopen(descriptor, "r+", encoding="utf-8") as lock:
         with open(owner_path, encoding="utf-8") as source:
             candidate = json.load(source)
         if (
-            candidate.get("schema") == "legion.provider-span-claim.v1"
+            isinstance(candidate, dict)
+            and candidate.get("schema") == "legion.provider-span-claim.v1"
             and isinstance(candidate.get("publisher_pid"), int)
             and candidate["publisher_pid"] > 0
             and valid_incarnation(candidate.get("publisher_incarnation"), candidate["publisher_pid"])
@@ -658,7 +676,8 @@ with os.fdopen(descriptor, "r+", encoding="utf-8") as lock:
         ):
             owner = candidate
         elif (
-            candidate.get("schema") == "legion.provider-span-claim.v1"
+            isinstance(candidate, dict)
+            and candidate.get("schema") == "legion.provider-span-claim.v1"
             and isinstance(candidate.get("publisher_pid"), int)
             and candidate["publisher_pid"] > 0
             and isinstance(candidate.get("token"), str)

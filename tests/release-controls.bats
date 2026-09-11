@@ -499,6 +499,54 @@ EOF
     ! grep -q '^            "Repository-owned validation completed before this PR was opened.\\n")"' "$consumer"
 }
 
+@test "consumer update enforces complete SemVer 2.0 syntax before arbitration" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+    local validator="$TEST_TMPDIR/consumer-semver-validator.sh"
+    local comparator="$TEST_TMPDIR/consumer-semver-comparator.sh"
+    local assignment
+    assignment="$(grep -m1 '^          semver=' "$consumer")"
+    {
+      printf '%s\n' 'set -euo pipefail' "${assignment#          }"
+      printf '%s\n' '[[ "$1" =~ $semver ]]'
+    } > "$validator"
+    {
+      printf '%s\n' 'set -euo pipefail'
+      awk '
+        /^          semver_cmp\(\)/ { in_function = 1 }
+        in_function {
+          source_line = $0
+          sub(/^          /, "")
+          print
+          if (source_line == "          }") exit
+        }
+      ' "$consumer"
+      printf '%s\n' 'semver_cmp "$1" "1.0.0" >/dev/null'
+    } > "$comparator"
+
+    local version
+    for version in \
+      1.0.0- 1.0.0-alpha..1 1.0.0-01 1.0.0-alpha.01 \
+      1.0.0+ 1.0.0+build..1; do
+      run bash "$validator" "$version"
+      [ "$status" -ne 0 ]
+      run bash "$comparator" "$version"
+      [ "$status" -ne 0 ]
+    done
+
+    for version in \
+      1.0.0 1.0.0-0 1.0.0-alpha.1 1.0.0-alpha-01 \
+      1.0.0+001 1.0.0-alpha+build.001; do
+      run bash "$validator" "$version"
+      [ "$status" -eq 0 ]
+      run bash "$comparator" "$version"
+      [ "$status" -eq 0 ]
+    done
+
+    # Incoming payload, comparator, and checked-in/candidate pin validation
+    # must all carry the complete prerelease grammar.
+    [ "$(grep -Fc '[0-9]*[A-Za-z-][0-9A-Za-z-]*' "$consumer")" -eq 3 ]
+}
+
 @test "consumer update retires only the exact stale draft candidate" {
     local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
     local step="$TEST_TMPDIR/retire-stale-candidate.sh"

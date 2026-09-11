@@ -27,19 +27,38 @@ install_signal_cleanup_failed_python() {
   local shim="$TEST_TMPDIR/python-shim" real_python
   real_python="$(command -v python3)"
   mkdir -p "$shim"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'if [[ "${1:-}" == */legion-process-supervisor.py ]]; then' \
-    '  status_file=""' \
-    '  while [[ $# -gt 0 ]]; do' \
-    '    if [[ "$1" == --status-file ]]; then status_file="$2"; break; fi' \
-    '    shift' \
-    '  done' \
-    "  trap 'printf \"%s\\n\" \"{\\\"schema\\\":\\\"legion.child-execution-lease.v1\\\",\\\"status\\\":\\\"cleanup_failed\\\",\\\"reason\\\":\\\"codex signal cleanup failed\\\",\\\"max_runtime_seconds\\\":30}\" > \"\$status_file\"; exit 70' TERM" \
-    '  : > "$LEGION_TEST_SUPERVISOR_STARTED"' \
-    '  while true; do sleep 1; done' \
-    'fi' \
-    'exec "$LEGION_TEST_REAL_PYTHON" "$@"' > "$shim/python3"
+  cat > "$shim/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  status_file=""; gate=""; token=""; runtime=30
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status-file) status_file="$2"; shift 2 ;;
+      --max-runtime-seconds) runtime="$2"; shift 2 ;;
+      --launch-gate-file) gate="$2"; shift 2 ;;
+      --launch-gate-token) token="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  trap 'printf "%s\n" "{\"schema\":\"legion.child-execution-lease.v1\",\"status\":\"cleanup_failed\",\"reason\":\"codex signal cleanup failed\",\"max_runtime_seconds\":$runtime}" > "$status_file"; exit 70' TERM
+  temp="$(mktemp "${gate%/*}/.native-ready.XXXXXX")"
+  jq -cn --arg token "$token" --argjson pid "$$" \
+    '{schema:"legion.child-launch-gate.v1",status:"ready",token:$token,supervisor_pid:$pid}' > "$temp"
+  chmod 600 "$temp"; mv -f "$temp" "$gate"
+  for ((i = 0; i < 500; i++)); do
+    jq -e --arg token "$token" --argjson pid "$$" \
+      '.status == "go" and .token == $token and .supervisor_pid == $pid' "$gate" >/dev/null 2>&1 && break
+    sleep 0.02
+  done
+  temp="$(mktemp "${gate%/*}/.native-started.XXXXXX")"
+  jq -cn --arg token "$token" --argjson pid "$$" \
+    '{schema:"legion.child-launch-gate.v1",status:"started",token:$token,supervisor_pid:$pid,child_pid:$pid}' > "$temp"
+  chmod 600 "$temp"; mv -f "$temp" "$gate"
+  : > "$LEGION_TEST_SUPERVISOR_STARTED"
+  while true; do sleep 1; done
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
   chmod +x "$shim/python3"
   export LEGION_TEST_REAL_PYTHON="$real_python"
   export PATH="$shim:$PATH"
@@ -60,7 +79,8 @@ assert_internal_attempt() {
   jq -e '.terminal_status == "failed" and .failure.class == "internal"
     and (.failure.message | contains("codex signal cleanup failed"))' "$attempt"
   [ "$(find "$(dirname "$attempt")" -maxdepth 1 -name 'attempt-*.json' \
-    ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 1 ]
+    ! -name '*.lease.json' ! -name '*.launch-gate.json' ! -name '*.verdict.json' \
+    | wc -l | tr -d ' ')" -eq 1 ]
   [ "$(find "$(dirname "$attempt")" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
 }
 
@@ -117,6 +137,7 @@ install_sandcastle_pending_python() {
     '    jq -cn --arg token "$token" --arg status "${MOCK_SANDCASTLE_MARKER_STATE:-pending}" '\''{schema:"legion.sandcastle-provider-launch.v1",token:$token,status:$status}'\'' > "$marker"' \
     '  fi' \
     '  : > "$LEGION_TEST_PROVIDER_MARKER_READY"' \
+    '  [[ "${MOCK_SANDCASTLE_MARKER_EXIT_IMMEDIATELY:-0}" != 1 ]] || exit 0' \
     '  sleep 30' \
     '  exit 143' \
     'fi' \
@@ -185,6 +206,63 @@ install_sandcastle_pending_python() {
   assert_internal_attempt "$art/resume-1/attempt-1.json"
   jq -e '.status == "failed" and .result_status == "containment_failed"' "$art/status.json"
   [ -d "$repo/.legion/worktrees/$run_id" ]
+}
+
+@test "native run review and resume cancel at the authenticated post-fork gate without paid attempts" {
+  local bash_env="$TEST_TMPDIR/native-post-fork-signal.bash" repo pid rc art run_id receipt
+  cat > "$bash_env" <<'SH'
+set -T
+trap 'case "$BASH_COMMAND" in complete_native_supervisor_launch_gate*)
+  if [[ "${LEGION_TEST_NATIVE_POST_FORK_SIGNALLED:-0}" == 0 ]]; then
+    LEGION_TEST_NATIVE_POST_FORK_SIGNALLED=1
+    kill -TERM "$$"
+  fi
+;; esac' DEBUG
+SH
+
+  repo="$(make_repo native-post-fork-run)"
+  rc=0
+  BASH_ENV="$bash_env" "$DELEGATE" run --executor codex --model "$CODEX_MODEL" \
+    --task wait --repo "$repo" --run-id native-post-fork-run --keep --quiet \
+    >"$TEST_TMPDIR/native-post-fork-run.out" 2>"$TEST_TMPDIR/native-post-fork-run.err" || rc=$?
+  [ "$rc" -eq 143 ]
+  art="$repo/.legion/runs/native-post-fork-run"
+  [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' \
+    ! -name '*.launch-gate.json' ! -name '*.verdict.json' | wc -l | tr -d ' ')" -eq 0 ]
+  jq -e '.status == "launch_failed" and (.reason | contains("final pre-launch gate"))' "$art/lease-1.json"
+  ! grep -q '^codex exec ' "$MOCK_CALL_LOG"
+
+  : > "$MOCK_CALL_LOG"
+  repo="$(make_repo native-post-fork-review)"
+  rc=0
+  BASH_ENV="$bash_env" "$DELEGATE" review --model "$CODEX_MODEL" --base HEAD \
+    --repo "$repo" --max-attempts 1 --quiet \
+    >"$TEST_TMPDIR/native-post-fork-review.out" 2>"$TEST_TMPDIR/native-post-fork-review.err" || rc=$?
+  [ "$rc" -eq 143 ]
+  receipt="$(find "$repo/.legion/runs" -name terminal.json -print -quit)"
+  art="$(dirname "$receipt")"
+  jq -e '.status == "failed" and .attempts == 0 and .codex_exit == 143' "$receipt" \
+    || { cat "$receipt" >&2; return 1; }
+  [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' \
+    ! -name '*.launch-gate.json' ! -name '*.verdict.json' | wc -l | tr -d ' ')" -eq 0 ]
+  jq -e '.status == "launch_failed"' "$art/attempt-1.lease.json"
+  ! grep -q '^codex exec ' "$MOCK_CALL_LOG"
+
+  : > "$MOCK_CALL_LOG"
+  repo="$(make_repo native-post-fork-resume)"
+  run "$DELEGATE" run --executor codex --model "$CODEX_MODEL" --task seed \
+    --repo "$repo" --keep --quiet
+  [ "$status" -eq 0 ]
+  run_id="$(jq -r .run_id <<<"$output")"
+  : > "$MOCK_CALL_LOG"
+  rc=0
+  BASH_ENV="$bash_env" "$DELEGATE" resume --run "$run_id" --task wait --repo "$repo" --quiet \
+    >"$TEST_TMPDIR/native-post-fork-resume.out" 2>"$TEST_TMPDIR/native-post-fork-resume.err" || rc=$?
+  [ "$rc" -eq 143 ]
+  art="$repo/.legion/runs/$run_id/resume-1"
+  [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 0 ]
+  jq -e '.status == "launch_failed"' "$art/lease-1.json"
+  ! grep -q '^codex exec ' "$MOCK_CALL_LOG"
 }
 
 @test "prompt review forwards TERM to adapter and preserves its canonical receipts" {
@@ -377,5 +455,43 @@ install_sandcastle_pending_python() {
     jq -e '.lifecycle.phase == "containment_failed"' \
       "$LEGION_REGISTRY_DIR/sandcastle-$state-signal.json"
     [ -d "$repo/.legion/worktrees/sandcastle-$state-signal" ]
+  done
+}
+
+@test "Sandcastle pending and malformed markers suppress accounting after success or lease expiry" {
+  local state mode repo rc art result lease
+  install_mock_sandcastle_provider_node
+  install_sandcastle_pending_python
+  for mode in success timeout; do
+    for state in pending malformed; do
+      repo="$(make_repo "sandcastle-$state-$mode")"
+      export MOCK_SANDCASTLE_MARKER_STATE="$state"
+      export LEGION_TEST_PROVIDER_MARKER_READY="$TEST_TMPDIR/$state-$mode-ready"
+      if [[ "$mode" == success ]]; then
+        export MOCK_SANDCASTLE_MARKER_EXIT_IMMEDIATELY=1
+      else
+        export MOCK_SANDCASTLE_MARKER_EXIT_IMMEDIATELY=0
+      fi
+      rc=0
+      "$DELEGATE" run --model "$CODEX_MODEL" --sandbox docker --task wait \
+        --repo "$repo" --run-id "sandcastle-$state-$mode" --max-runtime-seconds 1 \
+        --keep --quiet >"$TEST_TMPDIR/$state-$mode.out" 2>"$TEST_TMPDIR/$state-$mode.err" || rc=$?
+      [ "$rc" -eq 1 ] || { printf 'state=%s mode=%s rc=%s out=%s err=%s\n' \
+        "$state" "$mode" "$rc" "$(cat "$TEST_TMPDIR/$state-$mode.out")" \
+        "$(cat "$TEST_TMPDIR/$state-$mode.err")" >&2; return 1; }
+      result="$(tail -n 1 "$TEST_TMPDIR/$state-$mode.out")"
+      jq -e '.status == "containment_failed" and .attempt_receipt == null
+        and .failure_receipt == null and .usage_status == "unknown"
+        and .cost_status == "unknown"' <<<"$result"
+      art="$repo/.legion/runs/sandcastle-$state-$mode"
+      lease="$(jq -r .lease_receipt <<<"$result")"
+      jq -e '.status == "cleanup_failed" and (.reason | contains("provider launch evidence"))' "$lease"
+      [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 0 ]
+      [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s --arg run "sandcastle-$state-$mode" \
+        '[.[] | select(.run_id == $run and .artifacts.provider_attempt == true)] | length')" -eq 0 ]
+      jq -e '.lifecycle.phase == "containment_failed"' \
+        "$LEGION_REGISTRY_DIR/sandcastle-$state-$mode.json"
+      [ -d "$repo/.legion/worktrees/sandcastle-$state-$mode" ]
+    done
   done
 }

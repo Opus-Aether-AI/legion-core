@@ -318,10 +318,49 @@ def test_command_disappearing_before_popen_still_writes_lease_receipt(
     receipt = json.loads(status_file.read_text(encoding="utf-8"))
     assert receipt == {
         "schema": "legion.child-execution-lease.v1",
-        "status": "completed",
+        "status": "launch_failed",
         "reason": f"child launch failed: command not found: {missing}",
         "max_runtime_seconds": 2,
     }
+
+
+def test_popen_execution_error_is_typed_as_no_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_file = tmp_path / "launch-denied.json"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_launch_denied", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+
+    def denied(*_args, **_kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied", "/fixture/provider")
+
+    monkeypatch.setattr(supervisor.sys, "platform", "linux")
+    monkeypatch.setattr(supervisor.subprocess, "Popen", denied)
+    monkeypatch.setattr(
+        supervisor.sys,
+        "argv",
+        [
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "2",
+            "--status-file",
+            str(status_file),
+            "--",
+            "/fixture/provider",
+        ],
+    )
+
+    assert supervisor.main() == 126
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["schema"] == "legion.child-execution-lease.v1"
+    assert receipt["status"] == "launch_failed"
+    assert receipt["max_runtime_seconds"] == 2
+    assert "Permission denied" in receipt["reason"]
+    assert "child_exit_code" not in receipt
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt fingerprints are Darwin-only")

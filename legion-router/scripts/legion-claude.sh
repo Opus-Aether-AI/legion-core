@@ -406,7 +406,7 @@ cmd_run() {
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
   local base_commit=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
-  local read_only_violation=0
+  local read_only_violation=0 provider_launched=0 launch_failed=0 launch_reason=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -514,7 +514,7 @@ cmd_run() {
   out_file="$tmpdir/claude.out.json"
   err_file="$tmpdir/claude.err"
   artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" \
-    '{provider_attempt:true,stdout:$stdout, stderr:$stderr}')"
+    '{stdout:$stdout, stderr:$stderr}')"
 
   if has_low_claude_credit; then
     low_credit=1
@@ -656,6 +656,20 @@ cmd_run() {
     set -e
     attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
     attempt_duration=$((attempt_end_ms-attempt_start_ms))
+    if legion_adapter_supervisor_launch_failed "$lease_status"; then
+      # The typed sidecar proves Popen failed before creating a provider child.
+      # Retain it as terminal evidence, but never fabricate a paid-attempt
+      # receipt or span for this model.
+      launch_failed=1
+      launch_reason="$(legion_adapter_supervisor_reason \
+        "$lease_status" "provider launch failed before process creation")"
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      break
+    fi
+    # Missing or malformed no-launch evidence fails closed as a provider
+    # attempt. All other typed supervisor outcomes imply Popen returned a child.
+    provider_launched=1
     local attempt_is_error attempt_result attempt_usage attempt_cost attempt_effective
     local attempt_usage_status=unknown attempt_usage_source="" attempt_cost_status=unknown attempt_cost_source=""
     local attempt_output_started=false attempt_failure=provider attempt_retryable=false attempt_terminal=failed
@@ -809,17 +823,23 @@ cmd_run() {
       --arg wt "$wt_report" --arg diff "$diff_path" --arg declined "$claude_chain_note" \
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
       --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-      '{provider_attempt:true,stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff,
+      --argjson provider_launched "$provider_launched" \
+      '{stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff,
         preflight_receipt:$preflight,
         attempt_receipt:(if $attempt=="" then null else $attempt end),
         failure_receipt:(if $failure=="" then null else $failure end)}
+       + (if $provider_launched == 1 then {provider_attempt:true} else {} end)
        + (if $declined == "" then {} else {declined_models:$declined} end)')"
     export LEGION_CLAUDE_WORKTREE="$wt_report" LEGION_CLAUDE_DIFF="$diff_path"
   fi
   end_ms="$(date +%s000)"
   dur=$(( end_ms - start_ms ))
 
-  if [[ "$chain_stopped_before_launch" -eq 1 ]]; then
+  if [[ "$launch_failed" -eq 1 ]]; then
+    usage='{}'
+    cost="$chain_cost"
+    result="$launch_reason"
+  elif [[ "$chain_stopped_before_launch" -eq 1 ]]; then
     # out_file still belongs to the previous paid decline. It already has its
     # own durable receipt/span and its cost was banked in chain_cost; treating
     # it as the later preflight-only model would duplicate both identity and
@@ -864,6 +884,18 @@ cmd_run() {
     span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_model="$(jq -r '.effective_model // .requested_model // "unknown"' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_duration="$(jq -r '.duration_ms' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+  fi
+
+  if [[ "$launch_failed" -eq 1 ]]; then
+    status="failed"
+    reason="$launch_reason"
+    finish_claude_signal_accounting
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    return 1
   fi
 
   if [[ "$containment_failed" -eq 1 ]]; then

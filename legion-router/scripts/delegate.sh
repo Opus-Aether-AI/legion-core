@@ -160,7 +160,6 @@ NATIVE_RUN_TERMINAL_EXIT=1
 NATIVE_RUN_ART=""
 NATIVE_RUN_TERMINAL_KIND=""
 NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=""
-NATIVE_SPAN_PUBLICATION_CRITICAL=0
 TERMINATING_SIGNAL_ACTIVE=0
 SANDCASTLE_SETUP_REFUSED=0
 PROMPT_CHILD_PID=""
@@ -258,6 +257,13 @@ write_interrupted_native_attempt() {
   # yet been disarmed.
   if [[ -f "$NATIVE_ATTEMPT_ART/attempt-$NATIVE_ATTEMPT_ORDINAL.json" ]]; then
     NATIVE_ATTEMPT_ART=""
+    return 0
+  fi
+  if legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
+    # Popen never returned a child, so even a signal arriving after the
+    # supervisor exits must not invent a cancelled provider attempt.
+    NATIVE_ATTEMPT_ART=""
+    NATIVE_ATTEMPT_LAUNCHED=0
     return 0
   fi
   local ended_at end_ms duration usage cost output_started=false lease_status="" child_rc
@@ -396,6 +402,10 @@ on_terminating_signal() {
     terminal_status=containment_failed
     provider_exit=70
     terminal_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: $signal_worktree)"
+  elif legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
+    terminal_status=failed
+    provider_exit=1
+    terminal_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (no provider launched; evidence: $NATIVE_LEASE_STATUS)"
   elif [[ "$child_rc" -eq 70 ]]; then
     terminal_status=containment_failed
     provider_exit=70
@@ -662,7 +672,7 @@ is_sandcastle_sandbox() {
 # Sandcastle writes the diff directly to $art/diff.patch; the rest of the
 # delegate flow consumes that same artifact path.
 run_sandcastle() {
-  local node_bin sandcastle_script
+  local node_bin sandcastle_script provider_wrapper_dir provider_wrapper provider_marker
   SANDCASTLE_SETUP_REFUSED=0
   node_bin="$(command -v node 2>/dev/null || true)"
   [[ -n "$node_bin" ]] || {
@@ -672,6 +682,14 @@ run_sandcastle() {
     return 0
   }
   sandcastle_script="$_self_dir/sandcastle-run.mjs"
+  provider_wrapper_dir="$art/sandcastle-provider-bin"
+  provider_wrapper="$provider_wrapper_dir/codex"
+  provider_marker="$art/sandcastle-provider-launched"
+  mkdir -p "$provider_wrapper_dir"
+  rm -f "$provider_marker"
+  printf '#!/usr/bin/env bash\nset -e\n: > %q\nexec %q "$@"\n' \
+    "$provider_marker" "$CODEX_BIN" > "$provider_wrapper"
+  chmod 700 "$provider_wrapper"
   : > "$art/stream.jsonl"
   local input="$art/sandcastle-input.json"
   jq -cn \
@@ -687,7 +705,7 @@ run_sandcastle() {
   python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
     --max-runtime-seconds "$attempt_runtime" \
     --status-file "$art/lease-$attempt_ordinal.json" -- \
-    "$node_bin" "$sandcastle_script" < "$input" \
+    env "PATH=$provider_wrapper_dir:$PATH" "$node_bin" "$sandcastle_script" < "$input" \
     >"$art/sandcastle-result.json" 2>"$art/codex.err" &
   CODEX_CHILD_PID=$!
   CODEX_SIGNAL_CHILD_PID="$CODEX_CHILD_PID"
@@ -697,7 +715,12 @@ run_sandcastle() {
   CODEX_CHILD_RC="$rc"
   CODEX_CHILD_PID=""
   set -e
-  if [[ "$rc" -eq 3 ]] && grep -qF '@ai-hero/sandcastle not installed.' "$art/codex.err"; then
+  # Sandcastle can fail while importing/configuring its backend with many exit
+  # codes and messages. The trusted codex launcher marker distinguishes every
+  # such no-spend setup failure from a real provider process that later failed.
+  if [[ "$rc" -ne 0 && ! -f "$provider_marker" ]] \
+      && ! legion_adapter_supervisor_timed_out "$art/lease-$attempt_ordinal.json" \
+      && ! legion_adapter_supervisor_cleanup_failed "$art/lease-$attempt_ordinal.json"; then
     SANDCASTLE_SETUP_REFUSED=1
   fi
   # Surface the wrapper's stderr (e.g. the @ai-hero/sandcastle install hint on
@@ -825,7 +848,6 @@ emit_span() {
 }
 
 native_span_publication_begin() {
-  NATIVE_SPAN_PUBLICATION_CRITICAL=1
   NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=""
   if [[ "$TERMINATING_SIGNAL_ACTIVE" -eq 1 ]]; then
     # The terminal handler is already committed to exiting. A second signal
@@ -843,13 +865,84 @@ native_span_publication_begin() {
 native_span_publication_end() {
   local pending="$NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL"
   NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=""
-  NATIVE_SPAN_PUBLICATION_CRITICAL=0
   if [[ "$TERMINATING_SIGNAL_ACTIVE" -eq 1 ]]; then
     trap - INT TERM HUP
   else
     trap on_terminating_signal INT TERM HUP
     [[ -z "$pending" ]] || on_terminating_signal "$pending"
   fi
+}
+
+native_provider_span_is_recorded() {
+  local attempt_path="$1" span_file
+  [[ -n "$attempt_path" && -d "$LEGION_TELEMETRY_DIR" ]] || return 1
+  for span_file in "$LEGION_TELEMETRY_DIR"/*.jsonl; do
+    [[ -f "$span_file" ]] || continue
+    jq -e --arg attempt "$attempt_path" '
+      select(.schema == "legion.span.v1"
+        and .artifacts.provider_attempt == true
+        and .artifacts.attempt_receipt == $attempt)
+    ' "$span_file" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+# Returns 0 with a newly owned claim, 2 when telemetry already proves the span
+# durable, and 1 when another live publisher owns the claim.
+native_provider_span_claim() {
+  local attempt_path="$1" claim lock owner=""
+  claim="$attempt_path.span-emitted"
+  lock="$attempt_path.span-publishing"
+  if native_provider_span_is_recorded "$attempt_path"; then
+    mkdir -p "$claim" || return 1
+    : > "$claim/committed"
+    return 2
+  fi
+  # A symlink is the atomic ownership record. Creating a directory and then an
+  # owner file has a race in which a second publisher can observe the empty
+  # directory, call it stale, and remove a live publisher's claim.
+  if ! ln -s "$$" "$lock" 2>/dev/null; then
+    owner="$(readlink "$lock" 2>/dev/null || true)"
+    if [[ "$owner" =~ ^[1-9][0-9]*$ && "$owner" != "$$" ]] && kill -0 "$owner" 2>/dev/null; then
+      return 1
+    fi
+    rm -f "$lock" 2>/dev/null || return 1
+    ln -s "$$" "$lock" 2>/dev/null || return 1
+  fi
+  # The prior owner may have appended just before it died. Reconcile after
+  # acquiring ownership so telemetry, rather than a marker directory, wins.
+  if native_provider_span_is_recorded "$attempt_path"; then
+    mkdir -p "$claim" || { rm -f "$lock"; return 1; }
+    : > "$claim/committed"
+    rm -f "$lock"
+    return 2
+  fi
+  # An interrupted publisher can leave an empty/partial directory. It is not an
+  # acknowledgement: reclaim it only while holding the atomic publication lock
+  # and after telemetry proved that no provider span exists.
+  rm -f "$claim/owner" "$claim/committed" 2>/dev/null || return 1
+  if [[ -d "$claim" ]]; then
+    rmdir "$claim" 2>/dev/null || { rm -f "$lock"; return 1; }
+  elif [[ -e "$claim" || -L "$claim" ]]; then
+    rm -f "$lock"
+    return 1
+  fi
+  mkdir "$claim" 2>/dev/null || { rm -f "$lock"; return 1; }
+}
+
+native_provider_span_release() {
+  local claim="$1.span-emitted" lock="$1.span-publishing"
+  rm -f "$claim/owner" "$claim/committed" 2>/dev/null || true
+  rmdir "$claim" 2>/dev/null || true
+  [[ "$(readlink "$lock" 2>/dev/null || true)" != "$$" ]] || rm -f "$lock"
+}
+
+native_provider_span_commit() {
+  local attempt_path="$1" claim="$1.span-emitted" lock="$1.span-publishing"
+  native_provider_span_is_recorded "$attempt_path" || return 1
+  : > "$claim/committed"
+  rm -f "$claim/owner"
+  [[ "$(readlink "$lock" 2>/dev/null || true)" != "$$" ]] || rm -f "$lock"
 }
 
 emit_review_rollup_span() {
@@ -870,7 +963,8 @@ emit_review_rollup_span() {
 }
 
 emit_provider_attempt_span() {
-  local attempt_path="$1" task_text="$2" lease_path="${3:-}" claim
+  local attempt_path="$1" task_text="$2" lease_path="${3:-}"
+  local preflight_path="${4:-}" failure_path="${5:-}"
   [[ -n "$attempt_path" && -f "$attempt_path" ]] || return 0
   local executor provider model terminal span_status duration usage cost ingest_status
   local usage_status cost_status artifacts
@@ -894,24 +988,35 @@ emit_provider_attempt_span() {
       ;;
   esac
   artifacts="$(jq -cn --arg attempt "$attempt_path" --arg lease "$lease_path" \
+    --arg preflight "$preflight_path" --arg failure "$failure_path" \
     '{provider_attempt:true,attempt_receipt:$attempt,
-      lease_receipt:(if $lease=="" then null else $lease end)}')"
+      lease_receipt:(if $lease=="" then null else $lease end),
+      preflight_receipt:(if $preflight=="" then null else $preflight end),
+      failure_receipt:(if $failure=="" then null else $failure end)}')"
   # Parse before claiming so malformed evidence cannot leave a permanent empty
   # claim. Signals are deferred across claim + append + commit, preventing the
   # trap from abandoning or duplicating a paid provider span.
-  claim="$attempt_path.span-emitted"
   native_span_publication_begin
-  if ! mkdir "$claim" 2>/dev/null; then
+  local claim_rc=0
+  native_provider_span_claim "$attempt_path" || claim_rc=$?
+  if [[ "$claim_rc" -eq 2 ]]; then
     native_span_publication_end
     return 0
-  fi
-  if ! emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
-      "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
-    rmdir "$claim" 2>/dev/null || true
+  elif [[ "$claim_rc" -ne 0 ]]; then
     native_span_publication_end
     return 1
   fi
-  : > "$claim/committed"
+  if ! emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
+      "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
+  if ! native_provider_span_commit "$attempt_path"; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
   native_span_publication_end
   if [[ "$usage_status" == known && "$cost_status" == known ]]; then
     ingest_usage "$model" "$provider" "$ingest_status" "$usage" "$cost"
@@ -1604,9 +1709,9 @@ cmd_run() {
   # Sandbox install/dev setup above must not inherit Legion role state.
   legion_activate_executor_context "$RUN_ID" codex
   local start_ms end_ms dur rc=0 used_model="" attempt_ordinal=0 attempt_contract_failure=0
-  local candidate_ordinal=0 lease_exhausted=0 fallback_admission_refused=0
+  local candidate_ordinal=0 lease_exhausted=0 fallback_admission_refused=0 launch_failed=0
   local sandcastle_setup_refused=0 sandcastle_setup_reason=""
-  local containment_failed=0 lease_receipt=""
+  local containment_failed=0 lease_receipt="" launch_failure_reason=""
   start_ms="$(date +%s000)"
   child_lease_tighten_deadline "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
   # Try the chosen model, then the archetype's fallback chain on a quota/rate-limit error.
@@ -1665,6 +1770,16 @@ cmd_run() {
       run_codex "$attempt"
     fi
     attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
+    if legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
+      launch_failed=1
+      lease_receipt="$NATIVE_LEASE_STATUS"
+      launch_failure_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS")"
+      NATIVE_ATTEMPT_ART=""
+      NATIVE_ATTEMPT_LAUNCHED=0
+      CODEX_SIGNAL_CHILD_PID=""
+      CODEX_CHILD_RC=0
+      break
+    fi
     if [[ "$SANDCASTLE_SETUP_REFUSED" -eq 1 ]]; then
       sandcastle_setup_refused=1
       sandcastle_setup_reason="$(error_log_summary "$art/codex.err" "$art/codex.err")"
@@ -1859,6 +1974,8 @@ cmd_run() {
     keep=0
   elif [[ "$fallback_admission_refused" -eq 1 ]]; then
     status="failed"
+  elif [[ "$launch_failed" -eq 1 ]]; then
+    status="failed"
   elif [[ "$sandcastle_setup_refused" -eq 1 ]]; then
     status="refused"
   elif legion_adapter_supervisor_timed_out "$art/lease-$attempt_ordinal.json"; then
@@ -1952,6 +2069,8 @@ cmd_run() {
     --arg reason "$(
       if [[ "$status" == containment_failed ]]; then
         printf '%s' "$lease_reason"
+      elif [[ "$launch_failed" -eq 1 ]]; then
+        printf '%s (no provider launched; evidence: %s)' "$launch_failure_reason" "$lease_receipt"
       elif [[ "$status" == refused && "$sandcastle_setup_refused" -eq 1 ]]; then
         printf '%s' "$sandcastle_setup_reason"
       elif [[ "$status" == timed_out ]]; then
@@ -2105,7 +2224,7 @@ PY
 }
 
 emit_native_review_provider_span() {
-  local attempt_path="$1" task_text="$2" lease_path="${3:-}" claim ingest_status
+  local attempt_path="$1" task_text="$2" lease_path="${3:-}" ingest_status
   [[ -n "$attempt_path" && -f "$attempt_path" ]] || return 0
   local executor model terminal span_status duration usage cost usage_status cost_status artifacts
   executor="$(jq -r '.executor' "$attempt_path")"
@@ -2129,19 +2248,27 @@ emit_native_review_provider_span() {
   artifacts="$(jq -cn --arg attempt "$attempt_path" --arg lease "$lease_path" \
     '{provider_attempt:true,attempt_receipt:$attempt,
       lease_receipt:(if $lease=="" then null else $lease end)}')"
-  claim="$attempt_path.span-emitted"
   native_span_publication_begin
-  if ! mkdir "$claim" 2>/dev/null; then
+  local claim_rc=0
+  native_provider_span_claim "$attempt_path" || claim_rc=$?
+  if [[ "$claim_rc" -eq 2 ]]; then
     native_span_publication_end
     return 0
-  fi
-  if ! emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
-      "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
-    rmdir "$claim" 2>/dev/null || true
+  elif [[ "$claim_rc" -ne 0 ]]; then
     native_span_publication_end
     return 1
   fi
-  : > "$claim/committed"
+  if ! emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
+      "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
+  if ! native_provider_span_commit "$attempt_path"; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
   native_span_publication_end
   if [[ "$usage_status" == known && "$cost_status" == known ]]; then
     ingest_usage "$model" openai "$ingest_status" "$usage" "$cost"
@@ -2337,6 +2464,10 @@ preserve_interrupted_prompt_receipts() {
   [[ -z "$review_lease_receipt" ]] || cp "$review_lease_receipt" "$PROMPT_SHARED_ART/lease.json"
   if [[ -n "$review_attempt_receipt" && -n "$review_preflight_receipt" \
       && -n "$review_lease_receipt" ]]; then
+    emit_provider_attempt_span "$review_attempt_receipt" \
+      "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" \
+      "$review_lease_receipt" "$review_preflight_receipt" "$review_failure_receipt" || return 1
+    rm -rf "$PROMPT_RECEIPT_DIR/adapter-telemetry"
     return 0
   fi
   if [[ -n "$review_preflight_receipt" && ! -f "$source_attempt" \
@@ -2405,7 +2536,12 @@ $(cat "$patch")
   local prompt_art="$wt/.legion/runs/$prompt_run_id"
   local -a adapter_args=(run --repo "$wt" "${task_args[@]}" --sandbox "$review_sandbox"
     --run-id "$prompt_run_id" --max-runtime-seconds "$attempt_runtime" --quiet)
-  local -a adapter_env=(LEGION_REVIEW_HANDOFF=1)
+  # The adapter must prove its own span publication before returning, but its
+  # receipts live under this disposable review snapshot. Isolate that provisional
+  # telemetry here; after validation/copying below, publish one canonical span
+  # whose evidence paths are all under the durable outer run directory.
+  local -a adapter_env=(LEGION_REVIEW_HANDOFF=1
+    "LEGION_TELEMETRY_DIR=$receipt_dir/adapter-telemetry")
   [[ -z "$model" ]] || adapter_args+=(--model "$model")
   [[ -z "$review_archetype" ]] || adapter_args+=(--archetype "$review_archetype")
   if [[ "$adapter" == legion-claude ]]; then
@@ -2503,6 +2639,18 @@ $(cat "$patch")
       cp "$review_failure_receipt" "$shared_art/failure.json"
     else
       rm -f "$shared_art/failure.json"
+    fi
+    if ! emit_provider_attempt_span "$review_attempt_receipt" \
+        "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" \
+        "$review_lease_receipt" "$review_preflight_receipt" "$review_failure_receipt"; then
+      receipt_contract_failed=1
+      review_containment_failed=1
+      LEGION_WT_KEEP=1
+      review_prompt_containment_reason="prompt reviewer receipt was durable but its canonical provider span could not be published (evidence: $receipt_dir; worktree retained: $wt)"
+      printf '%s\n' "$review_prompt_containment_reason" >> "$err"
+      rc=70
+    else
+      rm -rf "$receipt_dir/adapter-telemetry"
     fi
   fi
   # Adapters return a JSON envelope; the reviewer's answer is .result (or the
@@ -2841,6 +2989,7 @@ cmd_review() {
   local review_executor review_kind review_model_ref _cand _cand_n=0
   local review_preflight_receipt="" review_attempt_receipt="" review_failure_receipt=""
   local review_lease_receipt="" review_containment_failed=0 review_prompt_containment_reason=""
+  local review_launch_failed=0
   local -a review_attempt_receipts=()
   : > "$attempt_stream"
   : > "$attempt_err"
@@ -3038,6 +3187,21 @@ cmd_review() {
       set -e
       native_attempt_end_ms="$(date +%s000)"
       native_attempt_ended_at="$(_now)"
+      if legion_adapter_supervisor_launch_failed "$attempt_lease"; then
+        review_launch_failed=1
+        status="failed"
+        reason="$(legion_adapter_supervisor_reason "$attempt_lease") (no provider launched; evidence: $attempt_lease)"
+        attempt=$((attempt - 1))
+        REVIEW_RECEIPT_ATTEMPT="$attempt"
+        review_attempt_receipt=""
+        review_failure_receipt=""
+        NATIVE_ATTEMPT_ART=""
+        NATIVE_ATTEMPT_LAUNCHED=0
+        NATIVE_LEASE_STATUS=""
+        CODEX_SIGNAL_CHILD_PID=""
+        CODEX_CHILD_RC=0
+        break
+      fi
     else
       set +e
       review_invoke_prompt "$review_executor" "$model" "$wt" "$patch_path" \
@@ -3178,6 +3342,7 @@ cmd_review() {
     if [[ "$status" == "ok" ]]; then
       break
     fi
+    [[ "$review_launch_failed" -ne 1 ]] || break
     [[ "$status" != "timed_out" && "$status" != "containment_failed" ]] || break
     if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
       note "⚠ reviewer '$review_executor' is unavailable (exit $rc); trying the next candidate"
@@ -3432,9 +3597,18 @@ cmd_resume() {
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
   local usage cost diff_rc=0 status="ok" reason="" wt_report="$wt" containment_failed=0
+  local launch_failed=0
   usage="$(codex_usage "$art/resume-stream.jsonl")"
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
-  if legion_adapter_supervisor_cleanup_failed "$lease_status"; then
+  if legion_adapter_supervisor_launch_failed "$lease_status"; then
+    launch_failed=1
+    status="failed"
+    reason="$(legion_adapter_supervisor_reason "$lease_status") (no provider launched; evidence: $lease_status)"
+    NATIVE_ATTEMPT_ART=""
+    NATIVE_ATTEMPT_LAUNCHED=0
+    CODEX_SIGNAL_CHILD_PID=""
+    CODEX_CHILD_RC=0
+  elif legion_adapter_supervisor_cleanup_failed "$lease_status"; then
     containment_failed=1
     LEGION_WT_KEEP=1
     status="containment_failed"
@@ -3480,13 +3654,18 @@ cmd_resume() {
       failure_class=internal
     fi
   fi
-  legion_adapter_write_attempt "$resume_art" codex-resume openai "$resume_ordinal" \
-    "$model" "" "$effort" "$effort" "$resume_sandbox" "$terminal_status" \
-    "$started_at" "$ended_at" "$dur" "$usage" "$usage_status" \
-    "$([[ "$usage_status" == known ]] && printf codex-jsonl)" "$cost" "$cost_status" \
-    "$([[ "$cost_status" == known ]] && printf legion-cost-table)" "$failure_class" false \
-    "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$reason"
-  emit_provider_attempt_span "$LEGION_ADAPTER_ATTEMPT_PATH" "resume $run: $task" "$lease_status"
+  if [[ "$launch_failed" -ne 1 ]]; then
+    legion_adapter_write_attempt "$resume_art" codex-resume openai "$resume_ordinal" \
+      "$model" "" "$effort" "$effort" "$resume_sandbox" "$terminal_status" \
+      "$started_at" "$ended_at" "$dur" "$usage" "$usage_status" \
+      "$([[ "$usage_status" == known ]] && printf codex-jsonl)" "$cost" "$cost_status" \
+      "$([[ "$cost_status" == known ]] && printf legion-cost-table)" "$failure_class" false \
+      "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$reason"
+    emit_provider_attempt_span "$LEGION_ADAPTER_ATTEMPT_PATH" "resume $run: $task" "$lease_status"
+  else
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
+  fi
   if [[ "$status" == "timed_out" ]]; then
     with_git_worktree_lock "$repo" \
       git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
@@ -3521,7 +3700,8 @@ cmd_resume() {
     {run_id:$run, status:$status, model:$model,
      archetype:(if $archetype=="" then null else $archetype end),
      thread_id:$thread, worktree:$wt, diff_path:$diff, usage:$usage, cost_usd:$cost,
-     preflight_receipt:$preflight,attempt_receipt:$attempt,
+     preflight_receipt:$preflight,
+     attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
      + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == "ok" ]] || exit 1

@@ -853,10 +853,13 @@ cmd_run() {
   fi
   MODEL="$actual_model"
   [[ -n "$usage" ]] || usage='{}'
-  local lease_reason="" containment_failed=0
+  local lease_reason="" containment_failed=0 launch_failed=0
   if legion_adapter_supervisor_cleanup_failed "$ART/lease.json"; then
     containment_failed=1
     lease_reason="$(legion_adapter_supervisor_reason "$ART/lease.json") (evidence: $ART/lease.json; worktree retained: $WT_RECORD)"
+  elif legion_adapter_supervisor_launch_failed "$ART/lease.json"; then
+    launch_failed=1
+    lease_reason="$(legion_adapter_supervisor_reason "$ART/lease.json" "provider launch failed before process creation")"
   elif legion_adapter_supervisor_timed_out "$ART/lease.json"; then
     lease_reason="$(legion_adapter_lease_reason "$ART/lease.json")"
   fi
@@ -888,6 +891,11 @@ cmd_run() {
     status=containment_failed
     KEEP=1
     result="$lease_reason"
+  elif [[ "$launch_failed" == 1 ]]; then
+    status=failed
+    result="$lease_reason"
+    usage=null
+    cost=null
   elif [[ -n "$lease_reason" ]]; then
     status=timed_out
     KEEP=0
@@ -948,28 +956,33 @@ cmd_run() {
       failure_class=internal
     fi
   fi
-  legion_adapter_write_attempt "$ART" "$ADAPTER_KIND" "$ADAPTER_KIND" 1 "$requested_model" "$observed_model" \
-    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
-    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
-    "$SANDBOX" "$terminal_status" "$started_at" "$ended_at" "$duration" \
-    "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
-    "$failure_class" false "$output_started" \
-    "$([[ "$PROVIDER_RC" -eq 0 ]] || printf '%s' "$PROVIDER_RC")" "$result"
-  local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" \
-    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
-    --argjson cost_provenance "$cost_provenance" '{provider_attempt:true,worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage,
-      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end),
-      lease_receipt:$lease} + $cost_provenance
-      + (if $reason=="" then {} else {lease_reason:$reason} end)')"
-  local span_usage span_cost span_usage_status span_cost_status
-  span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-  span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-  span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-  span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-  legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-    "$status" "$duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-    "$span_usage_status" "$span_cost_status"
+  if [[ "$launch_failed" == 1 ]]; then
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
+  else
+    legion_adapter_write_attempt "$ART" "$ADAPTER_KIND" "$ADAPTER_KIND" 1 "$requested_model" "$observed_model" \
+      "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+      "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+      "$SANDBOX" "$terminal_status" "$started_at" "$ended_at" "$duration" \
+      "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
+      "$failure_class" false "$output_started" \
+      "$([[ "$PROVIDER_RC" -eq 0 ]] || printf '%s' "$PROVIDER_RC")" "$result"
+    local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+      --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
+      --argjson cost_provenance "$cost_provenance" '{provider_attempt:true,worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage,
+        preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end),
+        lease_receipt:$lease} + $cost_provenance
+        + (if $reason=="" then {} else {lease_reason:$reason} end)')"
+    local span_usage span_cost span_usage_status span_cost_status
+    span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      "$status" "$duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+      "$span_usage_status" "$span_cost_status"
+  fi
   legion_adapter_disarm_signal_receipt
   SIGNAL_CHILD_PID=""
   CHILD_WAIT_RC=0
@@ -983,7 +996,7 @@ cmd_run() {
     --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
     --argjson usage "$usage" --argjson cost "$cost" --argjson rc "$PROVIDER_RC" \
     '{run_id:$run,status:$status,executor:$executor,model:$model,result:$result,worktree:$worktree,diff_path:$diff,last_message_path:$last,usage:$usage,cost_usd:$cost,provider_exit:$rc,
-      preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
+      preflight_receipt:$preflight,attempt_receipt:(if $attempt=="" then null else $attempt end),failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
       + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == ok ]] || exit 1
 }

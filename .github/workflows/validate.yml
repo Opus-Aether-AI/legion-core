@@ -412,6 +412,7 @@ jobs:
               tests/conventional-title.bats \
               tests/install.bats \
               tests/legion-primary-setup.bats \
+              tests/npm-runtime-surface.bats \
               tests/refresh.bats \
               tests/release-controls.bats \
               tests/uninstall.bats

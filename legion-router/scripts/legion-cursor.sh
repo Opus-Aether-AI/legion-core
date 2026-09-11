@@ -360,8 +360,9 @@ cmd_run() {
   actual_model="$observed_model"; [[ -n "$actual_model" ]] || actual_model="$model"
   cost="$(cost_from_output "$out_file" "$actual_model" "$usage")"
   result="$(result_text "$out_file")"
-  local containment_failed=0
+  local containment_failed=0 launch_failed=0
   legion_adapter_supervisor_cleanup_failed "$lease_status" && containment_failed=1
+  legion_adapter_supervisor_launch_failed "$lease_status" && launch_failed=1
   if [[ "$containment_failed" -ne 1 ]]; then
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
   # Diff against the worktree's STARTING commit, not HEAD. `diff --cached` alone
@@ -378,6 +379,11 @@ cmd_run() {
     status="containment_failed"
     keep=1
     result="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+  elif [[ "$launch_failed" -eq 1 ]]; then
+    status="failed"
+    result="$(legion_adapter_supervisor_reason "$lease_status" "provider launch failed before process creation")"
+    usage=null
+    cost=null
   elif legion_adapter_supervisor_timed_out "$lease_status"; then
     status="timed_out"
     keep=0
@@ -418,26 +424,31 @@ cmd_run() {
       failure_class=internal
     fi
   fi
-  legion_adapter_write_attempt "$art" cursor cursor 1 "$model" "$observed_model" "" "" \
-    "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
-    "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
-    "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
-  local artifacts
-  artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --arg stdout "$out_file" --arg stderr "$err_file" \
-    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
-    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    '{provider_attempt:true,worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
-      preflight_receipt:$preflight,attempt_receipt:$attempt,
-      failure_receipt:(if $failure=="" then null else $failure end)}')"
-  local span_usage span_cost span_usage_status span_cost_status
-  span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-  span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-  span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-  span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-  legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-    "cursor" "$actual_model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
-    "$span_usage_status" "$span_cost_status"
+  if [[ "$launch_failed" -eq 1 ]]; then
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
+  else
+    legion_adapter_write_attempt "$art" cursor cursor 1 "$model" "$observed_model" "" "" \
+      "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
+      "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
+      "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
+    local artifacts
+    artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
+      --arg stdout "$out_file" --arg stderr "$err_file" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+      '{provider_attempt:true,worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
+        preflight_receipt:$preflight,attempt_receipt:$attempt,
+        failure_receipt:(if $failure=="" then null else $failure end)}')"
+    local span_usage span_cost span_usage_status span_cost_status
+    span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      "cursor" "$actual_model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+      "$span_usage_status" "$span_cost_status"
+  fi
   legion_adapter_disarm_signal_receipt
   SIGNAL_CHILD_PID=""
   SIGNAL_CHILD_RC=0
@@ -470,17 +481,24 @@ cmd_run() {
   local auth_note=""
   [[ "$status" == "ok" ]] || auth_note="$cursor_auth_hint"
 
+  local receipt_reason=""
+  if [[ "$status" == timed_out ]]; then
+    receipt_reason="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$status" == containment_failed || "$launch_failed" -eq 1 ]]; then
+    receipt_reason="$(legion_adapter_supervisor_reason "$lease_status")"
+  fi
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg result "$result" --arg auth_note "$auth_note" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    --arg reason "$([[ "$status" == timed_out ]] && legion_adapter_lease_reason "$lease_status" || [[ "$status" == containment_failed ]] && legion_adapter_supervisor_reason "$lease_status")" \
+    --arg reason "$receipt_reason" \
     --arg lease "$lease_status" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"cursor", model:$model, cursor_exit:$rc,
      result:$result, worktree:$wt, diff_path:$diff, last_message_path:$last,
-     usage:$usage, cost_usd:$cost,preflight_receipt:$preflight,attempt_receipt:$attempt,
+     usage:$usage, cost_usd:$cost,preflight_receipt:$preflight,
+     attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
     + (if $reason=="" then {} else {reason:$reason} end)
     + (if $auth_note == "" then {} else {auth_error:$auth_note} end)'

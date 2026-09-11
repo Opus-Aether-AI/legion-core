@@ -13,6 +13,22 @@ setup() {
     unset MOCK_PR_REMOVE_LABEL_FAIL
 }
 
+@test "validate workflow measures packaged license metadata path under the existing threshold" {
+    local workflow coverage_step threshold_step
+    workflow="$REPO_ROOT/.github/workflows/validate.yml"
+    coverage_step="$(sed -n \
+      '/- name: Run installer and release tests under kcov for coverage/,/- name: Report coverage summary/p' \
+      "$workflow")"
+    threshold_step="$(sed -n \
+      '/- name: Enforce coverage threshold/,/- name: Upload coverage report/p' \
+      "$workflow")"
+
+    [[ "$coverage_step" == *"--include-path=scripts"* ]]
+    [[ "$coverage_step" == *"tests/npm-runtime-surface.bats"* ]]
+    [[ "$threshold_step" == *'coverage-output/bats/coverage.json'* ]]
+    [[ "$threshold_step" == *"THRESHOLD=95"* ]]
+}
+
 make_pending_release_fixture() {
     local repo="$1"
     mkdir -p "$repo"

@@ -313,8 +313,9 @@ cmd_run() {
   local usage=null cost=null result="" diff_rc=0 status="ok"
   result="$(cat "$out_file" 2>/dev/null || true)"
 
-  local containment_failed=0
+  local containment_failed=0 launch_failed=0
   legion_adapter_supervisor_cleanup_failed "$lease_status" && containment_failed=1
+  legion_adapter_supervisor_launch_failed "$lease_status" && launch_failed=1
   if [[ "$containment_failed" -ne 1 ]]; then
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
   # Diff against the worktree's STARTING commit, not HEAD -- an executor that
@@ -327,6 +328,9 @@ cmd_run() {
     status="containment_failed"
     keep=1
     result="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+  elif [[ "$launch_failed" -eq 1 ]]; then
+    status="failed"
+    result="$(legion_adapter_supervisor_reason "$lease_status" "provider launch failed before process creation")"
   elif legion_adapter_supervisor_timed_out "$lease_status"; then
     status="timed_out"
     keep=0
@@ -355,21 +359,26 @@ cmd_run() {
       failure_class=internal
     elif [[ "$rc" -ne 0 ]]; then failure_class=provider; else failure_class=malformed_event; fi
   fi
-  legion_adapter_write_attempt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
-    "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
-    null unknown '' null unknown '' "$failure_class" false "$output_started" \
-    "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
-  local artifacts
-  artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --arg stdout "$out_file" --arg stderr "$err_file" --arg profile "$DSH_PROFILE" \
-    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
-    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    '{provider_attempt:true,worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
-      dsh_profile:$profile,preflight_receipt:$preflight,attempt_receipt:$attempt,
-      failure_receipt:(if $failure=="" then null else $failure end)}')"
-  legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-    "deepseek" "$reported_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts" \
-    unknown unknown
+  if [[ "$launch_failed" -eq 1 ]]; then
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
+  else
+    legion_adapter_write_attempt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
+      "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
+      null unknown '' null unknown '' "$failure_class" false "$output_started" \
+      "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
+    local artifacts
+    artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
+      --arg stdout "$out_file" --arg stderr "$err_file" --arg profile "$DSH_PROFILE" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+      '{provider_attempt:true,worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
+        dsh_profile:$profile,preflight_receipt:$preflight,attempt_receipt:$attempt,
+        failure_receipt:(if $failure=="" then null else $failure end)}')"
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      "deepseek" "$reported_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts" \
+      unknown unknown
+  fi
   legion_adapter_disarm_signal_receipt
   SIGNAL_CHILD_PID=""
   SIGNAL_CHILD_RC=0
@@ -396,18 +405,24 @@ cmd_run() {
     "$base" "$archetype"
   [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
 
+  local receipt_reason=""
+  if [[ "$status" == timed_out ]]; then
+    receipt_reason="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$status" == containment_failed || "$launch_failed" -eq 1 ]]; then
+    receipt_reason="$(legion_adapter_supervisor_reason "$lease_status")"
+  fi
   jq -cn --arg run_id "$RUN_ID" --arg executor deepseek --arg model "$reported_model" \
     --arg status "$status" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg wt "$wt" --argjson usage "$usage" --argjson cost "$cost" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    --arg reason "$([[ "$status" == timed_out ]] && legion_adapter_lease_reason "$lease_status" || [[ "$status" == containment_failed ]] && legion_adapter_supervisor_reason "$lease_status")" \
+    --arg reason "$receipt_reason" \
     --arg lease "$lease_status" \
     '{run_id:$run_id, executor:$executor, model:$model, status:$status,
       diff_path:$diff, last_message:$last, worktree:$wt,
       usage:$usage,tokens:$usage,usage_status:"unknown",
       cost_usd:$cost,cost_status:"unknown",
-      preflight_receipt:$preflight,attempt_receipt:$attempt,
+      preflight_receipt:$preflight,attempt_receipt:(if $attempt=="" then null else $attempt end),
       failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
       + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == "ok" ]]

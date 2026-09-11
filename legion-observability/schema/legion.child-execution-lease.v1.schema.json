@@ -8,14 +8,23 @@
   "required": ["schema", "status", "reason", "max_runtime_seconds"],
   "properties": {
     "schema": {"const": "legion.child-execution-lease.v1"},
-    "status": {"enum": ["completed", "cancelled", "timed_out", "cleanup_failed"]},
+    "status": {"enum": ["completed", "cancelled", "timed_out", "cleanup_failed", "launch_failed"]},
     "reason": {"type": "string", "minLength": 1},
     "max_runtime_seconds": {"type": "integer", "minimum": 1},
     "child_exit_code": {
-      "description": "The direct child's normalized exit code when status is completed.",
+      "description": "The direct child's normalized exit code when status is completed. It is absent when no child launched.",
       "type": "integer",
       "minimum": 0,
       "maximum": 255
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "launch_failed"}},
+        "required": ["status"]
+      },
+      "then": {"not": {"required": ["child_exit_code"]}}
+    }
+  ]
 }

@@ -98,6 +98,23 @@ legion_adapter_supervisor_cleanup_failed() {
       "$status_file" >/dev/null 2>&1
 }
 
+# A launch_failed sidecar is authoritative no-spend evidence: the supervisor
+# writes it only when Popen raised before returning a child handle. Validate the
+# complete typed shape so a malformed or contradictory receipt cannot suppress
+# provider accounting.
+legion_adapter_supervisor_launch_failed() {
+  local status_file="$1"
+  [[ -f "$status_file" ]] \
+    && jq -e '
+      .schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed"
+      and (.reason | type == "string" and length > 0)
+      and (.max_runtime_seconds | type == "number" and . >= 1 and . == floor)
+      and (has("child_exit_code") | not)
+      and ((keys_unsorted - ["schema", "status", "reason", "max_runtime_seconds"]) | length == 0)
+    ' "$status_file" >/dev/null 2>&1
+}
+
 legion_adapter_supervisor_reason() {
   local status_file="$1" fallback="${2:-child supervisor reported an internal containment failure}" reason=""
   reason="$(jq -r '.reason // empty' "$status_file" 2>/dev/null || true)"
@@ -396,6 +413,16 @@ legion_adapter_write_signal_receipt() {
   ' "$lease_path" 2>/dev/null || true)"
   [[ -z "$lease_child_rc" ]] || child_rc="$lease_child_rc"
   case "$lease_status" in
+    launch_failed)
+      # No provider existed to cancel and therefore no provider attempt/span is
+      # permitted. Only the complete supervisor-authenticated shape can make
+      # that claim; malformed lookalikes fail closed as launched attempts.
+      if legion_adapter_supervisor_launch_failed "$lease_path"; then
+        LEGION_ADAPTER_SIGNAL_TERMINALIZED=0
+        return 0
+      fi
+      message="provider attempt cancelled by signal $signum; launch-failure sidecar was invalid"
+      ;;
     completed)
       # Bash may dispatch a pending signal after wait(1) returned but before the
       # adapter committed its attempt. The retained wait result and supervisor

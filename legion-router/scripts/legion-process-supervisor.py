@@ -1117,15 +1117,35 @@ def main() -> int:
                 arguments.status_file, "cancelled", reason, arguments.max_runtime_seconds
             )
             return 128 + interrupted
-        process = subprocess.Popen(
-            command,
-            cwd=arguments.cwd,
-            stdin=None,
-            stdout=None,
-            stderr=None,
-            env=environment,
-            start_new_session=True,
-        )
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=arguments.cwd,
+                stdin=None,
+                stdout=None,
+                stderr=None,
+                env=environment,
+                start_new_session=True,
+            )
+        except OSError as error:
+            # Admission and launch are separated by an unavoidable filesystem
+            # race. Authenticate that no provider process was created with a
+            # dedicated lease outcome; "completed" would make adapters account
+            # for a provider attempt that never happened.
+            if error.errno == errno.ENOENT:
+                reason = f"child launch failed: command not found: {command[0]}"
+                exit_code = 127
+            else:
+                reason = f"child launch failed: {error}"
+                exit_code = 126
+            _write_status(
+                arguments.status_file,
+                "launch_failed",
+                reason,
+                arguments.max_runtime_seconds,
+            )
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+            return exit_code
         tracker = DescendantTracker(
             process.pid,
             supervisor_token,
@@ -1167,15 +1187,6 @@ def main() -> int:
         print(f"legion-process-supervisor: descendant inspection failed: {error}", file=sys.stderr)
         returncode = 70
         cleanup_ok = False
-    except OSError as error:
-        if error.errno == errno.ENOENT:
-            reason = f"child launch failed: command not found: {command[0]}"
-            _write_status(
-                arguments.status_file, "completed", reason, arguments.max_runtime_seconds
-            )
-            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
-            return 127
-        raise
     finally:
         if process is not None and tracker is not None:
             if not cleanup_attempted:

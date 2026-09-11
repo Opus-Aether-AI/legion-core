@@ -24,6 +24,35 @@ make_test_repo() {
     echo "$d"
 }
 
+install_launch_failed_python() {
+    local shim_dir="$TEST_TMPDIR/launch-failed-python" real_python
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  status_file=""
+  max_runtime=""
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == --status-file ]]; then
+      j=$((i + 1)); status_file="${!j}"
+    elif [[ "${!i}" == --max-runtime-seconds ]]; then
+      j=$((i + 1)); max_runtime="${!j}"
+    fi
+  done
+  jq -cn --arg reason 'child launch failed: command not found: admitted-claude' \
+    --argjson runtime "$max_runtime" \
+    '{schema:"legion.child-execution-lease.v1",status:"launch_failed",
+      reason:$reason,max_runtime_seconds:$runtime}' > "$status_file"
+  exit 127
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export PATH="$shim_dir:$PATH"
+}
+
 @test "legion-claude: happy path uses claude and emits a claude span" {
     local repo; repo="$(make_test_repo ok1)"
     local context="$TEST_TMPDIR/context.log"
@@ -48,11 +77,46 @@ make_test_repo() {
     [ "$status" -eq 0 ]
     [ "$output" = $'claude\tfinal-review' ]
     span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "claude")')"
-    jq -e --argjson attempt "$(cat "$attempt")" '
+    jq -e --argjson attempt "$(cat "$attempt")" --arg attempt_path "$attempt" '
       .tokens == $attempt.usage and .usage_status == $attempt.usage_status
       and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
+      and .artifacts.provider_attempt == true
+      and .artifacts.attempt_receipt == $attempt_path
     ' <<<"$span"
     grep -Eq '^claude active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
+}
+
+@test "legion-claude: authenticated supervisor launch failure is no-spend terminal evidence" {
+    local repo run_id art lease
+    repo="$(make_test_repo launch-failed)"
+    run_id="launch-failed-claude"
+    install_launch_failed_python
+
+    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+      --run-id "$run_id" --quiet --no-fallback
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed"
+      and .attempt_receipt == null and .failure_receipt == null
+      and (.reason | contains("child launch failed"))
+      and (.lease_receipt | type == "string" and length > 0)
+    '
+    lease="$(echo "$output" | jq -r .lease_receipt)"
+    jq -e '
+      .schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed"
+      and (has("child_exit_code") | not)
+    ' "$lease"
+    art="$repo/.legion/runs/$run_id"
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
+    if compgen -G "$LEGION_TELEMETRY_DIR/*.jsonl" >/dev/null; then
+      run jq -s -e '[.[] | select(.artifacts.provider_attempt == true)] | length > 0' \
+        "$LEGION_TELEMETRY_DIR"/*.jsonl
+      [ "$status" -ne 0 ]
+    fi
 }
 
 @test "legion-claude: timeout never applies a partial diff" {
@@ -388,6 +452,20 @@ PY
     ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
 }
 
+@test "legion-claude: low-credit no-launch span is not a provider attempt" {
+    local repo span; repo="$(make_test_repo low-credit-no-launch)"
+    LEGION_LOW_CREDIT=claude run "$LEGION_CLAUDE" run --task "do the thing" \
+      --repo "$repo" --quiet --no-fallback
+    [ "$status" -eq 1 ]
+    ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
+    span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "claude")')"
+    jq -e '
+      .status == "failed" and .cost_status == "not_applicable"
+      and .usage_status == "not_applicable"
+      and .artifacts.provider_attempt != true
+    ' <<<"$span"
+}
+
 @test "legion-claude: worktree setup failure fails closed before invoking Claude" {
     local repo; repo="$(make_test_repo worktree-fail)"
     run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
@@ -399,6 +477,7 @@ PY
     assert_mock_not_called legion-delegate
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor == \"claude\" and .status == \"failed\")'"
     [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.artifacts.provider_attempt != true'
 }
 
 @test "legion-claude: non-git repo fails closed before invoking Claude" {
@@ -418,6 +497,9 @@ PY
     echo "$output" | jq -e \
         '.status == "failed" and .reason == "worktree_setup_failed" and .fell_back == false'
     ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e \
+      'select(.executor == \"claude\" and .artifacts.provider_attempt != true)'"
+    [ "$status" -eq 0 ]
     jq -e '
       .run_id == "queued-claude-non-git"
       and .state_version >= 2
@@ -488,15 +570,15 @@ PY
     local script receipt_line span_line disarm_line
     for script in legion-cursor.sh legion-opencode.sh legion-deepseek.sh legion-pi-hermes.sh; do
       receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
-      span_line="$(grep -n '^  legion_adapter_emit_normal_provider_span ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
-      disarm_line="$(grep -n '^  legion_adapter_disarm_signal_receipt$' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
+      span_line="$(grep -n '^[[:space:]]*legion_adapter_emit_normal_provider_span ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
+      disarm_line="$(grep -n '^[[:space:]]*legion_adapter_disarm_signal_receipt$' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
       [ "$receipt_line" -lt "$span_line" ]
       [ "$span_line" -lt "$disarm_line" ]
     done
     local claude_script="$REPO_ROOT/legion-router/scripts/legion-claude.sh"
     receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$claude_script" | tail -1 | cut -d: -f1)"
-    span_line="$(grep -n '^  legion_adapter_emit_normal_provider_span ' "$claude_script" | tail -1 | cut -d: -f1)"
-    disarm_line="$(grep -n '^  finish_claude_signal_accounting$' "$claude_script" | tail -1 | cut -d: -f1)"
+    span_line="$(grep -n '^[[:space:]]*legion_adapter_emit_normal_provider_span ' "$claude_script" | tail -1 | cut -d: -f1)"
+    disarm_line="$(grep -n '^[[:space:]]*finish_claude_signal_accounting$' "$claude_script" | tail -1 | cut -d: -f1)"
     [ "$receipt_line" -lt "$span_line" ]
     [ "$span_line" -lt "$disarm_line" ]
 }

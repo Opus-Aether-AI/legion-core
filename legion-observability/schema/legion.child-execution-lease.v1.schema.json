@@ -11,6 +11,10 @@
     "status": {"enum": ["completed", "cancelled", "timed_out", "cleanup_failed", "launch_failed"]},
     "reason": {"type": "string", "minLength": 1},
     "max_runtime_seconds": {"type": "integer", "minimum": 1},
+    "child_started": {
+      "description": "False only when a containment failure happened before Popen; omitted for legacy and ordinary outcomes.",
+      "const": false
+    },
     "child_exit_code": {
       "description": "The direct child's normalized exit code when status is completed. It is absent when no child launched.",
       "type": "integer",
@@ -25,6 +29,13 @@
         "required": ["status"]
       },
       "then": {"not": {"required": ["child_exit_code"]}}
+    },
+    {
+      "if": {"required": ["child_started"]},
+      "then": {
+        "properties": {"status": {"const": "cleanup_failed"}},
+        "required": ["status"]
+      }
     }
   ]
 }

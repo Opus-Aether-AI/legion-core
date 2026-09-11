@@ -151,6 +151,7 @@ NATIVE_ATTEMPT_LAST_MESSAGE=""
 NATIVE_ATTEMPT_STARTED_AT=""
 NATIVE_ATTEMPT_START_MS=0
 NATIVE_ATTEMPT_LAUNCHED=0
+NATIVE_PROVIDER_SPAN_CLAIM_TOKEN=""
 NATIVE_LEASE_STATUS=""
 NATIVE_RESUME_ART=""
 NATIVE_RESUME_WT=""
@@ -162,6 +163,8 @@ NATIVE_RUN_TERMINAL_KIND=""
 NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=""
 TERMINATING_SIGNAL_ACTIVE=0
 SANDCASTLE_SETUP_REFUSED=0
+SANDCASTLE_PROVIDER_MARKER=""
+SANDCASTLE_PROVIDER_TOKEN=""
 PROMPT_CHILD_PID=""
 PROMPT_CHILD_RC=0
 PROMPT_ATTEMPT_LAUNCHED=0
@@ -365,6 +368,7 @@ on_terminating_signal() {
   local interrupted_native_model="${NATIVE_ATTEMPT_MODEL:-}"
   local interrupted_native_ordinal="${NATIVE_ATTEMPT_ORDINAL:-0}"
   local interrupted_native_launched="${NATIVE_ATTEMPT_LAUNCHED:-0}"
+  local interrupted_native_sandbox="${NATIVE_ATTEMPT_SANDBOX:-}"
   local child_rc="$CODEX_CHILD_RC" terminal_status=failed terminal_reason=interrupted provider_exit=143
   local supervised_pid="${CODEX_SIGNAL_CHILD_PID:-unknown}"
   local signal_worktree="${LEGION_WT_PATH:-${REVIEW_WT_PATH:-}}"
@@ -395,6 +399,32 @@ on_terminating_signal() {
     signal_worktree="${PROMPT_WORKTREE:-$signal_worktree}"
   fi
   CODEX_CHILD_RC="$child_rc"
+  if [[ "$interrupted_native_launched" -eq 1 && "$interrupted_native_executor" == codex ]] \
+      && is_sandcastle_sandbox "$interrupted_native_sandbox"; then
+    local sandcastle_launch_status
+    sandcastle_launch_status="$(sandcastle_provider_launch_status)"
+    case "$sandcastle_launch_status" in
+      started) ;;
+      absent|not-started)
+        # The outer supervisor started, but the authenticated inner launcher
+        # proves that no billable provider process existed.
+        interrupted_native_launched=0
+        NATIVE_ATTEMPT_LAUNCHED=0
+        terminal_reason="Sandcastle was interrupted before provider launch (evidence: ${SANDCASTLE_PROVIDER_MARKER:-absent})"
+        ;;
+      pending|malformed)
+        # A pending or invalid marker cannot distinguish a child created just
+        # before termination from no launch. Fail containment closed and retain
+        # the evidence, but do not fabricate provider accounting.
+        interrupted_native_launched=0
+        NATIVE_ATTEMPT_LAUNCHED=0
+        terminal_status=containment_failed
+        provider_exit=70
+        LEGION_WT_KEEP=1
+        terminal_reason="Sandcastle provider launch evidence is $sandcastle_launch_status after termination (evidence: ${SANDCASTLE_PROVIDER_MARKER:-absent}; worktree retained: $signal_worktree)"
+        ;;
+    esac
+  fi
   if legion_adapter_supervisor_cleanup_failed "$NATIVE_LEASE_STATUS" \
       || { [[ -f "$NATIVE_LEASE_STATUS" ]] && jq -e \
         '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
@@ -672,6 +702,36 @@ is_sandcastle_sandbox() {
   case "$1" in docker|podman|vercel) return 0 ;; *) return 1 ;; esac
 }
 
+sandcastle_provider_launch_status() {
+  local marker="${SANDCASTLE_PROVIDER_MARKER:-}" token="${SANDCASTLE_PROVIDER_TOKEN:-}"
+  [[ -n "$marker" ]] || {
+    printf 'absent'
+    return 0
+  }
+  if [[ ! -e "$marker" && ! -L "$marker" ]]; then
+    printf 'absent'
+    return 0
+  fi
+  [[ -n "$token" && -f "$marker" && ! -L "$marker" ]] || {
+    printf 'malformed'
+    return 0
+  }
+  jq -er --arg token "$token" '
+    if type != "object"
+       or .schema != "legion.sandcastle-provider-launch.v1"
+       or .token != $token
+       or ((keys | sort) !=
+           (if .status == "started"
+            then ["provider_pid","schema","status","token"]
+            else ["schema","status","token"] end))
+       or (.status == "started" and ((.provider_pid | type) != "number" or .provider_pid < 1))
+       or (.status != "started" and .status != "pending" and .status != "not-started")
+    then "malformed"
+    else .status
+    end
+  ' "$marker" 2>/dev/null || printf 'malformed'
+}
+
 # Run Sandcastle for one model into $art files; sets the caller's $rc (dynamic scope).
 # Sandcastle writes the diff directly to $art/diff.patch; the rest of the
 # delegate flow consumes that same artifact path.
@@ -698,31 +758,53 @@ run_sandcastle() {
   provider_wrapper="$provider_wrapper_dir/codex"
   provider_launcher="$provider_wrapper_dir/provider-launch.py"
   provider_marker="$art/sandcastle-provider-launched"
+  SANDCASTLE_PROVIDER_MARKER="$provider_marker"
+  SANDCASTLE_PROVIDER_TOKEN="$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(24))
+PY
+)" || {
+    SANDCASTLE_SETUP_REFUSED=1
+    rc=127
+    return 0
+  }
   mkdir -p "$provider_wrapper_dir"
   rm -f "$provider_marker"
   printf '%s\n' '#!/usr/bin/env python3' \
-    'import os, signal, subprocess, sys' \
-    'marker, executable, *arguments = sys.argv[1:]' \
-    'marker_file = open(marker, "w", encoding="utf-8")' \
-    'marker_file.write("pending\n")' \
-    'marker_file.flush()' \
-    'os.fsync(marker_file.fileno())' \
+    'import json, os, signal, subprocess, sys, tempfile' \
+    'marker, token, executable, *arguments = sys.argv[1:]' \
+    'def write_marker(status, provider_pid=None):' \
+    '    directory = os.path.dirname(marker)' \
+    '    descriptor, temporary = tempfile.mkstemp(prefix=".sandcastle-provider.", suffix=".tmp", dir=directory)' \
+    '    try:' \
+    '        payload = {"schema":"legion.sandcastle-provider-launch.v1", "token":token, "status":status}' \
+    '        if provider_pid is not None:' \
+    '            payload["provider_pid"] = provider_pid' \
+    '        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:' \
+    '            json.dump(payload, destination, separators=(",", ":"))' \
+    '            destination.write("\n")' \
+    '            destination.flush()' \
+    '            os.fsync(destination.fileno())' \
+    '        os.chmod(temporary, 0o600)' \
+    '        os.replace(temporary, marker)' \
+    '        directory_fd = os.open(directory, os.O_RDONLY)' \
+    '        try:' \
+    '            os.fsync(directory_fd)' \
+    '        finally:' \
+    '            os.close(directory_fd)' \
+    '    finally:' \
+    '        try:' \
+    '            os.unlink(temporary)' \
+    '        except FileNotFoundError:' \
+    '            pass' \
+    'write_marker("pending")' \
     'try:' \
     '    child = subprocess.Popen([executable, *arguments])' \
     'except OSError as error:' \
-    '    marker_file.seek(0)' \
-    '    marker_file.truncate()' \
-    '    marker_file.write("not-started\n")' \
-    '    marker_file.flush()' \
-    '    os.fsync(marker_file.fileno())' \
+    '    write_marker("not-started")' \
     '    print(f"provider launch failed: {error}", file=sys.stderr)' \
     '    raise SystemExit(127 if getattr(error, "errno", None) == 2 else 126)' \
-    'marker_file.seek(0)' \
-    'marker_file.truncate()' \
-    'marker_file.write("started\n")' \
-    'marker_file.flush()' \
-    'os.fsync(marker_file.fileno())' \
-    'marker_file.close()' \
+    'write_marker("started", child.pid)' \
     'def forward(signum, _frame):' \
     '    try:' \
     '        child.send_signal(signum)' \
@@ -731,8 +813,9 @@ run_sandcastle() {
     'for caught in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):' \
     '    signal.signal(caught, forward)' \
     'raise SystemExit(child.wait())' > "$provider_launcher"
-  printf '#!/usr/bin/env bash\nexec %q %q %q %q "$@"\n' \
-    "$python_bin" "$provider_launcher" "$provider_marker" "$CODEX_BIN" > "$provider_wrapper"
+  printf '#!/usr/bin/env bash\nexec %q %q %q %q %q "$@"\n' \
+    "$python_bin" "$provider_launcher" "$provider_marker" "$SANDCASTLE_PROVIDER_TOKEN" \
+    "$CODEX_BIN" > "$provider_wrapper"
   chmod 700 "$provider_wrapper"
   : > "$art/stream.jsonl"
   local input="$art/sandcastle-input.json"
@@ -762,8 +845,10 @@ run_sandcastle() {
   # Sandcastle can fail while importing/configuring its backend with many exit
   # codes and messages. The trusted codex launcher marker distinguishes every
   # such no-spend setup failure from a real provider process that later failed.
+  local provider_launch_status
+  provider_launch_status="$(sandcastle_provider_launch_status)"
   if [[ "$rc" -ne 0 \
-      && ( ! -f "$provider_marker" || "$(cat "$provider_marker" 2>/dev/null || true)" == not-started ) ]] \
+      && ( "$provider_launch_status" == absent || "$provider_launch_status" == not-started ) ]] \
       && ! legion_adapter_supervisor_timed_out "$art/lease-$attempt_ordinal.json" \
       && ! legion_adapter_supervisor_cleanup_failed "$art/lease-$attempt_ordinal.json"; then
     SANDCASTLE_SETUP_REFUSED=1
@@ -952,12 +1037,58 @@ native_provider_span_claim() {
   local lock_outcome
   lock_outcome="$(python3 - "$lock" "$$" <<'PY'
 import fcntl
+import json
 import os
+import re
+import secrets
 import stat
+import subprocess
 import sys
+from datetime import datetime
 
 path, owner_text = sys.argv[1:]
 owner_pid = int(owner_text)
+
+def process_snapshot(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False, None, None
+    except PermissionError:
+        pass
+    boot = None
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as source:
+                boot = source.read(80).strip()
+        except OSError:
+            pass
+    elif sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                check=False, capture_output=True, text=True, timeout=1,
+                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin"},
+            )
+            match = re.search(r"sec\s*=\s*(\d+)", result.stdout[:256])
+            if result.returncode == 0 and match:
+                boot = match.group(1)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            check=False, capture_output=True, text=True, timeout=1,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        )
+        started = result.stdout.strip()
+        if result.returncode != 0 or not started or len(started) > 128 or not boot:
+            return True, None, None
+        started_epoch = datetime.strptime(started, "%a %b %d %H:%M:%S %Y").timestamp()
+        return True, f"{sys.platform}:{boot}:{started}", started_epoch
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return True, None, None
+
 flags = os.O_RDWR | os.O_CREAT
 if hasattr(os, "O_NOFOLLOW"):
     flags |= os.O_NOFOLLOW
@@ -981,39 +1112,72 @@ try:
         raise SystemExit(1)
     if (path_stat.st_dev, path_stat.st_ino) != (descriptor_stat.st_dev, descriptor_stat.st_ino):
         raise SystemExit(1)
+    descriptor_stat = os.fstat(descriptor)
+    owner_alive, owner_incarnation, _ = process_snapshot(owner_pid)
+    if not owner_alive or not owner_incarnation:
+        raise SystemExit(1)
     os.lseek(descriptor, 0, os.SEEK_SET)
     try:
-        raw_owner = os.read(descriptor, 65).decode("ascii", errors="strict").strip()
+        raw_owner = os.read(descriptor, 1025).decode("utf-8", errors="strict").strip()
     except UnicodeDecodeError:
         raw_owner = ""
-    prior_pid = None
+    prior_owner = None
+    legacy_pid = None
     if raw_owner:
-        if len(raw_owner) <= 64 and raw_owner.isdigit() and int(raw_owner) > 0:
-            prior_pid = int(raw_owner)
-    if prior_pid is not None:
         try:
-            os.kill(prior_pid, 0)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
+            candidate = json.loads(raw_owner)
+        except (ValueError, TypeError):
+            candidate = None
+        if (
+            isinstance(candidate, dict)
+            and candidate.get("schema") == "legion.native-provider-span-claim.v1"
+            and isinstance(candidate.get("publisher_pid"), int)
+            and candidate["publisher_pid"] > 0
+            and isinstance(candidate.get("publisher_incarnation"), str)
+            and candidate["publisher_incarnation"]
+            and isinstance(candidate.get("token"), str)
+            and candidate["token"]
+            and set(candidate) == {"schema", "publisher_pid", "publisher_incarnation", "token"}
+        ):
+            prior_owner = candidate
+        elif len(raw_owner) <= 64 and raw_owner.isdigit() and int(raw_owner) > 0:
+            legacy_pid = int(raw_owner)
+    if prior_owner:
+        prior_alive, prior_incarnation, _ = process_snapshot(prior_owner["publisher_pid"])
+        if prior_alive and (prior_incarnation is None or prior_incarnation == prior_owner["publisher_incarnation"]):
             print("busy")
             raise SystemExit(0)
-        else:
+    elif legacy_pid is not None:
+        prior_alive, _, prior_started = process_snapshot(legacy_pid)
+        if prior_alive and (prior_started is None or prior_started <= descriptor_stat.st_mtime + 1.0):
             print("busy")
             raise SystemExit(0)
+    token = secrets.token_hex(24)
     os.lseek(descriptor, 0, os.SEEK_SET)
     os.ftruncate(descriptor, 0)
-    os.write(descriptor, f"{owner_pid}\n".encode("ascii"))
+    payload = json.dumps(
+        {
+            "schema": "legion.native-provider-span-claim.v1",
+            "publisher_pid": owner_pid,
+            "publisher_incarnation": owner_incarnation,
+            "token": token,
+        },
+        separators=(",", ":"),
+    ) + "\n"
+    os.write(descriptor, payload.encode("utf-8"))
     os.fsync(descriptor)
     path_stat = os.stat(path, follow_symlinks=False)
     if (path_stat.st_dev, path_stat.st_ino) != (descriptor_stat.st_dev, descriptor_stat.st_ino):
         raise SystemExit(1)
-    print("acquired")
+    print(f"acquired:{token}")
 finally:
     os.close(descriptor)
 PY
 )" || return 1
-  [[ "$lock_outcome" == acquired ]] || return 1
+  case "$lock_outcome" in
+    acquired:*) NATIVE_PROVIDER_SPAN_CLAIM_TOKEN="${lock_outcome#acquired:}" ;;
+    *) return 1 ;;
+  esac
   # The prior owner may have appended just before it died. Reconcile after
   # acquiring ownership so telemetry, rather than a marker directory, wins.
   if native_provider_span_is_recorded "$attempt_path"; then
@@ -1039,16 +1203,58 @@ PY
 }
 
 native_provider_span_release_lock() {
-  local lock="$1.span-publishing"
-  [[ -e "$lock" && ! -L "$lock" ]] || return 0
-  python3 - "$lock" "$$" <<'PY'
+  local lock="$1.span-publishing" token="${NATIVE_PROVIDER_SPAN_CLAIM_TOKEN:-}" outcome
+  [[ -n "$token" && -e "$lock" && ! -L "$lock" ]] || return 1
+  outcome="$(python3 - "$lock" "$$" "$token" <<'PY'
 import fcntl
+import json
 import os
+import re
 import stat
+import subprocess
 import sys
+from datetime import datetime
 
-path, owner_text = sys.argv[1:]
+path, owner_text, token = sys.argv[1:]
 owner_pid = int(owner_text)
+
+def process_incarnation(pid):
+    boot = None
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as source:
+                boot = source.read(80).strip()
+        except OSError:
+            pass
+    elif sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                check=False, capture_output=True, text=True, timeout=1,
+                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin"},
+            )
+            match = re.search(r"sec\s*=\s*(\d+)", result.stdout[:256])
+            if result.returncode == 0 and match:
+                boot = match.group(1)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            check=False, capture_output=True, text=True, timeout=1,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        )
+        started = result.stdout.strip()
+        if result.returncode != 0 or not started or len(started) > 128 or not boot:
+            return None
+        datetime.strptime(started, "%a %b %d %H:%M:%S %Y")
+        return f"{sys.platform}:{boot}:{started}"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+owner_incarnation = process_incarnation(owner_pid)
+if not owner_incarnation:
+    raise SystemExit(1)
 flags = os.O_RDWR
 if hasattr(os, "O_NOFOLLOW"):
     flags |= os.O_NOFOLLOW
@@ -1073,14 +1279,30 @@ try:
     if (path_stat.st_dev, path_stat.st_ino) != (descriptor_stat.st_dev, descriptor_stat.st_ino):
         raise SystemExit(1)
     os.lseek(descriptor, 0, os.SEEK_SET)
-    raw_owner = os.read(descriptor, 65).decode("ascii", errors="strict").strip()
-    if len(raw_owner) <= 64 and raw_owner.isdigit() and int(raw_owner) == owner_pid:
+    try:
+        owner = json.loads(os.read(descriptor, 1024).decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        owner = None
+    if (
+        isinstance(owner, dict)
+        and owner.get("schema") == "legion.native-provider-span-claim.v1"
+        and owner.get("publisher_pid") == owner_pid
+        and owner.get("publisher_incarnation") == owner_incarnation
+        and owner.get("token") == token
+        and set(owner) == {"schema", "publisher_pid", "publisher_incarnation", "token"}
+    ):
         os.lseek(descriptor, 0, os.SEEK_SET)
         os.ftruncate(descriptor, 0)
         os.fsync(descriptor)
+        print("released")
+    else:
+        raise SystemExit(1)
 finally:
     os.close(descriptor)
 PY
+)" || return 1
+  [[ "$outcome" == released ]] || return 1
+  NATIVE_PROVIDER_SPAN_CLAIM_TOKEN=""
 }
 
 native_provider_span_release() {
@@ -3617,6 +3839,11 @@ cmd_review() {
   cost="$(jq -c '.reconciliation.cost_usd' <<<"$review_metering")"
   usage_status="$(jq -r '.reconciliation.usage_status' <<<"$review_metering")"
   cost_status="$(jq -r '.reconciliation.cost_status' <<<"$review_metering")"
+  local known_usage known_usage_attempts known_cost known_cost_attempts
+  known_usage="$(jq -c '.reconciliation.known_usage' <<<"$review_metering")"
+  known_usage_attempts="$(jq -r '.reconciliation.known_usage_attempts' <<<"$review_metering")"
+  known_cost="$(jq -c '.reconciliation.known_cost_usd' <<<"$review_metering")"
+  known_cost_attempts="$(jq -r '.reconciliation.known_cost_attempts' <<<"$review_metering")"
   local effective_review_model actual_review_executor
   effective_review_model="$(jq -r '.last.model // empty' <<<"$review_metering")"
   actual_review_executor="$(jq -r '.last.executor // empty' <<<"$review_metering")"
@@ -3684,7 +3911,10 @@ cmd_review() {
     --arg preflight "$review_preflight_receipt" --arg attempt_receipt "$review_attempt_receipt" \
     --arg failure "$review_failure_receipt" --arg lease "$review_lease_receipt" --arg wt "$wt_report" \
     --argjson attempts "$attempt" --argjson max_attempts "$max_attempts" \
-    --argjson usage "$usage" --argjson cost "${cost:-0}" \
+    --argjson usage "$usage" --arg usage_status "$usage_status" \
+    --argjson known_usage "$known_usage" --argjson known_usage_attempts "$known_usage_attempts" \
+    --argjson cost "${cost:-null}" --arg cost_status "$cost_status" \
+    --argjson known_cost "$known_cost" --argjson known_cost_attempts "$known_cost_attempts" \
     --argjson verdict "$verdict_json" '
     {run_id:$run, status:$status, reason:$reason, model:$model,
      reviewed_base_sha:$base, reviewed_head_sha:$head,
@@ -3694,7 +3924,14 @@ cmd_review() {
      failure_receipt:(if $failure=="" then null else $failure end),
      lease_receipt:(if $lease=="" then null else $lease end),worktree:$wt,
      attempts:$attempts, max_attempts:$max_attempts,
-     verdict:$verdict, error_log:$error_log, usage:$usage, cost_usd:$cost}'
+     verdict:$verdict, error_log:$error_log,
+     usage:$usage,usage_status:$usage_status,cost_usd:$cost,cost_status:$cost_status}
+     + (if $usage_status == "partial" then
+          {known_usage:$known_usage,known_usage_attempts:$known_usage_attempts}
+        else {} end)
+     + (if $cost_status == "partial" then
+          {known_cost_usd:$known_cost,known_cost_attempts:$known_cost_attempts}
+        else {} end)'
   if [[ "$status" != "ok" ]]; then
     # A missing or invalid post-launch receipt is a containment/provenance
     # failure, not an ordinary reviewer rejection. Preserve the supervisor's

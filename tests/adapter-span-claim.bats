@@ -138,3 +138,50 @@ teardown() {
   [ ! -e "$calls" ]
   [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 3 ]
 }
+
+@test "process incarnation reclaims a reused PID while live legacy owners remain conservative" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    attempt="$2"
+    claim="$attempt.provider-span-emitted"
+    mkdir -p "$claim"
+
+    jq -cn --argjson pid "$$" \
+      '\''{schema:"legion.provider-span-claim.v1",publisher_pid:$pid,
+          publisher_incarnation:"forged-prior-incarnation",token:"prior"}'\'' \
+      > "$claim/owner.json"
+    legion_adapter_claim_provider_span "$attempt"
+    jq -e --argjson pid "$$" \
+      '\''.publisher_pid == $pid and .publisher_incarnation != "forged-prior-incarnation"'\'' \
+      "$claim/owner.json"
+    legion_adapter_release_provider_span_claim "$attempt"
+
+    jq -cn --argjson pid "$$" \
+      '\''{schema:"legion.provider-span-claim.v1",publisher_pid:$pid,token:"legacy"}'\'' \
+      > "$claim/owner.json"
+    ! legion_adapter_claim_provider_span "$attempt"
+    touch -t 200001010000 "$claim/owner.json"
+    legion_adapter_claim_provider_span "$attempt"
+    legion_adapter_release_provider_span_claim "$attempt"
+  ' _ "$CONTRACT" "$ATTEMPT"
+
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "a supervisor token supplies publisher incarnation inside restricted process sandboxes" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    attempt="$2"
+    export LEGION_SUPERVISOR_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef
+    legion_adapter_claim_provider_span "$attempt"
+    jq -e --argjson pid "$$" --arg token "$LEGION_SUPERVISOR_TOKEN" \
+      '\''.publisher_pid == $pid
+          and .publisher_incarnation == ("supervisor:" + $token + ":pid:" + ($pid | tostring))'\'' \
+      "$attempt.provider-span-emitted/owner.json"
+    legion_adapter_release_provider_span_claim "$attempt"
+  ' _ "$CONTRACT" "$ATTEMPT"
+
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}

@@ -854,6 +854,7 @@ def _write_status(
     reason: str,
     runtime_seconds: int,
     child_exit_code: Optional[int] = None,
+    child_started: Optional[bool] = None,
 ) -> None:
     """Atomically publish the supervisor outcome outside provider-controlled output.
 
@@ -879,6 +880,8 @@ def _write_status(
             }
             if child_exit_code is not None:
                 payload["child_exit_code"] = child_exit_code
+            if child_started is not None:
+                payload["child_started"] = child_started
             json.dump(payload, handle, separators=(",", ":"))
             handle.write("\n")
             handle.flush()
@@ -895,13 +898,17 @@ def _write_status(
 def main() -> int:
     arguments = _parser().parse_args()
     if arguments.max_runtime_seconds < 1:
-        print("legion-process-supervisor: --max-runtime-seconds must be at least 1", file=sys.stderr)
+        reason = "--max-runtime-seconds must be at least 1"
+        _write_status(arguments.status_file, "launch_failed", reason, 1)
+        print(f"legion-process-supervisor: {reason}", file=sys.stderr)
         return 2
     command = arguments.command
     if command and command[0] == "--":
         command = command[1:]
     if not command:
-        print("legion-process-supervisor: command is required", file=sys.stderr)
+        reason = "command is required"
+        _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+        print(f"legion-process-supervisor: {reason}", file=sys.stderr)
         return 2
 
     absolute_deadline_ns: Optional[int] = None
@@ -912,7 +919,9 @@ def main() -> int:
             if absolute_deadline_ns < 1:
                 raise ValueError
         except ValueError:
-            print("legion-process-supervisor: invalid inherited child lease deadline", file=sys.stderr)
+            reason = "invalid inherited child lease deadline"
+            _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 2
         if absolute_deadline_ns <= time.monotonic_ns():
             reason = "inherited child lease deadline expired before launch"
@@ -933,12 +942,16 @@ def main() -> int:
     inherited_fingerprint_active = False
     using_inherited = False
     if bool(inherited_deny) != bool(inherited_allow):
-        print("legion-process-supervisor: incomplete inherited supervisor fingerprint", file=sys.stderr)
+        reason = "incomplete inherited supervisor fingerprint"
+        _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+        print(f"legion-process-supervisor: {reason}", file=sys.stderr)
         return 2
     if len(
         [value for value in (inherited_owner_path, inherited_owner_nonce, inherited_owner_pid) if value]
     ) not in (0, 3):
-        print("legion-process-supervisor: incomplete inherited supervisor ownership lease", file=sys.stderr)
+        reason = "incomplete inherited supervisor ownership lease"
+        _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+        print(f"legion-process-supervisor: {reason}", file=sys.stderr)
         return 2
     if sys.platform == "darwin" and inherited_deny:
         try:
@@ -948,8 +961,13 @@ def main() -> int:
                 )
             )
         except ProcessInspectionError as error:
-            print(f"legion-process-supervisor: invalid inherited supervisor fingerprint: {error}", file=sys.stderr)
-            return 2
+            reason = f"cannot inspect inherited supervisor fingerprint: {error}"
+            _write_status(
+                arguments.status_file, "cleanup_failed", reason,
+                arguments.max_runtime_seconds, child_started=False
+            )
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+            return 70
         # Test shims and stale caller environments may carry a well-formed pair
         # without actually running under that policy. Such a pair grants no
         # trust: fall through to a fresh direct-launch fingerprint instead.
@@ -962,7 +980,9 @@ def main() -> int:
             deny_canary = inherited_deny
             allow_canary = inherited_allow
     if bool(deny_canary) != bool(allow_canary):
-        print("legion-process-supervisor: both Darwin sandbox canaries are required", file=sys.stderr)
+        reason = "both Darwin sandbox canaries are required"
+        _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+        print(f"legion-process-supervisor: {reason}", file=sys.stderr)
         return 2
     if sys.platform == "darwin" and deny_canary:
         using_inherited = inherited_fingerprint_active and deny_canary == inherited_deny
@@ -984,12 +1004,16 @@ def main() -> int:
                 deny_path = Path(deny_canary).resolve(strict=True)
                 allow_path = Path(allow_canary).resolve(strict=True)
         except OSError as error:
-            print(f"legion-process-supervisor: invalid Darwin sandbox canary: {error}", file=sys.stderr)
+            reason = f"invalid Darwin sandbox canary: {error}"
+            _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 2
         if deny_path == allow_path or deny_path.parent != allow_path.parent or (
             not using_inherited and (not deny_path.is_file() or not allow_path.is_file())
         ):
-            print("legion-process-supervisor: Darwin sandbox canaries must be adjacent regular files", file=sys.stderr)
+            reason = "Darwin sandbox canaries must be adjacent regular files"
+            _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 2
         deny_canary = str(deny_path)
         allow_canary = str(allow_path)
@@ -1012,12 +1036,15 @@ def main() -> int:
             except ProcessInspectionError as error:
                 reason = f"invalid inherited supervisor fingerprint: {error}"
                 _write_status(
-                    arguments.status_file, "cleanup_failed", reason, arguments.max_runtime_seconds
+                    arguments.status_file, "cleanup_failed", reason,
+                    arguments.max_runtime_seconds, child_started=False
                 )
                 print(f"legion-process-supervisor: {reason}", file=sys.stderr)
                 return 70
         elif not _darwin_sandbox_probe(deny_canary, allow_canary):
-            print("legion-process-supervisor: Darwin sandbox inspection is unavailable", file=sys.stderr)
+            reason = "Darwin sandbox inspection is unavailable"
+            _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 2
 
     if sys.platform == "darwin" and not deny_canary:
@@ -1026,7 +1053,8 @@ def main() -> int:
         except ProcessInspectionError as error:
             reason = f"cannot inspect inherited Seatbelt policy: {error}"
             _write_status(
-                arguments.status_file, "cleanup_failed", reason, arguments.max_runtime_seconds
+                arguments.status_file, "cleanup_failed", reason,
+                arguments.max_runtime_seconds, child_started=False
             )
             print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 70
@@ -1035,7 +1063,8 @@ def main() -> int:
                 "inherited Seatbelt policy has no verified run-unique supervisor fingerprint"
             )
             _write_status(
-                arguments.status_file, "cleanup_failed", reason, arguments.max_runtime_seconds
+                arguments.status_file, "cleanup_failed", reason,
+                arguments.max_runtime_seconds, child_started=False
             )
             print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 70
@@ -1046,7 +1075,9 @@ def main() -> int:
         except (OSError, ProcessInspectionError) as error:
             if fingerprint_dir:
                 shutil.rmtree(fingerprint_dir, ignore_errors=True)
-            print(f"legion-process-supervisor: cannot establish Darwin process fingerprint: {error}", file=sys.stderr)
+            reason = f"cannot establish Darwin process fingerprint: {error}"
+            _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 2
 
     owner_descriptor = -1
@@ -1060,8 +1091,11 @@ def main() -> int:
         except (OSError, ValueError) as error:
             reason = f"cannot establish active supervisor ownership lease: {error}"
             _write_status(
-                arguments.status_file, "cleanup_failed", reason, arguments.max_runtime_seconds
+                arguments.status_file, "cleanup_failed", reason,
+                arguments.max_runtime_seconds, child_started=False
             )
+            if fingerprint_dir:
+                shutil.rmtree(fingerprint_dir, ignore_errors=True)
             print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 70
 

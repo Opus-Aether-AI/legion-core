@@ -21,6 +21,30 @@ make_test_repo() {
   printf '%s' "$repo"
 }
 
+install_mock_version_registry() {
+  export LEGION_EXECUTORS_FILE="$TEST_TMPDIR/executors.toml"
+  cp "$REPO_ROOT/legion-router/config/executors.toml" "$LEGION_EXECUTORS_FILE"
+  python3 - "$LEGION_EXECUTORS_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+for executor in ("claude", "cursor", "opencode", "deepseek", "pi", "hermes"):
+    start = text.index(f"[executors.{executor}]")
+    end = text.find("\n[executors.", start + 1)
+    if end < 0:
+        end = len(text)
+    section = text[start:end].replace(
+        "supported_version_patterns = []",
+        'supported_version_patterns = ["^[0-9]"]',
+        1,
+    )
+    text = text[:start] + section + text[end:]
+path.write_text(text, encoding="utf-8")
+PY
+}
+
 install_cleanup_failed_python() {
   local shim_dir="$TEST_TMPDIR/python-shim" real_python
   real_python="$(command -v python3)"
@@ -37,6 +61,35 @@ install_cleanup_failed_python() {
     '  exit 70' \
     'fi' \
     'exec "$LEGION_TEST_REAL_PYTHON" "$@"' > "$shim_dir/python3"
+  chmod +x "$shim_dir/python3"
+  export LEGION_TEST_REAL_PYTHON="$real_python"
+  export PATH="$shim_dir:$PATH"
+}
+
+install_prelaunch_cleanup_failed_python() {
+  local shim_dir="$TEST_TMPDIR/prelaunch-cleanup-python" real_python
+  real_python="$(command -v python3)"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  status_file="" max_runtime=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status-file) status_file="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  jq -cn --argjson runtime "$max_runtime" '
+    {schema:"legion.child-execution-lease.v1",status:"cleanup_failed",
+     reason:"host containment policy could not be verified",
+     max_runtime_seconds:$runtime,child_started:false}
+  ' > "$status_file"
+  exit 70
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
   chmod +x "$shim_dir/python3"
   export LEGION_TEST_REAL_PYTHON="$real_python"
   export PATH="$shim_dir:$PATH"
@@ -122,6 +175,99 @@ assert_signal_receipt() {
     '\'' "$2/attempt-1.json"
   ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$art" "$lease"
   [ "$status" -eq 0 ]
+}
+
+@test "prelaunch containment evidence remains containment while authenticating no spend" {
+  local receipt="$TEST_TMPDIR/prelaunch-containment.json"
+  printf '%s\n' \
+    '{"schema":"legion.child-execution-lease.v1","status":"cleanup_failed","reason":"host policy cannot be inspected","max_runtime_seconds":30,"child_started":false}' \
+    > "$receipt"
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    legion_adapter_supervisor_cleanup_failed "$2"
+    legion_adapter_supervisor_cleanup_failed_before_launch "$2"
+    legion_adapter_supervisor_launch_failed "$2"
+  ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$receipt"
+  [ "$status" -eq 0 ]
+
+  jq '.child_started = true' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  run bash -c '
+    source "$1"
+    ! legion_adapter_supervisor_cleanup_failed_before_launch "$2"
+    ! legion_adapter_supervisor_launch_failed "$2"
+  ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$receipt"
+  [ "$status" -eq 0 ]
+}
+
+@test "every foreground adapter aborts a signal pending at its final launch gate" {
+  local bash_env="$TEST_TMPDIR/pending-signal.bash" adapter provider_marker repo run_id rc art out err
+  install_mock_version_registry
+  cat > "$bash_env" <<'SH'
+set -T
+trap 'case "$BASH_COMMAND" in abort_pending_signal_launch|abort_pending_claude_signal_launch) kill -TERM "$$";; esac' DEBUG
+SH
+  for adapter in claude cursor opencode deepseek pi hermes; do
+    case "$adapter" in
+      claude) provider_marker='claude -p' ;;
+      cursor) provider_marker='agent -p' ;;
+      opencode) provider_marker='opencode run' ;;
+      deepseek) provider_marker='dsh --profile' ;;
+      pi) provider_marker='pi -p' ;;
+      hermes) provider_marker='hermes --oneshot' ;;
+    esac
+    repo="$(make_test_repo "pending-$adapter")"
+    run_id="pending-$adapter"
+    out="$TEST_TMPDIR/$adapter-pending.out"
+    err="$TEST_TMPDIR/$adapter-pending.err"
+    rc=0
+    local -a extra_args=()
+    [[ "$adapter" != claude ]] || extra_args+=(--no-fallback)
+    BASH_ENV="$bash_env" PI_BIN=pi HERMES_BIN=hermes \
+      "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task wait --repo "$repo" \
+        --run-id "$run_id" --quiet "${extra_args[@]}" >"$out" 2>"$err" || rc=$?
+    [ "$rc" -eq 143 ] || { printf 'adapter=%s rc=%s out=%s err=%s\n' "$adapter" "$rc" "$(cat "$out")" "$(cat "$err")" >&2; return 1; }
+    ! grep -Fq "$provider_marker" "$MOCK_CALL_LOG" \
+      || { printf 'adapter=%s launched provider\n' "$adapter" >&2; return 1; }
+    art="$repo/.legion/runs/$run_id"
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+  done
+}
+
+@test "every foreground adapter preserves prelaunch containment without provider accounting" {
+  local adapter repo run_id result_file provider_marker err_file rc
+  install_mock_version_registry
+  install_prelaunch_cleanup_failed_python
+  for adapter in claude cursor opencode deepseek pi hermes; do
+    case "$adapter" in
+      claude) provider_marker='claude -p' ;;
+      cursor) provider_marker='agent -p' ;;
+      opencode) provider_marker='opencode run' ;;
+      deepseek) provider_marker='dsh --profile' ;;
+      pi) provider_marker='pi -p' ;;
+      hermes) provider_marker='hermes --oneshot' ;;
+    esac
+    repo="$(make_test_repo "prelaunch-containment-$adapter")"
+    run_id="prelaunch-containment-$adapter"
+    result_file="$TEST_TMPDIR/$adapter-prelaunch-containment.out"
+    err_file="$TEST_TMPDIR/$adapter-prelaunch-containment.err"
+    rc=0
+    local -a extra_args=()
+    [[ "$adapter" != claude ]] || extra_args+=(--no-fallback)
+    PI_BIN=pi HERMES_BIN=hermes \
+      "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task wait --repo "$repo" \
+        --run-id "$run_id" --quiet "${extra_args[@]}" > "$result_file" 2>"$err_file" || rc=$?
+    jq -e '
+      .status == "containment_failed"
+      and .attempt_receipt == null and .failure_receipt == null
+      and ((.result // .reason) | contains("containment policy could not be verified"))
+    ' "$result_file" || { printf 'adapter=%s rc=%s output=%s err=%s\n' "$adapter" "$rc" "$(cat "$result_file")" "$(cat "$err_file")" >&2; return 1; }
+    jq -e '.status == "cleanup_failed" and .child_started == false' \
+      "$(jq -r '.lease_receipt' "$result_file")"
+    ! grep -Fq "$provider_marker" "$MOCK_CALL_LOG"
+  done
 }
 
 @test "normal and delayed-signal publication share one durable provider-span claim" {

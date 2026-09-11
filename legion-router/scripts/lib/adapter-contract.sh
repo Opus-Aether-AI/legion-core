@@ -99,12 +99,27 @@ legion_adapter_supervisor_cleanup_failed() {
       "$status_file" >/dev/null 2>&1
 }
 
+legion_adapter_supervisor_cleanup_failed_before_launch() {
+  local status_file="$1"
+  [[ -f "$status_file" ]] \
+    && jq -e '
+      .schema == "legion.child-execution-lease.v1"
+      and .status == "cleanup_failed"
+      and .child_started == false
+      and (.reason | type == "string" and length > 0)
+      and (.max_runtime_seconds | type == "number" and . >= 1 and . == floor)
+      and (has("child_exit_code") | not)
+      and ((keys_unsorted - ["schema", "status", "reason", "max_runtime_seconds", "child_started"]) | length == 0)
+    ' "$status_file" >/dev/null 2>&1
+}
+
 # A launch_failed sidecar is authoritative no-spend evidence: the supervisor
 # writes it only when Popen raised before returning a child handle. Validate the
 # complete typed shape so a malformed or contradictory receipt cannot suppress
 # provider accounting.
 legion_adapter_supervisor_launch_failed() {
   local status_file="$1"
+  legion_adapter_supervisor_cleanup_failed_before_launch "$status_file" && return 0
   [[ -f "$status_file" ]] \
     && jq -e '
       .schema == "legion.child-execution-lease.v1"
@@ -370,34 +385,108 @@ legion_adapter_claim_provider_span() {
 import fcntl
 import json
 import os
+import re
 import secrets
+import stat
+import subprocess
 import sys
 import tempfile
+from datetime import datetime
 
 lock_path, owner_path, publisher_pid_text = sys.argv[1:]
 publisher_pid = int(publisher_pid_text)
 
-def alive(pid):
+def process_snapshot(pid):
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return False, None, None
     except PermissionError:
-        return True
-    return True
+        pass
+    boot = None
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as source:
+                boot = source.read(80).strip()
+        except OSError:
+            pass
+    elif sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                check=False, capture_output=True, text=True, timeout=1,
+                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin"},
+            )
+            match = re.search(r"sec\s*=\s*(\d+)", result.stdout[:256])
+            if result.returncode == 0 and match:
+                boot = match.group(1)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            check=False, capture_output=True, text=True, timeout=1,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        )
+        started = result.stdout.strip()
+        if result.returncode != 0 or not started or len(started) > 128 or not boot:
+            return True, None, None
+        started_epoch = datetime.strptime(started, "%a %b %d %H:%M:%S %Y").timestamp()
+        return True, f"{sys.platform}:{boot}:{started}", started_epoch
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return True, None, None
 
-with open(lock_path, "a+", encoding="utf-8") as lock:
-    os.chmod(lock_path, 0o600)
+def current_publisher_incarnation(pid):
+    # A process supervisor contributes a fresh, unguessable token to exactly
+    # one supervised execution tree.  Prefer that token for the publisher
+    # itself: macOS Seatbelt intentionally denies the process inspection that
+    # ps(1) needs inside brokered harnesses.  Other-owner checks still use the
+    # host start time when it is observable.
+    supervisor_token = os.environ.get("LEGION_SUPERVISOR_TOKEN", "")
+    if re.fullmatch(r"[0-9a-f]{48}", supervisor_token):
+        return f"supervisor:{supervisor_token}:pid:{pid}"
+    alive, incarnation, _ = process_snapshot(pid)
+    return incarnation if alive else None
+
+flags = os.O_RDWR | os.O_CREAT
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(lock_path, flags, 0o600)
+with os.fdopen(descriptor, "r+", encoding="utf-8") as lock:
+    lock_stat = os.fstat(lock.fileno())
+    if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+        raise SystemExit(1)
+    os.fchmod(lock.fileno(), 0o600)
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         print("busy")
         raise SystemExit(0)
+    path_stat = os.stat(lock_path, follow_symlinks=False)
+    if (path_stat.st_dev, path_stat.st_ino) != (lock_stat.st_dev, lock_stat.st_ino):
+        raise SystemExit(1)
+    publisher_incarnation = current_publisher_incarnation(publisher_pid)
+    if not publisher_incarnation:
+        raise SystemExit(1)
     owner = None
+    legacy_owner = None
+    owner_mtime = None
     try:
+        owner_mtime = os.stat(owner_path, follow_symlinks=False).st_mtime
         with open(owner_path, encoding="utf-8") as source:
             candidate = json.load(source)
         if (
+            candidate.get("schema") == "legion.provider-span-claim.v1"
+            and isinstance(candidate.get("publisher_pid"), int)
+            and candidate["publisher_pid"] > 0
+            and isinstance(candidate.get("publisher_incarnation"), str)
+            and candidate["publisher_incarnation"]
+            and isinstance(candidate.get("token"), str)
+            and candidate["token"]
+            and set(candidate) == {"schema", "publisher_pid", "publisher_incarnation", "token"}
+        ):
+            owner = candidate
+        elif (
             candidate.get("schema") == "legion.provider-span-claim.v1"
             and isinstance(candidate.get("publisher_pid"), int)
             and candidate["publisher_pid"] > 0
@@ -405,12 +494,22 @@ with open(lock_path, "a+", encoding="utf-8") as lock:
             and candidate["token"]
             and set(candidate) == {"schema", "publisher_pid", "token"}
         ):
-            owner = candidate
+            legacy_owner = candidate
     except (OSError, ValueError, TypeError):
         pass
-    if owner and owner["publisher_pid"] != publisher_pid and alive(owner["publisher_pid"]):
-        print("busy")
-        raise SystemExit(0)
+    if owner:
+        if owner["publisher_pid"] == publisher_pid:
+            owner_alive, owner_incarnation = True, publisher_incarnation
+        else:
+            owner_alive, owner_incarnation, _ = process_snapshot(owner["publisher_pid"])
+        if owner_alive and (owner_incarnation is None or owner_incarnation == owner["publisher_incarnation"]):
+            print("busy")
+            raise SystemExit(0)
+    elif legacy_owner:
+        owner_alive, _, owner_started = process_snapshot(legacy_owner["publisher_pid"])
+        if owner_alive and (owner_started is None or owner_mtime is None or owner_started <= owner_mtime + 1.0):
+            print("busy")
+            raise SystemExit(0)
     token = secrets.token_hex(24)
     directory = os.path.dirname(owner_path)
     descriptor, temporary = tempfile.mkstemp(prefix=".owner.", suffix=".tmp", dir=directory)
@@ -420,6 +519,7 @@ with open(lock_path, "a+", encoding="utf-8") as lock:
                 {
                     "schema": "legion.provider-span-claim.v1",
                     "publisher_pid": publisher_pid,
+                    "publisher_incarnation": publisher_incarnation,
                     "token": token,
                 },
                 destination,
@@ -452,12 +552,66 @@ legion_adapter_release_provider_span_claim() {
 import fcntl
 import json
 import os
+import re
+import stat
+import subprocess
 import sys
+from datetime import datetime
 
 lock_path, owner_path, token, publisher_pid_text = sys.argv[1:]
 publisher_pid = int(publisher_pid_text)
-with open(lock_path, "a+", encoding="utf-8") as lock:
+
+def process_incarnation(pid):
+    supervisor_token = os.environ.get("LEGION_SUPERVISOR_TOKEN", "")
+    if re.fullmatch(r"[0-9a-f]{48}", supervisor_token):
+        return f"supervisor:{supervisor_token}:pid:{pid}"
+    boot = None
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as source:
+                boot = source.read(80).strip()
+        except OSError:
+            pass
+    elif sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                check=False, capture_output=True, text=True, timeout=1,
+                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin"},
+            )
+            match = re.search(r"sec\s*=\s*(\d+)", result.stdout[:256])
+            if result.returncode == 0 and match:
+                boot = match.group(1)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            check=False, capture_output=True, text=True, timeout=1,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        )
+        started = result.stdout.strip()
+        if result.returncode != 0 or not started or len(started) > 128 or not boot:
+            return None
+        return f"{sys.platform}:{boot}:{started}"
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+publisher_incarnation = process_incarnation(publisher_pid)
+if not publisher_incarnation:
+    raise SystemExit(1)
+flags = os.O_RDWR | os.O_CREAT
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(lock_path, flags, 0o600)
+with os.fdopen(descriptor, "r+", encoding="utf-8") as lock:
+    lock_stat = os.fstat(lock.fileno())
+    if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+        raise SystemExit(1)
     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    path_stat = os.stat(lock_path, follow_symlinks=False)
+    if (path_stat.st_dev, path_stat.st_ino) != (lock_stat.st_dev, lock_stat.st_ino):
+        raise SystemExit(1)
     try:
         with open(owner_path, encoding="utf-8") as source:
             owner = json.load(source)
@@ -467,6 +621,7 @@ with open(lock_path, "a+", encoding="utf-8") as lock:
         isinstance(owner, dict)
         and owner.get("schema") == "legion.provider-span-claim.v1"
         and owner.get("publisher_pid") == publisher_pid
+        and owner.get("publisher_incarnation") == publisher_incarnation
         and owner.get("token") == token
     ):
         try:
@@ -538,6 +693,13 @@ legion_adapter_write_signal_receipt() {
   ' "$lease_path" 2>/dev/null || true)"
   [[ -z "$lease_child_rc" ]] || child_rc="$lease_child_rc"
   case "$lease_status" in
+    cleanup_failed)
+      if legion_adapter_supervisor_cleanup_failed_before_launch "$lease_path"; then
+        LEGION_ADAPTER_SIGNAL_TERMINALIZED=0
+        return 0
+      fi
+      message="provider attempt cancelled by signal $signum; containment cleanup failed"
+      ;;
     launch_failed)
       # No provider existed to cancel and therefore no provider attempt/span is
       # permitted. Only the complete supervisor-authenticated shape can make

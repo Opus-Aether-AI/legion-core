@@ -1544,7 +1544,9 @@ SH
       and .attempt_receipt != null and .failure_receipt != null and .lease_receipt != null'
     art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
     [ -f "$art/sandcastle-provider-launched" ]
-    [ "$(cat "$art/sandcastle-provider-launched")" = started ]
+    jq -e '.schema == "legion.sandcastle-provider-launch.v1" and .status == "started"
+      and (.token | type == "string" and length == 48) and .provider_pid > 0' \
+      "$art/sandcastle-provider-launched"
     attempt="$(find "$art" -maxdepth 1 -type f -name 'attempt-*.json' -print -quit)"
     jq -e '.terminal_status == "failed" and .failure.class == "provider"' "$attempt"
     [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 1 ]
@@ -1580,7 +1582,8 @@ SH
     echo "$output" | tail -n 1 | jq -e '.status == "refused"
       and .attempt_receipt == null and .failure_receipt == null'
     art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
-    [ "$(cat "$art/sandcastle-provider-launched")" = not-started ]
+    jq -e '.schema == "legion.sandcastle-provider-launch.v1" and .status == "not-started"
+      and (.token | type == "string" and length == 48)' "$art/sandcastle-provider-launched"
     [ "$(find "$art" -maxdepth 1 -type f -name 'attempt-[0-9]*.json' | wc -l | tr -d ' ')" -eq 0 ]
     [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 0 ]
 }
@@ -2614,6 +2617,44 @@ native_provider_span_claim "$1/attempt-1.json"
 native_provider_span_release "$1/attempt-1.json"
 ! native_provider_span_claim "$1/attempt-2.json"
 [[ "$(cat "$1/victim")" == do-not-overwrite ]]
+SH
+    } > "$helper"
+
+    run bash "$helper" "$art"
+
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "native claim distinguishes PID reuse and conservatively migrates live legacy owners" {
+    local helper art
+    helper="$TEST_TMPDIR/native-span-incarnation.sh"
+    art="$TEST_TMPDIR/native-span-incarnation-art"
+    mkdir -p "$art/telemetry"
+    printf '{}\n' > "$art/attempt-1.json"
+    {
+      sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_claim()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release_lock()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+set -euo pipefail
+LEGION_TELEMETRY_DIR="$1/telemetry"
+attempt="$1/attempt-1.json"
+lock="$attempt.span-publishing"
+
+jq -cn --argjson pid "$$" \
+  '{schema:"legion.native-provider-span-claim.v1",publisher_pid:$pid,
+    publisher_incarnation:"forged-prior-incarnation",token:"prior"}' > "$lock"
+native_provider_span_claim "$attempt"
+jq -e --argjson pid "$$" \
+  '.publisher_pid == $pid and .publisher_incarnation != "forged-prior-incarnation"' "$lock"
+native_provider_span_release "$attempt"
+
+printf '%s\n' "$$" > "$lock"
+! native_provider_span_claim "$attempt"
+touch -t 200001010000 "$lock"
+native_provider_span_claim "$attempt"
+native_provider_span_release "$attempt"
 SH
     } > "$helper"
 
@@ -3707,6 +3748,10 @@ PY
     [[ "$output" != *'"reason":"review-failed"'* ]] || \
       { echo "review failed outright instead of falling through"; false; }
     echo "$output" | jq -e '.status == "ok"
+      and .usage == null and .usage_status == "partial"
+      and (.known_usage | type) == "object" and .known_usage_attempts == 1
+      and .cost_usd == null and .cost_status == "partial"
+      and .known_cost_usd == 0.03 and .known_cost_attempts == 1
       and (.preflight_receipt | contains("/prompt-review-"))
       and (.attempt_receipt | contains("/prompt-review-"))'
     jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"' \
@@ -3927,7 +3972,11 @@ SH
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.status == "refused" and .attempts == 0
       and (.reason | contains("unsupported effort"))
-      and .attempt_receipt == null and .failure_receipt == null'
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "unknown"
+      and .cost_usd == null and .cost_status == "unknown"
+      and (has("known_usage") | not) and (has("known_usage_attempts") | not)
+      and (has("known_cost_usd") | not) and (has("known_cost_attempts") | not)'
     jq -e '.schema == "legion.preflight.v1" and .status == "incompatible"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
     assert_mock_not_called codex

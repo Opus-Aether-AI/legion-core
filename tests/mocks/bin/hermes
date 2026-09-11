@@ -30,11 +30,13 @@ if [[ -n "$usage_file" && "${MOCK_HERMES_NO_USAGE:-0}" != 1 ]]; then
     printf '%s\n' '{"estimated_cost_usd":0.002,"input_tokens":256,"output_tokens":48,"completed":true,"failed":false}' > "$usage_file"
   else
     cost="${MOCK_HERMES_COST:-0.002}"
+    cost_status="${MOCK_HERMES_COST_STATUS:-estimated}"
+    cost_source="${MOCK_HERMES_COST_SOURCE:-official_docs_snapshot}"
     printf '%s\n' \
       '{' \
       "  \"estimated_cost_usd\": $cost," \
-      '  "cost_status": "estimated",' \
-      '  "cost_source": "official_docs_snapshot",' \
+      "  \"cost_status\": \"$cost_status\"," \
+      "  \"cost_source\": \"$cost_source\"," \
       '  "input_tokens": 256,' \
       '  "output_tokens": 48,' \
       '  "cache_read_tokens": 24,' \

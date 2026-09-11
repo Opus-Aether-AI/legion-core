@@ -69,6 +69,35 @@ def test_child_finishing_below_lease_succeeds(tmp_path: Path) -> None:
     assert elapsed < 1.5
 
 
+@pytest.mark.parametrize(
+    ("extra", "environment"),
+    (
+        (["--max-runtime-seconds", "0", "--", "/fixture/provider"], {}),
+        (["--max-runtime-seconds", "2"], {}),
+        (["--max-runtime-seconds", "2", "--", "/fixture/provider"],
+         {"LEGION_CHILD_LEASE_DEADLINE_NS": "invalid"}),
+    ),
+)
+def test_prelaunch_validation_failures_publish_no_child_evidence(
+    tmp_path: Path, extra: list[str], environment: dict[str, str]
+) -> None:
+    status_file = tmp_path / "validation-no-launch.json"
+    env = os.environ.copy()
+    env.update(environment)
+    result = subprocess.run(
+        [sys.executable, str(SUPERVISOR), "--cwd", str(tmp_path),
+         "--status-file", str(status_file), *extra],
+        capture_output=True,
+        env=env,
+        timeout=4,
+    )
+    assert result.returncode == 2
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["status"] == "launch_failed"
+    assert receipt["max_runtime_seconds"] >= 1
+    assert "child_exit_code" not in receipt
+
+
 def test_silent_setsid_descendant_is_reaped_on_timeout(tmp_path: Path) -> None:
     pid_file = tmp_path / "detached.pid"
     program = """
@@ -370,6 +399,68 @@ def test_popen_execution_error_is_typed_as_no_launch(
     assert "child_exit_code" not in receipt
 
 
+def test_darwin_host_policy_inspection_failure_is_containment_no_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_file = tmp_path / "host-inspection.json"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_host_inspection", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+
+    def inspection_failed():
+        raise supervisor.ProcessInspectionError("fixture inspection failure")
+
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "_darwin_inherited_host_sandboxed", inspection_failed)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("Popen ran"))
+    monkeypatch.setattr(
+        supervisor.sys,
+        "argv",
+        [str(SUPERVISOR), "--cwd", str(tmp_path), "--max-runtime-seconds", "30",
+         "--status-file", str(status_file), "--", "/fixture/provider"],
+    )
+
+    assert supervisor.main() == 70
+    assert json.loads(status_file.read_text(encoding="utf-8")) == {
+        "schema": "legion.child-execution-lease.v1",
+        "status": "cleanup_failed",
+        "reason": "cannot inspect inherited Seatbelt policy: fixture inspection failure",
+        "max_runtime_seconds": 30,
+        "child_started": False,
+    }
+
+
+def test_darwin_fresh_fingerprint_failure_is_authenticated_no_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_file = tmp_path / "fresh-fingerprint.json"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_fresh_fingerprint", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "_darwin_inherited_host_sandboxed", lambda: False)
+    monkeypatch.setattr(
+        supervisor, "_darwin_launch_fingerprint",
+        lambda _command: (_ for _ in ()).throw(OSError("fixture fingerprint failure")),
+    )
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("Popen ran"))
+    monkeypatch.setattr(
+        supervisor.sys,
+        "argv",
+        [str(SUPERVISOR), "--cwd", str(tmp_path), "--max-runtime-seconds", "30",
+         "--status-file", str(status_file), "--", "/fixture/provider"],
+    )
+
+    assert supervisor.main() == 2
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["status"] == "launch_failed"
+    assert "fixture fingerprint failure" in receipt["reason"]
+    assert "child_exit_code" not in receipt
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt fingerprints are Darwin-only")
 def test_inactive_inherited_fingerprint_cannot_disable_direct_launch(tmp_path: Path) -> None:
     deny_canary = tmp_path / "deny"
@@ -440,6 +531,7 @@ def test_existing_seatbelt_host_without_run_unique_canaries_fails_closed(tmp_pat
     assert result.returncode == 70, result.stderr.decode(errors="replace")
     receipt = json.loads(status_file.read_text(encoding="utf-8"))
     assert receipt["status"] == "cleanup_failed"
+    assert receipt["child_started"] is False
     assert "run-unique supervisor fingerprint" in receipt["reason"]
     assert not launched.exists()
 
@@ -477,6 +569,7 @@ def test_network_only_seatbelt_host_without_run_unique_canaries_fails_closed(tmp
     assert result.returncode == 70, result.stderr.decode(errors="replace")
     receipt = json.loads(status_file.read_text(encoding="utf-8"))
     assert receipt["status"] == "cleanup_failed"
+    assert receipt["child_started"] is False
     assert "run-unique supervisor fingerprint" in receipt["reason"]
     assert not launched.exists()
 
@@ -538,6 +631,7 @@ os.execve("/bin/sleep", ["sleep", "30"], {})
     assert result.returncode == 70, result.stderr.decode(errors="replace")
     receipt = json.loads(status_file.read_text(encoding="utf-8"))
     assert receipt["status"] == "cleanup_failed"
+    assert receipt["child_started"] is False
     assert "active outer Legion supervisor owner" in receipt["reason"]
     assert not pid_file.exists()
 
@@ -608,7 +702,9 @@ def test_stale_forged_owner_receipt_cannot_authorize_nested_launch(tmp_path: Pat
         timeout=8,
     )
     assert result.returncode == 70, result.stderr.decode(errors="replace")
-    assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "cleanup_failed"
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["status"] == "cleanup_failed"
+    assert receipt["child_started"] is False
     assert not launched.exists()
 
 

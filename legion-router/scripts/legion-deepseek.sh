@@ -109,6 +109,9 @@ begin_signal_launch() {
   trap 'SIGNAL_LAUNCH_PENDING=15' TERM
   trap 'SIGNAL_LAUNCH_PENDING=1' HUP
 }
+abort_pending_signal_launch() {
+  [[ -z "$SIGNAL_LAUNCH_PENDING" ]] || finish_signal_launch
+}
 finish_signal_launch() {
   local pending="$SIGNAL_LAUNCH_PENDING"
   SIGNAL_LAUNCH_PENDING=""
@@ -293,6 +296,7 @@ cmd_run() {
   start_ms="$(date +%s000)"
   set +e
   begin_signal_launch
+  abort_pending_signal_launch
   ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
       --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
       --status-file "$lease_status" -- "${cmd[@]}" "$task" ) >"$out_file" 2>"$err_file" &

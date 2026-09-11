@@ -91,6 +91,9 @@ begin_claude_signal_launch() {
   trap 'SIGNAL_LAUNCH_PENDING=15' TERM
   trap 'SIGNAL_LAUNCH_PENDING=1' HUP
 }
+abort_pending_claude_signal_launch() {
+  [[ -z "$SIGNAL_LAUNCH_PENDING" ]] || finish_claude_signal_launch
+}
 finish_claude_signal_launch() {
   local pending="$SIGNAL_LAUNCH_PENDING"
   SIGNAL_LAUNCH_PENDING=""
@@ -737,6 +740,7 @@ cmd_run() {
     SIGNAL_WORKTREE="${wt:-$repo}"
     set +e
     begin_claude_signal_launch
+    abort_pending_claude_signal_launch
     (
       legion_activate_executor_context "$RUN_ID" claude
       cd "${wt:-$repo}"
@@ -756,7 +760,15 @@ cmd_run() {
     set -e
     attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
     attempt_duration=$((attempt_end_ms-attempt_start_ms))
-    if legion_adapter_supervisor_launch_failed "$lease_status"; then
+    if legion_adapter_supervisor_cleanup_failed_before_launch "$lease_status"; then
+      containment_failed=1
+      keep=1
+      LEGION_CLAUDE_LEASE_RECEIPT="$lease_status"
+      lease_reason="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; no provider launched; worktree retained: ${wt:-$repo})"
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      break
+    elif legion_adapter_supervisor_launch_failed "$lease_status"; then
       # The typed sidecar proves Popen failed before creating a provider child.
       # Retain it as terminal evidence, but never fabricate a paid-attempt
       # receipt or span for this model.
@@ -1000,9 +1012,11 @@ cmd_run() {
     reason="containment_failed"
     status="containment_failed"
     result="$lease_reason"
-    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-      "$span_usage_status" "$span_cost_status"
+    if [[ -n "${LEGION_ADAPTER_ATTEMPT_PATH:-}" ]]; then
+      legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+        "$span_usage_status" "$span_cost_status"
+    fi
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \

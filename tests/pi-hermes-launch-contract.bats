@@ -278,6 +278,46 @@ assert_typed_pre_provider_timeout() {
     "$LEGION_TELEMETRY_DIR"/*.jsonl
 }
 
+@test "Hermes terminal metering follows its canonical attempt receipt" {
+  local repo result attempt
+  repo="$(make_test_repo hermes-unknown-cost)"
+
+  MOCK_HERMES_COST_STATUS=unknown MOCK_HERMES_COST_SOURCE=none HERMES_BIN=hermes \
+    run "$REPO_ROOT/legion-router/bin/legion-hermes" run --task inspect \
+      --model openai/fixture-hermes --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  result="$output"
+  attempt="$(jq -r '.attempt_receipt' <<<"$result")"
+  jq -e '.usage_status == "known" and (.usage | type) == "object"
+    and .cost_status == "unknown" and .cost_usd == null' <<<"$result"
+  jq -e --argjson result "$result" '
+    .usage == $result.usage and .usage_status == $result.usage_status
+    and .cost_usd == $result.cost_usd and .cost_status == $result.cost_status
+  ' "$attempt"
+}
+
+@test "Hermes launched pre-metering failure emits nullable unknown metering" {
+  local repo result attempt
+  repo="$(make_test_repo hermes-pre-metering-failure)"
+
+  MOCK_HERMES_FAIL=1 HERMES_BIN=hermes \
+    run "$REPO_ROOT/legion-router/bin/legion-hermes" run --task inspect \
+      --model openai/fixture-hermes --repo "$repo" --quiet
+
+  [ "$status" -ne 0 ]
+  result="$output"
+  jq -e '.status == "failed" and .provider_exit == 4
+    and .usage == null and .tokens == null and .usage_status == "unknown"
+    and .cost_usd == null and .cost_status == "unknown"
+    and (.attempt_receipt | type) == "string"' <<<"$result"
+  attempt="$(jq -r '.attempt_receipt' <<<"$result")"
+  jq -e --argjson result "$result" '
+    .usage == $result.usage and .usage_status == $result.usage_status
+    and .cost_usd == $result.cost_usd and .cost_status == $result.cost_status
+  ' "$attempt"
+}
+
 @test "a provider that really launches and exits 127 remains a billable attempt" {
   local repo provider result attempt lease
   repo="$(make_test_repo provider-127)"

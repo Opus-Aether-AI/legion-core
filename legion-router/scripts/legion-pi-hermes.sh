@@ -171,6 +171,9 @@ begin_signal_launch() {
   trap 'SIGNAL_LAUNCH_PENDING=15' TERM
   trap 'SIGNAL_LAUNCH_PENDING=1' HUP
 }
+abort_pending_signal_launch() {
+  [[ -z "$SIGNAL_LAUNCH_PENDING" ]] || finish_signal_launch
+}
 finish_signal_launch() {
   local pending="$SIGNAL_LAUNCH_PENDING"
   SIGNAL_LAUNCH_PENDING=""
@@ -897,6 +900,7 @@ run_provider() {
   fi
   supervisor_args+=(-- "${invocation[@]}")
   begin_signal_launch
+  abort_pending_signal_launch
   "${supervisor_args[@]}" >"$out" 2>"$err" &
   CHILD_PID=$!
   SIGNAL_CHILD_PID="$CHILD_PID"
@@ -1013,6 +1017,8 @@ cmd_run() {
   local lease_reason="" containment_failed=0 launch_failed=0
   if legion_adapter_supervisor_cleanup_failed "$ART/lease.json"; then
     containment_failed=1
+    legion_adapter_supervisor_cleanup_failed_before_launch "$ART/lease.json" \
+      && launch_failed=1
     lease_reason="$(legion_adapter_supervisor_reason "$ART/lease.json") (evidence: $ART/lease.json; worktree retained: $WT_RECORD)"
   elif legion_adapter_supervisor_launch_failed "$ART/lease.json"; then
     launch_failed=1
@@ -1103,6 +1109,8 @@ cmd_run() {
     fi
   fi
   local terminal_status=succeeded failure_class=""
+  local terminal_usage=null terminal_cost=null
+  local terminal_usage_status="$usage_status" terminal_cost_status="$cost_status"
   if [[ "$status" != ok ]]; then
     terminal_status=failed
     if [[ "$status" == timed_out ]]; then
@@ -1123,6 +1131,8 @@ cmd_run() {
   if [[ "$launch_failed" == 1 ]]; then
     LEGION_ADAPTER_ATTEMPT_PATH=""
     LEGION_ADAPTER_FAILURE_PATH=""
+    terminal_usage_status=not_applicable
+    terminal_cost_status=not_applicable
   else
     legion_adapter_write_attempt "$ART" "$ADAPTER_KIND" "$ADAPTER_KIND" 1 "$requested_model" "$observed_model" \
       "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
@@ -1131,6 +1141,17 @@ cmd_run() {
       "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
       "$failure_class" false "$output_started" \
       "$([[ "$PROVIDER_RC" -eq 0 ]] || printf '%s' "$PROVIDER_RC")" "$result"
+    # The attempt receipt is the canonical metering boundary. In particular,
+    # the writer normalizes unknown provider values to null; do not leak the
+    # adapter's pre-normalization {} / 0 placeholders into the terminal JSON.
+    terminal_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    if [[ "$terminal_usage_status" == known ]]; then
+      terminal_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    fi
+    if [[ "$terminal_cost_status" == known ]]; then
+      terminal_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    fi
     local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" \
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
       --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
@@ -1159,8 +1180,8 @@ cmd_run() {
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
     --arg provider_launch "$([[ "$launch_failed" == 1 && -f "$PROVIDER_LAUNCH_RECEIPT" ]] && printf '%s' "$PROVIDER_LAUNCH_RECEIPT")" \
-    --arg usage_status "$usage_status" --arg cost_status "$cost_status" \
-    --argjson usage "$usage" --argjson cost "$cost" --argjson rc "$PROVIDER_RC" \
+    --arg usage_status "$terminal_usage_status" --arg cost_status "$terminal_cost_status" \
+    --argjson usage "$terminal_usage" --argjson cost "$terminal_cost" --argjson rc "$PROVIDER_RC" \
     '{run_id:$run,status:$status,executor:$executor,model:$model,result:$result,worktree:$worktree,diff_path:$diff,last_message_path:$last,usage:$usage,cost_usd:$cost,provider_exit:$rc,
       tokens:$usage,usage_status:$usage_status,cost_status:$cost_status,
       preflight_receipt:$preflight,attempt_receipt:(if $attempt=="" then null else $attempt end),failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease,

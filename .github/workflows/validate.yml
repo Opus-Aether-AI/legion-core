@@ -396,14 +396,24 @@ jobs:
       - name: Verify bats tests pass without coverage instrumentation
         run: bats tests/
 
-      - name: Run bats under kcov for coverage
+      - name: Run installer and release tests under kcov for coverage
         run: |
           mkdir -p coverage-output
+          # The complete Bats suite already ran above. Instrument only the test
+          # files that exercise root scripts/: kcov rewrites every nested
+          # `bash -c`, which can perturb strict signal/provenance tests outside
+          # this job's installer/release coverage boundary.
           kcov \
             --include-path=scripts \
             --exclude-pattern=/tests/ \
             coverage-output \
-            bats tests/
+            bats \
+              tests/conventional-title.bats \
+              tests/install.bats \
+              tests/legion-primary-setup.bats \
+              tests/refresh.bats \
+              tests/release-controls.bats \
+              tests/uninstall.bats
 
       - name: Report coverage summary
         run: |

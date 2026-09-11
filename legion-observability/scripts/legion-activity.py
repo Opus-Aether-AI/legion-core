@@ -27,6 +27,7 @@ TERMINAL_PHASES = {
     "failed",
     "ok",
     "over_budget",
+    "refused",
     "timed_out",
 }
 TOOLLESS_ITEM_TYPES = {"agent_message", "reasoning"}

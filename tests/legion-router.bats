@@ -179,6 +179,44 @@ SH
     export PATH="$shim_dir:$PATH"
 }
 
+install_authenticated_untested_preflight_shim() {
+    local shim_dir="$TEST_TMPDIR/authenticated-untested-python" real_python
+    local refused_executor="$1" refused_model="$2"
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion_preflight.py ]]; then
+  executor="" model="" sandbox=""
+  for ((i=1; i <= $#; i++)); do
+    case "${!i}" in
+      --executor) j=$((i + 1)); executor="${!j}" ;;
+      --model) j=$((i + 1)); model="${!j}" ;;
+      --sandbox) j=$((i + 1)); sandbox="${!j}" ;;
+    esac
+  done
+  if [[ "$executor" == "$LEGION_TEST_REFUSED_EXECUTOR" \
+        && "$model" == "$LEGION_TEST_REFUSED_MODEL" ]]; then
+    jq -cn --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" '
+      {schema:"legion.preflight.v1",executor:$executor,status:"untested",
+       reason:"authenticated executable version is untested",
+       identity:{executable_path:"/trusted/agent",version:"future",config_sha256:"fixture"},
+       cache:{hit:false,key:null},
+       compatibility:{model:{requested:$model,status:"supported"},
+                      sandbox:{requested:$sandbox,status:"supported"},
+                      version:{status:"untested"}}}'
+    exit 1
+  fi
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export LEGION_TEST_REFUSED_EXECUTOR="$refused_executor"
+    export LEGION_TEST_REFUSED_MODEL="$refused_model"
+    export PATH="$shim_dir:$PATH"
+}
+
 # ── codex-json parser ────────────────────────────────────────────────
 @test "codex-json: thread-id from fixture" {
     run "$LIB/codex-json.sh" thread-id "$FIXTURE"
@@ -2062,6 +2100,27 @@ SH
     [ ! -e "$art/failure-1.json" ]
 }
 
+@test "delegate native signal writer does not invent an attempt before launch commits" {
+    local helper="$TEST_TMPDIR/native-signal-before-launch.sh"
+    local art="$TEST_TMPDIR/native-signal-before-launch-art"
+    mkdir -p "$art"
+    {
+      sed -n '/^write_interrupted_native_attempt()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+NATIVE_ATTEMPT_ART="$1"
+NATIVE_ATTEMPT_ORDINAL=1
+NATIVE_ATTEMPT_LAUNCHED=0
+write_interrupted_native_attempt
+SH
+    } > "$helper"
+
+    run bash "$helper" "$art"
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$art/attempt-1.json" ]
+    [ ! -e "$art/failure-1.json" ]
+}
+
 @test "delegate native signal writer honors completed lease and retained child result" {
     local helper art lease
     helper="$TEST_TMPDIR/native-signal-completed.sh"
@@ -2088,6 +2147,7 @@ NATIVE_ATTEMPT_STREAM="$2/stream.jsonl"
 NATIVE_ATTEMPT_LAST_MESSAGE="$2/last-message.txt"
 NATIVE_ATTEMPT_STARTED_AT=2026-01-01T00:00:00Z
 NATIVE_ATTEMPT_START_MS="$(date +%s000)"
+NATIVE_ATTEMPT_LAUNCHED=1
 NATIVE_LEASE_STATUS="$3"
 CODEX_CHILD_RC=127
 : > "$NATIVE_ATTEMPT_STREAM"
@@ -2100,6 +2160,40 @@ SH
     [ "$status" -eq 0 ]
     jq -e '.terminal_status == "succeeded" and .failure == null' "$art/attempt-1.json"
     [ ! -e "$art/failure-1.json" ]
+}
+
+@test "delegate delayed signal after committed run rollup preserves success" {
+    local helper="$TEST_TMPDIR/native-run-delayed-signal.sh"
+    local art="$TEST_TMPDIR/native-run-delayed-signal-art"
+    mkdir -p "$art"
+    {
+      sed -n '/^on_terminating_signal()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+NATIVE_RUN_ROLLUP_COMMITTED=1
+NATIVE_RUN_TERMINAL_STATUS=ok
+NATIVE_RUN_TERMINAL_EXIT=0
+NATIVE_RUN_ART="$1"
+NATIVE_ATTEMPT_ART=""
+NATIVE_ATTEMPT_EXECUTOR=""
+NATIVE_ATTEMPT_MODEL=""
+NATIVE_ATTEMPT_ORDINAL=0
+NATIVE_ATTEMPT_LAUNCHED=0
+CODEX_CHILD_RC=0
+CODEX_CHILD_PID=""
+CODEX_SIGNAL_CHILD_PID=""
+RUN_ID=completed-run
+LEGION_WT_PATH=retained-until-exit
+write_run_state() { :; }
+write_run_artifact_status() { printf '%s:%s\n' "$3" "$6" > "$1/status.seen"; }
+legion_disarm_adopted_run_guard() { :; }
+on_terminating_signal TERM
+SH
+    } > "$helper"
+
+    run bash "$helper" "$art"
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$art/status.seen")" = "completed:ok" ]
 }
 
 @test "native provider span publication defers a signal until its claim is durable" {
@@ -2405,6 +2499,28 @@ SH
       and $spans[0].model == "model-declines"
       and $spans[0].artifacts.provider_attempt == true
   ' "$LEGION_TELEMETRY_DIR"/*.jsonl
+}
+
+@test "Claude-to-Codex fallback keeps every emitted Claude receipt path stable" {
+  local repo run_id art spans
+  repo="$(make_test_repo claude-fallback-stable-receipts)"
+
+  MOCK_CLAUDE_DECLINE_MODELS=model-declines,model-b \
+    LEGION_CLAUDE_FALLBACK_MODELS=model-b \
+    run "$REPO_ROOT/legion-router/bin/legion-claude" run \
+      --model model-declines --task x --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.executor == "codex" and .fell_back == true'
+  run_id="$(echo "$output" | jq -r .run_id)"
+  art="$repo/.legion/runs/$run_id"
+  spans="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl)"
+  [ "$(jq -s --arg run "$run_id" '[.[] | select(.run_id == $run and .executor == "claude")] | length' <<<"$spans")" -eq 2 ]
+  while IFS= read -r receipt; do
+    [[ "$receipt" == "$art/claude/"* ]]
+    jq -e '.executor == "claude"' "$receipt"
+  done < <(jq -r --arg run "$run_id" \
+    'select(.run_id == $run and .executor == "claude") | .artifacts.attempt_receipt' <<<"$spans")
 }
 
 @test "delegate run: inherited Codex deadline can lower but never be raised" {
@@ -3243,6 +3359,47 @@ PY
     [ -d "$(echo "$output" | jq -r .worktree)" ]
 }
 
+@test "delegate review: interrupted prompt evidence missing an attempt is containment-invalid" {
+    local helper="$TEST_TMPDIR/interrupted-prompt-bundle.sh"
+    local source="$TEST_TMPDIR/interrupted-prompt-source"
+    local receipt="$TEST_TMPDIR/interrupted-prompt-receipt"
+    local shared="$TEST_TMPDIR/interrupted-prompt-shared"
+    mkdir -p "$source" "$receipt" "$shared"
+    printf '%s\n' '{"schema":"legion.preflight.v1","executor":"cursor","status":"supported"}' > "$source/preflight.json"
+    printf '%s\n' '{"schema":"legion.child-execution-lease.v1","status":"cancelled"}' > "$source/lease.json"
+    {
+      sed -n '/^prompt_review_preflight_no_spend_status()/,/^}/p' "$DELEGATE"
+      sed -n '/^preserve_interrupted_prompt_receipts()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+preserve_prompt_review_receipt() {
+  [[ -f "$1" ]] || return 1
+  cp "$1" "$3"
+  printf '%s\n' "$3"
+}
+review_track_attempt_receipt() { :; }
+PROMPT_ATTEMPT_ART="$1"
+PROMPT_ATTEMPT_ORDINAL=1
+PROMPT_RECEIPT_DIR="$2"
+PROMPT_SHARED_ART="$3"
+PROMPT_LEASE_STATUS="$1/lease.json"
+PROMPT_EXPECTED_EXECUTOR=cursor
+PROMPT_EXPECTED_PROVIDER=cursor
+PROMPT_EXPECTED_MODEL=fixture-model
+PROMPT_EXPECTED_SANDBOX=read-only
+PROMPT_RUN_ID=prompt-run
+REVIEW_WT_PATH=worktree
+rc=0
+preserve_interrupted_prompt_receipts || rc=$?
+exit "$rc"
+SH
+    } > "$helper"
+
+    run bash "$helper" "$source" "$receipt" "$shared"
+
+    [ "$status" -eq 1 ]
+    [ ! -e "$shared/attempt.json" ]
+}
+
 @test "delegate review: incompatible native admission stops reviewer selection" {
     local repo; repo="$(make_test_repo review-admission-incompatible)"
 
@@ -3276,6 +3433,27 @@ PY
     jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"
       and .status == "incompatible" and .identity == null
       and .compatibility.model.status == "incompatible"' "$preflight"
+    assert_mock_not_called agent
+    assert_mock_not_called opencode
+    assert_mock_not_called claude
+}
+
+@test "delegate review: authenticated untested prompt preflight is a zero-attempt refusal" {
+    local repo preflight
+    repo="$(make_test_repo review-prompt-admission-untested)"
+    install_authenticated_untested_preflight_shim cursor "$CURSOR_DEFAULT"
+
+    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+      --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "refused" and .attempts == 0
+      and .reason == "authenticated executable version is untested"
+      and .attempt_receipt == null and .failure_receipt == null'
+    preflight="$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"
+      and .status == "untested" and (.identity | type) == "object"
+      and .compatibility.version.status == "untested"' "$preflight"
     assert_mock_not_called agent
     assert_mock_not_called opencode
     assert_mock_not_called claude

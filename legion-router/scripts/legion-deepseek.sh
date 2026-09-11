@@ -66,6 +66,7 @@ SIGNAL_LEASE_STATUS=""
 SIGNAL_WORKTREE=""
 SIGNAL_CHILD_PID=""
 SIGNAL_CHILD_RC=0
+SIGNAL_LAUNCH_PENDING=""
 
 die() { printf 'legion-deepseek: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -101,6 +102,18 @@ on_signal() {
   fi
   legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
   exit $((128+signum))
+}
+begin_signal_launch() {
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'SIGNAL_LAUNCH_PENDING=2' INT
+  trap 'SIGNAL_LAUNCH_PENDING=15' TERM
+  trap 'SIGNAL_LAUNCH_PENDING=1' HUP
+}
+finish_signal_launch() {
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'on_signal 2' INT; trap 'on_signal 15' TERM; trap 'on_signal 1' HUP
+  [[ -z "$pending" ]] || on_signal "$pending"
 }
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit' EXIT
 trap 'on_signal 2' INT
@@ -278,14 +291,16 @@ cmd_run() {
   SIGNAL_WORKTREE="$wt"
   started_at="$(_now)"
   start_ms="$(date +%s000)"
-  legion_adapter_arm_signal_receipt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
-    "$sandbox" "$started_at" "$start_ms" "$out_file"
   set +e
+  begin_signal_launch
   ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
       --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
       --status-file "$lease_status" -- "${cmd[@]}" "$task" ) >"$out_file" 2>"$err_file" &
   CHILD_PID=$!
   SIGNAL_CHILD_PID="$CHILD_PID"
+  legion_adapter_arm_signal_receipt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
+    "$sandbox" "$started_at" "$start_ms" "$out_file"
+  finish_signal_launch
   wait "$CHILD_PID"; rc=$?
   SIGNAL_CHILD_RC="$rc"
   CHILD_PID=""
@@ -349,7 +364,7 @@ cmd_run() {
     --arg stdout "$out_file" --arg stderr "$err_file" --arg profile "$DSH_PROFILE" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
+    '{provider_attempt:true,worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
       dsh_profile:$profile,preflight_receipt:$preflight,attempt_receipt:$attempt,
       failure_receipt:(if $failure=="" then null else $failure end)}')"
   legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \

@@ -36,6 +36,7 @@ SIGNAL_LEASE_STATUS=""
 SIGNAL_WORKTREE=""
 SIGNAL_CHILD_PID=""
 SIGNAL_CHILD_RC=0
+SIGNAL_LAUNCH_PENDING=""
 
 die() { printf 'legion-claude: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -83,6 +84,20 @@ finish_claude_signal_accounting() {
   SIGNAL_CHILD_RC=0
   SIGNAL_LEASE_STATUS=""
   SIGNAL_WORKTREE=""
+}
+begin_claude_signal_launch() {
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'SIGNAL_LAUNCH_PENDING=2' INT
+  trap 'SIGNAL_LAUNCH_PENDING=15' TERM
+  trap 'SIGNAL_LAUNCH_PENDING=1' HUP
+}
+finish_claude_signal_launch() {
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'on_signal 2' INT
+  trap 'on_signal 15' TERM
+  trap 'on_signal 1' HUP
+  [[ -z "$pending" ]] || on_signal "$pending"
 }
 trap cleanup_claude_on_exit EXIT
 trap 'on_signal 2' INT
@@ -227,7 +242,7 @@ PY
 }
 
 archive_claude_fallback_receipts() {
-  local art="$1" archive="$1/claude" path name
+  local art="$1" mode="${2:-move}" archive="$1/claude" path name
   mkdir -p "$archive"
   for path in "$art"/attempt-*.json "$art"/failure-*.json \
       "$art"/claude-preflight*.json "$art"/lease-*.json; do
@@ -236,7 +251,11 @@ archive_claude_fallback_receipts() {
     [[ "$name" =~ ^(attempt|failure)-[0-9]+\.json$ \
       || "$name" =~ ^claude-preflight(-[0-9]+)?\.json$ \
       || "$name" =~ ^lease-[0-9]+\.json$ ]] || continue
-    mv -f "$path" "$archive/$name"
+    if [[ "$mode" == copy ]]; then
+      cp -f "$path" "$archive/$name"
+    else
+      mv -f "$path" "$archive/$name"
+    fi
   done
   if [[ -n "${LEGION_ADAPTER_ATTEMPT_PATH:-}" ]]; then
     name="${LEGION_ADAPTER_ATTEMPT_PATH##*/}"
@@ -494,7 +513,8 @@ cmd_run() {
   LEGION_CLAUDE_TMPDIR="$tmpdir"
   out_file="$tmpdir/claude.out.json"
   err_file="$tmpdir/claude.err"
-  artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" '{stdout:$stdout, stderr:$stderr}')"
+  artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" \
+    '{provider_attempt:true,stdout:$stdout, stderr:$stderr}')"
 
   if has_low_claude_credit; then
     low_credit=1
@@ -615,10 +635,8 @@ cmd_run() {
     LEGION_CLAUDE_LEASE_RECEIPT="$lease_status"
     SIGNAL_LEASE_STATUS="$lease_status"
     SIGNAL_WORKTREE="${wt:-$repo}"
-    legion_adapter_arm_signal_receipt "$contract_art" claude anthropic "$chain_idx" \
-      "$attempt_model" "" "$effort" "$effort" "$sandbox" "$attempt_started_at" \
-      "$attempt_start_ms" "$out_file"
     set +e
+    begin_claude_signal_launch
     (
       legion_activate_executor_context "$RUN_ID" claude
       cd "${wt:-$repo}"
@@ -628,6 +646,10 @@ cmd_run() {
     ) < <(printf '%s' "$task") >"$out_file" 2>"$err_file" &
     CHILD_PID=$!
     SIGNAL_CHILD_PID="$CHILD_PID"
+    legion_adapter_arm_signal_receipt "$contract_art" claude anthropic "$chain_idx" \
+      "$attempt_model" "" "$effort" "$effort" "$sandbox" "$attempt_started_at" \
+      "$attempt_start_ms" "$out_file"
+    finish_claude_signal_launch
     wait "$CHILD_PID"; rc=$?
     SIGNAL_CHILD_RC="$rc"
     CHILD_PID=""
@@ -715,6 +737,11 @@ cmd_run() {
       # emitted by the common terminal path below; together this keeps every
       # provider attempt exactly once without placing chain totals on a span
       # that links only the final receipt.
+      # Publish against an immutable archived copy while retaining the canonical
+      # root receipt for same-vendor callers. A later cross-executor fallback may
+      # then reuse root ordinals without leaving this span with a stale alias.
+      archive_claude_fallback_receipts "$contract_art" copy
+      lease_status="$LEGION_CLAUDE_LEASE_RECEIPT"
       local prior_attempt="$LEGION_ADAPTER_ATTEMPT_PATH"
       local prior_usage prior_cost prior_usage_status prior_cost_status prior_artifacts
       prior_usage="$(jq -c '.usage' "$prior_attempt")"
@@ -782,7 +809,7 @@ cmd_run() {
       --arg wt "$wt_report" --arg diff "$diff_path" --arg declined "$claude_chain_note" \
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
       --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
-      '{stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff,
+      '{provider_attempt:true,stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff,
         preflight_receipt:$preflight,
         attempt_receipt:(if $attempt=="" then null else $attempt end),
         failure_receipt:(if $failure=="" then null else $failure end)}

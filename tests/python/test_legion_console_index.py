@@ -163,8 +163,8 @@ def test_derive_status_state_machine():
     ) == "failed"
 
 
-def test_timeout_and_containment_failure_are_terminal_failures():
-    for status in ("timed_out", "containment_failed"):
+def test_refusal_timeout_and_containment_failure_are_terminal_failures():
+    for status in ("refused", "timed_out", "containment_failed"):
         record = _record(f"run-{status}", phase=status)
         span = _span(f"run-{status}", status=status)
         assert indexer.derive_status(

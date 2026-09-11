@@ -817,6 +817,21 @@ def test_containment_failed_span_is_ingested_as_high_severity_outcome(tmp_path):
     assert "containment_failed" in outcomes[0]["summary"]
 
 
+def test_refused_span_is_ingested_as_no_launch_outcome(tmp_path):
+    span = _span(
+        "refused-run",
+        "2026-08-16T01:00:00Z",
+        executor="codex",
+        status="refused",
+    )
+    validated = self_learn._validated_span(span)
+    assert validated is not None
+    outcomes = self_learn.span_outcomes([validated], _catalog(tmp_path))
+    assert len(outcomes) == 1
+    assert outcomes[0]["severity"] == "medium"
+    assert "refused" in outcomes[0]["summary"]
+
+
 def test_self_learning_excludes_rollup_only_spans(tmp_path):
     provider = _span(
         "provider", "2026-08-16T01:00:00Z", executor="codex", status="failed"

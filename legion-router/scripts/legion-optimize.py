@@ -613,9 +613,38 @@ def optimize(spans, routing, *, min_samples=5, bar_slack=0.02, cost_eps=1e-9):
 def _format_stats(stats):
     if not stats:
         return "n/a"
+    cost_status = stats.get("cost_status")
+    mean_cost = stats.get("mean_cost")
+    if cost_status == "partial":
+        known_cost = stats.get("known_cost_usd")
+        known_runs = stats.get("known_cost_runs")
+        runs = stats.get("runs")
+        if (
+            isinstance(known_cost, (int, float))
+            and not isinstance(known_cost, bool)
+            and math.isfinite(known_cost)
+            and known_cost >= 0
+        ):
+            cost = f"partial(known_total=${known_cost:.4f}"
+            if isinstance(known_runs, int) and isinstance(runs, int):
+                cost += f", metered_runs={known_runs}/{runs}"
+            cost += ")"
+        else:
+            cost = "partial"
+    elif cost_status == "not_applicable":
+        cost = "n/a"
+    elif (
+        isinstance(mean_cost, (int, float))
+        and not isinstance(mean_cost, bool)
+        and math.isfinite(mean_cost)
+        and mean_cost >= 0
+    ):
+        cost = f"${mean_cost:.4f}"
+    else:
+        cost = "unknown"
     return (
         f'success={stats["success_rate"] * 100:.1f}% '
-        f'mean_cost=${stats["mean_cost"]:.4f} '
+        f'mean_cost={cost} '
         f'p50={stats["p50_ms"]:.1f}ms '
         f'p95={stats["p95_ms"]:.1f}ms'
     )

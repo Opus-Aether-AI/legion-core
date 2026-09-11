@@ -78,7 +78,7 @@ def test_rollup_and_provider_with_same_receipt_never_share_span_id():
     assert oe.span_to_otlp(provider)["spanId"] != oe.span_to_otlp(rollup)["spanId"]
 
 
-def test_span_schema_declares_attempt_identity_fields():
+def test_span_schema_declares_attempt_identity_fields_and_refused_status():
     schema_path = os.path.join(
         HERE, "..", "..", "legion-observability", "schema", "legion.span.v1.schema.json"
     )
@@ -86,6 +86,7 @@ def test_span_schema_declares_attempt_identity_fields():
         properties = json.load(handle)["properties"]
     assert properties["attempt_id"]["type"] == ["string", "null"]
     assert properties["attempt_ordinal"]["minimum"] == 1
+    assert "refused" in properties["status"]["enum"]
 
 
 def test_span_to_otlp_tolerates_nonnumeric_duration_and_cost():

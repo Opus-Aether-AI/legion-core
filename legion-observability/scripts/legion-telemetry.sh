@@ -160,7 +160,7 @@ validate() {
 	        and ((has("attempt_ordinal") | not) or .attempt_ordinal == null
 	          or (.attempt_ordinal | positive_integer))
 	        and ((.archetype == null) or (.archetype | type == "string"))
-	        and (.status | IN("ok", "failed", "error", "over_budget", "blocked", "timed_out", "containment_failed"))
+	        and (.status | IN("ok", "failed", "error", "over_budget", "blocked", "refused", "timed_out", "containment_failed"))
 	        and ((.duration_ms // 0) | type == "number" and . >= 0)
 	        and valid_cost_provenance
 	        and valid_usage_provenance

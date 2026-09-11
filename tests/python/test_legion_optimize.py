@@ -123,6 +123,28 @@ def test_unknown_partial_and_not_applicable_cost_routes_are_not_ranked():
     assert got["proposed_model"] == "known"
 
 
+def test_text_stats_render_unclassified_cost_without_numeric_none_formatting():
+    common = {"runs": 5, "success_rate": 0.8, "p50_ms": 100, "p95_ms": 200}
+
+    assert "mean_cost=unknown" in opt._format_stats({
+        **common, "mean_cost": None, "cost_status": "unknown",
+    })
+    partial = opt._format_stats({
+        **common,
+        "mean_cost": None,
+        "cost_status": "partial",
+        "known_cost_usd": 0.25,
+        "known_cost_runs": 2,
+    })
+    assert "mean_cost=partial(known_total=$0.2500, metered_runs=2/5)" in partial
+    assert "mean_cost=n/a" in opt._format_stats({
+        **common, "mean_cost": None, "cost_status": "not_applicable",
+    })
+    assert "mean_cost=$0.1250" in opt._format_stats({
+        **common, "mean_cost": 0.125, "cost_status": "known",
+    })
+
+
 def test_stats_preserve_known_zero_but_exclude_route_with_any_unknown_cost():
     common = {"schema": "legion.span.v1", "executor": "codex",
               "archetype": "implement-feature", "status": "ok", "duration_ms": 1}

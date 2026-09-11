@@ -1111,6 +1111,12 @@ def main() -> int:
             )
             print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 124
+        if cancel_requested:
+            reason = f"cancelled by {signal.Signals(interrupted).name}"
+            _write_status(
+                arguments.status_file, "cancelled", reason, arguments.max_runtime_seconds
+            )
+            return 128 + interrupted
         process = subprocess.Popen(
             command,
             cwd=arguments.cwd,

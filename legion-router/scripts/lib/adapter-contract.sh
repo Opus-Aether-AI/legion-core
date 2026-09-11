@@ -332,6 +332,8 @@ legion_adapter_provider_span_is_durable() {
     [[ -f "$span_file" ]] || continue
     jq -e --arg attempt "$attempt_path" '
       select(.schema == "legion.span.v1"
+        and .artifacts.provider_attempt == true
+        and .artifacts.rollup_only != true
         and .artifacts.attempt_receipt == $attempt)
     ' "$span_file" >/dev/null 2>&1 && return 0
   done
@@ -349,16 +351,26 @@ legion_adapter_claim_provider_span() {
 # path checks the durable JSONL record and takes over publication only when the
 # normal append did not complete.
 legion_adapter_emit_normal_provider_span() {
-  local attempt_path="$1"
+  local attempt_path="$1" claim_path
   shift
+  claim_path="$attempt_path.provider-span-emitted"
   if legion_adapter_claim_provider_span "$attempt_path"; then
-    emit_span "$@"
-    return 0
+    # Some adapter-local emitters deliberately swallow their underlying append
+    # error. The durable attempt-bound record, rather than the emitter's return
+    # code, is therefore the publication acknowledgement.
+    emit_span "$@" || true
+    legion_adapter_provider_span_is_durable "$attempt_path" && return 0
+    rmdir "$claim_path" 2>/dev/null || true
+    return 1
   fi
   legion_adapter_provider_span_is_durable "$attempt_path" && return 0
   # An incomplete claim can survive abrupt termination. The immutable receipt
   # plus absence of a matching durable span makes retrying publication safe.
-  emit_span "$@"
+  emit_span "$@" || true
+  legion_adapter_provider_span_is_durable "$attempt_path" && return 0
+  # Do not remove a claim this invocation did not acquire: its owner may still
+  # be publishing. Absence of a durable span remains retryable on the next call.
+  return 1
 }
 
 legion_adapter_write_signal_receipt() {

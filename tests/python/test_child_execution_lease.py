@@ -214,6 +214,75 @@ def test_deadline_expiring_during_launch_setup_refuses_immediately_before_popen(
     assert receipt["reason"] == "inherited child lease deadline expired during launch setup"
 
 
+@pytest.mark.parametrize(
+    ("signum", "expected_returncode"),
+    ((signal.SIGTERM, 143), (signal.SIGINT, 130)),
+)
+def test_signal_after_handlers_before_popen_cancels_without_child_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signum: int,
+    expected_returncode: int,
+) -> None:
+    status_file = tmp_path / "prelaunch-cancelled.json"
+    spec = importlib.util.spec_from_file_location(
+        f"lease_supervisor_prelaunch_signal_{signum}", SUPERVISOR
+    )
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    launched = False
+
+    def forbidden_popen(*_args, **_kwargs):
+        nonlocal launched
+        launched = True
+        raise AssertionError("Popen must not run after prelaunch cancellation")
+
+    original_environment_copy = supervisor.os.environ.copy
+
+    def signal_during_prelaunch_setup():
+        environment = original_environment_copy()
+        os.kill(os.getpid(), signum)
+        return environment
+
+    previous_handlers = {
+        caught: signal.getsignal(caught)
+        for caught in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+    monkeypatch.setattr(supervisor.sys, "platform", "linux")
+    monkeypatch.setattr(supervisor.os.environ, "copy", signal_during_prelaunch_setup)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", forbidden_popen)
+    monkeypatch.setattr(
+        supervisor.sys,
+        "argv",
+        [
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "30",
+            "--status-file",
+            str(status_file),
+            "--",
+            "/fixture/provider",
+        ],
+    )
+
+    try:
+        assert supervisor.main() == expected_returncode
+    finally:
+        for caught, handler in previous_handlers.items():
+            signal.signal(caught, handler)
+
+    assert not launched
+    assert json.loads(status_file.read_text(encoding="utf-8")) == {
+        "schema": "legion.child-execution-lease.v1",
+        "status": "cancelled",
+        "reason": f"cancelled by {signal.Signals(signum).name}",
+        "max_runtime_seconds": 30,
+    }
+
+
 def test_command_disappearing_before_popen_still_writes_lease_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

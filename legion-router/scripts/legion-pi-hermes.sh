@@ -28,6 +28,7 @@ PROVIDER_BIN="${PI_BIN:-pi}"
 [[ "$ADAPTER_KIND" == hermes ]] && PROVIDER_BIN="${HERMES_BIN:-hermes}"
 RUN_ID="" CHILD_PID="" CHILD_WAIT_RC=0 KEEP=0 WT="" WT_RECORD="" BRANCH="" REPO="" ART=""
 SIGNAL_CHILD_PID=""
+SIGNAL_LAUNCH_PENDING=""
 WT_CREATED=0 BRANCH_CREATED=0
 BROKER_PID="" BROKER_SOCKET_DIR="" BROKER_SOCKET="" BROKER_TOKEN="" BROKER_ROOT="" BROKER_RC=0
 CONTROL_EMPTY_DIR="" SANITIZED_PROVIDER_PATH=""
@@ -155,6 +156,18 @@ on_signal() {
   [[ -z "$RUN_ID" || -z "$ART" ]] || write_state failed
   legion_adapter_emit_signal_span "${task:-}" "${ART:-}/lease.json" || true
   exit $((128+signum))
+}
+begin_signal_launch() {
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'SIGNAL_LAUNCH_PENDING=2' INT
+  trap 'SIGNAL_LAUNCH_PENDING=15' TERM
+  trap 'SIGNAL_LAUNCH_PENDING=1' HUP
+}
+finish_signal_launch() {
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'on_signal 2' INT; trap 'on_signal 15' TERM; trap 'on_signal 1' HUP
+  [[ -z "$pending" ]] || on_signal "$pending"
 }
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit; cleanup_worktree' EXIT
 trap 'on_signal 2' INT
@@ -727,9 +740,16 @@ run_provider() {
       --darwin-sandbox-allow-canary "$SUPERVISOR_ALLOW_CANARY")
   fi
   supervisor_args+=(-- "${invocation[@]}")
+  begin_signal_launch
   "${supervisor_args[@]}" >"$out" 2>"$err" &
   CHILD_PID=$!
   SIGNAL_CHILD_PID="$CHILD_PID"
+  legion_adapter_arm_signal_receipt "$ART" "$ADAPTER_KIND" "$ADAPTER_KIND" 1 \
+    "$requested_model" "" \
+    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+    "$SANDBOX" "$started_at" "$start" "$out"
+  finish_signal_launch
   set +e; wait "$CHILD_PID"; PROVIDER_RC=$?; set -e
   CHILD_WAIT_RC="$PROVIDER_RC"
   CHILD_PID=""
@@ -810,11 +830,6 @@ cmd_run() {
   local started_at ended_at
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   start="$(date +%s000)"
-  legion_adapter_arm_signal_receipt "$ART" "$ADAPTER_KIND" "$ADAPTER_KIND" 1 \
-    "$requested_model" "" \
-    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
-    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
-    "$SANDBOX" "$started_at" "$start" "$out"
   run_provider "$out" "$err" "${command[@]}"; end="$(date +%s000)"; duration=$((end-start))
   ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   stop_handoff_broker
@@ -943,7 +958,7 @@ cmd_run() {
   local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
-    --argjson cost_provenance "$cost_provenance" '{worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage,
+    --argjson cost_provenance "$cost_provenance" '{provider_attempt:true,worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage,
       preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end),
       lease_receipt:$lease} + $cost_provenance
       + (if $reason=="" then {} else {lease_reason:$reason} end)')"

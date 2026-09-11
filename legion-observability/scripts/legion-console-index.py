@@ -304,7 +304,7 @@ def pid_alive(pid: Any) -> bool:
 
 
 def _terminal_status(status: Any, diff_exists: bool, worktree_exists: bool) -> str | None:
-    if status in ("failed", "error", "timed_out", "containment_failed"):
+    if status in ("failed", "error", "refused", "timed_out", "containment_failed"):
         return "failed"
     if status in ("ok", "over_budget"):
         # awaiting_human only when there's an actionable diff AND its worktree still

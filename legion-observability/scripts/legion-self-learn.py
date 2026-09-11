@@ -65,7 +65,7 @@ MAX_SPAN_NESTING = 8
 SPAN_IDENTITY_VERSION = 2
 SPAN_STATUSES = {
     "ok", "failed", "error", "over_budget", "blocked", "timed_out",
-    "containment_failed",
+    "containment_failed", "refused",
 }
 GLOBAL_HINT_RESERVE = 100
 PROJECT_HINT_CAP = (

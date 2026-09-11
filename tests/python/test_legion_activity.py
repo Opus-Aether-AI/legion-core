@@ -286,6 +286,31 @@ def test_completed_single_attempt_prefers_durable_provenance(tmp_path):
     assert enriched["activity"]["items"] == 3
 
 
+def test_refused_no_launch_run_is_terminal_and_prefers_durable_provenance(tmp_path):
+    run_dir = tmp_path / "runs" / "refused"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+    durable = {
+        "refused": {
+            "cost_usd": None,
+            "cost_status": "not_applicable",
+            "known_cost_usd": None,
+            "known_cost_attempts": 0,
+            "attempt_count": 1,
+        }
+    }
+
+    enriched = activity.enrich_run(
+        {"run_id": "refused", "model": "test-model-alpha", "lifecycle": {"phase": "refused"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=durable,
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "not_applicable"
+
+
 def test_activity_cost_loader_excludes_rollup_only_span(tmp_path):
     spans = tmp_path / "spans"
     spans.mkdir()

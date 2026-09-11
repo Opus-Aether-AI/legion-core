@@ -139,7 +139,7 @@ assert_signal_receipt() {
       "{}" unknown "" 0 unknown "" "" false true "" ""
     emit_span() {
       jq -cn --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
-        '\''{schema:"legion.span.v1",artifacts:{attempt_receipt:$attempt}}'\'' \
+        '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
         >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
     }
     legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"
@@ -148,6 +148,50 @@ assert_signal_receipt() {
     [[ -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
     [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d " ")" == 1 ]]
   ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$art" "$spans"
+  [ "$status" -eq 0 ]
+}
+
+@test "failed normal provider-span publication releases claim and can be retried" {
+  local art="$TEST_TMPDIR/retry-span-claim" spans="$TEST_TMPDIR/retry-span-claim-spans"
+  mkdir -p "$art" "$spans"
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    RUN_ID=retry-span-claim
+    LEGION_TELEMETRY_DIR="$3"
+    legion_adapter_write_attempt "$2" cursor cursor 1 fixture "" "" "" read-only \
+      succeeded 2026-01-01T00:00:00Z 2026-01-01T00:00:01Z 1000 \
+      "{}" unknown "" 0 unknown "" "" false true "" ""
+    emit_span() { return 0; }
+    if legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"; then
+      exit 10
+    fi
+    [[ ! -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
+    emit_span() {
+      jq -cn --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
+        >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+    }
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"
+    [[ -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
+    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d " ")" == 1 ]]
+  ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$art" "$spans"
+  [ "$status" -eq 0 ]
+}
+
+@test "rollup-only span cannot satisfy provider-span durability" {
+  local spans="$TEST_TMPDIR/rollup-is-not-provider"
+  mkdir -p "$spans"
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    LEGION_TELEMETRY_DIR="$2"
+    jq -cn --arg attempt "$3" \
+      '\''{schema:"legion.span.v1",artifacts:{rollup_only:true,attempt_receipt:$attempt}}'\'' \
+      > "$LEGION_TELEMETRY_DIR/spans.jsonl"
+    ! legion_adapter_provider_span_is_durable "$3"
+  ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$spans" \
+    "$TEST_TMPDIR/attempt-1.json"
   [ "$status" -eq 0 ]
 }
 

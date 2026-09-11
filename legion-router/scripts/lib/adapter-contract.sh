@@ -43,6 +43,9 @@ LEGION_ADAPTER_SIGNAL_START_MS=""
 LEGION_ADAPTER_SIGNAL_OUTPUT_FILE=""
 LEGION_ADAPTER_SIGNAL_TERMINALIZED=0
 LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN=""
+LEGION_ADAPTER_LAUNCH_GATE_PATH=""
+LEGION_ADAPTER_LAUNCH_GATE_TOKEN=""
+LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=""
 
 legion_adapter_contract_root() {
   local lib_dir
@@ -161,6 +164,121 @@ legion_adapter_write_final_gate_no_launch() {
   fi
   rm -f "$temp"
   legion_adapter_supervisor_launch_failed "$status_file"
+}
+
+legion_adapter_prepare_supervisor_launch_gate() {
+  local gate_path="$1"
+  [[ -n "$gate_path" && ! -e "$gate_path" && ! -L "$gate_path" \
+      && -d "${gate_path%/*}" && ! -L "${gate_path%/*}" ]] || return 1
+  LEGION_ADAPTER_LAUNCH_GATE_PATH="$gate_path"
+  LEGION_ADAPTER_LAUNCH_GATE_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
+    || return 1
+  LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=""
+}
+
+legion_adapter_complete_supervisor_launch_gate() {
+  local supervisor_pid="$1" lease_path="$2" pending_name="$3"
+  local gate="$LEGION_ADAPTER_LAUNCH_GATE_PATH" token="$LEGION_ADAPTER_LAUNCH_GATE_TOKEN"
+  local pending="" decision=go temp="" i sleep_bin=/bin/sleep
+  [[ -x "$sleep_bin" ]] || sleep_bin="$(command -v sleep 2>/dev/null || true)"
+  [[ -n "$sleep_bin" ]] || return 0
+  LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=containment_failed
+  for ((i = 0; i < 500; i++)); do
+    if jq -e --arg token "$token" --argjson pid "$supervisor_pid" '
+        .schema == "legion.child-launch-gate.v1" and .status == "ready"
+        and .token == $token and .supervisor_pid == $pid
+        and ((keys_unsorted - ["schema","status","token","supervisor_pid"]) | length == 0)
+      ' "$gate" >/dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "$supervisor_pid" 2>/dev/null; then
+      legion_adapter_supervisor_launch_failed "$lease_path" \
+        && LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=launch_failed
+      return 0
+    fi
+    "$sleep_bin" 0.02
+  done
+  jq -e --arg token "$token" --argjson pid "$supervisor_pid" '
+    .schema == "legion.child-launch-gate.v1" and .status == "ready"
+    and .token == $token and .supervisor_pid == $pid
+  ' "$gate" >/dev/null 2>&1 || return 0
+  pending="${!pending_name:-}"
+  [[ -z "$pending" ]] || decision=cancel
+  temp="$(mktemp "${gate%/*}/.launch-gate-decision.XXXXXX")" || return 0
+  if ! jq -cn --arg status "$decision" --arg token "$token" \
+      --argjson pid "$supervisor_pid" --argjson signum "${pending:-0}" '
+      {schema:"legion.child-launch-gate.v1",status:$status,token:$token,supervisor_pid:$pid}
+      + (if $status == "cancel" then {signal:$signum} else {} end)
+    ' > "$temp"; then
+    rm -f "$temp"
+    return 0
+  fi
+  chmod 600 "$temp" || { rm -f "$temp"; return 0; }
+  mv -f "$temp" "$gate" || { rm -f "$temp"; return 0; }
+  for ((i = 0; i < 500; i++)); do
+    if jq -e --arg token "$token" --argjson pid "$supervisor_pid" '
+        .schema == "legion.child-launch-gate.v1" and .status == "started"
+        and .token == $token and .supervisor_pid == $pid
+        and (.child_pid | type == "number" and . >= 1 and . == floor)
+        and ((keys_unsorted - ["schema","status","token","supervisor_pid","child_pid"]) | length == 0)
+      ' "$gate" >/dev/null 2>&1; then
+      LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=started
+      return 0
+    fi
+    if legion_adapter_supervisor_launch_failed "$lease_path"; then
+      LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=launch_failed
+      return 0
+    fi
+    if legion_adapter_supervisor_cleanup_failed_before_launch "$lease_path"; then
+      return 0
+    fi
+    if ! kill -0 "$supervisor_pid" 2>/dev/null; then
+      legion_adapter_supervisor_launch_failed "$lease_path" \
+        && LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=launch_failed
+      return 0
+    fi
+    "$sleep_bin" 0.02
+  done
+}
+
+# A malformed, unauthenticated, or stalled launch gate leaves the provider
+# launch state unknowable. After the adapter has terminated and waited for the
+# supervisor, replace any weaker sidecar with a strict containment receipt and
+# emit a machine-readable terminal envelope. Unknown is intentional here: the
+# failed gate cannot prove either spend or no-spend.
+legion_adapter_terminalize_launch_gate_containment() {
+  local executor="$1" model="$2" run_id="$3" preflight="$4"
+  local lease_path="$5" gate_path="$6" worktree="$7" max_runtime="$8"
+  local directory temp="" reason lease_receipt=""
+  directory="${lease_path%/*}"
+  reason="supervisor launch-gate authentication or handshake failed; launch state unresolved (gate: $gate_path; evidence: $lease_path; worktree retained: $worktree)"
+  if [[ -n "$lease_path" && "$directory" != "$lease_path" && -d "$directory" \
+      && ! -L "$directory" && ! -L "$lease_path" \
+      && "$max_runtime" =~ ^[1-9][0-9]*$ ]] \
+      && temp="$(mktemp "$directory/.launch-gate-containment.XXXXXX")" \
+      && jq -cn --arg reason "$reason" --argjson runtime "$max_runtime" '
+      {schema:"legion.child-execution-lease.v1",status:"cleanup_failed",
+       reason:$reason,max_runtime_seconds:$runtime}
+    ' > "$temp" \
+      && chmod 600 "$temp" \
+      && mv -f "$temp" "$lease_path" \
+      && legion_adapter_supervisor_cleanup_failed "$lease_path"; then
+    lease_receipt="$lease_path"
+  else
+    [[ -z "$temp" ]] || rm -f "$temp"
+    reason="$reason; strict containment sidecar could not be persisted"
+  fi
+  jq -cn --arg run "$run_id" --arg executor "$executor" --arg model "$model" \
+    --arg reason "$reason" --arg worktree "$worktree" --arg preflight "$preflight" \
+    --arg lease "$lease_receipt" '
+      {run_id:$run,status:"containment_failed",executor:$executor,model:$model,
+       result:$reason,reason:$reason,worktree:$worktree,
+       usage:null,tokens:null,usage_status:"unknown",
+       cost_usd:null,cost_status:"unknown",
+       preflight_receipt:(if $preflight=="" then null else $preflight end),
+       attempt_receipt:null,failure_receipt:null,
+       lease_receipt:(if $lease=="" then null else $lease end)}
+    '
 }
 
 legion_adapter_supervisor_reason() {
@@ -718,6 +836,10 @@ legion_adapter_acquire_provider_span_claim() {
 legion_adapter_emit_normal_provider_span() {
   local attempt_path="$1"
   shift
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == claim ]]; then
+    return 1
+  fi
   if ! legion_adapter_acquire_provider_span_claim "$attempt_path"; then
     legion_adapter_provider_span_is_durable "$attempt_path" && return 0
     return 1
@@ -729,7 +851,19 @@ legion_adapter_emit_normal_provider_span() {
   # Some adapter-local emitters deliberately swallow their underlying append
   # error. The durable attempt-bound record, rather than the emitter's return
   # code, is therefore the publication acknowledgement.
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == append ]]; then
+    legion_adapter_release_provider_span_claim "$attempt_path"
+    return 1
+  fi
   emit_span "$@" || true
+  # Simulate losing the acknowledgement after the append. The durable span is
+  # deliberately retained so a retry proves exact-once reconciliation.
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == commit ]]; then
+    legion_adapter_release_provider_span_claim "$attempt_path"
+    return 1
+  fi
   legion_adapter_provider_span_is_durable "$attempt_path" && return 0
   legion_adapter_release_provider_span_claim "$attempt_path"
   return 1
@@ -826,6 +960,10 @@ legion_adapter_emit_signal_span() {
   [[ "$LEGION_ADAPTER_SIGNAL_TERMINALIZED" == 1 ]] || return 0
   attempt_path="$LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json"
   [[ -f "$attempt_path" ]] || return 0
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == claim ]]; then
+    return 1
+  fi
   if ! legion_adapter_acquire_provider_span_claim "$attempt_path"; then
     legion_adapter_provider_span_is_durable "$attempt_path" && return 0
     return 1
@@ -856,6 +994,11 @@ legion_adapter_emit_signal_span() {
       lease_receipt:(if $lease=="" then null else $lease end)}')"
   root="$(legion_adapter_contract_root)"
   trace_bin="$root/legion-observability/bin/legion-trace"
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == append ]]; then
+    legion_adapter_release_provider_span_claim "$attempt_path"
+    return 1
+  fi
   if [[ ! -x "$trace_bin" ]] || ! "$trace_bin" emit \
       --executor "$executor" --model "$model" --status "$span_status" \
       --run-id "$RUN_ID" --trace-id "${LEGION_TRACE_ID:-$RUN_ID}" \
@@ -863,6 +1006,11 @@ legion_adapter_emit_signal_span() {
       --duration-ms "$duration" --cost "$cost" --cost-status "$cost_status" \
       --task "$task_text" --tokens "$usage" --usage-status "$usage_status" \
       --artifacts "$artifacts" >/dev/null 2>&1; then
+    legion_adapter_release_provider_span_claim "$attempt_path"
+    return 1
+  fi
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == commit ]]; then
     legion_adapter_release_provider_span_claim "$attempt_path"
     return 1
   fi

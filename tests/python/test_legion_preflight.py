@@ -57,6 +57,16 @@ def registry_with_missing_configuration(
     return path
 
 
+@pytest.mark.parametrize("payload", ["[]", '"cached"', "null"])
+def test_non_object_cache_entries_are_cache_misses(
+    tmp_path: Path, payload: str
+) -> None:
+    cache = tmp_path / "cache.json"
+    cache.write_text(payload, encoding="utf-8")
+
+    assert preflight._read_cache(cache, "expected-key") is None
+
+
 @pytest.mark.parametrize(
     ("policy", "extra", "requested", "environment", "check"),
     [

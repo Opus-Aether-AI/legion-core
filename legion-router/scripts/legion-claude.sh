@@ -75,7 +75,19 @@ on_signal() {
     legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
     exit 70
   fi
-  legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
+  if ! legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS"; then
+    keep=1
+    containment_reason="provider attempt receipt is durable but its signal-path span publication is uncertain (evidence: $LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json; worktree retained: ${wt:-$repo})"
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" claude \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "${wt:-$repo}" "${branch:-}" "$model" "$sandbox" \
+        "$base" "$archetype" "$effort" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
   exit $((128+signum))
 }
 finish_claude_signal_accounting() {
@@ -545,7 +557,7 @@ cmd_run() {
   local max_runtime_seconds=""
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
   local base_commit=""
-  local wt="" branch="" wt_report="" diff_path="" diff_rc=0
+  local wt="" branch="" wt_report="" diff_path="" diff_rc=0 cleanup_pending=0 apply_pending=0
   local read_only_violation=0 provider_launched=0 launch_failed=0 launch_reason=""
 
   while [[ $# -gt 0 ]]; do
@@ -788,9 +800,12 @@ cmd_run() {
     local attempt_started_at attempt_ended_at attempt_start_ms attempt_end_ms attempt_duration
     attempt_started_at="$(_now)"; attempt_start_ms="$(date +%s000)"
     local lease_status="$contract_art/lease-$chain_idx.json"
+    local launch_gate="$contract_art/launch-gate-$chain_idx.json"
     LEGION_CLAUDE_LEASE_RECEIPT="$lease_status"
     SIGNAL_LEASE_STATUS="$lease_status"
     SIGNAL_WORKTREE="${wt:-$repo}"
+    legion_adapter_prepare_supervisor_launch_gate "$launch_gate" \
+      || die 'unable to prepare trusted supervisor launch gate'
     set +e
     begin_claude_signal_launch
     abort_pending_claude_signal_launch
@@ -799,13 +814,30 @@ cmd_run() {
       cd "${wt:-$repo}"
       exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "${wt:-$repo}" \
         --max-runtime-seconds "$attempt_runtime" \
-        --status-file "$lease_status" -- "${claude_cmd[@]}"
+        --status-file "$lease_status" \
+        --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" \
+        -- "${claude_cmd[@]}"
     ) < <(printf '%s' "$task") >"$out_file" 2>"$err_file" &
     CHILD_PID=$!
     SIGNAL_CHILD_PID="$CHILD_PID"
-    legion_adapter_arm_signal_receipt "$contract_art" claude anthropic "$chain_idx" \
-      "$attempt_model" "" "$effort" "$effort" "$sandbox" "$attempt_started_at" \
-      "$attempt_start_ms" "$out_file"
+    legion_adapter_complete_supervisor_launch_gate "$CHILD_PID" "$lease_status" SIGNAL_LAUNCH_PENDING
+    if [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" == started ]]; then
+      legion_adapter_arm_signal_receipt "$contract_art" claude anthropic "$chain_idx" \
+        "$attempt_model" "" "$effort" "$effort" "$sandbox" "$attempt_started_at" \
+        "$attempt_start_ms" "$out_file"
+    elif [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" != launch_failed ]]; then
+      kill -TERM "$CHILD_PID" 2>/dev/null || true
+      wait "$CHILD_PID" 2>/dev/null || true
+      CHILD_PID=""; keep=1
+      [[ -z "${preset_run_id:-}" ]] || legion_write_adapter_run_state \
+        containment_failed "$RUN_ID" "$repo" "$contract_art" "${wt:-$repo}" \
+        "${branch:-}" "$model" "$sandbox" "$base" "$archetype" "$effort"
+      [[ -z "${preset_run_id:-}" ]] || legion_disarm_adopted_run_guard
+      legion_adapter_terminalize_launch_gate_containment claude "$attempt_model" \
+        "$RUN_ID" "$LEGION_ADAPTER_PREFLIGHT_PATH" "$lease_status" "$launch_gate" \
+        "${wt:-$repo}" "$attempt_runtime"
+      exit 70
+    fi
     finish_claude_signal_launch
     wait "$CHILD_PID"; rc=$?
     SIGNAL_CHILD_RC="$rc"
@@ -924,10 +956,15 @@ cmd_run() {
       prior_artifacts="$(jq -cn --arg attempt "$prior_attempt" --arg lease "$lease_status" \
         '{provider_attempt:true,intermediate_attempt:true,attempt_receipt:$attempt,
           lease_receipt:$lease}')"
-      legion_adapter_emit_normal_provider_span "$prior_attempt" \
-        "claude" "$attempt_model" failed "$attempt_duration" \
-        "$prior_cost" "$prior_usage" "$task" "$prior_artifacts" \
-        "$prior_usage_status" "$prior_cost_status"
+      if ! legion_adapter_emit_normal_provider_span "$prior_attempt" \
+          "claude" "$attempt_model" failed "$attempt_duration" \
+          "$prior_cost" "$prior_usage" "$task" "$prior_artifacts" \
+          "$prior_usage_status" "$prior_cost_status"; then
+        containment_failed=1
+        keep=1
+        lease_reason="provider attempt receipt is durable but its span publication is uncertain (evidence: $prior_attempt; worktree retained: $wt)"
+        break
+      fi
       finish_claude_signal_accounting
       # The numbered receipt/span above is now the durable identity for this
       # paid attempt. Do not let its mutable aliases leak into the next
@@ -967,18 +1004,17 @@ cmd_run() {
         policy_refused "" "Claude produced file changes during a read-only run"
     fi
     if [[ "$lease_timed_out" -ne 1 && "$containment_failed" -ne 1 && "$do_apply" -eq 1 && "$read_only_violation" -eq 0 && -s "$diff_path" ]]; then
-      if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
-        git -C "$repo" apply "$diff_path" && note "diff applied to $repo"
-      else
-        note "diff did not apply cleanly; left in $diff_path"
-      fi
+      # Applying mutates the caller's repository, so defer it until the paid
+      # attempt's provider span is durably acknowledged. Publication
+      # uncertainty must leave both the caller and retained worktree untouched.
+      apply_pending=1
     fi
     wt_report="$wt"
     if [[ "$keep" -ne 1 ]]; then
-      # The worktree goes; the patch stays. It already lives outside the worktree.
-      git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
-      git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
-      git -C "$repo" worktree prune >/dev/null 2>&1 || true
+      # Do not remove the only recoverable worktree until the durable provider
+      # span acknowledges the attempt receipt. Publication uncertainty must
+      # retain both, even when the caller did not request --keep.
+      cleanup_pending=1
       wt_report="(removed; rerun with --keep to retain the worktree)"
     fi
     artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" \
@@ -1046,9 +1082,60 @@ cmd_run() {
     span_duration="$(jq -r '.duration_ms' "$LEGION_ADAPTER_ATTEMPT_PATH")"
   fi
 
+  finish_deferred_claude_apply() {
+    [[ "$apply_pending" -eq 1 ]] || return 0
+    apply_pending=0
+    if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
+      if git -C "$repo" apply "$diff_path"; then
+        note "diff applied to $repo"
+      else
+        note "diff passed its preflight but could not be applied; left in $diff_path"
+      fi
+    else
+      note "diff did not apply cleanly; left in $diff_path"
+    fi
+    return 0
+  }
+
+  finish_deferred_claude_cleanup() {
+    [[ "$cleanup_pending" -eq 1 ]] || return 0
+    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
+    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    cleanup_pending=0
+  }
+
+  finish_deferred_claude_actions() {
+    finish_deferred_claude_apply
+    finish_deferred_claude_cleanup
+  }
+
+  terminalize_claude_span_publication_failure() {
+    containment_failed=1
+    keep=1
+    cleanup_pending=0
+    apply_pending=0
+    status=containment_failed
+    reason=containment_failed
+    wt_report="$wt"
+    export LEGION_CLAUDE_WORKTREE="$wt_report"
+    lease_reason="provider attempt receipt is durable but its span publication is uncertain (evidence: $LEGION_ADAPTER_ATTEMPT_PATH; worktree retained: $wt)"
+    result="$lease_reason"
+    finish_claude_signal_accounting
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+      "$model" "$sandbox" "$base" "$archetype" "$effort"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason" \
+      "$terminal_usage_status" "$terminal_cost_status" \
+      "$terminal_known_cost" "$terminal_known_cost_attempts" \
+      "$terminal_known_usage" "$terminal_known_usage_attempts"
+  }
+
   if [[ "$launch_failed" -eq 1 ]]; then
     status="failed"
     reason="$launch_reason"
+    finish_deferred_claude_actions
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
@@ -1066,9 +1153,12 @@ cmd_run() {
     status="containment_failed"
     result="$lease_reason"
     if [[ -n "${LEGION_ADAPTER_ATTEMPT_PATH:-}" ]]; then
-      legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-        "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-        "$span_usage_status" "$span_cost_status"
+      if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+          "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+          "$span_usage_status" "$span_cost_status"; then
+        terminalize_claude_span_publication_failure
+        return 1
+      fi
     fi
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
@@ -1087,10 +1177,14 @@ cmd_run() {
     status="timed_out"
     result="$lease_reason"
     if [[ "$chain_stopped_before_launch" -ne 1 ]]; then
-      legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-        "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-        "$span_usage_status" "$span_cost_status"
+      if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+          "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+          "$span_usage_status" "$span_cost_status"; then
+        terminalize_claude_span_publication_failure
+        return 1
+      fi
     fi
+    finish_deferred_claude_actions
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
@@ -1107,6 +1201,7 @@ cmd_run() {
     reason="admission_refused"
     status="failed"
     result="$LEGION_ADAPTER_PREFLIGHT_REASON"
+    finish_deferred_claude_actions
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
@@ -1123,9 +1218,13 @@ cmd_run() {
     status="failed"
     [[ -n "$result" ]] && result="${result}"$'\n'
     result="${result}Claude produced file changes during a read-only run."
-    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-      "$span_usage_status" "$span_cost_status"
+    if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+        "$span_usage_status" "$span_cost_status"; then
+      terminalize_claude_span_publication_failure
+      return 1
+    fi
+    finish_deferred_claude_actions
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
@@ -1143,9 +1242,13 @@ cmd_run() {
   # the refusal text as the run's result.
   if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" && "$declined_final" -eq 0 ]]; then
     status="ok"
-    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-      "$span_usage_status" "$span_cost_status"
+    if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+        "$span_usage_status" "$span_cost_status"; then
+      terminalize_claude_span_publication_failure
+      return 1
+    fi
+    finish_deferred_claude_actions
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
@@ -1182,9 +1285,13 @@ cmd_run() {
       | .failure_receipt=(if $failure=="" then null else $failure end)
       | .lease_receipt=(if $lease=="" then null else $lease end)
     ' <<<"$artifacts")"
-    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-      "$span_usage_status" "$span_cost_status"
+    if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+        "$span_usage_status" "$span_cost_status"; then
+      terminalize_claude_span_publication_failure
+      return 1
+    fi
+    finish_deferred_claude_actions
     finish_claude_signal_accounting
     note "⚠ Claude failed ($reason): falling back to $fallback_model"
     run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
@@ -1202,9 +1309,13 @@ cmd_run() {
   else
     status="failed"
   fi
-  legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-    "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-    "$span_usage_status" "$span_cost_status"
+  if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+      "$span_usage_status" "$span_cost_status"; then
+    terminalize_claude_span_publication_failure
+    return 1
+  fi
+  finish_deferred_claude_actions
   finish_claude_signal_accounting
   [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
     "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \

@@ -71,7 +71,19 @@ on_signal() {
     legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
     exit 70
   fi
-  legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
+  if ! legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS"; then
+    keep=1
+    containment_reason="provider attempt receipt is durable but its signal-path span publication is uncertain (evidence: $LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json; worktree retained: $SIGNAL_WORKTREE)"
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" cursor \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
   exit $((128+signum))
 }
 begin_signal_launch() {
@@ -351,9 +363,11 @@ cmd_run() {
   legion_activate_executor_context "$RUN_ID" cursor
   note "-> ${cmd[*]}"
   local started_at ended_at output_started=false
-  local lease_status="$art/lease.json"
+  local lease_status="$art/lease.json" launch_gate="$art/launch-gate.json"
   SIGNAL_LEASE_STATUS="$lease_status"
   SIGNAL_WORKTREE="$wt"
+  legion_adapter_prepare_supervisor_launch_gate "$launch_gate" \
+    || die 'unable to prepare trusted supervisor launch gate'
   started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
@@ -361,11 +375,27 @@ cmd_run() {
   abort_pending_signal_launch
   ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
       --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
-      --status-file "$lease_status" -- "${cmd[@]}" ) >"$out_file" 2>"$err_file" &
+      --status-file "$lease_status" \
+      --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" \
+      -- "${cmd[@]}" ) >"$out_file" 2>"$err_file" &
   CHILD_PID=$!
   SIGNAL_CHILD_PID="$CHILD_PID"
-  legion_adapter_arm_signal_receipt "$art" cursor cursor 1 "$model" "" "" "" \
-    "$sandbox" "$started_at" "$start_ms" "$out_file"
+  legion_adapter_complete_supervisor_launch_gate "$CHILD_PID" "$lease_status" SIGNAL_LAUNCH_PENDING
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" == started ]]; then
+    legion_adapter_arm_signal_receipt "$art" cursor cursor 1 "$model" "" "" "" \
+      "$sandbox" "$started_at" "$start_ms" "$out_file"
+  elif [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" != launch_failed ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+    CHILD_PID=""; keep=1
+    legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" "$art" \
+      "$wt" "$branch" "$model" "$sandbox" "$base" "$archetype" "" || true
+    legion_disarm_adopted_run_guard
+    legion_adapter_terminalize_launch_gate_containment cursor "$model" "$RUN_ID" \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH" "$lease_status" "$launch_gate" "$wt" \
+      "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
+    exit 70
+  fi
   finish_signal_launch
   wait "$CHILD_PID"; rc=$?
   SIGNAL_CHILD_RC="$rc"
@@ -445,6 +475,7 @@ cmd_run() {
   fi
   local terminal_usage=null terminal_cost=null
   local terminal_usage_status=not_applicable terminal_cost_status=not_applicable
+  local publication_reason=""
   if [[ "$launch_failed" -eq 1 ]]; then
     LEGION_ADAPTER_ATTEMPT_PATH=""
     LEGION_ADAPTER_FAILURE_PATH=""
@@ -470,9 +501,15 @@ cmd_run() {
     span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-      "cursor" "$actual_model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
-      "$span_usage_status" "$span_cost_status"
+    if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "cursor" "$actual_model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+        "$span_usage_status" "$span_cost_status"; then
+      status=containment_failed
+      rc=70
+      keep=1
+      publication_reason="provider attempt receipt is durable but its span publication is uncertain; worktree and evidence retained"
+      result="$publication_reason"
+    fi
   fi
   legion_adapter_disarm_signal_receipt
   SIGNAL_CHILD_PID=""
@@ -507,7 +544,9 @@ cmd_run() {
   [[ "$status" == "ok" ]] || auth_note="$cursor_auth_hint"
 
   local receipt_reason=""
-  if [[ "$status" == timed_out ]]; then
+  if [[ -n "$publication_reason" ]]; then
+    receipt_reason="$publication_reason"
+  elif [[ "$status" == timed_out ]]; then
     receipt_reason="$(legion_adapter_lease_reason "$lease_status")"
   elif [[ "$status" == containment_failed || "$launch_failed" -eq 1 ]]; then
     receipt_reason="$(legion_adapter_supervisor_reason "$lease_status")"

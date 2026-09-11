@@ -192,8 +192,15 @@ on_signal() {
     legion_adapter_emit_signal_span "${task:-}" "${ART:-}/lease.json" || true
     exit 70
   fi
+  if ! legion_adapter_emit_signal_span "${task:-}" "${ART:-}/lease.json"; then
+    KEEP=1
+    containment_reason="provider attempt receipt is durable but its signal-path span publication is uncertain (evidence: $ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json; worktree retained: $WT_RECORD)"
+    legion_adapter_fail_recorded_attempt "$ART" "$ADAPTER_KIND" \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    [[ -z "$RUN_ID" || -z "$ART" ]] || write_state containment_failed
+    exit 70
+  fi
   [[ -z "$RUN_ID" || -z "$ART" ]] || write_state failed
-  legion_adapter_emit_signal_span "${task:-}" "${ART:-}/lease.json" || true
   exit $((128+signum))
 }
 begin_signal_launch() {
@@ -1085,8 +1092,13 @@ run_provider() {
     || die 'unable to create provider launch attestation token'
   (umask 077; set -o noclobber; printf '%s\n' "$PROVIDER_LAUNCH_TOKEN" > "$PROVIDER_LAUNCH_TOKEN_FILE") \
     || die 'unable to persist provider launch attestation secret'
+  local launch_gate="$ART/launch-gate.json"
+  legion_adapter_prepare_supervisor_launch_gate "$launch_gate" \
+    || die 'unable to prepare trusted supervisor launch gate'
   local -a supervisor_args=(python3 "$supervisor" --cwd "$WT"
-    --max-runtime-seconds "$provider_runtime" --status-file "$ART/lease.json")
+    --max-runtime-seconds "$provider_runtime" --status-file "$ART/lease.json"
+    --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN"
+    --descendant-signal-ready-file "$PROVIDER_LAUNCH_RECEIPT")
   if [[ "$FS_SANDBOX_KIND" == sandbox-exec ]]; then
     supervisor_args+=(--darwin-sandbox-deny-canary "$SUPERVISOR_DENY_CANARY" \
       --darwin-sandbox-allow-canary "$SUPERVISOR_ALLOW_CANARY")
@@ -1098,11 +1110,24 @@ run_provider() {
   "${supervisor_args[@]}" >"$out" 2>"$err" &
   CHILD_PID=$!
   SIGNAL_CHILD_PID="$CHILD_PID"
-  legion_adapter_arm_signal_receipt "$ART" "$ADAPTER_KIND" "$ADAPTER_KIND" 1 \
-    "$requested_model" "" \
-    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
-    "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
-    "$SANDBOX" "$started_at" "$start" "$out"
+  legion_adapter_complete_supervisor_launch_gate "$CHILD_PID" "$ART/lease.json" SIGNAL_LAUNCH_PENDING
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" == started ]]; then
+    legion_adapter_arm_signal_receipt "$ART" "$ADAPTER_KIND" "$ADAPTER_KIND" 1 \
+      "$requested_model" "" \
+      "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+      "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" \
+      "$SANDBOX" "$started_at" "$start" "$out"
+  elif [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" != launch_failed ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+    CHILD_PID=""; KEEP=1
+    write_state containment_failed
+    [[ -z "$PRESET_RUN_ID" ]] || legion_disarm_adopted_run_guard
+    legion_adapter_terminalize_launch_gate_containment "$ADAPTER_KIND" "$requested_model" \
+      "$RUN_ID" "$LEGION_ADAPTER_PREFLIGHT_PATH" "$ART/lease.json" "$launch_gate" \
+      "$WT_RECORD" "$provider_runtime"
+    exit 70
+  fi
   finish_signal_launch
   set +e; wait "$CHILD_PID"; PROVIDER_RC=$?; set -e
   CHILD_WAIT_RC="$PROVIDER_RC"
@@ -1384,9 +1409,15 @@ cmd_run() {
     span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-      "$status" "$duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-      "$span_usage_status" "$span_cost_status"
+    if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "$status" "$duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+        "$span_usage_status" "$span_cost_status"; then
+      status=containment_failed
+      PROVIDER_RC=70
+      KEEP=1
+      lease_reason="provider attempt receipt is durable but its span publication is uncertain; worktree and evidence retained"
+      result="$lease_reason"
+    fi
   fi
   legion_adapter_disarm_signal_receipt
   SIGNAL_CHILD_PID=""

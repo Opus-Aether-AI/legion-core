@@ -478,10 +478,28 @@ SH
 }
 
 @test "legion-claude: same-vendor retries share one absolute lease" {
-    local repo
+    local repo claude_shim art first_runtime second_runtime first_deadline second_deadline
     repo="$(make_test_repo model-chain-deadline)"
+    claude_shim="$TEST_TMPDIR/claude-model-delay"
+    cat > "$claude_shim" <<'SH'
+#!/usr/bin/env bash
+model=""; previous=""
+for argument in "$@"; do
+    [[ "$previous" != --model ]] || model="$argument"
+    previous="$argument"
+done
+printf '%s\t%s\n' "$model" "${LEGION_CHILD_LEASE_DEADLINE_NS:-}" \
+    >> "$LEGION_TEST_CLAUDE_DEADLINE_LOG"
+[[ "$model" != model-b ]] || export MOCK_CLAUDE_DELAY=30
+exec "$LEGION_TEST_CLAUDE_MOCK" "$@"
+SH
+    chmod +x "$claude_shim"
+    install_claude_remaining_seconds_python_shim
+    export LEGION_TEST_CLAUDE_REMAINING_VALUES=3,1
+    export LEGION_TEST_CLAUDE_DEADLINE_LOG="$TEST_TMPDIR/claude-deadlines.log"
+    export LEGION_TEST_CLAUDE_MOCK="$BATS_TEST_DIRNAME/mocks/bin/claude"
 
-    MOCK_CLAUDE_DECLINE_MODELS="model-a,model-b" MOCK_CLAUDE_DELAY=2 \
+    CLAUDE_BIN="$claude_shim" MOCK_CLAUDE_DECLINE_MODELS="model-a,model-b" \
       run "$LEGION_CLAUDE" run --task x --model model-a \
         --fallback-models model-b --repo "$repo" --max-runtime-seconds 3 --quiet
 
@@ -490,6 +508,17 @@ SH
       .executor == "claude" and .status == "timed_out"
       and (.reason | contains("expired after 3 seconds"))'
     [ "$(grep -c '^claude -p ' "$MOCK_CALL_LOG")" -eq 2 ]
+    art="$(dirname "$(echo "$output" | jq -r .attempt_receipt)")"
+    first_runtime="$(jq -r .max_runtime_seconds "$art/lease-1.json")"
+    second_runtime="$(jq -r .max_runtime_seconds "$art/lease-2.json")"
+    [ "$first_runtime" -eq 3 ]
+    [ "$second_runtime" -eq 1 ]
+    first_deadline="$(awk -F '\t' '$1 == "model-a" {print $2; exit}' "$LEGION_TEST_CLAUDE_DEADLINE_LOG")"
+    second_deadline="$(awk -F '\t' '$1 == "model-b" {print $2; exit}' "$LEGION_TEST_CLAUDE_DEADLINE_LOG")"
+    [[ "$first_deadline" =~ ^[1-9][0-9]*$ ]]
+    [ "$second_deadline" = "$first_deadline" ]
+    jq -e '.status == "completed"' "$art/lease-1.json"
+    jq -e '.status == "timed_out"' "$art/lease-2.json"
     assert_mock_not_called legion-delegate
 }
 
@@ -764,14 +793,14 @@ PY
     local script receipt_line span_line disarm_line
     for script in legion-cursor.sh legion-opencode.sh legion-deepseek.sh legion-pi-hermes.sh; do
       receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
-      span_line="$(grep -n '^[[:space:]]*legion_adapter_emit_normal_provider_span ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
+      span_line="$(grep -En '^[[:space:]]*(if ! )?legion_adapter_emit_normal_provider_span ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
       disarm_line="$(grep -n '^[[:space:]]*legion_adapter_disarm_signal_receipt$' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
       [ "$receipt_line" -lt "$span_line" ]
       [ "$span_line" -lt "$disarm_line" ]
     done
     local claude_script="$REPO_ROOT/legion-router/scripts/legion-claude.sh"
     receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$claude_script" | tail -1 | cut -d: -f1)"
-    span_line="$(grep -n '^[[:space:]]*legion_adapter_emit_normal_provider_span ' "$claude_script" | tail -1 | cut -d: -f1)"
+    span_line="$(grep -En '^[[:space:]]*(if ! )?legion_adapter_emit_normal_provider_span ' "$claude_script" | tail -1 | cut -d: -f1)"
     disarm_line="$(grep -n '^[[:space:]]*finish_claude_signal_accounting$' "$claude_script" | tail -1 | cut -d: -f1)"
     [ "$receipt_line" -lt "$span_line" ]
     [ "$span_line" -lt "$disarm_line" ]

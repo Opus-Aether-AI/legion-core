@@ -46,23 +46,91 @@ PY
 }
 
 install_cleanup_failed_python() {
-  local shim_dir="$TEST_TMPDIR/python-shim" real_python
+  local mode="${1:-immediate}" shim_dir="$TEST_TMPDIR/python-shim" real_python
   real_python="$(command -v python3)"
   mkdir -p "$shim_dir"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'if [[ "${1:-}" == */legion-process-supervisor.py ]]; then' \
-    '  status_file=""' \
-    '  while [[ $# -gt 0 ]]; do' \
-    '    if [[ "$1" == --status-file ]]; then status_file="$2"; break; fi' \
-    '    shift' \
-    '  done' \
-    '  printf '\''%s\n'\'' '\''{"schema":"legion.child-execution-lease.v1","status":"cleanup_failed","reason":"forced cleanup evidence","max_runtime_seconds":30}'\'' > "$status_file"' \
-    '  exit 70' \
-    'fi' \
-    'exec "$LEGION_TEST_REAL_PYTHON" "$@"' > "$shim_dir/python3"
+  cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+write_gate() {
+  local status="$1" child_pid="${2:-}" temp
+  temp="$(mktemp "${launch_gate%/*}/.fixture-launch-gate.XXXXXX")" || exit 70
+  if [[ -n "$child_pid" ]]; then
+    jq -cn --arg status "$status" --arg token "$launch_token" \
+      --argjson pid "$$" --argjson child "$child_pid" \
+      '{schema:"legion.child-launch-gate.v1",status:$status,token:$token,supervisor_pid:$pid,child_pid:$child}' > "$temp"
+  else
+    jq -cn --arg status "$status" --arg token "$launch_token" --argjson pid "$$" \
+      '{schema:"legion.child-launch-gate.v1",status:$status,token:$token,supervisor_pid:$pid}' > "$temp"
+  fi
+  chmod 600 "$temp"
+  mv -f "$temp" "$launch_gate"
+}
+
+write_provider_started() {
+  local wrapper_index=0 receipt="" token_file="" provider="" i
+  [[ -n "$descendant_ready" ]] || return 0
+  for ((i = 1; i <= $#; i++)); do
+    [[ "${!i}" != */provider-launch-wrapper.py ]] || { wrapper_index="$i"; break; }
+  done
+  [[ "$wrapper_index" -gt 0 ]] || return 70
+  i=$((wrapper_index + 1)); receipt="${!i}"
+  i=$((wrapper_index + 2)); token_file="${!i}"
+  i=$((wrapper_index + 4)); provider="${!i}"
+  [[ "$receipt" == "$descendant_ready" && -s "$token_file" && -n "$provider" ]] || return 70
+  "$LEGION_TEST_REAL_PYTHON" - "$receipt" "$token_file" "$provider" "$$" <<'PY'
+import hashlib, hmac, json, os, pathlib, sys, tempfile
+receipt, token_file, executable, provider_pid = sys.argv[1:]
+token = pathlib.Path(token_file).read_text(encoding="ascii").strip()
+payload = {"schema":"legion.provider-launch.v1", "status":"started",
+           "executable_path":executable, "provider_pid":int(provider_pid)}
+encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+payload["auth"] = hmac.new(token.encode(), encoded, hashlib.sha256).hexdigest()
+fd, temporary = tempfile.mkstemp(prefix=".fixture-provider.", dir=str(pathlib.Path(receipt).parent))
+with os.fdopen(fd, "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, separators=(",", ":")); stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+os.chmod(temporary, 0o600); os.replace(temporary, receipt)
+PY
+}
+
+if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  status_file=""; launch_gate=""; launch_token=""; descendant_ready=""; max_runtime=30
+  original=("$@")
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status-file) status_file="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime="$2"; shift 2 ;;
+      --launch-gate-file) launch_gate="$2"; shift 2 ;;
+      --launch-gate-token) launch_token="$2"; shift 2 ;;
+      --descendant-signal-ready-file) descendant_ready="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  write_gate ready
+  decision=""
+  for ((i = 0; i < 500; i++)); do
+    decision="$(jq -r --arg token "$launch_token" --argjson pid "$$" \
+      'if .schema == "legion.child-launch-gate.v1" and .token == $token and .supervisor_pid == $pid then .status else empty end' \
+      "$launch_gate" 2>/dev/null || true)"
+    [[ "$decision" != go && "$decision" != cancel ]] || break
+    sleep 0.02
+  done
+  [[ "$decision" == go ]] || exit 70
+  write_gate started "$$"
+  write_provider_started "${original[@]}" || exit 70
+  if [[ "${LEGION_TEST_FIXTURE_CLEANUP_MODE:-immediate}" == signal ]]; then
+    trap 'printf "%s\n" "{\"schema\":\"legion.child-execution-lease.v1\",\"status\":\"cleanup_failed\",\"reason\":\"signal drain failed\",\"max_runtime_seconds\":$max_runtime}" > "$status_file"; exit 70' TERM
+    : > "$LEGION_TEST_SUPERVISOR_STARTED"
+    while true; do sleep 1; done
+  fi
+  jq -cn --argjson runtime "$max_runtime" \
+    '{schema:"legion.child-execution-lease.v1",status:"cleanup_failed",reason:"forced cleanup evidence",max_runtime_seconds:$runtime}' > "$status_file"
+  exit 70
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
   chmod +x "$shim_dir/python3"
   export LEGION_TEST_REAL_PYTHON="$real_python"
+  export LEGION_TEST_FIXTURE_CLEANUP_MODE="$mode"
   export PATH="$shim_dir:$PATH"
 }
 
@@ -95,26 +163,44 @@ SH
   export PATH="$shim_dir:$PATH"
 }
 
-install_signal_cleanup_failed_python() {
-  local shim_dir="$TEST_TMPDIR/signal-python-shim" real_python
+install_malformed_launch_gate_python() {
+  local shim_dir="$TEST_TMPDIR/malformed-gate-python" real_python
   real_python="$(command -v python3)"
   mkdir -p "$shim_dir"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'if [[ "${1:-}" == */legion-process-supervisor.py ]]; then' \
-    '  status_file=""' \
-    '  while [[ $# -gt 0 ]]; do' \
-    '    if [[ "$1" == --status-file ]]; then status_file="$2"; break; fi' \
-    '    shift' \
-    '  done' \
-    "  trap 'printf \"%s\\n\" \"{\\\"schema\\\":\\\"legion.child-execution-lease.v1\\\",\\\"status\\\":\\\"cleanup_failed\\\",\\\"reason\\\":\\\"signal drain failed\\\",\\\"max_runtime_seconds\\\":30}\" > \"\$status_file\"; exit 70' TERM" \
-    '  : > "$LEGION_TEST_SUPERVISOR_STARTED"' \
-    '  while true; do sleep 1; done' \
-    'fi' \
-    'exec "$LEGION_TEST_REAL_PYTHON" "$@"' > "$shim_dir/python3"
+  cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  gate=""; token=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --launch-gate-file) gate="$2"; shift 2 ;;
+      --launch-gate-token) token="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  temp="$(mktemp "${gate%/*}/.malformed-gate-fixture.XXXXXX")" || exit 70
+  jq -cn --arg token "$token" --argjson pid "$$" \
+    '{schema:"legion.child-launch-gate.v1",status:"ready",token:$token,supervisor_pid:$pid}' > "$temp"
+  chmod 600 "$temp"; mv -f "$temp" "$gate"
+  for ((i = 0; i < 500; i++)); do
+    jq -e --arg token "$token" --argjson pid "$$" \
+      '.status == "go" and .token == $token and .supervisor_pid == $pid' "$gate" >/dev/null 2>&1 && break
+    sleep 0.02
+  done
+  printf '%s\n' '{"schema":"legion.child-launch-gate.v1","status":"started","token":"forged"}' > "$gate"
+  exit 70
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
   chmod +x "$shim_dir/python3"
   export LEGION_TEST_REAL_PYTHON="$real_python"
   export PATH="$shim_dir:$PATH"
+}
+
+install_signal_cleanup_failed_python() {
+  # Hold after publishing authenticated outer/inner started evidence until the
+  # adapter forwards TERM, then publish the post-launch cleanup failure.
+  install_cleanup_failed_python signal
 }
 
 assert_signal_receipt() {
@@ -298,7 +384,52 @@ SH
   done
 }
 
-@test "every foreground adapter preserves prelaunch containment without provider accounting" {
+@test "every foreground adapter cancels through the supervisor handshake after background fork" {
+  local bash_env="$TEST_TMPDIR/post-fork-signal.bash" adapter provider_marker signal expected_rc repo run_id rc art out err lease
+  install_mock_version_registry
+  cat > "$bash_env" <<'SH'
+set -T
+trap 'case "$BASH_COMMAND" in legion_adapter_complete_supervisor_launch_gate*)
+  if [[ "${LEGION_TEST_POST_FORK_SIGNALLED:-0}" == 0 ]]; then
+    LEGION_TEST_POST_FORK_SIGNALLED=1
+    kill -"${LEGION_TEST_POST_FORK_SIGNAL:-TERM}" "$$"
+  fi
+;; esac' DEBUG
+SH
+  for adapter in claude cursor opencode deepseek pi hermes; do
+    case "$adapter" in
+      claude) provider_marker='claude -p'; signal=TERM; expected_rc=143 ;;
+      cursor) provider_marker='agent -p'; signal=INT; expected_rc=130 ;;
+      opencode) provider_marker='opencode run'; signal=HUP; expected_rc=129 ;;
+      deepseek) provider_marker='dsh --profile'; signal=TERM; expected_rc=143 ;;
+      pi) provider_marker='pi -p'; signal=INT; expected_rc=130 ;;
+      hermes) provider_marker='hermes --oneshot'; signal=HUP; expected_rc=129 ;;
+    esac
+    repo="$(make_test_repo "post-fork-$adapter")"
+    run_id="post-fork-$adapter"
+    out="$TEST_TMPDIR/$adapter-post-fork.out"
+    err="$TEST_TMPDIR/$adapter-post-fork.err"
+    rc=0
+    local -a extra_args=()
+    [[ "$adapter" != claude ]] || extra_args+=(--no-fallback)
+    BASH_ENV="$bash_env" LEGION_TEST_POST_FORK_SIGNAL="$signal" PI_BIN=pi HERMES_BIN=hermes \
+      "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task wait --repo "$repo" \
+        --run-id "$run_id" --quiet "${extra_args[@]}" >"$out" 2>"$err" || rc=$?
+    [ "$rc" -eq "$expected_rc" ] || { printf 'adapter=%s signal=%s rc=%s out=%s err=%s\n' "$adapter" "$signal" "$rc" "$(cat "$out")" "$(cat "$err")" >&2; return 1; }
+    ! grep -Fq "$provider_marker" "$MOCK_CALL_LOG"
+    art="$repo/.legion/runs/$run_id"
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    lease="$(find "$art" -maxdepth 1 -name 'lease*.json' -print -quit)"
+    jq -e '
+      .schema == "legion.child-execution-lease.v1" and .status == "launch_failed"
+      and (.reason | contains("final pre-launch gate"))
+      and (has("child_exit_code") | not)
+    ' "$lease"
+  done
+}
+
+@test "every foreground adapter preserves typed prelaunch and malformed-gate containment" {
   local adapter repo run_id result_file provider_marker err_file rc
   install_mock_version_registry
   install_prelaunch_cleanup_failed_python
@@ -329,6 +460,47 @@ SH
     jq -e '.status == "cleanup_failed" and .child_started == false' \
       "$(jq -r '.lease_receipt' "$result_file")"
     ! grep -Fq "$provider_marker" "$MOCK_CALL_LOG"
+  done
+
+  # A forged post-ready gate is neither authenticated launch evidence nor a
+  # no-launch attestation. It must return a terminal containment envelope,
+  # retain the worktree, and preserve usage/cost as unknown without inventing
+  # an attempt.
+  export PATH="${PATH#*:}"
+  install_malformed_launch_gate_python
+  for adapter in claude cursor opencode deepseek pi hermes; do
+    case "$adapter" in
+      claude) provider_marker='claude -p' ;;
+      cursor) provider_marker='agent -p' ;;
+      opencode) provider_marker='opencode run' ;;
+      deepseek) provider_marker='dsh --profile' ;;
+      pi) provider_marker='pi -p' ;;
+      hermes) provider_marker='hermes --oneshot' ;;
+    esac
+    repo="$(make_test_repo "malformed-gate-$adapter")"
+    run_id="malformed-gate-$adapter"
+    result_file="$TEST_TMPDIR/$adapter-malformed-gate.out"
+    err_file="$TEST_TMPDIR/$adapter-malformed-gate.err"
+    rc=0
+    local -a gate_args=()
+    [[ "$adapter" != claude ]] || gate_args+=(--no-fallback)
+    PI_BIN=pi HERMES_BIN=hermes \
+      "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task wait --repo "$repo" \
+        --run-id "$run_id" --quiet "${gate_args[@]}" >"$result_file" 2>"$err_file" || rc=$?
+    [ "$rc" -eq 70 ] || { printf 'adapter=%s rc=%s output=%s err=%s\n' "$adapter" "$rc" "$(cat "$result_file")" "$(cat "$err_file")" >&2; return 1; }
+    jq -e '
+      .status == "containment_failed" and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "unknown"
+      and .cost_usd == null and .cost_status == "unknown"
+      and (.reason | contains("launch-gate authentication or handshake failed"))
+      and (.lease_receipt | type == "string")
+    ' "$result_file"
+    jq -e '.schema == "legion.child-execution-lease.v1" and .status == "cleanup_failed"' \
+      "$(jq -r .lease_receipt "$result_file")"
+    ! grep -Fq "$provider_marker" "$MOCK_CALL_LOG"
+    [ "$(find "$repo/.legion/runs/$run_id" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
+    [ -d "$(jq -r .worktree_dir "$LEGION_REGISTRY_DIR/$run_id.json")" ]
   done
 }
 
@@ -539,17 +711,10 @@ SH
     lease="$(find "$art" -maxdepth 1 -name 'lease*.json' -print -quit)"
     [ -n "$lease" ]
     jq -e '.status == "cleanup_failed" and (.reason | contains("signal drain failed"))' "$lease"
-    if [[ "$adapter" == pi || "$adapter" == hermes ]]; then
-      # Their authenticated inner launch boundary proves this fixture never
-      # reached a provider, even though outer descendant cleanup failed.
-      [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
-      [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
-    else
-      jq -e '.terminal_status == "failed" and .failure.class == "internal"
-        and (.failure.message | contains("worktree retained"))' "$art/attempt-1.json"
-      [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
-      [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
-    fi
+    jq -e '.terminal_status == "failed" and .failure.class == "internal"
+      and (.failure.message | contains("worktree retained"))' "$art/attempt-1.json"
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
     jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
     [ -d "$repo/.legion/worktrees/$run_id" ]
   done

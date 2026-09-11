@@ -104,6 +104,7 @@ payload = {
     "status": "pending",
     "executable_path": executable,
 }
+
 encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 payload["auth"] = hmac.new(token.encode(), encoded, hashlib.sha256).hexdigest()
 Path(path).write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
@@ -113,6 +114,54 @@ sleep 30
 SH
   chmod +x "$shim_dir/sandbox-exec"
   export LEGION_FS_SANDBOX_BIN="$shim_dir/sandbox-exec"
+}
+
+install_delayed_started_python() {
+  local shim_dir="$TEST_TMPDIR/delayed-start-python"
+  mkdir -p "$shim_dir"
+  export MOCK_REAL_PYTHON="$(command -v python3)"
+  export MOCK_DELAYED_STARTED_HARNESS="$shim_dir/delayed-started-harness.py"
+  cat > "$MOCK_DELAYED_STARTED_HARNESS" <<'PY'
+import importlib.util
+from pathlib import Path
+import os
+import sys
+import time
+
+wrapper = sys.argv[1]
+spec = importlib.util.spec_from_file_location("legion_provider_launch_wrapper", wrapper)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+real_write_receipt = module.write_receipt
+
+def delayed_write_receipt(receipt, payload, token):
+    if payload.get("status") == "started":
+        Path(os.environ["MOCK_DELAYED_STARTED_ASSIGNED"]).write_text(
+            "assigned\n", encoding="utf-8"
+        )
+        deadline = time.monotonic() + 10
+        release = Path(os.environ["MOCK_DELAYED_STARTED_RELEASE"])
+        while not release.exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("timed out waiting to publish started receipt")
+            time.sleep(0.01)
+    return real_write_receipt(receipt, payload, token)
+
+module.write_receipt = delayed_write_receipt
+sys.argv = sys.argv[1:]
+raise SystemExit(module.main())
+PY
+  cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == */provider-launch-wrapper.py ]]; then
+  exec "$MOCK_REAL_PYTHON" "$MOCK_DELAYED_STARTED_HARNESS" "$@"
+fi
+exec "$MOCK_REAL_PYTHON" "$@"
+SH
+  chmod +x "$shim_dir/python3"
+  export PATH="$shim_dir:$PATH"
 }
 
 install_deadline_expiring_sed() {
@@ -566,6 +615,72 @@ PY
     and (.auth | type == "string" and length == 64)
     and (has("token") | not)
   ' "$receipt"
+}
+
+@test "Pi production supervisor defers descendant shutdown until started receipt is durable" {
+  local repo run_id art provider result_file error_file assigned release child_pid_file signal_file
+  local adapter_pid child_pid rc=0 attempt
+  repo="$(make_test_repo production-delayed-started)"
+  run_id=production-delayed-started
+  art="$repo/.legion/runs/$run_id"
+  assigned="$art/tmp/delayed-started-assigned"
+  release="$art/tmp/delayed-started-release"
+  child_pid_file="$art/tmp/delayed-started-child.pid"
+  signal_file="$art/tmp/delayed-started-child.signal"
+  install_delayed_started_python
+
+  provider="$TEST_TMPDIR/production-delayed-provider"
+  cat > "$provider" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [[ "${1:-}" == --version ]]; then printf 'pi 1.0.0\n'; exit 0; fi
+printf '%s\n' "$$" > "$MOCK_DELAYED_STARTED_CHILD_PID"
+trap 'printf "TERM\n" > "$MOCK_DELAYED_STARTED_CHILD_SIGNAL"; exit 143' TERM
+while :; do sleep 0.05; done
+SH
+  chmod +x "$provider"
+  provider="$(cd "${provider%/*}" && pwd -P)/${provider##*/}"
+  result_file="$TEST_TMPDIR/production-delayed-started.out"
+  error_file="$TEST_TMPDIR/production-delayed-started.err"
+  MOCK_DELAYED_STARTED_ASSIGNED="$assigned" \
+    MOCK_DELAYED_STARTED_RELEASE="$release" \
+    MOCK_DELAYED_STARTED_CHILD_PID="$child_pid_file" \
+    MOCK_DELAYED_STARTED_CHILD_SIGNAL="$signal_file" \
+    PI_BIN="$provider" "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+      --repo "$repo" --run-id "$run_id" --keep --quiet >"$result_file" 2>"$error_file" &
+  adapter_pid=$!
+  for _ in $(seq 1 300); do
+    [[ -f "$assigned" && -f "$child_pid_file" ]] && break
+    kill -0 "$adapter_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ -f "$assigned" ]
+  [ -f "$child_pid_file" ]
+  child_pid="$(cat "$child_pid_file")"
+  kill -TERM "$adapter_pid"
+  sleep 0.2
+  kill -0 "$child_pid"
+  [ ! -e "$signal_file" ]
+  jq -e '.status == "pending"' "$art/tmp/provider-launch.json"
+
+  : > "$release"
+  wait "$adapter_pid" || rc=$?
+  [ "$rc" -eq 143 ]
+  for _ in $(seq 1 100); do
+    ! kill -0 "$child_pid" 2>/dev/null && break
+    sleep 0.05
+  done
+  ! kill -0 "$child_pid" 2>/dev/null
+  grep -qx TERM "$signal_file"
+  jq -e '.status == "started"' "$art/tmp/provider-launch.json"
+  [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+  attempt="$(cd "$art" && pwd -P)/attempt-1.json"
+  jq -e '.terminal_status == "cancelled" and .failure.class == "cancelled"' "$attempt"
+  jq -s -e --arg attempt "$attempt" '
+    [.[] | select(.artifacts.provider_attempt == true
+      and .artifacts.attempt_receipt == $attempt)] | length == 1
+  ' "$LEGION_TELEMETRY_DIR"/*.jsonl
 }
 
 @test "a provider that really launches and exits 127 remains a billable attempt" {

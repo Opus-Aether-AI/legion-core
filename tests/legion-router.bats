@@ -176,6 +176,11 @@ if [[ "${1:-}" == - ]]; then
     printf '%s\n' "$((count + 1))" > "$LEGION_TEST_REMAINING_COUNT_FILE"
     value="$(printf '%s\n' "${LEGION_TEST_REMAINING_VALUES:-0}" | cut -d, -f"$((count + 1))")"
     [[ -n "$value" ]] || value=0
+    if [[ -n "${LEGION_TEST_BLOCK_PROMPT_LEASE_REPO:-}" ]]; then
+      art="$(find "$LEGION_TEST_BLOCK_PROMPT_LEASE_REPO/.legion/runs" \
+        -mindepth 1 -maxdepth 1 -type d -print -quit)"
+      [[ -z "$art" ]] || : > "$art/prompt-review-2-1"
+    fi
     printf '%s\n' "$value"
     exit 0
   fi
@@ -197,18 +202,58 @@ install_missing_lease_supervisor_shim() {
     local shim_dir="$TEST_TMPDIR/missing-lease-python" real_python
     real_python="$(command -v python3)"
     mkdir -p "$shim_dir"
-    printf '%s\n' \
-      '#!/usr/bin/env bash' \
-      'if [[ "${1:-}" == */legion-process-supervisor.py ]]; then' \
-      '  status_file=""' \
-      '  for ((i=1; i <= $#; i++)); do' \
-      '    if [[ "${!i}" == --status-file ]]; then j=$((i + 1)); status_file="${!j}"; break; fi' \
-      '  done' \
-      '  "$LEGION_TEST_REAL_PYTHON" "$@"; rc=$?' \
-      '  [[ -z "$status_file" ]] || rm -f "$status_file"' \
-      '  exit "$rc"' \
-      'fi' \
-      'exec "$LEGION_TEST_REAL_PYTHON" "$@"' > "$shim_dir/python3"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+write_gate() {
+  local status="$1" child_pid="${2:-}" temp
+  temp="$(mktemp "${launch_gate%/*}/.missing-lease-gate.XXXXXX")" || exit 70
+  if [[ -n "$child_pid" ]]; then
+    jq -cn --arg status "$status" --arg token "$launch_token" \
+      --argjson pid "$$" --argjson child "$child_pid" \
+      '{schema:"legion.child-launch-gate.v1",status:$status,token:$token,supervisor_pid:$pid,child_pid:$child}' > "$temp"
+  else
+    jq -cn --arg status "$status" --arg token "$launch_token" --argjson pid "$$" \
+      '{schema:"legion.child-launch-gate.v1",status:$status,token:$token,supervisor_pid:$pid}' > "$temp"
+  fi
+  chmod 600 "$temp"
+  mv -f "$temp" "$launch_gate"
+}
+
+if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  cwd=""; status_file=""; launch_gate=""; launch_token=""
+  command=()
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cwd) cwd="$2"; shift 2 ;;
+      --status-file) status_file="$2"; shift 2 ;;
+      --launch-gate-file) launch_gate="$2"; shift 2 ;;
+      --launch-gate-token) launch_token="$2"; shift 2 ;;
+      --max-runtime-seconds) shift 2 ;;
+      --) shift; command=("$@"); break ;;
+      *) shift ;;
+    esac
+  done
+  write_gate ready
+  decision=""
+  for ((i = 0; i < 500; i++)); do
+    decision="$(jq -r --arg token "$launch_token" --argjson pid "$$" '
+      if .schema == "legion.child-launch-gate.v1" and .token == $token
+        and .supervisor_pid == $pid then .status else empty end
+      ' "$launch_gate" 2>/dev/null || true)"
+    [[ "$decision" != go && "$decision" != cancel ]] || break
+    /bin/sleep 0.02
+  done
+  [[ "$decision" == go ]] || exit 70
+  (cd "$cwd" && exec "${command[@]}") &
+  child_pid=$!
+  write_gate started "$child_pid"
+  wait "$child_pid"; rc=$?
+  [[ -z "$status_file" ]] || rm -f "$status_file"
+  exit "$rc"
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
     chmod +x "$shim_dir/python3"
     export LEGION_TEST_REAL_PYTHON="$real_python"
     export PATH="$shim_dir:$PATH"
@@ -2056,6 +2101,50 @@ SH
     [ ! -e "$art/attempt.json" ]
     [ ! -e "$art/failure.json" ]
     [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 1 ]
+}
+
+@test "delegate review: prompt expiry before launch writes numbered strict no-launch evidence" {
+    local repo result lease art
+    repo="$(make_test_repo review-prompt-prelaunch-expiry)"
+    install_exhausted_remaining_seconds_python_shim
+
+    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+      --repo "$repo" --max-runtime-seconds 30 --quiet
+
+    [ "$status" -eq 1 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "timed_out" and .attempts == 0
+      and .preflight_receipt == null
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
+    lease="$(echo "$result" | jq -r .lease_receipt)"
+    [[ "$lease" == */prompt-review-2-1/lease.json ]]
+    art="$(dirname "$(dirname "$lease")")"
+    jq -e '.schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    [ ! -e "$art/attempt.json" ]
+    [ ! -e "$art/failure.json" ]
+    assert_mock_not_called agent
+}
+
+@test "delegate review: prompt no-launch evidence persistence failure retains containment" {
+    local repo result wt
+    repo="$(make_test_repo review-prompt-prelaunch-evidence-failure)"
+    install_exhausted_remaining_seconds_python_shim
+    export LEGION_TEST_BLOCK_PROMPT_LEASE_REPO="$repo"
+
+    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+      --repo "$repo" --max-runtime-seconds 30 --quiet
+
+    [ "$status" -eq 70 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "containment_failed"
+      and (.reason | contains("unable to persist authenticated no-launch prompt review lease evidence"))
+      and .attempt_receipt == null and .failure_receipt == null'
+    wt="$(echo "$result" | jq -r .worktree)"
+    [ -d "$wt" ]
+    assert_mock_not_called agent
 }
 
 @test "delegate review: invalid runtime bound creates no worktree or lifecycle" {

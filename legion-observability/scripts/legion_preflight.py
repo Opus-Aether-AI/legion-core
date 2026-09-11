@@ -104,6 +104,8 @@ def _read_cache(path, key):
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(value, dict):
+        return None
     return value if value.get("cache_key") == key else None
 
 

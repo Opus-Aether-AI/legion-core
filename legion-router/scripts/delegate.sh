@@ -464,12 +464,22 @@ on_terminating_signal() {
       emit_native_review_provider_span \
         "$interrupted_native_art/attempt-$interrupted_native_ordinal.json" \
         "review --base $REVIEW_RECEIPT_BASE_SHA --head $REVIEW_RECEIPT_HEAD_SHA" \
-        "$NATIVE_LEASE_STATUS" || true
+        "$NATIVE_LEASE_STATUS" || {
+          terminal_status=containment_failed
+          provider_exit=70
+          LEGION_WT_KEEP=1
+          terminal_reason="provider attempt receipt is durable but its span publication is uncertain (evidence: $interrupted_native_art/attempt-$interrupted_native_ordinal.json; worktree retained: $signal_worktree)"
+        }
     elif [[ "$interrupted_native_executor" == codex || "$interrupted_native_executor" == codex-resume ]]; then
       emit_provider_attempt_span \
         "$interrupted_native_art/attempt-$interrupted_native_ordinal.json" \
         "$([[ "$interrupted_native_executor" == codex-resume ]] && printf 'resume %s: %s' "$RUN_ID" "${task:-}" || printf '%s' "${task:-}")" \
-        "$NATIVE_LEASE_STATUS" || true
+        "$NATIVE_LEASE_STATUS" || {
+          terminal_status=containment_failed
+          provider_exit=70
+          LEGION_WT_KEEP=1
+          terminal_reason="provider attempt receipt is durable but its span publication is uncertain (evidence: $interrupted_native_art/attempt-$interrupted_native_ordinal.json; worktree retained: $signal_worktree)"
+        }
     fi
   fi
   if [[ "$PROMPT_ATTEMPT_LAUNCHED" -eq 1 && -n "${PROMPT_ATTEMPT_ART:-}" ]]; then
@@ -1434,6 +1444,11 @@ emit_provider_attempt_span() {
   # claim. Signals are deferred across claim + append + commit, preventing the
   # trap from abandoning or duplicating a paid provider span.
   native_span_publication_begin
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == claim ]]; then
+    native_span_publication_end
+    return 1
+  fi
   local claim_rc=0
   native_provider_span_claim "$attempt_path" || claim_rc=$?
   if [[ "$claim_rc" -eq 2 ]]; then
@@ -1443,8 +1458,20 @@ emit_provider_attempt_span() {
     native_span_publication_end
     return 1
   fi
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == append ]]; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
   if ! emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
       "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == commit ]]; then
     native_provider_span_release "$attempt_path"
     native_span_publication_end
     return 1
@@ -2360,7 +2387,13 @@ cmd_run() {
       "$attempt_failure" "$attempt_retryable" "$attempt_output_started" \
       "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" \
       "${lease_reason:-$(error_log_summary "$art/codex.err" "$art/codex.err")}"
-    emit_provider_attempt_span "$LEGION_ADAPTER_ATTEMPT_PATH" "$task" "$lease_status"
+    if ! emit_provider_attempt_span "$LEGION_ADAPTER_ATTEMPT_PATH" "$task" "$lease_status"; then
+      containment_failed=1
+      rc=70
+      keep=1
+      LEGION_WT_KEEP=1
+      lease_reason="provider attempt receipt is durable but its span publication is uncertain (evidence: $LEGION_ADAPTER_ATTEMPT_PATH; worktree retained: $wt)"
+    fi
     CODEX_SIGNAL_CHILD_PID=""
     [[ "$containment_failed" -ne 1 ]] || break
     [[ "$attempt_timed_out" -ne 1 ]] || break
@@ -2784,6 +2817,11 @@ emit_native_review_provider_span() {
     '{provider_attempt:true,attempt_receipt:$attempt,
       lease_receipt:(if $lease=="" then null else $lease end)}')"
   native_span_publication_begin
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == claim ]]; then
+    native_span_publication_end
+    return 1
+  fi
   local claim_rc=0
   native_provider_span_claim "$attempt_path" || claim_rc=$?
   if [[ "$claim_rc" -eq 2 ]]; then
@@ -2793,8 +2831,20 @@ emit_native_review_provider_span() {
     native_span_publication_end
     return 1
   fi
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == append ]]; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
   if ! emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
       "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
+  if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
+      && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == commit ]]; then
     native_provider_span_release "$attempt_path"
     native_span_publication_end
     return 1
@@ -3683,9 +3733,21 @@ cmd_review() {
           rc=70
         fi
       else
-        status="timed_out"
-        reason="shared child execution lease expired before the next review attempt"
-        rc=124
+        local prompt_no_launch_dir="$art/prompt-review-$_cand_n-$((attempt + 1))"
+        review_lease_receipt="$prompt_no_launch_dir/lease.json"
+        reason="shared child execution lease expired before prompt reviewer launch"
+        if mkdir -p "$prompt_no_launch_dir" \
+            && write_strict_no_launch_lease "$review_lease_receipt" "$reason" \
+              "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"; then
+          status="timed_out"
+          rc=124
+        else
+          review_containment_failed=1
+          LEGION_WT_KEEP=1
+          status="containment_failed"
+          reason="unable to persist authenticated no-launch prompt review lease evidence (expected: $review_lease_receipt; worktree retained: $wt)"
+          rc=70
+        fi
       fi
       break
     fi
@@ -3725,8 +3787,15 @@ cmd_review() {
       review_attempt_receipt="$LEGION_ADAPTER_ATTEMPT_PATH"
       review_failure_receipt="$LEGION_ADAPTER_FAILURE_PATH"
       review_track_attempt_receipt "$review_attempt_receipt"
-      emit_native_review_provider_span "$review_attempt_receipt" \
-        "review --base $base_sha --head $head_sha" "$attempt_lease"
+      if ! emit_native_review_provider_span "$review_attempt_receipt" \
+          "review --base $base_sha --head $head_sha" "$attempt_lease"; then
+        review_containment_failed=1
+        LEGION_WT_KEEP=1
+        status=containment_failed
+        reason="provider attempt receipt is durable but its span publication is uncertain (evidence: $review_attempt_receipt; worktree retained: $wt)"
+        rc=70
+        return 1
+      fi
       native_attempt_recorded=1
       NATIVE_ATTEMPT_ART=""
       NATIVE_ATTEMPT_LAUNCHED=0
@@ -3853,7 +3922,7 @@ cmd_review() {
       LEGION_WT_KEEP=1
       status="containment_failed"
       reason="$(legion_adapter_supervisor_reason "$attempt_lease") (evidence: $attempt_lease; worktree retained: $wt)"
-      record_native_review_attempt failed internal false "$reason"
+      record_native_review_attempt failed internal false "$reason" || break
       break
     fi
     if [[ "$review_kind" != "native" && "$review_containment_failed" -eq 1 ]]; then
@@ -3865,7 +3934,7 @@ cmd_review() {
     if [[ "$review_kind" == "native" ]] && legion_adapter_supervisor_timed_out "$attempt_lease"; then
       status="timed_out"
       reason="$(legion_adapter_lease_reason "$attempt_lease")"
-      record_native_review_attempt timed_out timed_out false "$reason"
+      record_native_review_attempt timed_out timed_out false "$reason" || break
       break
     fi
     if [[ "$review_kind" != "native" ]] \
@@ -3878,7 +3947,7 @@ cmd_review() {
     if [[ "$rc" -eq 0 ]]; then
       if [[ ! -s "$attempt_verdict" ]]; then
         reason="missing-verdict"
-        record_native_review_attempt failed malformed_event false "$reason"
+        record_native_review_attempt failed malformed_event false "$reason" || break
         break
       fi
       if ! review_verdict_is_schema_conformant "$attempt_verdict"; then
@@ -3891,16 +3960,16 @@ cmd_review() {
           if review_verdict_has_negative_signal "$attempt_verdict"; then
             note "⚠ malformed verdict carries a non-approving signal; failing closed without retry"
             reason="invalid-verdict"
-            record_native_review_attempt failed malformed_event false "$reason"
+            record_native_review_attempt failed malformed_event false "$reason" || break
             break
           fi
           if [[ "$attempt" -lt "$max_attempts" ]]; then
             note "⚠ review output did not conform to the schema; retrying with the same immutable SHAs"
-            record_native_review_attempt failed malformed_event true "invalid review verdict"
+            record_native_review_attempt failed malformed_event true "invalid review verdict" || break
             continue
           fi
           reason="invalid-verdict"
-          record_native_review_attempt failed malformed_event false "$reason"
+          record_native_review_attempt failed malformed_event false "$reason" || break
           break
         fi
       fi
@@ -3909,12 +3978,12 @@ cmd_review() {
       # reviewer another chance to erase blocking findings.
       if ! review_verdict_is_valid "$attempt_verdict"; then
         reason="invalid-verdict"
-        record_native_review_attempt failed malformed_event false "$reason"
+        record_native_review_attempt failed malformed_event false "$reason" || break
         break
       fi
       status="ok"
       reason="completed"
-      record_native_review_attempt succeeded "" false ""
+      record_native_review_attempt succeeded "" false "" || break
       break
     fi
     # A nonzero exit does not always mean no review happened. Codex can emit a
@@ -3938,7 +4007,7 @@ cmd_review() {
         note "⚠ reviewer exited $rc but produced a usable non-approving verdict; honoring it"
         status="ok"
         reason="completed"
-        record_native_review_attempt failed provider false "reviewer exited $rc after a usable non-approving verdict"
+        record_native_review_attempt failed provider false "reviewer exited $rc after a usable non-approving verdict" || break
         break
       fi
     fi
@@ -3946,16 +4015,16 @@ cmd_review() {
       reason="transient-exhausted"
       if [[ "$attempt" -lt "$max_attempts" ]]; then
         note "⚠ transient review failure (exit $rc); retrying with the same immutable SHAs"
-        record_native_review_attempt failed provider true "transient review failure"
+        record_native_review_attempt failed provider true "transient review failure" || break
         continue
       fi
     else
       reason="review-failed"
     fi
     if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
-      record_native_review_attempt failed unavailable true "reviewer unavailable"
+      record_native_review_attempt failed unavailable true "reviewer unavailable" || break
     else
-      record_native_review_attempt failed provider false "$reason"
+      record_native_review_attempt failed provider false "$reason" || break
     fi
     break
   done
@@ -4333,7 +4402,12 @@ cmd_resume() {
     terminal_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     terminal_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     terminal_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-    emit_provider_attempt_span "$LEGION_ADAPTER_ATTEMPT_PATH" "resume $run: $task" "$lease_status"
+    if ! emit_provider_attempt_span "$LEGION_ADAPTER_ATTEMPT_PATH" "resume $run: $task" "$lease_status"; then
+      containment_failed=1
+      status=containment_failed
+      reason="provider attempt receipt is durable but its span publication is uncertain (evidence: $LEGION_ADAPTER_ATTEMPT_PATH; worktree retained: $wt)"
+      LEGION_WT_KEEP=1
+    fi
   else
     LEGION_ADAPTER_ATTEMPT_PATH=""
     LEGION_ADAPTER_FAILURE_PATH=""

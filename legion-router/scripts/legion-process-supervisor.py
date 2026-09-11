@@ -794,7 +794,32 @@ class DescendantTracker:
                 return
 
 
-def _terminate_tree(process: subprocess.Popen[bytes], tracker: DescendantTracker) -> bool:
+def _provider_launch_started(path: str) -> bool:
+    if not path:
+        return True
+    candidate = Path(path)
+    try:
+        if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size > 4096:
+            return False
+        value = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return (
+        isinstance(value, dict)
+        and value.get("schema") == "legion.provider-launch.v1"
+        and value.get("status") == "started"
+        and type(value.get("provider_pid")) is int
+        and value["provider_pid"] > 0
+        and isinstance(value.get("auth"), str)
+        and len(value["auth"]) == 64
+    )
+
+
+def _terminate_tree(
+    process: subprocess.Popen[bytes],
+    tracker: DescendantTracker,
+    descendant_signal_ready_file: str = "",
+) -> bool:
     def signal_unreaped_root(signum: int) -> bool:
         # A direct child cannot have its PID reused until this parent reaps it,
         # so signalling its Popen handle remains safe even when tracker setup or
@@ -832,6 +857,36 @@ def _terminate_tree(process: subprocess.Popen[bytes], tracker: DescendantTracker
             time.sleep(POLL_SECONDS)
         return False
 
+    if descendant_signal_ready_file and not _provider_launch_started(descendant_signal_ready_file):
+        # The direct child is a trusted launcher. Ask it to terminate first,
+        # but do not signal its assigned provider until the launcher's durable
+        # receipt establishes the paid-attempt boundary. The launcher handler
+        # records this signal and forwards it immediately after publication.
+        signal_unreaped_root(signal.SIGTERM)
+        ready_deadline = time.monotonic() + GRACE_SECONDS
+        while time.monotonic() < ready_deadline:
+            if _provider_launch_started(descendant_signal_ready_file):
+                break
+            if process.poll() is not None:
+                try:
+                    tracker.snapshot()
+                    with tracker._lock:
+                        live_descendants = any(
+                            pid != tracker.root_pid and handle.is_live()
+                            for pid, handle in tracker._handles.items()
+                        )
+                except ProcessInspectionError:
+                    live_descendants = True
+                if not live_descendants:
+                    return True
+            time.sleep(POLL_SECONDS)
+        if not _provider_launch_started(descendant_signal_ready_file):
+            # The trusted launcher failed to publish its boundary. Reap any
+            # possible descendant, but force the caller to retain containment
+            # evidence instead of treating this as ordinary cancellation.
+            drain(signal.SIGTERM)
+            drain(signal.SIGKILL)
+            return False
     if drain(signal.SIGTERM):
         return True
     return drain(signal.SIGKILL)
@@ -844,6 +899,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--status-file", default="")
     parser.add_argument("--darwin-sandbox-deny-canary", default="")
     parser.add_argument("--darwin-sandbox-allow-canary", default="")
+    parser.add_argument("--launch-gate-file", default="")
+    parser.add_argument("--launch-gate-token", default="")
+    parser.add_argument("--descendant-signal-ready-file", default="")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
@@ -895,6 +953,68 @@ def _write_status(
             pass
 
 
+def _write_launch_gate(
+    path: str,
+    token: str,
+    status: str,
+    *,
+    child_pid: Optional[int] = None,
+) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": "legion.child-launch-gate.v1",
+        "status": status,
+        "token": token,
+        "supervisor_pid": os.getpid(),
+    }
+    if child_pid is not None:
+        payload["child_pid"] = child_pid
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _read_launch_gate_decision(path: str, token: str) -> tuple[str, int]:
+    candidate = Path(path)
+    try:
+        if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size > 4096:
+            return "malformed", 0
+        value = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return "malformed", 0
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != "legion.child-launch-gate.v1"
+        or value.get("token") != token
+        or value.get("supervisor_pid") != os.getpid()
+    ):
+        return "malformed", 0
+    status = value.get("status")
+    expected = {"schema", "status", "token", "supervisor_pid"}
+    if status == "cancel":
+        expected.add("signal")
+        signum = value.get("signal")
+        if type(signum) is not int or signum not in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            return "malformed", 0
+        if set(value) != expected:
+            return "malformed", 0
+        return status, signum
+    if status in ("ready", "go") and set(value) == expected:
+        return status, 0
+    return "malformed", 0
+
+
 def main() -> int:
     arguments = _parser().parse_args()
     if arguments.max_runtime_seconds < 1:
@@ -907,6 +1027,16 @@ def main() -> int:
         command = command[1:]
     if not command:
         reason = "command is required"
+        _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
+        print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+        return 2
+    launch_gate_file = arguments.launch_gate_file
+    launch_gate_token = arguments.launch_gate_token
+    if bool(launch_gate_file) != bool(launch_gate_token) or (
+        launch_gate_token
+        and (len(launch_gate_token) != 64 or any(char not in "0123456789abcdef" for char in launch_gate_token))
+    ):
+        reason = "launch gate requires a path and 64-character lowercase hex token"
         _write_status(arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds)
         print(f"legion-process-supervisor: {reason}", file=sys.stderr)
         return 2
@@ -1124,6 +1254,55 @@ def main() -> int:
     signal.signal(signal.SIGHUP, stop)
 
     try:
+        if launch_gate_file:
+            try:
+                _write_launch_gate(launch_gate_file, launch_gate_token, "ready")
+            except OSError as error:
+                reason = f"cannot publish pre-launch supervisor readiness: {error}"
+                _write_status(
+                    arguments.status_file, "cleanup_failed", reason,
+                    arguments.max_runtime_seconds, child_started=False
+                )
+                return 70
+            gate_deadline = time.monotonic() + min(10, arguments.max_runtime_seconds)
+            while True:
+                if cancel_requested:
+                    reason = f"cancelled by {signal.Signals(interrupted).name} before child launch"
+                    _write_status(
+                        arguments.status_file, "launch_failed", reason,
+                        arguments.max_runtime_seconds
+                    )
+                    return 128 + interrupted
+                decision, gate_signal = _read_launch_gate_decision(
+                    launch_gate_file, launch_gate_token
+                )
+                if decision == "go":
+                    break
+                if decision == "cancel":
+                    reason = (
+                        f"cancelled by {signal.Signals(gate_signal).name} "
+                        "at final pre-launch gate"
+                    )
+                    _write_status(
+                        arguments.status_file, "launch_failed", reason,
+                        arguments.max_runtime_seconds
+                    )
+                    return 128 + gate_signal
+                if decision != "ready":
+                    reason = "pre-launch supervisor gate was malformed"
+                    _write_status(
+                        arguments.status_file, "cleanup_failed", reason,
+                        arguments.max_runtime_seconds, child_started=False
+                    )
+                    return 70
+                if time.monotonic() >= gate_deadline:
+                    reason = "pre-launch supervisor gate timed out before launch authorization"
+                    _write_status(
+                        arguments.status_file, "launch_failed", reason,
+                        arguments.max_runtime_seconds
+                    )
+                    return 124
+                time.sleep(POLL_SECONDS)
         environment = os.environ.copy()
         environment["LEGION_SUPERVISOR_TOKEN"] = supervisor_token
         if sys.platform == "darwin" and deny_canary:
@@ -1187,6 +1366,22 @@ def main() -> int:
             "" if using_inherited else allow_canary,
         )
         tracker.start()
+        if launch_gate_file:
+            try:
+                _write_launch_gate(
+                    launch_gate_file, launch_gate_token, "started", child_pid=process.pid
+                )
+            except OSError as error:
+                cleanup_ok = _terminate_tree(
+                    process, tracker, arguments.descendant_signal_ready_file
+                )
+                cleanup_attempted = True
+                reason = f"cannot publish authenticated child launch: {error}"
+                _write_status(
+                    arguments.status_file, "cleanup_failed", reason,
+                    arguments.max_runtime_seconds
+                )
+                return 70
         deadline = time.monotonic() + arguments.max_runtime_seconds
         if absolute_deadline_ns is not None:
             deadline = min(deadline, absolute_deadline_ns / 1_000_000_000)
@@ -1209,7 +1404,9 @@ def main() -> int:
         # then a second complete drain in finally (roughly ten seconds under
         # contention). _terminate_tree polls/reaps the direct child itself, so
         # a second blocking wait or drain adds no containment guarantee.
-        cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
+        cleanup_ok = _terminate_tree(
+            process, tracker, arguments.descendant_signal_ready_file
+        ) and cleanup_ok
         cleanup_attempted = True
         observed_returncode = process.poll()
         if observed_returncode is None:
@@ -1224,7 +1421,9 @@ def main() -> int:
     finally:
         if process is not None and tracker is not None:
             if not cleanup_attempted:
-                cleanup_ok = _terminate_tree(process, tracker) and cleanup_ok
+                cleanup_ok = _terminate_tree(
+                    process, tracker, arguments.descendant_signal_ready_file
+                ) and cleanup_ok
             cleanup_ok = tracker.close() and cleanup_ok
         if fingerprint_dir:
             shutil.rmtree(fingerprint_dir, ignore_errors=True)

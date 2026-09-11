@@ -28,7 +28,10 @@ make_test_repo() {
     local context="$TEST_TMPDIR/context.log"
     MOCK_CONTEXT_LOG="$context" run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e --arg m "$OPENCODE_DEFAULT" '.status == "ok" and .executor == "opencode" and .model == $m'
+    echo "$output" | jq -e --arg m "$OPENCODE_DEFAULT" '
+      .status == "ok" and .executor == "opencode" and .model == $m
+      and .usage_status == "known" and (.usage | type) == "object"
+      and .cost_status == "known" and (.cost_usd | type) == "number"'
     jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
     local attempt span
@@ -185,6 +188,8 @@ make_test_repo() {
     echo "$output" | jq -e '
       .status == "error"
       and (.result | contains("no recognized JSONL events"))
+      and .usage == null and .usage_status == "unknown"
+      and .cost_usd == null and .cost_status == "unknown"
     '
 }
 

@@ -125,7 +125,21 @@ validate() {
     n=$((n + 1))
 	    if ! printf '%s' "$line" | jq -e '
 	        def nonnegative_number: type == "number" and isfinite and . >= 0;
+	        def nonnegative_integer: nonnegative_number and . == floor;
 	        def positive_integer: type == "number" and isfinite and . >= 1 and . == floor;
+	        def valid_usage_object:
+	          type == "object"
+	          and all(to_entries[]; .value | nonnegative_integer);
+	        def valid_cost_companions:
+	          ((has("known_cost_usd") | not) or .known_cost_usd == null
+	            or (.known_cost_usd | nonnegative_number))
+	          and ((has("known_cost_attempts") | not)
+	            or (.known_cost_attempts | nonnegative_integer));
+	        def valid_usage_companions:
+	          ((has("known_usage") | not) or .known_usage == null
+	            or (.known_usage | valid_usage_object))
+	          and ((has("known_usage_attempts") | not)
+	            or (.known_usage_attempts | nonnegative_integer));
 	        def valid_cost_provenance:
 	          if has("cost_status") | not then
 	            (has("cost_usd") | not) or (.cost_usd == null) or (.cost_usd | nonnegative_number)
@@ -140,12 +154,12 @@ validate() {
 	          else false end;
 	        def valid_usage_provenance:
 	          if has("usage_status") | not then
-	            (has("tokens") | not) or (.tokens == null) or (.tokens | type == "object")
+	            (has("tokens") | not) or (.tokens == null) or (.tokens | valid_usage_object)
 	          elif .usage_status == "known" then
-	            (.tokens | type == "object")
+	            (.tokens | valid_usage_object)
 	          elif .usage_status == "partial" then
 	            .tokens == null
-	            and (.known_usage | type == "object")
+	            and (.known_usage | valid_usage_object)
 	            and (.known_usage_attempts | positive_integer)
 	          elif (.usage_status == "unknown" or .usage_status == "not_applicable") then
 	            .tokens == null and ((has("known_usage") | not) or .known_usage == null)
@@ -164,6 +178,8 @@ validate() {
 	        and ((.duration_ms // 0) | type == "number" and . >= 0)
 	        and valid_cost_provenance
 	        and valid_usage_provenance
+	        and valid_cost_companions
+	        and valid_usage_companions
 	        and ((.target_type == null) or (.target_type | type == "string"))
 	        and ((.target_name == null) or (.target_name | type == "string"))' >/dev/null 2>&1; then
       echo "invalid span (line $n): $line" >&2

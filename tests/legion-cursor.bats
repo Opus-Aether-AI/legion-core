@@ -28,7 +28,10 @@ make_test_repo() {
     local context="$TEST_TMPDIR/context.log"
     MOCK_CONTEXT_LOG="$context" run "$LEGION_CURSOR" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e --arg model "$CURSOR_DEFAULT" '.status == "ok" and .executor == "cursor" and .model == $model'
+    echo "$output" | jq -e --arg model "$CURSOR_DEFAULT" '
+      .status == "ok" and .executor == "cursor" and .model == $model
+      and .usage_status == "known" and (.usage | type) == "object"
+      and .cost_status == "known" and (.cost_usd | type) == "number"'
     jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
       "$(echo "$output" | jq -r .preflight_receipt)"
     local attempt span
@@ -48,6 +51,18 @@ make_test_repo() {
       and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
     ' <<<"$span"
     grep -Eq '^agent active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
+}
+
+@test "legion-cursor: provider failure reports unknown metering as nullable" {
+    local repo; repo="$(make_test_repo failed-metering)"
+
+    MOCK_CURSOR_FAIL=1 run "$LEGION_CURSOR" run --task "fail" --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed"
+      and .usage == null and .usage_status == "unknown"
+      and .cost_usd == null and .cost_status == "unknown"'
 }
 
 @test "legion-cursor: resolves cursor-agent alias before shared preflight" {

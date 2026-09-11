@@ -144,8 +144,12 @@ def test_expired_inherited_deadline_refuses_before_child_launch(tmp_path: Path) 
         env=environment,
     )
     assert result.returncode == 124
-    assert receipt["status"] == "timed_out"
-    assert "before launch" in receipt["reason"]
+    assert receipt == {
+        "schema": "legion.child-execution-lease.v1",
+        "status": "launch_failed",
+        "reason": "inherited child lease deadline expired before launch",
+        "max_runtime_seconds": 10,
+    }
     assert not launched.exists()
     assert elapsed < 1
 
@@ -209,9 +213,12 @@ def test_deadline_expiring_during_launch_setup_refuses_immediately_before_popen(
 
     assert supervisor.main() == 124
     assert not launched
-    receipt = json.loads(status_file.read_text(encoding="utf-8"))
-    assert receipt["status"] == "timed_out"
-    assert receipt["reason"] == "inherited child lease deadline expired during launch setup"
+    assert json.loads(status_file.read_text(encoding="utf-8")) == {
+        "schema": "legion.child-execution-lease.v1",
+        "status": "launch_failed",
+        "reason": "inherited child lease deadline expired during launch setup",
+        "max_runtime_seconds": 30,
+    }
 
 
 @pytest.mark.parametrize(
@@ -277,7 +284,7 @@ def test_signal_after_handlers_before_popen_cancels_without_child_launch(
     assert not launched
     assert json.loads(status_file.read_text(encoding="utf-8")) == {
         "schema": "legion.child-execution-lease.v1",
-        "status": "cancelled",
+        "status": "launch_failed",
         "reason": f"cancelled by {signal.Signals(signum).name}",
         "max_runtime_seconds": 30,
     }

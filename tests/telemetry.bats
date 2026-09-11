@@ -130,6 +130,27 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
+@test "telemetry: validate rejects malformed companion metering fields for every status" {
+  local base='{"schema":"legion.span.v1","ts":"t","run_id":"r","executor":"e","model":"m","status":"ok","cost_usd":0,"cost_status":"known","tokens":{},"usage_status":"known"}'
+  for invalid in \
+    '{"known_cost_usd":-1}' \
+    '{"known_cost_usd":"free"}' \
+    '{"known_cost_attempts":-1}' \
+    '{"known_cost_attempts":1.5}' \
+    '{"known_usage":[]}' \
+    '{"known_usage":{"input_tokens":-1}}' \
+    '{"known_usage":{"input_tokens":1.5}}' \
+    '{"known_usage":{"input_tokens":"many"}}' \
+    '{"known_usage_attempts":-1}' \
+    '{"known_usage_attempts":true}'; do
+    run bash -c "jq -c --argjson invalid '$invalid' '. + \$invalid' <<<'$base' | '$TEL' validate -"
+    [ "$status" -eq 1 ]
+  done
+
+  run bash -c "jq -c '. + {cost_usd:null,cost_status:\"unknown\",tokens:null,usage_status:\"unknown\",known_cost_attempts:-1,known_usage_attempts:1.5}' <<<'$base' | '$TEL' validate -"
+  [ "$status" -eq 1 ]
+}
+
 @test "telemetry: validate enforces canonical attempt identity fields" {
   local base='{"schema":"legion.span.v1","ts":"t","run_id":"r","executor":"e","model":"m","status":"ok"}'
   run bash -c "jq -c '. + {attempt_id:\"attempt-1\",attempt_ordinal:1}' <<<'$base' | '$TEL' validate -"

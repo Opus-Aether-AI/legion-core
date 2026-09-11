@@ -294,6 +294,15 @@ resolve_delegate_bin() {
 emit_terminal_json() {
   local executor="$1" model="$2" status="$3" result="$4" usage="$5" cost="$6" fell_back="$7" reason="${8:-}"
   local usage_status="${9:-}" cost_status="${10:-}" known_cost_usd="${11:-null}" known_cost_attempts="${12:-0}"
+  local known_usage="${13:-null}" known_usage_attempts="${14:-0}"
+  if [[ -z "$usage_status" ]]; then
+    usage_status="$(jq -nr --argjson usage "${usage:-null}" \
+      '$usage | if type == "object" then "known" else "unknown" end')"
+  fi
+  if [[ -z "$cost_status" ]]; then
+    cost_status="$(jq -nr --argjson cost "${cost:-null}" \
+      '$cost | if type == "number" then "known" else "unknown" end')"
+  fi
   # LEGION_CLAUDE_WORKTREE / _DIFF are set by cmd_run once a worktree exists, so a caller can
   # review the run as a diff instead of diffing the operator's tree by hand.
   jq -cn \
@@ -302,6 +311,7 @@ emit_terminal_json() {
     --argjson cost "${cost:-0}" --argjson fell_back "$fell_back" --arg reason "$reason" \
     --arg usage_status "$usage_status" --arg cost_status "$cost_status" \
     --argjson known_cost_usd "$known_cost_usd" --argjson known_cost_attempts "$known_cost_attempts" \
+    --argjson known_usage "$known_usage" --argjson known_usage_attempts "$known_usage_attempts" \
     --arg wt "${LEGION_CLAUDE_WORKTREE:-}" --arg diff "${LEGION_CLAUDE_DIFF:-}" \
     --arg preflight "${LEGION_ADAPTER_PREFLIGHT_PATH:-}" \
     --arg attempt "${LEGION_ADAPTER_ATTEMPT_PATH:-}" \
@@ -318,14 +328,74 @@ emit_terminal_json() {
     + (if $cost_status == "partial" then
          {known_cost_usd:$known_cost_usd,known_cost_attempts:$known_cost_attempts}
        else {} end)
+    + (if $usage_status == "partial" then
+         {known_usage:$known_usage,known_usage_attempts:$known_usage_attempts}
+       else {} end)
     + (if $reason == "" then {} else {fell_back_reason:$reason, reason:$reason} end)
     + (if $wt == "" then {} else {worktree:$wt} end)
     + (if $diff == "" then {} else {diff_path:$diff} end)'
 }
 
+claude_attempt_metering() {
+  local art="$1" path attempt_dir ordinal
+  local -a attempts=()
+  # Claude evidence is archived before a cross-executor fallback; the fallback
+  # then starts its own ordinal sequence at one. Preserve that causal group
+  # order, walk numeric ordinals explicitly, and deduplicate immutable ids in
+  # Python below. This also excludes attempt-1.lease.json-style sidecars.
+  for attempt_dir in "$art/claude" "$art"; do
+    ordinal=1
+    while :; do
+      path="$attempt_dir/attempt-$ordinal.json"
+      [[ -f "$path" ]] || break
+      attempts+=("$path")
+      ordinal=$((ordinal + 1))
+    done
+  done
+  if [[ "${#attempts[@]}" -eq 0 ]]; then
+    printf '%s\n' '{"usage":null,"usage_status":"not_applicable","known_usage":null,"known_usage_attempts":0,"cost_usd":null,"cost_status":"not_applicable","known_cost_usd":null,"known_cost_attempts":0,"attempt_count":0}'
+    return 0
+  fi
+  PYTHONPATH="$_self_dir/../../legion-observability/scripts" python3 - "${attempts[@]}" <<'PY'
+import json
+import sys
+
+from legion_receipts import reconcile_attempts, validate_attempt
+
+attempts = []
+seen = set()
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as handle:
+        attempt = json.load(handle)
+    validate_attempt(attempt)
+    if attempt["attempt_id"] in seen:
+        continue
+    seen.add(attempt["attempt_id"])
+    attempt = dict(attempt)
+    # Different executors own independent ordinal sequences. This helper
+    # creates a run-level reconciliation, so normalize the combined causal
+    # order before applying the shared contiguous-ordinal contract.
+    attempt["ordinal"] = len(attempts) + 1
+    attempts.append(attempt)
+print(json.dumps(reconcile_attempts(attempts), separators=(",", ":")))
+PY
+}
+
+emit_fallback_no_launch() {
+  local executor="$1" model="$2" status="$3" result="$4" fell_back="$5" reason="$6" art="$7"
+  local metering
+  metering="$(claude_attempt_metering "$art")"
+  emit_terminal_json "$executor" "$model" "$status" "$result" \
+    "$(jq -c '.usage' <<<"$metering")" "$(jq -c '.cost_usd' <<<"$metering")" \
+    "$fell_back" "$reason" \
+    "$(jq -r '.usage_status' <<<"$metering")" "$(jq -r '.cost_status' <<<"$metering")" \
+    "$(jq -c '.known_cost_usd' <<<"$metering")" "$(jq -r '.known_cost_attempts' <<<"$metering")" \
+    "$(jq -c '.known_usage' <<<"$metering")" "$(jq -r '.known_usage_attempts' <<<"$metering")"
+}
+
 run_fallback() {
   local reason="$1" task="$2" model="$3" repo="$4" sandbox="$5" base="$6"
-  local delegate_bin out rc fallback_status fallback_model fallback_runtime fallback_result last_path
+  local delegate_bin out rc fallback_status fallback_model fallback_runtime fallback_result last_path fallback_metering
   local -a fallback_args
   local fallback_art="$repo/.legion/runs/$RUN_ID"
   local fallback_wt="$repo/.legion/worktrees/$RUN_ID"
@@ -340,7 +410,7 @@ run_fallback() {
       timed_out "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
       "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
     [[ -z "${preset_run_id:-}" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "claude" "$model" "timed_out" "$reason" "{}" 0 false "$reason"
+    emit_fallback_no_launch "codex" "$model" "timed_out" "$reason" true "$reason" "$fallback_art"
     return 1
   fi
 
@@ -349,7 +419,7 @@ run_fallback() {
       failed "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
       "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
     [[ -z "${preset_run_id:-}" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "codex" "$model" "failed" "" "{}" 0 true "$reason"
+    emit_fallback_no_launch "codex" "$model" "failed" "" true "$reason" "$fallback_art"
     return 1
   }
 
@@ -387,14 +457,30 @@ run_fallback() {
     "$fallback_model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
   [[ -z "${preset_run_id:-}" ]] || legion_disarm_adopted_run_guard
   if jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1; then
-    jq -c --arg fallback_reason "$reason" --arg fallback_result "$fallback_result" '
+    fallback_metering="$(claude_attempt_metering "$fallback_art")"
+    jq -c --arg fallback_reason "$reason" --arg fallback_result "$fallback_result" \
+      --argjson metering "$fallback_metering" '
       . + {fell_back:true, fell_back_reason:$fallback_reason}
       | if ((.reason? // "") == "") then .reason=$fallback_reason else . end
       | if ((.result? // "") == "") and ($fallback_result != "")
         then .result=$fallback_result else . end
+      | .usage=$metering.usage
+      | .usage_status=$metering.usage_status
+      | .cost_usd=$metering.cost_usd
+      | .cost_status=$metering.cost_status
+      | .metering_reconciliation=$metering
+      | del(.known_usage,.known_usage_attempts,.known_cost_usd,.known_cost_attempts)
+      | if $metering.usage_status == "partial" then
+          .known_usage=$metering.known_usage
+          | .known_usage_attempts=$metering.known_usage_attempts
+        else . end
+      | if $metering.cost_status == "partial" then
+          .known_cost_usd=$metering.known_cost_usd
+          | .known_cost_attempts=$metering.known_cost_attempts
+        else . end
     ' <<<"$out"
   else
-    emit_terminal_json "codex" "$fallback_model" "failed" "" "{}" 0 true "$reason"
+    emit_fallback_no_launch "codex" "$fallback_model" "failed" "" true "$reason" "$fallback_art"
     rc=1
   fi
   return "$rc"
@@ -605,8 +691,7 @@ cmd_run() {
   fi
 
   start_ms="$(date +%s000)"
-  local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0 chain_cost=0
-  local chain_paid_attempts=0 chain_known_cost=0 chain_known_cost_attempts=0
+  local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0
   local any_output_started=0 permission_refused=0 chain_admission_refused=0
   local chain_stopped_before_launch=0
   local lease_timed_out=0 containment_failed=0 lease_reason=""
@@ -639,6 +724,7 @@ cmd_run() {
     attempt_runtime="$(claude_remaining_lease_seconds)"
     if [[ "$attempt_runtime" -lt 1 ]]; then
       lease_timed_out=1
+      chain_stopped_before_launch=1
       lease_reason="child execution lease expired after $LEGION_ADAPTER_MAX_RUNTIME_SECONDS seconds"
       break
     fi
@@ -749,17 +835,11 @@ cmd_run() {
     # well-formed 200 with rc 0 and is_error false, so without this flag the
     # refusal text would be handed back as the result of a "successful" run.
     declined_final=1
-    # A decline still burns input tokens — the prompt was sent and read. Only the
-    # LAST attempt's stdout survives (each iteration overwrites out_file), so bank
-    # this attempt's cost now or it disappears from the record entirely. On a large
-    # prompt at frontier rates that is real money silently unaccounted for, in a
-    # system whose whole point is honest cost attribution.
+    # A decline still burns input tokens — the prompt was sent and read. Preserve
+    # its immutable receipt and span before mutable stdout/aliases are reused by
+    # the next candidate; terminal metering reconciles those receipts below.
     claude_chain_note="${claude_chain_note}${claude_chain_note:+; }$model"
     if [[ "$chain_idx" -lt "$chain_len" ]]; then
-      local _declined_usage _declined_cost
-      _declined_usage="$(usage_json "$out_file")"
-      _declined_cost="$(cost_from_usage "$model" "$_declined_usage" 2>/dev/null || printf '0')"
-      chain_cost="$(awk -v a="$chain_cost" -v b="$_declined_cost" 'BEGIN{printf "%.6f", a + b}')"
       # This paid provider attempt will no longer be the adapter's terminal
       # attempt, so publish its own durable span now. The final attempt is
       # emitted by the common terminal path below; together this keeps every
@@ -776,13 +856,6 @@ cmd_run() {
       prior_cost="$(jq -c '.cost_usd' "$prior_attempt")"
       prior_usage_status="$(jq -r '.usage_status' "$prior_attempt")"
       prior_cost_status="$(jq -r '.cost_status' "$prior_attempt")"
-      chain_paid_attempts=$((chain_paid_attempts + 1))
-      if [[ "$prior_cost_status" == known ]] \
-          && jq -e 'type == "number" and . >= 0' <<<"$prior_cost" >/dev/null 2>&1; then
-        chain_known_cost="$(awk -v a="$chain_known_cost" -v b="$prior_cost" \
-          'BEGIN{printf "%.6f", a + b}')"
-        chain_known_cost_attempts=$((chain_known_cost_attempts + 1))
-      fi
       prior_artifacts="$(jq -cn --arg attempt "$prior_attempt" --arg lease "$lease_status" \
         '{provider_attempt:true,intermediate_attempt:true,attempt_receipt:$attempt,
           lease_receipt:$lease}')"
@@ -791,16 +864,19 @@ cmd_run() {
         "$prior_cost" "$prior_usage" "$task" "$prior_artifacts" \
         "$prior_usage_status" "$prior_cost_status"
       finish_claude_signal_accounting
+      # The numbered receipt/span above is now the durable identity for this
+      # paid attempt. Do not let its mutable aliases leak into the next
+      # candidate's preflight, deadline, or launch-failure evidence.
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      LEGION_CLAUDE_LEASE_RECEIPT=""
       note "⚠ $model declined the task or is unreachable — trying the next Claude model"
     else
       note "⚠ $model declined the task or is unreachable — no Claude models left in the chain"
     fi
   done
-  # Which models were skipped, and why, has to survive into the record. Only the
-  # LAST attempt's stdout is kept (each iteration overwrites it), so without this
-  # a run that quietly cost two model calls is indistinguishable from one that
-  # cost a single call on the second model. Same limitation as the codex fallback
-  # loop in delegate.sh, which also reports only its final attempt's usage.
+  # Which models were skipped, and why, has to survive into the record even though
+  # terminal usage/cost are now reconciled from all immutable attempt receipts.
   [[ -n "$claude_chain_note" ]] && note "model chain: declined by $claude_chain_note → answered by $model"
   [[ "$lease_timed_out" -ne 1 ]] || keep=0
   [[ "$containment_failed" -ne 1 ]] || keep=1
@@ -856,43 +932,35 @@ cmd_run() {
   end_ms="$(date +%s000)"
   dur=$(( end_ms - start_ms ))
 
-  if [[ "$launch_failed" -eq 1 ]]; then
-    usage=null
-    if [[ "$chain_paid_attempts" -eq 0 ]]; then
-      cost=null
-    elif [[ "$chain_known_cost_attempts" -eq "$chain_paid_attempts" ]]; then
-      cost="$chain_known_cost"
+  local terminal_usage_status terminal_cost_status terminal_metering
+  local terminal_known_usage terminal_known_usage_attempts
+  local terminal_known_cost terminal_known_cost_attempts
+  if [[ "$launch_failed" -eq 1 || "$chain_stopped_before_launch" -eq 1 ]]; then
+    if [[ "$launch_failed" -eq 1 ]]; then
+      result="$launch_reason"
+    elif [[ "$lease_timed_out" -eq 1 ]]; then
+      result="$lease_reason"
     else
-      cost=null
+      result="$LEGION_ADAPTER_PREFLIGHT_REASON"
     fi
-    result="$launch_reason"
-  elif [[ "$chain_stopped_before_launch" -eq 1 ]]; then
-    # out_file still belongs to the previous paid decline. It already has its
-    # own durable receipt/span and its cost was banked in chain_cost; treating
-    # it as the later preflight-only model would duplicate both identity and
-    # spend.
-    usage='{}'
-    cost="$chain_cost"
-    result="$LEGION_ADAPTER_PREFLIGHT_REASON"
   elif jq -e . "$out_file" >/dev/null 2>&1; then
     json_ok=1
     is_error="$(jq -r '.is_error // false' "$out_file" 2>/dev/null || printf 'false')"
     result="$(jq -r '.result // ""' "$out_file" 2>/dev/null || true)"
-    usage="$(usage_json "$out_file")"
-    if jq -e '.total_cost_usd | numbers' "$out_file" >/dev/null 2>&1; then
-      cost="$(jq -r '.total_cost_usd' "$out_file")"
-    else
-      cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || printf '0')"
-    fi
-    # Add what the declined attempts already burned. Both figures the CLI can give
-    # us — total_cost_usd and the usage-derived one — describe the LAST attempt
-    # only, because out_file was overwritten each time round the chain. `usage`
-    # stays the answering model's, since mixing token counts across models would
-    # make the per-model rollups meaningless; only the dollars aggregate.
-    if [[ "$chain_cost" != "0" ]]; then
-      cost="$(awk -v a="$cost" -v b="$chain_cost" 'BEGIN{printf "%.6f", a + b}')"
-    fi
   fi
+  # Terminal run metering is a reconciliation of immutable paid-attempt
+  # receipts. It must not be reconstructed from the mutable final stdout or
+  # aliases: doing so loses retries and can turn partial evidence into a false
+  # exact zero.
+  terminal_metering="$(claude_attempt_metering "$contract_art")"
+  usage="$(jq -c '.usage' <<<"$terminal_metering")"
+  cost="$(jq -c '.cost_usd' <<<"$terminal_metering")"
+  terminal_usage_status="$(jq -r '.usage_status' <<<"$terminal_metering")"
+  terminal_cost_status="$(jq -r '.cost_status' <<<"$terminal_metering")"
+  terminal_known_usage="$(jq -c '.known_usage' <<<"$terminal_metering")"
+  terminal_known_usage_attempts="$(jq -r '.known_usage_attempts' <<<"$terminal_metering")"
+  terminal_known_cost="$(jq -c '.known_cost_usd' <<<"$terminal_metering")"
+  terminal_known_cost_attempts="$(jq -r '.known_cost_attempts' <<<"$terminal_metering")"
 
   combined_text="$result"
   if [[ -s "$err_file" ]]; then
@@ -916,20 +984,6 @@ cmd_run() {
   if [[ "$launch_failed" -eq 1 ]]; then
     status="failed"
     reason="$launch_reason"
-    local terminal_usage_status=not_applicable terminal_cost_status=not_applicable
-    local terminal_known_cost=null terminal_known_cost_attempts=0
-    if [[ "$chain_paid_attempts" -gt 0 ]]; then
-      terminal_usage_status=unknown
-      terminal_known_cost_attempts="$chain_known_cost_attempts"
-      if [[ "$chain_known_cost_attempts" -eq "$chain_paid_attempts" ]]; then
-        terminal_cost_status=known
-      elif [[ "$chain_known_cost_attempts" -gt 0 ]]; then
-        terminal_cost_status=partial
-        terminal_known_cost="$chain_known_cost"
-      else
-        terminal_cost_status=unknown
-      fi
-    fi
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
@@ -937,7 +991,8 @@ cmd_run() {
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
     emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason" \
       "$terminal_usage_status" "$terminal_cost_status" \
-      "$terminal_known_cost" "$terminal_known_cost_attempts"
+      "$terminal_known_cost" "$terminal_known_cost_attempts" \
+      "$terminal_known_usage" "$terminal_known_usage_attempts"
     return 1
   fi
 
@@ -953,7 +1008,10 @@ cmd_run() {
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason" \
+      "$terminal_usage_status" "$terminal_cost_status" \
+      "$terminal_known_cost" "$terminal_known_cost_attempts" \
+      "$terminal_known_usage" "$terminal_known_usage_attempts"
     return 1
   fi
 
@@ -961,15 +1019,20 @@ cmd_run() {
     reason="$lease_reason"
     status="timed_out"
     result="$lease_reason"
-    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
-      "$span_usage_status" "$span_cost_status"
+    if [[ "$chain_stopped_before_launch" -ne 1 ]]; then
+      legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+        "$span_usage_status" "$span_cost_status"
+    fi
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason" \
+      "$terminal_usage_status" "$terminal_cost_status" \
+      "$terminal_known_cost" "$terminal_known_cost_attempts" \
+      "$terminal_known_usage" "$terminal_known_usage_attempts"
     return 1
   fi
 
@@ -981,7 +1044,10 @@ cmd_run() {
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason" \
+      "$terminal_usage_status" "$terminal_cost_status" \
+      "$terminal_known_cost" "$terminal_known_cost_attempts" \
+      "$terminal_known_usage" "$terminal_known_usage_attempts"
     return 1
   fi
 
@@ -998,7 +1064,10 @@ cmd_run() {
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason" \
+      "$terminal_usage_status" "$terminal_cost_status" \
+      "$terminal_known_cost" "$terminal_known_cost_attempts" \
+      "$terminal_known_usage" "$terminal_known_usage_attempts"
     return 1
   fi
 
@@ -1015,7 +1084,10 @@ cmd_run() {
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "" \
+      "$terminal_usage_status" "$terminal_cost_status" \
+      "$terminal_known_cost" "$terminal_known_cost_attempts" \
+      "$terminal_known_usage" "$terminal_known_usage_attempts"
     return 0
   fi
 
@@ -1071,7 +1143,10 @@ cmd_run() {
     "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
     "$model" "$sandbox" "$base" "$archetype" "$effort"
   [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-  emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+  emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason" \
+    "$terminal_usage_status" "$terminal_cost_status" \
+    "$terminal_known_cost" "$terminal_known_cost_attempts" \
+    "$terminal_known_usage" "$terminal_known_usage_attempts"
   return 1
 }
 

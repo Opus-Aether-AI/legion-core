@@ -4,11 +4,19 @@ load 'helpers/setup'
 
 setup() {
   setup_test_env
+  SPAN_CLAIM_PUBLISHER_PID=""
   export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
   mkdir -p "$LEGION_TELEMETRY_DIR"
   export CONTRACT="$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh"
   export ATTEMPT="$TEST_TMPDIR/attempt-1.json"
   printf '{}\n' > "$ATTEMPT"
+}
+
+teardown() {
+  if [[ -n "${SPAN_CLAIM_PUBLISHER_PID:-}" ]] && kill -0 "$SPAN_CLAIM_PUBLISHER_PID" 2>/dev/null; then
+    kill -TERM "$SPAN_CLAIM_PUBLISHER_PID" 2>/dev/null || true
+    wait "$SPAN_CLAIM_PUBLISHER_PID" 2>/dev/null || true
+  fi
 }
 
 @test "a failed contender never emits while a live publisher owns the claim" {
@@ -31,6 +39,7 @@ setup() {
     legion_adapter_emit_normal_provider_span "$attempt"
   ' _ "$CONTRACT" "$LEGION_TELEMETRY_DIR" "$ATTEMPT" "$calls" "$entered" "$release" &
   publisher=$!
+  SPAN_CLAIM_PUBLISHER_PID="$publisher"
   for _ in $(seq 1 100); do
     [[ -f "$entered" ]] && break
     sleep 0.02
@@ -51,6 +60,7 @@ setup() {
 
   : > "$release"
   wait "$publisher"
+  SPAN_CLAIM_PUBLISHER_PID=""
   [ "$(grep -c '^publisher$' "$calls")" -eq 1 ]
   [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 1 ]
 }
@@ -105,4 +115,26 @@ setup() {
   [ "$rc" -eq 0 ]
   [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ]
   [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 1 ]
+}
+
+@test "malformed trailing telemetry cannot hide an already durable provider span" {
+  local calls="$TEST_TMPDIR/malformed-tail-calls"
+  jq -cn --arg attempt "$ATTEMPT" \
+    '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
+    > "$LEGION_TELEMETRY_DIR/spans.jsonl"
+  printf '%s\n' '{malformed trailing record' >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+  printf '%s\n' '"structurally malformed record"' >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    LEGION_TELEMETRY_DIR="$2"
+    calls="$4"
+    emit_span() { printf "duplicate\n" >> "$calls"; }
+    legion_adapter_emit_normal_provider_span "$3"
+  ' _ "$CONTRACT" "$LEGION_TELEMETRY_DIR" "$ATTEMPT" "$calls"
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$calls" ]
+  [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 3 ]
 }

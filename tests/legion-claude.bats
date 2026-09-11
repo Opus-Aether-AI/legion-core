@@ -150,7 +150,7 @@ SH
     echo "$output" | jq -e --arg second "$second_model" '
       .status == "failed" and .model == $second
       and .attempt_receipt == null and .failure_receipt == null
-      and .usage == null and .usage_status == "unknown"
+      and .usage.input_tokens == 100000 and .usage_status == "known"
       and (.cost_usd | type == "number" and . > 0)
       and .cost_status == "known"
       and (.reason | contains("child launch failed"))
@@ -678,7 +678,9 @@ PY
       run "$LEGION_CLAUDE" run --task x --model "$CLAUDE_DEFAULT" \
         --fallback-models "model-answers" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e '.model == "model-answers"'
+    echo "$output" | jq -e '.model == "model-answers"
+      and .usage_status == "known" and .usage.input_tokens == 101000
+      and .cost_status == "known"'
     # The answering model's own cost is the mock's 0.12; the declined attempt read
     # 100k input tokens at the default role's rate, so the reported total
     # must exceed a single call's.

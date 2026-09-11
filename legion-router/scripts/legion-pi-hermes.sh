@@ -193,6 +193,66 @@ write_state() {
   [[ -n "${PRESET_RUN_ID:-}" ]] || return 0
   legion_write_adapter_run_state "$phase" "$RUN_ID" "$REPO" "$ART" "$WT_RECORD" "$BRANCH" "$MODEL" "$SANDBOX" "$BASE" "$ARCHETYPE" "${THINKING:-}"
 }
+
+write_pre_provider_no_launch_lease() {
+  local reason="$1" lease="$ART/lease.json" temp="$ART/.lease.json.tmp.$$"
+  jq -cn --arg reason "$reason" --argjson runtime "$MAX_RUNTIME_SECONDS" '
+    {schema:"legion.child-execution-lease.v1",status:"launch_failed",
+     reason:$reason,max_runtime_seconds:$runtime}
+  ' > "$temp" || return 1
+  chmod 600 "$temp" || { rm -f "$temp"; return 1; }
+  mv -f "$temp" "$lease"
+}
+
+terminalize_pre_provider_timeout() {
+  local timeout_reason="$1" terminal_status=timed_out terminal_reason="$1"
+  local report="$WT_RECORD" diff="$ART/diff.patch" last="$ART/last-message.txt"
+
+  # A timeout before the provider exists is a timed-out adapter run, but its
+  # lease evidence must use the strict launch_failed shape understood by every
+  # adapter. It deliberately has no child_exit_code or provider attempt.
+  if ! write_pre_provider_no_launch_lease "$timeout_reason"; then
+    terminal_status=containment_failed
+    terminal_reason="unable to persist authenticated no-launch lease evidence; worktree retained: $WT_RECORD"
+    KEEP=1
+  else
+    stop_handoff_broker
+    if [[ "$BROKER_RC" -eq 70 ]]; then
+      terminal_status=containment_failed
+      terminal_reason="handoff broker reported incomplete descendant cleanup (evidence: $ART/broker.err; worktree retained: $WT_RECORD)"
+      KEEP=1
+    else
+      # Lease expiry overrides --keep, matching a post-launch timed_out run.
+      KEEP=0
+      cleanup_worktree
+      if [[ "$WT_CREATED" == 1 ]]; then
+        terminal_status=containment_failed
+        terminal_reason="unable to remove the expired child worktree; worktree retained: $WT_RECORD"
+        KEEP=1
+      else
+        report='(removed; child execution lease expired before provider launch)'
+      fi
+    fi
+  fi
+
+  : > "$diff"
+  printf '%s\n' "$terminal_reason" > "$last"
+  write_state "$terminal_status"
+  [[ -z "$PRESET_RUN_ID" ]] || legion_disarm_adopted_run_guard
+  jq -cn --arg run "$RUN_ID" --arg status "$terminal_status" \
+    --arg executor "$ADAPTER_KIND" --arg model "$MODEL" --arg result "$terminal_reason" \
+    --arg worktree "$report" --arg diff "$diff" --arg last "$last" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg lease "$ART/lease.json" '
+    {run_id:$run,status:$status,executor:$executor,model:$model,result:$result,
+     worktree:$worktree,diff_path:$diff,last_message_path:$last,
+     usage:null,tokens:null,usage_status:"not_applicable",
+     cost_usd:null,cost_status:"not_applicable",provider_exit:null,
+     preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+     lease_receipt:$lease,provider_launch_receipt:null,reason:$result}
+  '
+  [[ "$terminal_status" != containment_failed ]] || exit 70
+  exit 1
+}
 emit_span() {
   local status="$1" duration="$2" cost="$3" usage="$4" task="$5" artifacts="$6"
   local usage_status="${7:-known}" cost_status="${8:-known}"
@@ -735,7 +795,8 @@ start_handoff_broker() {
   chmod 755 "$ART/broker-bin/legion-delegate"
   prepare_delegate_boundary
   broker_runtime="$(remaining_child_lease_seconds)"
-  [[ "$broker_runtime" -ge 1 ]] || die 'child execution lease expired before handoff broker launch'
+  [[ "$broker_runtime" -ge 1 ]] \
+    || terminalize_pre_provider_timeout 'child execution lease expired before handoff broker launch; no provider launched'
   python3 "$helper" serve --socket "$BROKER_SOCKET" --token "$BROKER_TOKEN" \
     --delegate "$delegate" --source-repo "$REPO" --broker-root "$BROKER_ROOT" --base-sha "$BASE_SHA" \
     --sandbox-bin "$FS_SANDBOX_BIN" --sandbox-kind "$FS_SANDBOX_KIND" \
@@ -826,7 +887,8 @@ run_provider() {
     "$PROVIDER_LAUNCH_RECEIPT" -- "$@")
   local provider_runtime
   provider_runtime="$(remaining_child_lease_seconds)"
-  [[ "$provider_runtime" -ge 1 ]] || die 'child execution lease expired before provider launch'
+  [[ "$provider_runtime" -ge 1 ]] \
+    || terminalize_pre_provider_timeout 'child execution lease expired during provider launch setup; no provider launched'
   local -a supervisor_args=(python3 "$supervisor" --cwd "$WT"
     --max-runtime-seconds "$provider_runtime" --status-file "$ART/lease.json")
   if [[ "$FS_SANDBOX_KIND" == sandbox-exec ]]; then

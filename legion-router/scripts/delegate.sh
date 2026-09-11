@@ -923,10 +923,11 @@ native_provider_span_is_recorded() {
   [[ -n "$attempt_path" && -d "$LEGION_TELEMETRY_DIR" ]] || return 1
   for span_file in "$LEGION_TELEMETRY_DIR"/*.jsonl; do
     [[ -f "$span_file" ]] || continue
-    jq -e --arg attempt "$attempt_path" '
-      select(.schema == "legion.span.v1"
+    jq -R -e --arg attempt "$attempt_path" '
+      try (fromjson | select(.schema == "legion.span.v1"
         and .artifacts.provider_attempt == true
-        and .artifacts.attempt_receipt == $attempt)
+        and .artifacts.rollup_only != true
+        and .artifacts.attempt_receipt == $attempt)) catch empty
     ' "$span_file" >/dev/null 2>&1 && return 0
   done
   return 1
@@ -965,22 +966,31 @@ try:
 except OSError:
     raise SystemExit(1)
 try:
-    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+    descriptor_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(descriptor_stat.st_mode) or descriptor_stat.st_nlink != 1:
         raise SystemExit(1)
+    os.fchmod(descriptor, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         print("busy")
         raise SystemExit(0)
+    try:
+        path_stat = os.stat(path, follow_symlinks=False)
+    except OSError:
+        raise SystemExit(1)
+    if (path_stat.st_dev, path_stat.st_ino) != (descriptor_stat.st_dev, descriptor_stat.st_ino):
+        raise SystemExit(1)
     os.lseek(descriptor, 0, os.SEEK_SET)
-    raw_owner = os.read(descriptor, 64).decode("ascii", errors="strict").strip()
+    try:
+        raw_owner = os.read(descriptor, 65).decode("ascii", errors="strict").strip()
+    except UnicodeDecodeError:
+        raw_owner = ""
     prior_pid = None
     if raw_owner:
-        if not raw_owner.isdigit() or int(raw_owner) < 1:
-            print("busy")
-            raise SystemExit(0)
-        prior_pid = int(raw_owner)
-    if prior_pid is not None and prior_pid != owner_pid:
+        if len(raw_owner) <= 64 and raw_owner.isdigit() and int(raw_owner) > 0:
+            prior_pid = int(raw_owner)
+    if prior_pid is not None:
         try:
             os.kill(prior_pid, 0)
         except ProcessLookupError:
@@ -995,6 +1005,9 @@ try:
     os.ftruncate(descriptor, 0)
     os.write(descriptor, f"{owner_pid}\n".encode("ascii"))
     os.fsync(descriptor)
+    path_stat = os.stat(path, follow_symlinks=False)
+    if (path_stat.st_dev, path_stat.st_ino) != (descriptor_stat.st_dev, descriptor_stat.st_ino):
+        raise SystemExit(1)
     print("acquired")
 finally:
     os.close(descriptor)
@@ -1004,37 +1017,85 @@ PY
   # The prior owner may have appended just before it died. Reconcile after
   # acquiring ownership so telemetry, rather than a marker directory, wins.
   if native_provider_span_is_recorded "$attempt_path"; then
-    mkdir -p "$claim" || { rm -f "$lock"; return 1; }
+    mkdir -p "$claim" || { native_provider_span_release_lock "$attempt_path"; return 1; }
     : > "$claim/committed"
-    rm -f "$lock"
+    native_provider_span_release_lock "$attempt_path"
     return 2
   fi
   # An interrupted publisher can leave an empty/partial directory. It is not an
   # acknowledgement: reclaim it only while holding the atomic publication lock
   # and after telemetry proved that no provider span exists.
-  rm -f "$claim/owner" "$claim/committed" 2>/dev/null || return 1
+  rm -f "$claim/owner" "$claim/committed" 2>/dev/null || {
+    native_provider_span_release_lock "$attempt_path"
+    return 1
+  }
   if [[ -d "$claim" ]]; then
-    rmdir "$claim" 2>/dev/null || { rm -f "$lock"; return 1; }
+    rmdir "$claim" 2>/dev/null || { native_provider_span_release_lock "$attempt_path"; return 1; }
   elif [[ -e "$claim" || -L "$claim" ]]; then
-    rm -f "$lock"
+    native_provider_span_release_lock "$attempt_path"
     return 1
   fi
-  mkdir "$claim" 2>/dev/null || { rm -f "$lock"; return 1; }
+  mkdir "$claim" 2>/dev/null || { native_provider_span_release_lock "$attempt_path"; return 1; }
+}
+
+native_provider_span_release_lock() {
+  local lock="$1.span-publishing"
+  [[ -e "$lock" && ! -L "$lock" ]] || return 0
+  python3 - "$lock" "$$" <<'PY'
+import fcntl
+import os
+import stat
+import sys
+
+path, owner_text = sys.argv[1:]
+owner_pid = int(owner_text)
+flags = os.O_RDWR
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+try:
+    descriptor = os.open(path, flags)
+except FileNotFoundError:
+    raise SystemExit(0)
+except OSError:
+    raise SystemExit(1)
+try:
+    descriptor_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(descriptor_stat.st_mode) or descriptor_stat.st_nlink != 1:
+        raise SystemExit(1)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(1)
+    try:
+        path_stat = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        raise SystemExit(0)
+    if (path_stat.st_dev, path_stat.st_ino) != (descriptor_stat.st_dev, descriptor_stat.st_ino):
+        raise SystemExit(1)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    raw_owner = os.read(descriptor, 65).decode("ascii", errors="strict").strip()
+    if len(raw_owner) <= 64 and raw_owner.isdigit() and int(raw_owner) == owner_pid:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.ftruncate(descriptor, 0)
+        os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
 }
 
 native_provider_span_release() {
-  local claim="$1.span-emitted" lock="$1.span-publishing"
+  local claim="$1.span-emitted"
   rm -f "$claim/owner" "$claim/committed" 2>/dev/null || true
   rmdir "$claim" 2>/dev/null || true
-  [[ "$(cat "$lock" 2>/dev/null || true)" != "$$" ]] || rm -f "$lock"
+  native_provider_span_release_lock "$1"
 }
 
 native_provider_span_commit() {
-  local attempt_path="$1" claim="$1.span-emitted" lock="$1.span-publishing"
+  local attempt_path="$1" claim="$1.span-emitted"
   native_provider_span_is_recorded "$attempt_path" || return 1
   : > "$claim/committed"
   rm -f "$claim/owner"
-  [[ "$(cat "$lock" 2>/dev/null || true)" != "$$" ]] || rm -f "$lock"
+  native_provider_span_release_lock "$attempt_path"
 }
 
 emit_review_rollup_span() {
@@ -1113,6 +1174,25 @@ emit_provider_attempt_span() {
   if [[ "$usage_status" == known && "$cost_status" == known ]]; then
     ingest_usage "$model" "$provider" "$ingest_status" "$usage" "$cost"
   fi
+}
+
+native_run_canonical_metering() {
+  local art="$1" path ordinal=1
+  local -a native_receipts=()
+  # Provider attempts are written with contiguous numeric ordinals. Walking
+  # those ordinals explicitly both preserves attempt order beyond 9 and avoids
+  # admitting similarly named sidecars such as attempt-1.lease.json.
+  while :; do
+    path="$art/attempt-$ordinal.json"
+    [[ -f "$path" ]] || break
+    native_receipts+=("$path")
+    ordinal=$((ordinal + 1))
+  done
+  if [[ "${#native_receipts[@]}" -eq 0 ]]; then
+    printf '%s\n' '{"reconciliation":{"usage":null,"usage_status":"not_applicable","usage_source":null,"known_usage":null,"known_usage_attempts":0,"cost_usd":null,"cost_status":"not_applicable","cost_source":null,"known_cost_usd":null,"known_cost_attempts":0,"attempt_count":0},"last":{}}'
+    return 0
+  fi
+  review_canonical_metering "${native_receipts[@]}"
 }
 
 legion_delegated_context() {
@@ -1700,7 +1780,8 @@ cmd_run() {
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
       {run_id:$run,status:"refused",executor:"codex",model:$model,reason:$reason,
        preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
-       usage:{},cost_usd:0}'
+       usage:null,usage_status:"not_applicable",
+       cost_usd:null,cost_status:"not_applicable"}'
     return 1
   fi
   CODEX_BIN="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
@@ -1816,6 +1897,14 @@ cmd_run() {
     tried="${tried:+$tried,}$attempt"
     candidate_ordinal=$((candidate_ordinal + 1))
     if [[ "$candidate_ordinal" -gt 1 ]]; then
+      # The previous paid candidate is durable in its numbered receipt/span.
+      # Clear mutable aliases before this candidate can stop at preflight or an
+      # exhausted lease, otherwise the terminal envelope pairs incompatible
+      # evidence and may count the previous attempt twice.
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      NATIVE_LEASE_STATUS=""
+      lease_receipt=""
       if ! legion_adapter_preflight codex "$art" "$sandbox" stdin "$attempt" "$effort" 0 "$CODEX_BIN"; then
         cp "$LEGION_ADAPTER_PREFLIGHT_PATH" "$art/codex-preflight-$candidate_ordinal.json"
         if [[ "$LEGION_ADAPTER_PREFLIGHT_STATUS" == unavailable ]]; then
@@ -1983,6 +2072,9 @@ cmd_run() {
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
 
   local thread_id usage cost filtered_err error_log
+  local usage_status=unknown cost_status=unknown
+  local known_usage=null known_usage_attempts=0 known_cost=null known_cost_attempts=0
+  local native_metering='{}'
   filtered_err="$art/codex.filtered.err"
   filter_codex_stderr "$art/codex.err" "$filtered_err"
   # A reviewer's real failure reason may only exist on stdout (codex prints
@@ -2014,6 +2106,15 @@ cmd_run() {
     usage=null
     cost=null
   fi
+  native_metering="$(native_run_canonical_metering "$art")"
+  usage="$(jq -c '.reconciliation.usage' <<<"$native_metering")"
+  cost="$(jq -c '.reconciliation.cost_usd' <<<"$native_metering")"
+  usage_status="$(jq -r '.reconciliation.usage_status' <<<"$native_metering")"
+  cost_status="$(jq -r '.reconciliation.cost_status' <<<"$native_metering")"
+  known_usage="$(jq -c '.reconciliation.known_usage' <<<"$native_metering")"
+  known_usage_attempts="$(jq -r '.reconciliation.known_usage_attempts' <<<"$native_metering")"
+  known_cost="$(jq -c '.reconciliation.known_cost_usd' <<<"$native_metering")"
+  known_cost_attempts="$(jq -r '.reconciliation.known_cost_attempts' <<<"$native_metering")"
 
   local diff_rc=0
   if [[ "$containment_failed" -eq 1 ]]; then
@@ -2066,7 +2167,9 @@ cmd_run() {
   fi
 
   local total_tokens status="ok"
-  total_tokens="$(jq -r '((.input_tokens//0)+(.output_tokens//0)+(.reasoning_output_tokens//0)) | floor' <<<"$usage" 2>/dev/null || echo 0)"
+  total_tokens="$(jq -r '((.input_tokens//0)+(.output_tokens//0)+(.reasoning_output_tokens//0)) | floor' \
+    <<<"$([[ "$usage" != null ]] && printf '%s' "$usage" || printf '%s' "$known_usage")" \
+    2>/dev/null || echo 0)"
   [[ "$total_tokens" =~ ^[0-9]+$ ]] || total_tokens=0   # guard: never let a non-int abort the -gt test
   if [[ "$containment_failed" -eq 1 ]]; then
     status="containment_failed"
@@ -2109,11 +2212,14 @@ cmd_run() {
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg lease "$lease_receipt" \
     --argjson copied_secret_names "$copied_secret_names" --argjson task_evidence "$task_evidence" \
+    --argjson metering "$native_metering" \
     '{worktree:$wt, diff:$diff, last_message:$last, stream:$stream,
       preflight_receipt:$preflight,
       attempt_receipt:(if $attempt=="" then null else $attempt end),
       failure_receipt:(if $failure=="" then null else $failure end),
       lease_receipt:(if $lease=="" then null else $lease end),
+      metering_reconciliation:(if $metering.reconciliation.attempt_count == 0
+        then null else $metering.reconciliation end),
       copied_secret_names:$copied_secret_names} + $task_evidence')"
   artifacts="$(jq -c '. + {rollup_only:true}' <<<"$artifacts")"
   NATIVE_RUN_TERMINAL_STATUS="$status"
@@ -2166,7 +2272,11 @@ cmd_run() {
 
   jq -cn --arg status "$status" --arg model "$model" --arg thread "$thread_id" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-0}" --arg run "$RUN_ID" --argjson rc "${rc:-0}" \
+    --arg error_log "$error_log" --argjson usage "$usage" --argjson cost "${cost:-null}" --arg run "$RUN_ID" --argjson rc "${rc:-0}" \
+    --arg usage_status "$usage_status" --arg cost_status "$cost_status" \
+    --argjson known_usage "$known_usage" --argjson known_usage_attempts "$known_usage_attempts" \
+    --argjson known_cost "$known_cost" --argjson known_cost_attempts "$known_cost_attempts" \
+    --argjson metering "$native_metering" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg lease "$lease_receipt" \
     --arg reason "$(
@@ -2185,11 +2295,20 @@ cmd_run() {
       fi
     )" '
     {run_id:$run, status:$status, executor:"codex", model:$model, thread_id:$thread, codex_exit:$rc,
-     worktree:$wt, diff_path:$diff, last_message_path:$last, error_log:$error_log, usage:$usage, cost_usd:$cost,
+     worktree:$wt, diff_path:$diff, last_message_path:$last, error_log:$error_log,
+     usage:$usage,usage_status:$usage_status,cost_usd:$cost,cost_status:$cost_status,
      preflight_receipt:$preflight,
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),
-     lease_receipt:(if $lease=="" then null else $lease end)}
+     lease_receipt:(if $lease=="" then null else $lease end),
+     metering_reconciliation:(if $metering.reconciliation.attempt_count == 0
+       then null else $metering.reconciliation end)}
+     + (if $usage_status == "partial" then
+          {known_usage:$known_usage,known_usage_attempts:$known_usage_attempts}
+        else {} end)
+     + (if $cost_status == "partial" then
+          {known_cost_usd:$known_cost,known_cost_attempts:$known_cost_attempts}
+        else {} end)
      + (if $reason=="" then {} else {reason:$reason} end)'
   # over_budget produced a usable diff (budget is advisory — codex can't be pre-empted),
   # so it exits 0; only a real failure/error is non-zero (M1: graceful degradation).
@@ -3679,7 +3798,8 @@ cmd_resume() {
       {run_id:$run,status:"refused",executor:"codex-resume",model:$model,
        archetype:(if $archetype=="" then null else $archetype end),thread_id:$thread,
        reason:$reason,preflight_receipt:$preflight,attempt_receipt:null,
-       failure_receipt:null,usage:{},cost_usd:0}'
+       failure_receipt:null,usage:null,usage_status:"not_applicable",
+       cost_usd:null,cost_status:"not_applicable"}'
     return 1
   fi
   CODEX_BIN="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
@@ -3777,6 +3897,10 @@ cmd_resume() {
     usage_status=known
     cost_model_has_pricing "$model" && cost_status=known
   fi
+  if [[ "$launch_failed" -eq 1 ]]; then
+    usage_status=not_applicable
+    cost_status=not_applicable
+  fi
   if [[ "$status" != ok ]]; then
     terminal_status=failed
     if [[ "$status" == timed_out ]]; then
@@ -3831,10 +3955,15 @@ cmd_resume() {
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg run "$run" --arg reason "$reason" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" --arg lease "$lease_status" \
-    --argjson usage "$usage" --argjson cost "${cost:-0}" '
+    --argjson usage "$usage" --arg usage_status "$usage_status" \
+    --argjson cost "${cost:-null}" --arg cost_status "$cost_status" '
     {run_id:$run, status:$status, model:$model,
      archetype:(if $archetype=="" then null else $archetype end),
-     thread_id:$thread, worktree:$wt, diff_path:$diff, usage:$usage, cost_usd:$cost,
+     thread_id:$thread, worktree:$wt, diff_path:$diff,
+     usage:(if $usage_status == "known" then $usage else null end),
+     usage_status:$usage_status,
+     cost_usd:(if $cost_status == "known" then $cost else null end),
+     cost_status:$cost_status,
      preflight_receipt:$preflight,
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}

@@ -2429,6 +2429,7 @@ SH
       sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_claim()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release_lock()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_release()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_commit()/,/^}/p' "$DELEGATE"
       sed -n '/^emit_provider_attempt_span()/,/^}/p' "$DELEGATE"
@@ -2474,6 +2475,7 @@ SH
       sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_claim()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release_lock()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_release()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_commit()/,/^}/p' "$DELEGATE"
       sed -n '/^emit_provider_attempt_span()/,/^}/p' "$DELEGATE"
@@ -2506,7 +2508,118 @@ SH
     [ "$(wc -l < "$telemetry" | tr -d ' ')" -eq 1 ]
     [ -f "$art/attempt-1.json.span-emitted/committed" ]
     [ ! -e "$art/attempt-1.json.span-emitted/owner" ]
-    [ ! -e "$art/attempt-1.json.span-publishing" ]
+    [ -f "$art/attempt-1.json.span-publishing" ]
+    [ ! -s "$art/attempt-1.json.span-publishing" ]
+}
+
+@test "native durability ignores a malformed telemetry tail" {
+    local helper art telemetry
+    helper="$TEST_TMPDIR/native-span-malformed-tail.sh"
+    art="$TEST_TMPDIR/native-span-malformed-tail-art"
+    telemetry="$TEST_TMPDIR/native-span-malformed-tail.jsonl"
+    mkdir -p "$art"
+    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null}' > "$art/attempt-1.json"
+    jq -cn --arg attempt "$art/attempt-1.json" \
+      '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
+      > "$telemetry"
+    printf '%s\n' '{malformed trailing record' >> "$telemetry"
+    printf '%s\n' '"structurally malformed record"' >> "$telemetry"
+    {
+      sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_claim()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release_lock()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_commit()/,/^}/p' "$DELEGATE"
+      sed -n '/^emit_provider_attempt_span()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+LEGION_TELEMETRY_DIR="$(dirname "$2")"
+DUPLICATE="$1/duplicate"
+TERMINATING_SIGNAL_ACTIVE=0
+NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=""
+on_terminating_signal() { exit 143; }
+emit_span() { : > "$DUPLICATE"; }
+ingest_usage() { :; }
+emit_provider_attempt_span "$1/attempt-1.json" fixture ""
+[[ ! -e "$DUPLICATE" ]]
+SH
+    } > "$helper"
+
+    run bash "$helper" "$art" "$telemetry"
+
+    [ "$status" -eq 0 ]
+}
+
+@test "native claim keeps one stable inode and rejects a live same-shell contender" {
+    local helper art
+    helper="$TEST_TMPDIR/native-span-live-owner.sh"
+    art="$TEST_TMPDIR/native-span-live-owner-art"
+    mkdir -p "$art/telemetry"
+    printf '{}\n' > "$art/attempt-1.json"
+    {
+      sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_claim()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release_lock()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+set -euo pipefail
+LEGION_TELEMETRY_DIR="$1/telemetry"
+attempt="$1/attempt-1.json"
+entered="$1/entered"
+release="$1/release"
+(
+  native_provider_span_claim "$attempt"
+  : > "$entered"
+  while [[ ! -e "$release" ]]; do sleep 0.01; done
+  native_provider_span_release "$attempt"
+) &
+publisher=$!
+for _retry in $(seq 1 100); do
+  [[ -e "$entered" ]] && break
+  sleep 0.01
+done
+[[ -e "$entered" ]]
+! native_provider_span_claim "$attempt"
+: > "$release"
+wait "$publisher"
+[[ -f "$attempt.span-publishing" && ! -s "$attempt.span-publishing" ]]
+SH
+    } > "$helper"
+
+    run bash "$helper" "$art"
+
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "native claim reclaims malformed owners and refuses linked lock inodes" {
+    local helper art
+    helper="$TEST_TMPDIR/native-span-owner-validation.sh"
+    art="$TEST_TMPDIR/native-span-owner-validation-art"
+    mkdir -p "$art/telemetry"
+    printf '{}\n' > "$art/attempt-1.json"
+    printf '%s\n' 'not-a-pid' > "$art/attempt-1.json.span-publishing"
+    printf '%s\n' 'do-not-overwrite' > "$art/victim"
+    ln "$art/victim" "$art/attempt-2.json.span-publishing"
+    printf '{}\n' > "$art/attempt-2.json"
+    {
+      sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_claim()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release_lock()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+set -euo pipefail
+LEGION_TELEMETRY_DIR="$1/telemetry"
+native_provider_span_claim "$1/attempt-1.json"
+native_provider_span_release "$1/attempt-1.json"
+! native_provider_span_claim "$1/attempt-2.json"
+[[ "$(cat "$1/victim")" == do-not-overwrite ]]
+SH
+    } > "$helper"
+
+    run bash "$helper" "$art"
+
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
 }
 
 @test "native review ingestion preserves the failed provider status" {
@@ -2521,6 +2634,7 @@ SH
       sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_claim()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release_lock()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_release()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_commit()/,/^}/p' "$DELEGATE"
       sed -n '/^emit_native_review_provider_span()/,/^}/p' "$DELEGATE"
@@ -2693,7 +2807,14 @@ SH
 
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.status == "ok" and .model == "test-model-beta"
-    and .failure_receipt == null'
+    and .failure_receipt == null
+    and .usage == null and .usage_status == "partial"
+    and (.known_usage.input_tokens | type) == "number"
+    and .known_usage_attempts == 1
+    and .cost_usd == null and .cost_status == "unknown"
+    and (has("known_cost_usd") | not)
+    and (has("known_cost_attempts") | not)
+    and .metering_reconciliation.attempt_count == 2'
   local art; art="$(dirname "$(echo "$output" | jq -r .attempt_receipt)")"
   [ -f "$art/failure-1.json" ]
   [ ! -e "$art/failure.json" ]
@@ -2766,8 +2887,12 @@ SH
 
   [ "$status" -eq 1 ]
   echo "$output" | jq -e --arg paid "$CODEX_WORKHORSE" '
-    .status == "failed" and .model == $paid'
-  art="$(dirname "$(echo "$output" | jq -r .attempt_receipt)")"
+    .status == "failed" and .model == $paid
+    and .attempt_receipt == null and .failure_receipt == null
+    and .usage == null and .usage_status == "unknown"
+    and .cost_usd == null and .cost_status == "unknown"
+    and .metering_reconciliation.attempt_count == 1'
+  art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
   jq -e --arg paid "$CODEX_WORKHORSE" \
     '.requested_model == $paid and .failure.class == "quota"' "$art/attempt-1.json"
   jq -e '.status == "incompatible" and .reason == "forced fallback refusal"' \
@@ -2811,9 +2936,12 @@ SH
 
   [ "$status" -eq 1 ]
   echo "$output" | jq -e '.status == "failed" and .reason == "admission_refused"
-    and .model == "model-b"'
-  art="$(dirname "$(echo "$output" | jq -r .attempt_receipt)")"
+    and .model == "model-b"
+    and .attempt_receipt == null and .failure_receipt == null
+    and .usage_status == "known" and .usage.input_tokens == 100000
+    and .cost_status == "unknown" and .cost_usd == null'
   run_id="$(echo "$output" | jq -r .run_id)"
+  art="$repo/.legion/runs/$run_id"
   [ -f "$art/attempt-1.json" ]
   [ ! -e "$art/attempt-2.json" ]
   [ "$(grep -Ec '^claude -p ' "$MOCK_CALL_LOG")" -eq 1 ]
@@ -3190,7 +3318,9 @@ PY
     --repo "$repo" --quiet
 
   [ "$status" -eq 1 ]
-  echo "$output" | jq -e '.status == "failed"'
+  echo "$output" | jq -e '.status == "failed"
+    and .usage == null and .usage_status == "unknown"
+    and .cost_usd == null and .cost_status == "unknown"'
   jq -e '.schema == "legion.attempt.v1" and .terminal_status == "failed"
     and .failure.class == "provider"' "$(echo "$output" | jq -r .attempt_receipt)"
   jq -e '.schema == "legion.failure.v1" and .class == "provider"' \

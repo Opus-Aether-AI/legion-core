@@ -348,11 +348,11 @@ legion_adapter_provider_span_is_durable() {
   [[ -n "$attempt_path" && -d "${LEGION_TELEMETRY_DIR:-}" ]] || return 1
   for span_file in "$LEGION_TELEMETRY_DIR"/*.jsonl; do
     [[ -f "$span_file" ]] || continue
-    jq -e --arg attempt "$attempt_path" '
-      select(.schema == "legion.span.v1"
+    jq -R -e --arg attempt "$attempt_path" '
+      try (fromjson | select(.schema == "legion.span.v1"
         and .artifacts.provider_attempt == true
         and .artifacts.rollup_only != true
-        and .artifacts.attempt_receipt == $attempt)
+        and .artifacts.attempt_receipt == $attempt)) catch empty
     ' "$span_file" >/dev/null 2>&1 && return 0
   done
   return 1

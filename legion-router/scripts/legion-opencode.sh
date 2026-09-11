@@ -523,18 +523,19 @@ cmd_run() {
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg reason "$receipt_reason" \
     --arg lease "$lease_status" \
+    --arg usage_status "$usage_status" --arg cost_status "$cost_status" \
     --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" \
     --argjson launch_failed "$launch_failed" '
     {run_id:$run, status:$status, executor:"opencode", model:$model, opencode_exit:$rc,
      result:$result, opencode_error:(if $opencode_error == "" then null else $opencode_error end),
      worktree:$wt, diff_path:$diff, last_message_path:$last,
-     usage:(if $launch_failed == 1 then null else $usage end),
-     cost_usd:(if $launch_failed == 1 then null else $cost end),preflight_receipt:$preflight,
+     usage:(if $launch_failed == 1 or $usage_status != "known" then null else $usage end),
+     usage_status:(if $launch_failed == 1 then "not_applicable" else $usage_status end),
+     cost_usd:(if $launch_failed == 1 or $cost_status != "known" then null else $cost end),
+     cost_status:(if $launch_failed == 1 then "not_applicable" else $cost_status end),
+     preflight_receipt:$preflight,
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
-     + (if $launch_failed == 1 then
-          {usage_status:"not_applicable",cost_status:"not_applicable"}
-        else {} end)
      + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == "ok" ]] || exit 1
 }

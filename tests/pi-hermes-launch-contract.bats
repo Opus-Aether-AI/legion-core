@@ -7,6 +7,28 @@ setup() {
   export LEGION_STATE_ROOT="$TEST_TMPDIR/state"
   export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
   export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
+  export MOCK_REAL_GIT="$(command -v git)"
+  export LEGION_EXECUTORS_FILE="$TEST_TMPDIR/executors.toml"
+  cp "$REPO_ROOT/legion-router/config/executors.toml" "$LEGION_EXECUTORS_FILE"
+  python3 - "$LEGION_EXECUTORS_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+for executor in ("pi", "hermes"):
+    start = text.index(f"[executors.{executor}]")
+    end = text.find("\n[executors.", start + 1)
+    if end < 0:
+        end = len(text)
+    section = text[start:end].replace(
+        "supported_version_patterns = []",
+        'supported_version_patterns = ["^1[.]0[.]0$"]',
+        1,
+    )
+    text = text[:start] + section + text[end:]
+path.write_text(text, encoding="utf-8")
+PY
 }
 
 make_test_repo() {
@@ -56,6 +78,85 @@ SH
   export LEGION_FS_SANDBOX_BIN="$shim_dir/sandbox-exec"
 }
 
+install_deadline_expiring_sed() {
+  local shim_dir="$TEST_TMPDIR/deadline-sed"
+  mkdir -p "$shim_dir"
+  export MOCK_REAL_SED
+  MOCK_REAL_SED="$(command -v sed)"
+  export MOCK_REAL_PYTHON
+  MOCK_REAL_PYTHON="$(command -v python3)"
+  export MOCK_SED_DELAY_MARKER="$TEST_TMPDIR/deadline-sed-used"
+  cat > "$shim_dir/sed" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if mkdir "$MOCK_SED_DELAY_MARKER" 2>/dev/null; then
+  "$MOCK_REAL_PYTHON" - "$LEGION_CHILD_LEASE_DEADLINE_NS" <<'PY'
+import sys
+import time
+
+delay = (int(sys.argv[1]) - time.monotonic_ns()) / 1_000_000_000 + 0.1
+if delay > 0:
+    time.sleep(delay)
+PY
+fi
+exec "$MOCK_REAL_SED" "$@"
+SH
+  chmod +x "$shim_dir/sed"
+  export PATH="$shim_dir:$PATH"
+}
+
+install_deadline_expiring_git() {
+  local shim_dir="$TEST_TMPDIR/deadline-git-$1"
+  mkdir -p "$shim_dir"
+  export MOCK_REAL_PYTHON
+  MOCK_REAL_PYTHON="$(command -v python3)"
+  export MOCK_GIT_DELAY_MARKER="$TEST_TMPDIR/deadline-git-used-$1"
+  cat > "$shim_dir/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" worktree add "* ]] && mkdir "$MOCK_GIT_DELAY_MARKER" 2>/dev/null; then
+  "$MOCK_REAL_PYTHON" - "$LEGION_CHILD_LEASE_DEADLINE_NS" <<'PY'
+import sys
+import time
+
+delay = (int(sys.argv[1]) - time.monotonic_ns()) / 1_000_000_000 + 0.1
+if delay > 0:
+    time.sleep(delay)
+PY
+fi
+exec "$MOCK_REAL_GIT" "$@"
+SH
+  chmod +x "$shim_dir/git"
+  export PATH="$shim_dir:$PATH"
+}
+
+assert_typed_pre_provider_timeout() {
+  local result_file="$1" expected_reason="$2" repo="$3" adapter="$4"
+  jq -e --arg executor "$adapter" --arg reason "$expected_reason" '
+    .status == "timed_out" and .executor == $executor
+    and (.reason | contains($reason))
+    and .attempt_receipt == null and .failure_receipt == null
+    and .provider_launch_receipt == null and .provider_exit == null
+    and .usage == null and .tokens == null and .usage_status == "not_applicable"
+    and .cost_usd == null and .cost_status == "not_applicable"
+    and (.worktree | contains("removed"))
+  ' "$result_file" || { cat "$result_file" >&2; return 1; }
+  local lease
+  lease="$(jq -r '.lease_receipt' "$result_file")"
+  jq -e --arg reason "$expected_reason" '
+    .schema == "legion.child-execution-lease.v1"
+    and .status == "launch_failed" and (.reason | contains($reason))
+    and (.max_runtime_seconds | type == "number" and . >= 1)
+    and (has("child_exit_code") | not)
+    and ((keys_unsorted - ["schema","status","reason","max_runtime_seconds"]) | length == 0)
+  ' "$lease"
+  [ ! -d "$repo/.legion/worktrees" ] \
+    || [ -z "$(find "$repo/.legion/worktrees" -mindepth 1 -maxdepth 1 -print -quit)" ]
+  [ "$(find "$(dirname "$lease")" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+  [ "$(find "$(dirname "$lease")" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+  assert_mock_not_called "$adapter"
+}
+
 @test "Pi and Hermes preflight refusals use nullable not-applicable metering" {
   local adapter repo
   for adapter in pi hermes; do
@@ -71,6 +172,39 @@ SH
       and .cost_usd == null and .cost_status == "not_applicable"
     '
   done
+}
+
+@test "Pi and Hermes expired lease at broker gate is a typed zero-attempt timeout" {
+  local adapter repo deadline result_file rc
+  for adapter in pi hermes; do
+    repo="$(make_test_repo "broker-expired-$adapter")"
+    install_deadline_expiring_git "$adapter"
+    deadline="$(python3 -c 'import time; print(time.monotonic_ns() + 4_000_000_000)')"
+    result_file="$TEST_TMPDIR/$adapter-broker-expired.json"
+    rc=0
+    LEGION_CHILD_LEASE_DEADLINE_NS="$deadline" PI_BIN=pi HERMES_BIN=hermes \
+      "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task inspect \
+        --model openai/fixture-model --repo "$repo" --run-id "broker-expired-$adapter" \
+        --keep --quiet > "$result_file" 2>/dev/null || rc=$?
+    [ "$rc" -eq 1 ]
+    assert_typed_pre_provider_timeout \
+      "$result_file" "expired before handoff broker launch" "$repo" "$adapter"
+  done
+}
+
+@test "Pi lease expiring during provider setup is a typed zero-attempt timeout" {
+  local repo deadline result_file rc=0
+  repo="$(make_test_repo provider-setup-expired-pi)"
+  install_deadline_expiring_sed
+  deadline="$(python3 -c 'import time; print(time.monotonic_ns() + 4_000_000_000)')"
+  result_file="$TEST_TMPDIR/pi-provider-setup-expired.json"
+  LEGION_CHILD_LEASE_DEADLINE_NS="$deadline" PI_BIN=pi \
+    "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+      --model openai/fixture-pi --repo "$repo" --run-id provider-setup-expired-pi \
+      --quiet > "$result_file" 2>/dev/null || rc=$?
+  [ "$rc" -eq 1 ]
+  assert_typed_pre_provider_timeout \
+    "$result_file" "expired during provider launch setup" "$repo" pi
 }
 
 @test "Pi and Hermes authenticate provider disappearance after admission as no-spend" {

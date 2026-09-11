@@ -84,6 +84,7 @@ def _zero_usage() -> dict[str, int]:
 def _empty_activity() -> dict[str, Any]:
     return {
         "usage": _zero_usage(),
+        "_usage_observed": False,
         "tools": [],
         "files": [],
         "items": 0,
@@ -99,16 +100,18 @@ def _sum_usage(total: dict[str, int], usage: Any) -> None:
 
 def _normalize_costs(costs: Any) -> dict[str, Any]:
     default = _dict(_dict(costs).get("default"))
+    models = [
+        model for model in _dict(costs).get("models", []) if isinstance(model, dict)
+    ]
     return {
-        "models": [
-            model for model in _dict(costs).get("models", []) if isinstance(model, dict)
-        ],
+        "models": models,
         "default": {
             "input": _num(default.get("input")),
             "output": _num(default.get("output")),
             "cache_read": _num(default.get("cache_read")),
             "cache_write": _num(default.get("cache_write")),
         },
+        "_default_pricing_observed": _valid_rate_table(default),
     }
 
 
@@ -121,7 +124,20 @@ def _default_costs() -> dict[str, Any]:
             "cache_read": 0.0,
             "cache_write": 0.0,
         },
+        "_default_pricing_observed": False,
     }
+
+
+def _valid_rate_table(value: Any) -> bool:
+    table = _dict(value)
+    return all(
+        key in table
+        and isinstance(table[key], (int, float))
+        and not isinstance(table[key], bool)
+        and math.isfinite(table[key])
+        and table[key] >= 0
+        for key in ("input", "output", "cache_read", "cache_write")
+    )
 
 
 def load_costs(costs_path: str) -> dict[str, Any]:
@@ -136,12 +152,18 @@ def load_costs(costs_path: str) -> dict[str, Any]:
 
 
 def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
+    return _rates_for_with_evidence(model, costs)[0]
+
+
+def _rates_for_with_evidence(
+    model: Any, costs: dict[str, Any]
+) -> tuple[dict[str, float], bool]:
     model_name = _string(model).lower()
     for entry in costs.get("models", []):
         match = _string(entry.get("match")).lower()
         if match and match in model_name:
             long_context = _dict(entry.get("long_context"))
-            return {
+            return ({
                 "input": _num(entry.get("input")),
                 "output": _num(entry.get("output")),
                 "cache_read": _num(entry.get("cache_read")),
@@ -169,9 +191,9 @@ def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
                     if long_context.get("output_multiplier") is not None
                     else 1.0
                 ),
-            }
+            }, _valid_rate_table(entry))
     default = _dict(costs.get("default"))
-    return {
+    return ({
         "input": _num(default.get("input")),
         "output": _num(default.get("output")),
         "cache_read": _num(default.get("cache_read")),
@@ -179,7 +201,7 @@ def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
         "lc_threshold": -1.0,
         "lc_input_multiplier": 1.0,
         "lc_output_multiplier": 1.0,
-    }
+    }, costs.get("_default_pricing_observed") is True)
 
 
 def cost_for(model: Any, usage: Any, costs: dict[str, Any]) -> float:
@@ -340,6 +362,7 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
     tool_counts: Counter[str] = Counter()
     files: set[str] = set()
     items = 0
+    usage_observed = False
 
     for stream_path in stream_paths:
         try:
@@ -360,6 +383,8 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
                         usage_payload = event.get("usage")
                         if not isinstance(usage_payload, dict):
                             usage_payload = _dict(_dict(event.get("payload")).get("usage"))
+                        if isinstance(usage_payload, dict) and usage_payload:
+                            usage_observed = True
                         _sum_usage(usage, usage_payload)
                         continue
 
@@ -383,6 +408,7 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
     file_list = sorted(files)
     return {
         "usage": usage,
+        "_usage_observed": usage_observed,
         "tools": tools,
         "files": file_list,
         "items": items,
@@ -537,7 +563,8 @@ def enrich_run(
         and durable_metering is not None
         and durable_attempt_count > 0
     )
-    if activity != _empty_activity() and not prefer_durable:
+    _, pricing_observed = _rates_for_with_evidence(model, costs)
+    if activity.get("_usage_observed") is True and pricing_observed and not prefer_durable:
         stream_cost = round(cost_for(model, activity.get("usage"), costs), 6)
         metering = {
             "cost_usd": stream_cost,

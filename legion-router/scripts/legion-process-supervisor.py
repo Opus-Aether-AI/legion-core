@@ -917,7 +917,7 @@ def main() -> int:
         if absolute_deadline_ns <= time.monotonic_ns():
             reason = "inherited child lease deadline expired before launch"
             _write_status(
-                arguments.status_file, "timed_out", reason, arguments.max_runtime_seconds
+                arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds
             )
             print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 124
@@ -1107,14 +1107,14 @@ def main() -> int:
         if absolute_deadline_ns is not None and absolute_deadline_ns <= time.monotonic_ns():
             reason = "inherited child lease deadline expired during launch setup"
             _write_status(
-                arguments.status_file, "timed_out", reason, arguments.max_runtime_seconds
+                arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds
             )
             print(f"legion-process-supervisor: {reason}", file=sys.stderr)
             return 124
         if cancel_requested:
             reason = f"cancelled by {signal.Signals(interrupted).name}"
             _write_status(
-                arguments.status_file, "cancelled", reason, arguments.max_runtime_seconds
+                arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds
             )
             return 128 + interrupted
         try:

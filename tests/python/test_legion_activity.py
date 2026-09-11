@@ -286,6 +286,61 @@ def test_completed_single_attempt_prefers_durable_provenance(tmp_path):
     assert enriched["activity"]["items"] == 3
 
 
+def test_running_stream_cost_stays_unknown_without_usage_evidence(tmp_path):
+    run_dir = tmp_path / "runs" / "no-usage"
+    run_dir.mkdir(parents=True)
+    (run_dir / "stream.jsonl").write_text(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "still running"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    enriched = activity.enrich_run(
+        {"run_id": "no-usage", "model": "test-model-alpha", "lifecycle": {"phase": "running"}},
+        str(run_dir),
+        activity._normalize_costs(_costs_payload()),
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+    assert enriched["known_cost_attempts"] == 0
+
+
+def test_running_stream_cost_stays_unknown_without_pricing_evidence(tmp_path):
+    run_dir = tmp_path / "runs" / "no-pricing"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+
+    enriched = activity.enrich_run(
+        {"run_id": "no-pricing", "model": "unpriced", "lifecycle": {"phase": "running"}},
+        str(run_dir),
+        activity.load_costs(str(tmp_path / "missing-costs.json")),
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+    assert enriched["known_cost_attempts"] == 0
+
+
+def test_running_stream_accepts_observed_usage_and_explicit_zero_pricing(tmp_path):
+    run_dir = tmp_path / "runs" / "zero-priced"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+    costs = _costs_payload()
+    costs["default"] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+
+    enriched = activity.enrich_run(
+        {"run_id": "zero-priced", "model": "unpriced", "lifecycle": {"phase": "running"}},
+        str(run_dir),
+        activity._normalize_costs(costs),
+    )
+
+    assert enriched["cost_usd"] == 0
+    assert enriched["cost_status"] == "known"
+
+
 def test_refused_no_launch_run_is_terminal_and_prefers_durable_provenance(tmp_path):
     run_dir = tmp_path / "runs" / "refused"
     run_dir.mkdir(parents=True)

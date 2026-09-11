@@ -864,6 +864,36 @@ def test_self_learning_span_validation_matches_attempt_identity_schema():
         assert self_learn._validated_span({**valid, **invalid}) is None
 
 
+def test_self_learning_rejects_malformed_known_and_partial_usage_maps():
+    valid = _span("metered", "2026-08-16T01:00:00Z")
+    assert self_learn._validated_span(
+        {**valid, "tokens": {"input_tokens": 0}, "usage_status": "known"}
+    ) is not None
+    assert self_learn._validated_span(
+        {
+            **valid,
+            "tokens": None,
+            "usage_status": "partial",
+            "known_usage": {"input_tokens": 0},
+            "known_usage_attempts": 1,
+        }
+    ) is not None
+
+    for value in (-1, 1.5, True, "1", None):
+        assert self_learn._validated_span(
+            {**valid, "tokens": {"input_tokens": value}, "usage_status": "known"}
+        ) is None
+        assert self_learn._validated_span(
+            {
+                **valid,
+                "tokens": None,
+                "usage_status": "partial",
+                "known_usage": {"input_tokens": value},
+                "known_usage_attempts": 1,
+            }
+        ) is None
+
+
 def test_cached_sibling_requires_recorded_checkout_to_still_exist(
     tmp_path, monkeypatch
 ):

@@ -160,6 +160,107 @@ def test_inherited_absolute_deadline_clamps_relative_allowance(tmp_path: Path) -
     assert elapsed < 4
 
 
+@pytest.mark.parametrize("kind", ("symlink", "hardlink", "fifo", "oversized"))
+def test_provider_launch_signal_receipt_rejects_unsafe_files_without_blocking(
+    tmp_path: Path, kind: str
+) -> None:
+    spec = importlib.util.spec_from_file_location(f"lease_supervisor_receipt_{kind}", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    receipt = tmp_path / "provider-launch.json"
+    target = tmp_path / "target"
+    target.write_text(
+        json.dumps(
+            {
+                "schema": "legion.provider-launch.v1",
+                "status": "started",
+                "provider_pid": os.getpid(),
+                "auth": "a" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    if kind == "symlink":
+        receipt.symlink_to(target)
+    elif kind == "hardlink":
+        os.link(target, receipt)
+    elif kind == "fifo":
+        os.mkfifo(receipt)
+    else:
+        receipt.write_bytes(b"x" * 4097)
+
+    started = time.monotonic()
+    assert supervisor._provider_launch_started(str(receipt)) is False
+    assert time.monotonic() - started < 1
+
+
+def test_provider_launch_signal_receipt_detects_path_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = importlib.util.spec_from_file_location("lease_supervisor_receipt_replacement", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    receipt = tmp_path / "provider-launch.json"
+    replacement = tmp_path / "replacement.json"
+    payload = json.dumps(
+        {
+            "schema": "legion.provider-launch.v1",
+            "status": "started",
+            "provider_pid": os.getpid(),
+            "auth": "a" * 64,
+        }
+    ).encode()
+    receipt.write_bytes(payload)
+    replacement.write_bytes(payload)
+    real_read = os.read
+    replaced = False
+
+    def replace_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal replaced
+        chunk = real_read(descriptor, size)
+        if chunk and not replaced:
+            os.replace(replacement, receipt)
+            replaced = True
+        return chunk
+
+    monkeypatch.setattr(supervisor.os, "read", replace_after_read)
+    assert supervisor._provider_launch_started(str(receipt)) is False
+    assert replaced
+
+
+def test_descendant_signal_receipt_fifo_does_not_hang_supervisor_cleanup(tmp_path: Path) -> None:
+    signal_receipt = tmp_path / "provider-launch.json"
+    os.mkfifo(signal_receipt)
+    status_file = tmp_path / "lease.json"
+    started = time.monotonic()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "1",
+            "--status-file",
+            str(status_file),
+            "--descendant-signal-ready-file",
+            str(signal_receipt),
+            "--",
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=8,
+    )
+    assert result.returncode == 124
+    assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "timed_out"
+    assert time.monotonic() - started < 6
+
+
 def test_expired_inherited_deadline_refuses_before_child_launch(tmp_path: Path) -> None:
     launched = tmp_path / "launched"
     environment = os.environ.copy()

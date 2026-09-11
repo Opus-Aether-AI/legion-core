@@ -26,9 +26,15 @@
     "cost_status": { "type": "string", "enum": ["known", "partial", "unknown", "not_applicable"] },
     "known_cost_usd": { "type": ["number", "null"], "minimum": 0 },
     "known_cost_attempts": { "type": "integer", "minimum": 0 },
-    "tokens": { "type": ["object", "null"] },
+    "tokens": {
+      "type": ["object", "null"],
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
     "usage_status": { "type": "string", "enum": ["known", "partial", "unknown", "not_applicable"] },
-    "known_usage": { "type": ["object", "null"] },
+    "known_usage": {
+      "type": ["object", "null"],
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
     "known_usage_attempts": { "type": "integer", "minimum": 0 },
     "artifacts": { "type": "object" }
   },

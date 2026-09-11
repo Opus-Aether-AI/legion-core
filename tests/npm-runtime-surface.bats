@@ -38,8 +38,23 @@ setup() {
     "legion-hermes-mode/.claude-plugin/plugin.json" \
     "legion-deepseek-mode/README.md" \
     "legion-deepseek-mode/SKILL.md" \
-    "legion-deepseek-mode/.claude-plugin/plugin.json"; do
+    "legion-deepseek-mode/.claude-plugin/plugin.json" \
+    "legion-observability/scripts/_vendor/tomli/__init__.py" \
+    "legion-observability/scripts/_vendor/tomli/_parser.py" \
+    "legion-observability/scripts/_vendor/tomli/LICENSE"; do
     [ -f "$EXTRACTED/package/$required" ]
+  done
+
+  # When an older interpreter is available locally, exercise the unpacked npm
+  # artifact with neither stdlib tomllib nor an installed tomli dependency.
+  local compat_python
+  for compat_python in python3.9 python3.10; do
+    command -v "$compat_python" >/dev/null 2>&1 || continue
+    run "$compat_python" -S \
+      "$EXTRACTED/package/legion-observability/scripts/legion_executor_registry.py" \
+      --family codex
+    [ "$status" -eq 0 ]
+    [ "$output" = codex ]
   done
 
   local name target

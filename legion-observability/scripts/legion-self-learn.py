@@ -771,6 +771,13 @@ def _bounded_span_value(value: Any, depth: int = 0) -> Any:
     return _INVALID_SPAN_VALUE
 
 
+def _valid_usage(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        for item in value.values()
+    )
+
+
 def _validated_span(payload: Any) -> dict[str, Any] | None:
     """Validate and bound the in-repository ``legion.span.v1`` contract."""
     if not isinstance(payload, dict) or payload.get("schema") != SPAN_SCHEMA:
@@ -825,7 +832,11 @@ def _validated_span(payload: Any) -> dict[str, Any] | None:
         ):
             return None
     for field in ("tokens", "known_usage"):
-        if field in payload and payload.get(field) is not None and not isinstance(payload.get(field), dict):
+        if (
+            field in payload
+            and payload.get(field) is not None
+            and not _valid_usage(payload.get(field))
+        ):
             return None
     if "artifacts" in payload and not isinstance(payload.get("artifacts"), dict):
         return None

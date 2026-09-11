@@ -133,7 +133,8 @@ stop_handoff_broker() {
   BROKER_PID=""
 }
 on_signal() {
-  local signum="$1" containment_reason="" supervised_pid="${SIGNAL_CHILD_PID:-unknown}" launch_status=""
+  local signum="$1" containment_reason="" supervised_pid="${SIGNAL_CHILD_PID:-unknown}"
+  local launch_evidence='' launch_status=""
   trap - INT TERM HUP
   stop_child
   stop_handoff_broker
@@ -149,7 +150,9 @@ on_signal() {
     containment_reason="handoff broker reported incomplete descendant cleanup (evidence: $ART/broker.err; worktree retained: $WT_RECORD)"
   fi
   if [[ "${LEGION_ADAPTER_SIGNAL_ARMED:-0}" == 1 ]]; then
-    launch_status="$(provider_launch_status)"
+    launch_evidence="$(provider_launch_status)"
+    launch_status="$(jq -r '.status // "malformed"' <<<"$launch_evidence" 2>/dev/null \
+      || printf malformed)"
     case "$launch_status" in
       launch_failed)
         # The authenticated inner wrapper proves that the admitted provider
@@ -652,19 +655,19 @@ verify_provider_file() {
 
 provider_launch_status() {
   [[ -n "$PROVIDER_LAUNCH_RECEIPT" && -n "$PROVIDER_LAUNCH_TOKEN" ]] || {
-    printf 'absent'
+    printf '{"status":"absent","reason":null}'
     return 0
   }
   if [[ ! -e "$PROVIDER_LAUNCH_RECEIPT" && ! -L "$PROVIDER_LAUNCH_RECEIPT" ]]; then
-    printf 'absent'
+    printf '{"status":"absent","reason":null}'
     return 0
   fi
   [[ -f "$PROVIDER_LAUNCH_RECEIPT" && ! -L "$PROVIDER_LAUNCH_RECEIPT" ]] || {
-    printf 'malformed'
+    printf '{"status":"malformed","reason":null}'
     return 0
   }
   python3 - "$PROVIDER_LAUNCH_RECEIPT" "$PROVIDER_LAUNCH_TOKEN" "$PROVIDER_BIN" <<'PY' \
-    2>/dev/null || printf 'malformed'
+    2>/dev/null || printf '{"status":"malformed","reason":null}'
 import hashlib
 import hmac
 import json
@@ -740,13 +743,22 @@ encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 expected = hmac.new(token.encode(), encoded, hashlib.sha256).hexdigest()
 if not hmac.compare_digest(auth, expected):
     raise SystemExit(1)
-print(status, end="")
+print(
+    json.dumps(
+        {
+            "status": status,
+            "reason": value.get("reason") if status == "launch_failed" else None,
+        },
+        separators=(",", ":"),
+    ),
+    end="",
+)
 PY
 }
 
 provider_launch_reason() {
   jq -r '.reason // "provider launch failed before process creation"' \
-    "$PROVIDER_LAUNCH_RECEIPT" 2>/dev/null \
+    <<<"$1" 2>/dev/null \
     || printf 'provider launch failed before process creation'
 }
 
@@ -1283,7 +1295,7 @@ cmd_run() {
   MODEL="$actual_model"
   [[ -n "$usage" ]] || usage='{}'
   local lease_reason="" containment_failed=0 launch_failed=0 launch_timed_out=0
-  local provider_launch_unresolved=0 provider_launch_state=""
+  local provider_launch_unresolved=0 provider_launch_state="" provider_launch_evidence=''
   if legion_adapter_supervisor_cleanup_failed "$ART/lease.json"; then
     containment_failed=1
     legion_adapter_supervisor_cleanup_failed_before_launch "$ART/lease.json" \
@@ -1298,11 +1310,13 @@ cmd_run() {
     lease_reason="$(legion_adapter_supervisor_reason "$ART/lease.json" "provider launch failed before process creation")"
   fi
   if [[ "$launch_failed" != 1 ]]; then
-    provider_launch_state="$(provider_launch_status)"
+    provider_launch_evidence="$(provider_launch_status)"
+    provider_launch_state="$(jq -r '.status // "malformed"' \
+      <<<"$provider_launch_evidence" 2>/dev/null || printf malformed)"
     case "$provider_launch_state" in
       launch_failed)
         launch_failed=1
-        lease_reason="$(provider_launch_reason)"
+        lease_reason="$(provider_launch_reason "$provider_launch_evidence")"
         ;;
       started)
         if [[ "$containment_failed" != 1 ]] && legion_adapter_supervisor_timed_out "$ART/lease.json"; then

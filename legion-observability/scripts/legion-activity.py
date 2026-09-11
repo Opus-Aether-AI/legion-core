@@ -106,6 +106,19 @@ def _sum_usage(total: dict[str, int], usage: Any) -> None:
         total[field] += int(max(0.0, _num(data.get(field))))
 
 
+def _valid_stream_usage(value: Any) -> bool:
+    """Accept only the canonical, exactly metered Codex token counters."""
+    return (
+        isinstance(value, dict)
+        and bool(value)
+        and set(value).issubset(TOKEN_FIELDS)
+        and all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 0
+            for item in value.values()
+        )
+    )
+
+
 def _normalize_costs(costs: Any) -> dict[str, Any]:
     default = _dict(_dict(costs).get("default"))
     models = [
@@ -391,9 +404,9 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
                         usage_payload = event.get("usage")
                         if not isinstance(usage_payload, dict):
                             usage_payload = _dict(_dict(event.get("payload")).get("usage"))
-                        if isinstance(usage_payload, dict) and usage_payload:
+                        if _valid_stream_usage(usage_payload):
                             usage_observed = True
-                        _sum_usage(usage, usage_payload)
+                            _sum_usage(usage, usage_payload)
                         continue
 
                     if event_type != "item.completed":

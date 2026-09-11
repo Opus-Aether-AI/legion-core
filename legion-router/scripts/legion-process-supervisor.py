@@ -794,15 +794,69 @@ class DescendantTracker:
                 return
 
 
+def _read_stable_regular_file(path: str, maximum_bytes: int) -> Optional[bytes]:
+    """Read an untrusted path once without following, blocking, or racing it."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_size > maximum_bytes
+        ):
+            return None
+        path_stat = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or path_stat.st_nlink != 1
+            or (path_stat.st_dev, path_stat.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while total <= maximum_bytes:
+            chunk = os.read(descriptor, maximum_bytes + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        raw = b"".join(chunks)
+        closed = os.fstat(descriptor)
+        final_path_stat = os.stat(path, follow_symlinks=False)
+        if (
+            len(raw) > maximum_bytes
+            or not stat.S_ISREG(closed.st_mode)
+            or closed.st_nlink != 1
+            or closed.st_size > maximum_bytes
+            or (closed.st_dev, closed.st_ino) != (opened.st_dev, opened.st_ino)
+            or (final_path_stat.st_dev, final_path_stat.st_ino)
+            != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(final_path_stat.st_mode)
+            or final_path_stat.st_nlink != 1
+            or closed.st_mtime_ns != opened.st_mtime_ns
+            or closed.st_ctime_ns != opened.st_ctime_ns
+        ):
+            return None
+        return raw
+    except OSError:
+        return None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _provider_launch_started(path: str) -> bool:
     if not path:
         return True
-    candidate = Path(path)
+    raw = _read_stable_regular_file(path, 4096)
+    if raw is None:
+        return False
     try:
-        if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size > 4096:
-            return False
-        value = json.loads(candidate.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+        value = json.loads(raw)
+    except (UnicodeDecodeError, ValueError, TypeError):
         return False
     return (
         isinstance(value, dict)

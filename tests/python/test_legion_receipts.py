@@ -43,6 +43,45 @@ def typed_failure(attempt_id):
     )
 
 
+@pytest.mark.parametrize("field", ["failure_id", "ts"])
+@pytest.mark.parametrize("value", [0, 1, False, True, [], {}, ""])
+def test_failure_constructor_rejects_supplied_non_string_identity(field, value):
+    kwargs = {
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "failure_class": "provider",
+        "retryable": False,
+        "output_started": False,
+        field: value,
+    }
+
+    with pytest.raises(ValueError, match=rf"{field} must be a non-empty string"):
+        receipts.failure_receipt(**kwargs)
+
+
+@pytest.mark.parametrize("field", ["failure_id", "ts"])
+@pytest.mark.parametrize("value", [0, 1, False, True, [], {}, ""])
+def test_failure_validator_rejects_non_string_identity(field, value):
+    failure = typed_failure("attempt-1")
+    failure[field] = value
+
+    with pytest.raises(ValueError, match=rf"{field} must be a non-empty string"):
+        receipts.validate_failure(failure)
+
+
+@pytest.mark.parametrize("duration", [float("nan"), float("inf"), float("-inf")])
+def test_attempt_constructor_and_validator_reject_non_finite_duration(duration):
+    fields = attempt_fields(attempt_id="attempt-1")
+    fields["duration_ms"] = duration
+    with pytest.raises(ValueError, match="duration_ms must be a finite non-negative number"):
+        receipts.attempt_receipt(**fields)
+
+    attempt = receipts.attempt_receipt(**attempt_fields(attempt_id="attempt-1"))
+    attempt["duration_ms"] = duration
+    with pytest.raises(ValueError, match="duration_ms must be a finite non-negative number"):
+        receipts.validate_attempt(attempt)
+
+
 def test_constructor_rejects_failure_on_succeeded_attempt():
     with pytest.raises(ValueError, match="successful attempts cannot contain a typed failure"):
         receipts.attempt_receipt(

@@ -29,6 +29,18 @@ setup() {
     [[ "$threshold_step" == *"THRESHOLD=95"* ]]
 }
 
+@test "validate workflow exercises the packed npm runtime on Python 3.9 and 3.10" {
+    local workflow="$REPO_ROOT/.github/workflows/validate.yml"
+    local compat_job
+    compat_job="$(sed -n '/^  validate-python-runtime:/,/^  validate-marketplace:/p' "$workflow")"
+
+    [[ "$compat_job" == *"python-version: ['3.9', '3.10']"* ]]
+    [[ "$compat_job" == *'npm pack --json'* ]]
+    [[ "$compat_job" == *'python3 -S'* ]]
+    [[ "$compat_job" == *'legion_executor_registry.py'* ]]
+    [[ "$compat_job" == *'--family codex | grep -Fx codex'* ]]
+}
+
 make_pending_release_fixture() {
     local repo="$1"
     mkdir -p "$repo"

@@ -96,6 +96,27 @@ def test_complete_span_validation_accepts_partial_telemetry_lower_bounds() -> No
     assert BROKER._validate_span(span, "parent-run")["known_cost_usd"] == 0.25
 
 
+@pytest.mark.parametrize("field", ["tokens", "known_usage"])
+@pytest.mark.parametrize("value", [-1, 1.5, True, "7", None])
+def test_complete_span_validation_rejects_malformed_usage_map_values(
+    field: str, value: object
+) -> None:
+    span = valid_span()
+    if field == "known_usage":
+        span.update(
+            {
+                "tokens": None,
+                "usage_status": "partial",
+                "known_usage": {"input_tokens": value},
+                "known_usage_attempts": 1,
+            }
+        )
+    else:
+        span.update({"usage_status": "known", "tokens": {"input_tokens": value}})
+    with pytest.raises(ValueError, match=field):
+        BROKER._validate_span(span, "parent-run")
+
+
 @pytest.mark.parametrize(
     ("changes", "field"),
     [

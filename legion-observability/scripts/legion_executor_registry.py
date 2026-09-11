@@ -14,10 +14,7 @@ import re
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - py<3.11
-    try:
-        import tomli as tomllib
-    except ModuleNotFoundError:  # pragma: no cover - optional py<3.11 dependency
-        tomllib = None
+    from _vendor import tomli as tomllib
 
 
 # Keep this intentionally conservative legacy fallback.  It is used only when
@@ -80,7 +77,7 @@ def _load_toml(path):
     """Parse complete TOML or fail closed on Python versions without a parser."""
     if tomllib is None:
         raise ExecutorRegistryError(
-            "TOML parser unavailable; install tomli when running Python earlier than 3.11"
+            "TOML parser unavailable; reinstall Legion Core with its bundled runtime files"
         )
     with open(path, "rb") as fh:
         return tomllib.load(fh)

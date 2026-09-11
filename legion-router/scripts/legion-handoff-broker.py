@@ -279,9 +279,18 @@ def _validate_json_schema(payload: Any, schema: dict[str, Any], path: str = "spa
         missing = [name for name in schema.get("required", []) if name not in payload]
         if missing:
             raise ValueError(f"{path} is missing required field {missing[0]}")
-        for name, child_schema in schema.get("properties", {}).items():
+        properties = schema.get("properties", {})
+        for name, child_schema in properties.items():
             if name in payload:
                 _validate_json_schema(payload[name], child_schema, f"{path}.{name}")
+        additional = schema.get("additionalProperties", True)
+        for name, value in payload.items():
+            if name in properties:
+                continue
+            if additional is False:
+                raise ValueError(f"{path}.{name} is not permitted")
+            if isinstance(additional, dict):
+                _validate_json_schema(value, additional, f"{path}.{name}")
     for condition in schema.get("allOf", []):
         predicate = condition.get("if")
         if not isinstance(predicate, dict):

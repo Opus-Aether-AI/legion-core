@@ -109,6 +109,25 @@ def test_aggregate_partial_span_preserves_known_subtotal_and_attempt_counts():
     assert group["known_usage_runs"] == 2
 
 
+def test_aggregate_rejects_malformed_known_and_partial_usage_values():
+    malformed_values = (-1, 1.5, True, "10", None)
+    for value in malformed_values:
+        known = agg.aggregate([
+            {"schema": "legion.span.v1", "executor": "bad-known", "status": "ok",
+             "tokens": {"input_tokens": value}, "usage_status": "known"}
+        ])["groups"]["bad-known"]
+        partial = agg.aggregate([
+            {"schema": "legion.span.v1", "executor": "bad-partial", "status": "ok",
+             "tokens": None, "usage_status": "partial",
+             "known_usage": {"input_tokens": value}, "known_usage_attempts": 2}
+        ])["groups"]["bad-partial"]
+
+        assert known["usage_status"] == "unknown"
+        assert known["known_usage_runs"] == 0
+        assert partial["usage_status"] == "unknown"
+        assert partial["known_usage_runs"] == 0
+
+
 def test_load_tolerates_garbage_lines(tmp_path):
     p = tmp_path / "s.jsonl"
     p.write_text('{"schema":"legion.span.v1","executor":"a","model":"m","status":"ok"}\nGARBAGE\n\n')

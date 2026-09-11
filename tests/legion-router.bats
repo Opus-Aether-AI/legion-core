@@ -179,6 +179,50 @@ SH
     export PATH="$shim_dir:$PATH"
 }
 
+install_prompt_timeout_supervisor_shim() {
+    local shim_dir="$TEST_TMPDIR/prompt-timeout-python" real_python
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  status_file="" launch_gate="" launch_token="" max_runtime=30
+  arguments=("$@")
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status-file) status_file="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime="$2"; shift 2 ;;
+      --launch-gate-file) launch_gate="$2"; shift 2 ;;
+      --launch-gate-token) launch_token="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ "$status_file" == *-prompt-review-*/* && -n "$launch_gate" ]]; then
+    temp="$(mktemp "${launch_gate%/*}/.prompt-timeout-ready.XXXXXX")" || exit 70
+    jq -cn --arg token "$launch_token" --argjson pid "$$" \
+      '{schema:"legion.child-launch-gate.v1",status:"ready",token:$token,supervisor_pid:$pid}' > "$temp"
+    chmod 600 "$temp"; mv -f "$temp" "$launch_gate"
+    for ((i = 0; i < 500; i++)); do
+      jq -e --arg token "$launch_token" --argjson pid "$$" \
+        '.status == "go" and .token == $token and .supervisor_pid == $pid' \
+        "$launch_gate" >/dev/null 2>&1 && break
+      /bin/sleep 0.02
+    done
+    jq -cn --argjson runtime "$max_runtime" '
+      {schema:"legion.child-execution-lease.v1",status:"launch_failed",
+       reason:"inherited child lease deadline expired during launch setup",
+       max_runtime_seconds:$runtime}' > "$status_file"
+    exit 124
+  fi
+  exec "$LEGION_TEST_REAL_PYTHON" "${arguments[@]}"
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export PATH="$shim_dir:$PATH"
+}
+
 install_exhausted_remaining_seconds_python_shim() {
     local shim_dir="$TEST_TMPDIR/exhausted-remaining-python" real_python
     real_python="$(command -v python3)"
@@ -4326,6 +4370,34 @@ PY
     # A launch failure is candidate-local: the outer walk must advance rather
     # than terminalizing immediately as if the admitted adapter had run.
     [ "$(find "$art" -maxdepth 1 -type d -name 'prompt-review-*' | wc -l | tr -d ' ')" -ge 2 ]
+}
+
+@test "delegate review: prompt no-launch deadline timeout is terminal and never falls back" {
+    local repo result art lease
+    repo="$(make_test_repo review-prompt-launch-timeout)"
+    install_prompt_timeout_supervisor_shim
+
+    MOCK_CODEX_REVIEW_QUOTA=1 run "$DELEGATE" review --base HEAD \
+      --repo "$repo" --quiet
+
+    [ "$status" -ne 0 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "timed_out"
+      and (.reason | contains("deadline expired during launch setup"))'
+    art="$(dirname "$(echo "$result" | jq -r .terminal_receipt)")"
+    jq -e '.status == "timed_out" and .codex_exit == 124' "$art/terminal.json"
+    lease="$(find "$art" -path '*/prompt-review-*/lease.json' -type f -print -quit)"
+    [ -n "$lease" ]
+    jq -e '.schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed"
+      and (.reason | contains("deadline expired during launch setup"))
+      and (has("child_exit_code") | not)' "$lease"
+    [ ! -e "$(dirname "$lease")/attempt.json" ]
+    [ ! -e "$(dirname "$lease")/failure.json" ]
+    [ "$(find "$art" -maxdepth 1 -type d -name 'prompt-review-*' | wc -l | tr -d ' ')" -eq 1 ]
+    assert_mock_not_called agent
+    assert_mock_not_called opencode
+    assert_mock_not_called claude
 }
 
 @test "delegate review: prompt prelaunch cleanup failure remains containment failure" {

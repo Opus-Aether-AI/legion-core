@@ -3372,10 +3372,17 @@ $(cat "$patch")
         "$review_preflight_receipt" "$ex" "$model" "$review_sandbox" 2>/dev/null || true)"
     elif [[ -n "$review_lease_receipt" ]] && prompt_review_launch_failed_no_spend \
         "$review_preflight_receipt" "$review_lease_receipt" "$ex" "$model" "$review_sandbox"; then
-      preflight_no_spend_status=launch_failed
-      # This authenticated zero-attempt result means only that this candidate
-      # could not launch. Let the outer immutable reviewer walk try the next one.
-      review_launch_failed=1
+      if jq -e '.status == "timed_out"' "$stream" >/dev/null 2>&1; then
+        # The adapter and authenticated no-child lease agree that the shared
+        # deadline expired before launch. This is terminal for the whole route,
+        # not candidate-local unavailability.
+        preflight_no_spend_status=timed_out
+      else
+        preflight_no_spend_status=launch_failed
+        # This authenticated zero-attempt result means only that this candidate
+        # could not launch. Let the outer immutable reviewer walk try the next one.
+        review_launch_failed=1
+      fi
     fi
   fi
   if [[ -z "$review_preflight_receipt" || -z "$review_attempt_receipt" || -z "$review_lease_receipt" ||
@@ -4144,6 +4151,7 @@ cmd_review() {
       && jq -e '.status == "timed_out"' "$attempt_stream" >/dev/null 2>&1; then
       status="timed_out"
       reason="$(jq -r '.reason // "child execution lease expired"' "$attempt_stream")"
+      rc=124
       break
     fi
 
@@ -4237,12 +4245,15 @@ cmd_review() {
     if [[ "$status" == "ok" ]]; then
       break
     fi
+    # A shared deadline or containment failure is terminal even when the
+    # adapter also proves that no provider child launched. Only an ordinary
+    # launch failure is candidate-local unavailability.
+    [[ "$status" != "timed_out" && "$status" != "containment_failed" ]] || break
     if [[ "$review_launch_failed" -eq 1 ]]; then
       note "⚠ reviewer '$review_executor' failed to launch after admission; trying the next candidate"
       reason="reviewer-unavailable"
       continue
     fi
-    [[ "$status" != "timed_out" && "$status" != "containment_failed" ]] || break
     if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
       note "⚠ reviewer '$review_executor' is unavailable (exit $rc); trying the next candidate"
       reason="reviewer-unavailable"

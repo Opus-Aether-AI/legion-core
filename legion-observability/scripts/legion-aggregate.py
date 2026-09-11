@@ -57,13 +57,20 @@ def _num(x):
     ) else 0
 
 
+def _valid_usage(value):
+    return isinstance(value, dict) and all(
+        isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        for item in value.values()
+    )
+
+
 def _provenance_status(span, kind):
     status = span.get(f"{kind}_status")
     value = span.get("cost_usd" if kind == "cost" else "tokens")
     value_is_known = (
         isinstance(value, (int, float)) and not isinstance(value, bool)
         and math.isfinite(value) and value >= 0
-    ) if kind == "cost" else isinstance(value, dict)
+    ) if kind == "cost" else _valid_usage(value)
     if status == "known":
         return "known" if value_is_known else "unknown"
     if status == "partial":
@@ -72,7 +79,7 @@ def _provenance_status(span, kind):
         known_value_is_valid = (
             isinstance(known_value, (int, float)) and not isinstance(known_value, bool)
             and math.isfinite(known_value) and known_value >= 0
-        ) if kind == "cost" else isinstance(known_value, dict)
+        ) if kind == "cost" else _valid_usage(known_value)
         return "partial" if known_value_is_valid and _positive_count(known_count) else "unknown"
     if status in {"unknown", "not_applicable"}:
         return status

@@ -64,6 +64,14 @@ Legion's local validation and packaging lean on:
 - [Git](https://git-scm.com/) for worktree-based delegation and reproducible
   diff handling.
 
+## Bundled runtime dependencies
+
+- [Tomli](https://github.com/hukkin/tomli) 2.3.1 is bundled under
+  `legion-observability/scripts/_vendor/tomli` so the npm runtime can parse the
+  complete TOML routing contract on supported Python 3.9 and 3.10 installations
+  without a network-time dependency install. Tomli is MIT-licensed; its notice
+  is retained alongside the bundled source.
+
 ## Provenance
 
 legion-core was extracted from the broader Legion marketplace and sanitized into

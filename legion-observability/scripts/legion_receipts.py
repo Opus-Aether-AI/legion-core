@@ -110,6 +110,12 @@ def _validate_terminal_failure(terminal_status, failure):
         raise ValueError("non-successful attempts require a typed failure")
 
 
+def _validate_duration_ms(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or value < 0 or (isinstance(value, float) and not math.isfinite(value)):
+        raise ValueError("duration_ms must be a finite non-negative number")
+
+
 def failure_receipt(*, run_id, attempt_id, failure_class, retryable, output_started,
                     provider_code=None, message=None, failure_id=None, ts=None):
     _require_string("run_id", run_id)
@@ -122,9 +128,15 @@ def failure_receipt(*, run_id, attempt_id, failure_class, retryable, output_star
         _require_string("provider_code", provider_code)
     if message is not None:
         _require_string("message", message)
+    if failure_id is not None:
+        _require_string("failure_id", failure_id)
+    if ts is not None:
+        _require_string("ts", ts)
     return {
-        "schema": "legion.failure.v1", "failure_id": failure_id or _identifier("failure"),
-        "run_id": run_id, "attempt_id": attempt_id, "ts": ts or _now(),
+        "schema": "legion.failure.v1",
+        "failure_id": failure_id if failure_id is not None else _identifier("failure"),
+        "run_id": run_id, "attempt_id": attempt_id,
+        "ts": ts if ts is not None else _now(),
         "class": failure_class, "provider_code": provider_code, "retryable": retryable,
         "output_started": output_started, "message": message,
     }
@@ -166,8 +178,7 @@ def attempt_receipt(*, run_id, ordinal, executor, provider, config_identity,
         raise ValueError("ordinal must be a positive integer")
     if terminal_status not in TERMINAL_STATUSES:
         raise ValueError(f"terminal_status must be one of {sorted(TERMINAL_STATUSES)}")
-    if isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)) or duration_ms < 0:
-        raise ValueError("duration_ms must be non-negative")
+    _validate_duration_ms(duration_ms)
     if not isinstance(output_started, bool):
         raise ValueError("output_started must be a boolean")
     reconciliation = None
@@ -302,9 +313,7 @@ def validate_attempt(receipt):
         raise ValueError("invalid terminal_status")
     if not isinstance(receipt["output_started"], bool):
         raise ValueError("output_started must be a boolean")
-    if isinstance(receipt["duration_ms"], bool) or not isinstance(receipt["duration_ms"], (int, float)) \
-            or receipt["duration_ms"] < 0:
-        raise ValueError("duration_ms must be non-negative")
+    _validate_duration_ms(receipt["duration_ms"])
     _validate_terminal_failure(receipt["terminal_status"], receipt["failure"])
     if receipt["failure"] is not None:
         validate_failure(receipt["failure"])

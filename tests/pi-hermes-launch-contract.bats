@@ -392,6 +392,63 @@ assert_typed_pre_provider_timeout() {
   done
 }
 
+@test "Pi launch failure reason is reused from the verified receipt descriptor" {
+  local helper="$TEST_TMPDIR/provider-launch-status.sh"
+  local receipt="$TEST_TMPDIR/provider-launch-reason.json"
+  local token provider evidence reason
+  token="$(printf '%064d' 0)"
+  provider="$TEST_TMPDIR/provider-for-reason"
+  : > "$provider"
+  python3 - "$receipt" "$token" "$provider" <<'PY'
+import hashlib
+import hmac
+import json
+import sys
+
+path, token, executable = sys.argv[1:]
+payload = {
+    "schema": "legion.provider-launch.v1",
+    "status": "launch_failed",
+    "executable_path": executable,
+    "errno": 2,
+    "reason": "verified original reason",
+}
+encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+payload["auth"] = hmac.new(token.encode(), encoded, hashlib.sha256).hexdigest()
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, separators=(",", ":"))
+PY
+  {
+    awk '
+      /^provider_launch_status\(\)/ { emit=1 }
+      emit { print }
+      emit && /^PY$/ { getline; print; emit=0 }
+    ' "$REPO_ROOT/legion-router/scripts/legion-pi-hermes.sh"
+    sed -n '/^provider_launch_reason()/,/^}/p' \
+      "$REPO_ROOT/legion-router/scripts/legion-pi-hermes.sh"
+    cat <<'SH'
+PROVIDER_LAUNCH_RECEIPT="$1"
+PROVIDER_LAUNCH_TOKEN="$2"
+PROVIDER_BIN="$3"
+evidence="$(provider_launch_status)"
+# Simulate a provider replacing the pathname after the verified descriptor has
+# been consumed but before the caller classifies the failure reason.
+printf '%s\n' '{"reason":"replacement-controlled reason"}' > "$PROVIDER_LAUNCH_RECEIPT"
+printf '%s\n' "$evidence"
+provider_launch_reason "$evidence"
+SH
+  } > "$helper"
+
+  run bash "$helper" "$receipt" "$token" "$provider"
+
+  [ "$status" -eq 0 ]
+  evidence="$(printf '%s\n' "$output" | sed -n '1p')"
+  reason="$(printf '%s\n' "$output" | sed -n '2p')"
+  jq -e '.status == "launch_failed" and .reason == "verified original reason"' \
+    <<<"$evidence"
+  [ "$reason" = "verified original reason" ]
+}
+
 @test "Pi and Hermes type provider disappearance during post-admission re-resolution as no-launch" {
   local adapter repo provider run_id result_file preflight rc
   for adapter in pi hermes; do

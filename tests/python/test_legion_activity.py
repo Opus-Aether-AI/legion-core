@@ -144,6 +144,64 @@ def test_parse_stream_sums_usage_and_collects_tools_files_and_items(tmp_path):
     assert "3 items" in parsed["summary"]
 
 
+def test_live_stream_ignores_malformed_and_noncanonical_usage(tmp_path):
+    stream_path = tmp_path / "stream.jsonl"
+    malformed = (
+        {"input_tokens": -1},
+        {"input_tokens": 1.5},
+        {"input_tokens": True},
+        {"input_tokens": "1"},
+        {"uncached_tokens": 7},
+        {"input_tokens": 7, "future_tokens": 1},
+    )
+    stream_path.write_text(
+        "".join(
+            json.dumps({"type": "turn.completed", "usage": usage}) + "\n"
+            for usage in malformed
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = activity.parse_stream(str(stream_path))
+    assert parsed["_usage_observed"] is False
+    assert parsed["usage"] == activity._zero_usage()
+
+    enriched = activity.enrich_run(
+        {
+            "run_id": "malformed",
+            "model": "test-model-alpha",
+            "lifecycle": {"phase": "running"},
+        },
+        str(tmp_path),
+        activity._normalize_costs(_costs_payload()),
+    )
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+
+
+def test_live_stream_sums_only_fully_valid_completed_usage(tmp_path):
+    stream_path = tmp_path / "stream.jsonl"
+    stream_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 100, "unexpected_tokens": 1},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    parsed = activity.parse_stream(str(stream_path))
+    assert parsed["_usage_observed"] is True
+    assert parsed["usage"]["input_tokens"] == 5
+
+
 def test_run_cost_uses_stream_and_resume_stream_usage_not_spans(tmp_path):
     costs_path = tmp_path / "costs.json"
     run_dir = tmp_path / "runs" / "run-1"

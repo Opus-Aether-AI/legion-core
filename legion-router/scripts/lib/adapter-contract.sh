@@ -43,6 +43,13 @@ LEGION_ADAPTER_SIGNAL_START_MS=""
 LEGION_ADAPTER_SIGNAL_OUTPUT_FILE=""
 LEGION_ADAPTER_SIGNAL_TERMINALIZED=0
 LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN=""
+LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE=0
+LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=0
+LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=0
+LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE=""
+LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN=""
+LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID=""
+LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
 LEGION_ADAPTER_LAUNCH_GATE_PATH=""
 LEGION_ADAPTER_LAUNCH_GATE_TOKEN=""
 LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=""
@@ -193,10 +200,82 @@ legion_adapter_prepare_supervisor_launch_gate() {
   LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=""
 }
 
+# Record a signal during the shell-to-supervisor launch handshake. While the
+# decision is unpublished, the trap replaces the exact temp file that the main
+# path will rename; once rename has linearized, it replaces a still-ready/go
+# gate with cancel. Thus the trap and publisher share one decision payload
+# instead of racing a local pending snapshot against an unconditional `go`.
+legion_adapter_record_launch_signal() {
+  local pending_name="$1" signum="$2" normalized="$2" directory cancel_temp=""
+  case "$normalized" in HUP) normalized=1 ;; INT) normalized=2 ;; TERM) normalized=15 ;; esac
+  printf -v "$pending_name" '%s' "$signum"
+  [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE" -eq 1 ]] || return 0
+  [[ "$normalized" =~ ^(1|2|15)$ ]] || {
+    LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
+    return 0
+  }
+  # A repeated signal can interrupt the commands below. The first handler owns
+  # publication; later handlers still update the caller's pending signal.
+  [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY" -eq 0 ]] || return 0
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=1
+  directory="${LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE%/*}"
+  cancel_temp="$(mktemp "$directory/.launch-gate-signal.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$cancel_temp" ]] || ! jq -cn \
+      --arg token "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN" \
+      --argjson pid "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" \
+      --argjson signal "$normalized" '
+        {schema:"legion.child-launch-gate.v1",status:"cancel",token:$token,
+         supervisor_pid:$pid,signal:$signal}
+      ' > "$cancel_temp" \
+      || ! chmod 600 "$cancel_temp"; then
+    [[ -z "$cancel_temp" ]] || rm -f "$cancel_temp"
+    LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
+    kill -TERM "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" 2>/dev/null || true
+    LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=0
+    return 0
+  fi
+  if [[ -n "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP" \
+      && -e "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP" ]]; then
+    if ! mv -f "$cancel_temp" "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP"; then
+      rm -f "$cancel_temp"
+      LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
+      kill -TERM "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" 2>/dev/null || true
+    fi
+  elif jq -e --arg token "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN" \
+      --argjson pid "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" '
+        .schema == "legion.child-launch-gate.v1"
+        and (.status == "ready" or .status == "go")
+        and .token == $token and .supervisor_pid == $pid
+        and ((keys_unsorted - ["schema","status","token","supervisor_pid"]) | length == 0)
+      ' "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE" >/dev/null 2>&1; then
+    if ! mv -f "$cancel_temp" "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE"; then
+      rm -f "$cancel_temp"
+      LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
+      kill -TERM "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" 2>/dev/null || true
+    fi
+  else
+    rm -f "$cancel_temp"
+  fi
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=0
+}
+
+legion_adapter_close_launch_signal_window() {
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE=0
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=0
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=0
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE=""
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN=""
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID=""
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
+}
+
 legion_adapter_complete_supervisor_launch_gate() {
   local supervisor_pid="$1" lease_path="$2" pending_name="$3"
   local gate="$LEGION_ADAPTER_LAUNCH_GATE_PATH" token="$LEGION_ADAPTER_LAUNCH_GATE_TOKEN"
-  local pending="" decision=go temp="" i sleep_bin=/bin/sleep
+  local pending="" decision=go temp="" gate_cancelled=0 i sleep_bin=/bin/sleep
+  # Do not let stale publication state from an interrupted or reused shell
+  # influence this handshake, including early polling failures below.
+  legion_adapter_close_launch_signal_window
   [[ -x "$sleep_bin" ]] || sleep_bin="$(command -v sleep 2>/dev/null || true)"
   [[ -n "$sleep_bin" ]] || return 0
   LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=containment_failed
@@ -218,7 +297,14 @@ legion_adapter_complete_supervisor_launch_gate() {
   jq -e --arg token "$token" --argjson pid "$supervisor_pid" '
     .schema == "legion.child-launch-gate.v1" and .status == "ready"
     and .token == $token and .supervisor_pid == $pid
+    and ((keys_unsorted - ["schema","status","token","supervisor_pid"]) | length == 0)
   ' "$gate" >/dev/null 2>&1 || return 0
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE=1
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=0
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE="$gate"
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN="$token"
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID="$supervisor_pid"
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
   pending="${!pending_name:-}"
   case "$pending" in
     HUP) pending=1 ;;
@@ -226,17 +312,64 @@ legion_adapter_complete_supervisor_launch_gate() {
     TERM) pending=15 ;;
   esac
   [[ -z "$pending" ]] || decision=cancel
-  temp="$(mktemp "${gate%/*}/.launch-gate-decision.XXXXXX")" || return 0
+  temp="$(mktemp "${gate%/*}/.launch-gate-decision.XXXXXX")" || {
+    legion_adapter_close_launch_signal_window
+    return 0
+  }
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP="$temp"
   if ! jq -cn --arg status "$decision" --arg token "$token" \
       --argjson pid "$supervisor_pid" --argjson signum "${pending:-0}" '
       {schema:"legion.child-launch-gate.v1",status:$status,token:$token,supervisor_pid:$pid}
       + (if $status == "cancel" then {signal:$signum} else {} end)
     ' > "$temp"; then
     rm -f "$temp"
+    legion_adapter_close_launch_signal_window
     return 0
   fi
-  chmod 600 "$temp" || { rm -f "$temp"; return 0; }
-  mv -f "$temp" "$gate" || { rm -f "$temp"; return 0; }
+  chmod 600 "$temp" || {
+    rm -f "$temp"
+    legion_adapter_close_launch_signal_window
+    return 0
+  }
+  # Revalidate after temp construction. A trap that observed a signal either
+  # replaced this temp with cancel or replaced the gate itself; never overwrite
+  # that decision with a stale local `go`.
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED" -eq 1 ]]; then
+    rm -f "$temp"
+    legion_adapter_close_launch_signal_window
+    return 0
+  elif jq -e --arg token "$token" --argjson pid "$supervisor_pid" '
+        .schema == "legion.child-launch-gate.v1" and .status == "ready"
+        and .token == $token and .supervisor_pid == $pid
+        and ((keys_unsorted - ["schema","status","token","supervisor_pid"]) | length == 0)
+      ' "$gate" >/dev/null 2>&1; then
+    :
+  elif jq -e --arg token "$token" --argjson pid "$supervisor_pid" '
+        .schema == "legion.child-launch-gate.v1" and .status == "cancel"
+        and .token == $token and .supervisor_pid == $pid
+        and (.signal | type == "number" and (. == 1 or . == 2 or . == 15))
+        and ((keys_unsorted - ["schema","status","token","supervisor_pid","signal"]) | length == 0)
+      ' "$gate" >/dev/null 2>&1; then
+    rm -f "$temp"
+    LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
+    gate_cancelled=1
+  else
+    rm -f "$temp"
+    legion_adapter_close_launch_signal_window
+    return 0
+  fi
+  if [[ "$gate_cancelled" -eq 0 ]]; then
+    mv -f "$temp" "$gate" || {
+      rm -f "$temp"
+      legion_adapter_close_launch_signal_window
+      return 0
+    }
+    LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
+  fi
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED" -eq 1 ]]; then
+    legion_adapter_close_launch_signal_window
+    return 0
+  fi
   for ((i = 0; i < 500; i++)); do
     if jq -e --arg token "$token" --argjson pid "$supervisor_pid" '
         .schema == "legion.child-launch-gate.v1" and .status == "started"
@@ -245,22 +378,27 @@ legion_adapter_complete_supervisor_launch_gate() {
         and ((keys_unsorted - ["schema","status","token","supervisor_pid","child_pid"]) | length == 0)
       ' "$gate" >/dev/null 2>&1; then
       LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=started
+      legion_adapter_close_launch_signal_window
       return 0
     fi
     if legion_adapter_supervisor_launch_failed "$lease_path"; then
       LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=launch_failed
+      legion_adapter_close_launch_signal_window
       return 0
     fi
     if legion_adapter_supervisor_cleanup_failed_before_launch "$lease_path"; then
+      legion_adapter_close_launch_signal_window
       return 0
     fi
     if ! kill -0 "$supervisor_pid" 2>/dev/null; then
       legion_adapter_supervisor_launch_failed "$lease_path" \
         && LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=launch_failed
+      legion_adapter_close_launch_signal_window
       return 0
     fi
     "$sleep_bin" 0.02
   done
+  legion_adapter_close_launch_signal_window
 }
 
 # A malformed, unauthenticated, or stalled launch gate leaves the provider
@@ -386,7 +524,11 @@ legion_adapter_preflight_failure_disposition() {
   [[ -f "$receipt" && ! -L "$receipt" ]] || { printf containment_failed; return 0; }
   status="$(jq -r 'if .schema == "legion.preflight.v1" then (.status // "") else "" end' \
     "$receipt" 2>/dev/null || true)"
-  [[ "$status" == unavailable ]] || { printf refused; return 0; }
+  case "$status" in
+    incompatible|untested) printf refused; return 0 ;;
+    unavailable) ;;
+    *) printf containment_failed; return 0 ;;
+  esac
   probe="$(jq -r '.compatibility.version.probe_status // empty' "$receipt" 2>/dev/null || true)"
   if [[ -z "$probe" ]]; then
     printf unavailable

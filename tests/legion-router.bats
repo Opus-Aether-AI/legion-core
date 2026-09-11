@@ -2725,6 +2725,8 @@ SH
     mkdir -p "$art"
     printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null}' > "$art/attempt-1.json"
     {
+      sed -n '/^legion_adapter_record_launch_signal()/,/^}/p' \
+        "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh"
       sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
       sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"

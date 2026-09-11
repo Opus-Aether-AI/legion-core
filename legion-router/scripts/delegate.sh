@@ -1093,9 +1093,9 @@ native_span_publication_begin() {
   else
     # Bash dispatches traps between commands. Defer the terminal handler until
     # the append and durable claim are complete, then replay the signal.
-    trap 'NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=INT' INT
-    trap 'NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=TERM' TERM
-    trap 'NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=HUP' HUP
+    trap 'legion_adapter_record_launch_signal NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL INT' INT
+    trap 'legion_adapter_record_launch_signal NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL TERM' TERM
+    trap 'legion_adapter_record_launch_signal NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL HUP' HUP
   fi
 }
 

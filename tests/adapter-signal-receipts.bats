@@ -392,6 +392,114 @@ assert_signal_receipt() {
   [ "$output" = refused ]
 }
 
+@test "launch gate signal after pending snapshot atomically cancels before go publication" {
+  local gate="$TEST_TMPDIR/race-gate.json" lease="$TEST_TMPDIR/race-lease.json"
+  local launched="$TEST_TMPDIR/provider-launched" token="race-token" supervisor rc=0
+  (
+    local status
+    while true; do
+      status="$(jq -r '.status // empty' "$gate" 2>/dev/null || true)"
+      case "$status" in
+        cancel)
+          jq -cn '{schema:"legion.child-execution-lease.v1",status:"launch_failed",
+            reason:"provider launch cancelled by signal 15 at supervisor gate; no provider launched",
+            max_runtime_seconds:30}' > "$lease"
+          exit 143
+          ;;
+        go)
+          : > "$launched"
+          exit 70
+          ;;
+      esac
+      /bin/sleep 0.01
+    done
+  ) &
+  supervisor=$!
+  jq -cn --arg token "$token" --argjson pid "$supervisor" '
+    {schema:"legion.child-launch-gate.v1",status:"ready",token:$token,supervisor_pid:$pid}
+  ' > "$gate"
+
+  run env CONTRACT="$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" \
+    GATE="$gate" LEASE="$lease" TOKEN="$token" SUPERVISOR="$supervisor" \
+    bash -c '
+      set -euo pipefail
+      set -T
+      source "$CONTRACT"
+      LEGION_ADAPTER_LAUNCH_GATE_PATH="$GATE"
+      LEGION_ADAPTER_LAUNCH_GATE_TOKEN="$TOKEN"
+      PENDING=""
+      trap '\''
+        if [[ "${LEGION_TEST_RACE_FIRED:-0}" == 0
+              && "$BASH_COMMAND" == mv\ -f* \
+              && " ${FUNCNAME[*]:-} " == *" legion_adapter_complete_supervisor_launch_gate "* ]]; then
+          LEGION_TEST_RACE_FIRED=1
+          trap - DEBUG
+          legion_adapter_record_launch_signal PENDING 15
+        fi
+      '\'' DEBUG
+      legion_adapter_complete_supervisor_launch_gate "$SUPERVISOR" "$LEASE" PENDING
+      [[ "$LEGION_TEST_RACE_FIRED" == 1 ]]
+      [[ "$PENDING" == 15 ]]
+      [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" == launch_failed ]]
+      [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE" == 0 ]]
+      [[ -z "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP" ]]
+    '
+  rc=$status
+  kill "$supervisor" 2>/dev/null || true
+  wait "$supervisor" 2>/dev/null || true
+  [ "$rc" -eq 0 ]
+  [ ! -e "$launched" ]
+  jq -e '
+    .schema == "legion.child-launch-gate.v1" and .status == "cancel"
+    and .signal == 15
+    and ((keys_unsorted - ["schema","status","token","supervisor_pid","signal"]) | length == 0)
+  ' "$gate"
+  jq -e '.status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+}
+
+@test "launch gate rejects an extra-key ready receipt at final revalidation" {
+  local gate="$TEST_TMPDIR/extra-ready.json" lease="$TEST_TMPDIR/extra-ready-lease.json"
+  local shim_dir="$TEST_TMPDIR/extra-ready-jq" token="extra-ready-token" supervisor
+  mkdir -p "$shim_dir"
+  /bin/sleep 30 & supervisor=$!
+  jq -cn --arg token "$token" --argjson pid "$supervisor" '
+    {schema:"legion.child-launch-gate.v1",status:"ready",token:$token,supervisor_pid:$pid}
+  ' > "$gate"
+  cat > "$shim_dir/jq" <<'SH'
+#!/usr/bin/env bash
+"$LEGION_TEST_REAL_JQ" "$@"
+rc=$?
+if [[ "$rc" -eq 0 && " $* " == *'status == "ready"'* \
+      && "${LEGION_TEST_READY_MUTATED:-0}" == 0 ]]; then
+  export LEGION_TEST_READY_MUTATED=1
+  path="${!#}"
+  "$LEGION_TEST_REAL_JQ" '.extra=true' "$path" > "$path.tmp"
+  chmod 600 "$path.tmp"
+  mv -f "$path.tmp" "$path"
+fi
+exit "$rc"
+SH
+  chmod +x "$shim_dir/jq"
+  run env PATH="$shim_dir:$PATH" LEGION_TEST_REAL_JQ="$(command -v jq)" \
+    CONTRACT="$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" \
+    GATE="$gate" LEASE="$lease" TOKEN="$token" SUPERVISOR="$supervisor" \
+    bash -c '
+      set -euo pipefail
+      source "$CONTRACT"
+      LEGION_ADAPTER_LAUNCH_GATE_PATH="$GATE"
+      LEGION_ADAPTER_LAUNCH_GATE_TOKEN="$TOKEN"
+      PENDING=""
+      legion_adapter_complete_supervisor_launch_gate "$SUPERVISOR" "$LEASE" PENDING
+      [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" == containment_failed ]]
+      [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE" == 0 ]]
+      [[ -z "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP" ]]
+    '
+  kill "$supervisor" 2>/dev/null || true
+  wait "$supervisor" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  jq -e '.status == "ready" and .extra == true' "$gate"
+}
+
 @test "every foreground adapter aborts a signal pending at its final launch gate" {
   local bash_env="$TEST_TMPDIR/pending-signal.bash" adapter provider_marker signal expected_rc repo run_id rc art out err lease
   install_mock_version_registry

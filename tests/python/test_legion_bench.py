@@ -1018,6 +1018,69 @@ def test_span_totals_do_not_classify_fractional_tokens_as_known(tmp_path):
     assert totals["tokens"] is None
 
 
+def test_span_totals_require_integer_values_inside_usage_maps(tmp_path):
+    malformed_values = (1.0, -1, 1.5, True, "1", None)
+    for index, value in enumerate(malformed_values):
+        spans = tmp_path / f"logs-{index}" / "spans"
+        spans.mkdir(parents=True)
+        payloads = [
+            {
+                "model": "invalid-known",
+                "cost_usd": 0,
+                "cost_status": "known",
+                "tokens": {"input_tokens": value},
+                "usage_status": "known",
+            },
+            {
+                "model": "invalid-partial",
+                "cost_usd": 0,
+                "cost_status": "known",
+                "tokens": None,
+                "usage_status": "partial",
+                "known_usage": {"input_tokens": value},
+                "known_usage_attempts": 1,
+            },
+        ]
+        (spans / "invalid.jsonl").write_text(
+            "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+            encoding="utf-8",
+        )
+
+        totals = bench._span_totals(str(spans.parent))
+        assert totals["usage_status"] == "unknown"
+        assert totals["tokens"] is None
+        assert totals["known_usage"] is None
+        assert totals["known_usage_attempts"] == 0
+
+
+def test_span_totals_preserve_integral_float_legacy_scalar_compatibility(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    (spans / "legacy.jsonl").write_text(
+        json.dumps(
+            {
+                "model": "legacy",
+                "cost_usd": 0,
+                "cost_status": "known",
+                "tokens": 7.0,
+                "usage_status": "known",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+    assert totals["usage_status"] == "known"
+    assert totals["tokens"] == 7
+
+    huge_map_total = 10**1000
+    assert bench._usage_value({"input_tokens": huge_map_total}) == {
+        "total_tokens": huge_map_total
+    }
+    assert bench._usage_value(huge_map_total) is None
+
+
 def test_compare_and_cost_gate_fail_closed_for_partial_metering():
     baseline = {
         "run_id": "base", "suite": "core",

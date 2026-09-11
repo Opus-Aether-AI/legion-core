@@ -99,9 +99,9 @@ finish_claude_signal_accounting() {
 }
 begin_claude_signal_launch() {
   SIGNAL_LAUNCH_PENDING=""
-  trap 'SIGNAL_LAUNCH_PENDING=2' INT
-  trap 'SIGNAL_LAUNCH_PENDING=15' TERM
-  trap 'SIGNAL_LAUNCH_PENDING=1' HUP
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 2' INT
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 15' TERM
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 1' HUP
 }
 abort_pending_claude_signal_launch() {
   local pending="$SIGNAL_LAUNCH_PENDING"
@@ -767,6 +767,7 @@ cmd_run() {
   start_ms="$(date +%s000)"
   local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0
   local any_output_started=0 permission_refused=0 chain_admission_refused=0
+  local chain_admission_disposition="" chain_admission_reason=""
   local chain_stopped_before_launch=0
   local lease_timed_out=0 containment_failed=0 lease_reason=""
   for attempt_model in "${claude_model_chain[@]}"; do
@@ -777,8 +778,25 @@ cmd_run() {
       if ! legion_adapter_preflight claude "$contract_art" "$sandbox" stdin "$model" "$effort" \
           "$premium_consent" "$CLAUDE_BIN"; then
         LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID="$previous_attempt_id"
+        chain_admission_disposition="$(legion_adapter_preflight_failure_disposition \
+          "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+        chain_admission_reason="$LEGION_ADAPTER_PREFLIGHT_REASON"
         chain_admission_refused=1
         chain_stopped_before_launch=1
+        LEGION_ADAPTER_ATTEMPT_PATH=""
+        LEGION_ADAPTER_FAILURE_PATH=""
+        LEGION_CLAUDE_LEASE_RECEIPT=""
+        case "$chain_admission_disposition" in
+          timed_out)
+            lease_timed_out=1
+            lease_reason="$chain_admission_reason"
+            ;;
+          containment_failed)
+            containment_failed=1
+            keep=1
+            lease_reason="$chain_admission_reason (evidence: $LEGION_ADAPTER_PREFLIGHT_PATH; worktree retained: ${wt:-$repo})"
+            ;;
+        esac
         break
       fi
       LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID="$previous_attempt_id"
@@ -1223,9 +1241,34 @@ cmd_run() {
   fi
 
   if [[ "$chain_admission_refused" -eq 1 ]]; then
-    reason="admission_refused"
-    status="failed"
-    result="$LEGION_ADAPTER_PREFLIGHT_REASON"
+    result="$chain_admission_reason"
+    case "$chain_admission_disposition" in
+      unavailable|launch_failed)
+        if [[ "$allow_fallback" -eq 1 ]]; then
+          reason=claude_unavailable
+          finish_deferred_claude_actions
+          finish_claude_signal_accounting
+          note "⚠ Claude fallback model was unavailable at admission: falling back to $fallback_model"
+          run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
+          return $?
+        fi
+        if [[ "$chain_admission_disposition" == launch_failed ]]; then
+          reason="version_probe_launch_failed"
+          status="failed"
+        else
+          reason="admission_refused"
+          status="refused"
+        fi
+        ;;
+      *)
+        reason="admission_refused"
+        # A prior model already produced a paid attempt. Preserve the adapter's
+        # established terminal contract for a later admission refusal: the run
+        # failed after spend, even though the unlaunched candidate itself was
+        # refused and has no fabricated attempt receipt.
+        status="failed"
+        ;;
+    esac
     finish_deferred_claude_actions
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \

@@ -108,6 +108,65 @@ SH
     export PATH="$shim_dir:$PATH"
 }
 
+install_claude_fallback_preflight_shim() {
+    local shim_dir="$TEST_TMPDIR/fallback-preflight-python" real_python
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion_preflight.py \
+      && " $* " == *" --model ${LEGION_TEST_FALLBACK_PREFLIGHT_MODEL} "* ]]; then
+  case "$LEGION_TEST_FALLBACK_PREFLIGHT_MODE" in
+    timed_out)
+      jq -cn '{schema:"legion.preflight.v1",status:"unavailable",
+        reason:"fallback version probe deadline expired",identity:null,
+        cache:{hit:false,key:null},compatibility:{version:{probe_status:"timed_out",
+          probe_reason:"inherited child lease deadline expired during launch setup",
+          probe_lease:{schema:"legion.child-execution-lease.v1",status:"launch_failed",
+            reason:"inherited child lease deadline expired during launch setup",
+            max_runtime_seconds:30}}}}'
+      ;;
+    containment_failed)
+      jq -cn '{schema:"legion.preflight.v1",status:"unavailable",
+        reason:"fallback version evidence malformed",identity:null,
+        cache:{hit:false,key:null},compatibility:{version:{probe_status:"cleanup_failed",
+          probe_reason:"cleanup ownership unresolved"}}}'
+      ;;
+    malformed)
+      jq -cn '{schema:"legion.preflight.v1",status:"unexpected",
+        reason:"fallback receipt status malformed",identity:null,
+        cache:{hit:false,key:null},compatibility:{}}'
+      ;;
+    launch_failed)
+      jq -cn '{schema:"legion.preflight.v1",status:"unavailable",
+        reason:"fallback executable disappeared",identity:null,
+        cache:{hit:false,key:null},compatibility:{version:{probe_status:"launch_failed",
+          probe_reason:"child launch failed: command not found: admitted-claude",
+          probe_lease:{schema:"legion.child-execution-lease.v1",status:"launch_failed",
+            reason:"child launch failed: command not found: admitted-claude",
+            max_runtime_seconds:30}}}}'
+      ;;
+    unavailable)
+      jq -cn '{schema:"legion.preflight.v1",status:"unavailable",
+        reason:"fallback configuration unavailable",identity:null,
+        cache:{hit:false,key:null},compatibility:{}}'
+      ;;
+    refused)
+      jq -cn '{schema:"legion.preflight.v1",status:"incompatible",
+        reason:"fallback model refused by policy",identity:null,
+        cache:{hit:false,key:null},compatibility:{model:{status:"incompatible"}}}'
+      ;;
+    *) exit 70 ;;
+  esac
+  exit 1
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export PATH="$shim_dir:$PATH"
+}
+
 @test "legion-claude: happy path uses claude and emits a claude span" {
     local repo; repo="$(make_test_repo ok1)"
     local context="$TEST_TMPDIR/context.log"
@@ -774,6 +833,68 @@ PY
         --fallback-models "model-b" --repo "$repo" --no-fallback --quiet
     echo "$output" | jq -e '.status != "ok"'
     echo "$output" | jq -e '.reason == "claude_declined"'
+}
+
+@test "legion-claude: fallback preflight preserves timeout containment malformed unavailable launch and refusal" {
+    local mode repo result run_id art worktree
+    install_claude_fallback_preflight_shim
+    export LEGION_TEST_FALLBACK_PREFLIGHT_MODEL=model-b
+    for mode in timed_out containment_failed malformed unavailable launch_failed refused; do
+      repo="$(make_test_repo "fallback-preflight-$mode")"
+      export LEGION_TEST_FALLBACK_PREFLIGHT_MODE="$mode"
+      run_id="fallback-preflight-$mode"
+      MOCK_CLAUDE_DECLINE_MODELS=model-a \
+        run "$LEGION_CLAUDE" run --task x --model model-a \
+          --fallback-models model-b --repo "$repo" --run-id "$run_id" --quiet
+      result="$(printf '%s\n' "$output" | tail -n 1)"
+      if [[ "$mode" == unavailable || "$mode" == launch_failed ]]; then
+        [ "$status" -eq 0 ]
+      else
+        [ "$status" -eq 1 ]
+      fi || {
+        printf 'mode=%s status=%s output=%s\n' "$mode" "$status" "$output" >&2
+        return 1
+      }
+      art="$repo/.legion/runs/$run_id"
+      [ "$(find "$art" -name attempt-1.json | wc -l | tr -d ' ')" -ge 1 ]
+      [ "$(find "$art" -name attempt-2.json | wc -l | tr -d ' ')" -eq 0 ]
+      [ "$(grep -Ec '^claude -p ' "$MOCK_CALL_LOG" || true)" -eq 1 ]
+      case "$mode" in
+        timed_out)
+          jq -e '.status == "timed_out" and .model == "model-b"
+            and .attempt_receipt == null and .failure_receipt == null
+            and (.reason | contains("fallback version probe deadline expired"))' <<<"$result"
+          assert_mock_not_called legion-delegate
+          ;;
+        containment_failed|malformed)
+          jq -e --arg mode "$mode" '.status == "containment_failed" and .model == "model-b"
+            and .attempt_receipt == null and .failure_receipt == null
+            and (.result | contains(if $mode == "malformed"
+              then "fallback receipt status malformed"
+              else "fallback version evidence malformed" end))' <<<"$result"
+          worktree="$(jq -r .worktree <<<"$result")"
+          [ -d "$worktree" ]
+          assert_mock_not_called legion-delegate
+          ;;
+        unavailable)
+          jq -e '.status == "ok" and .executor == "codex"
+            and .reason == "claude_unavailable" and .fell_back == true' <<<"$result"
+          assert_mock_called legion-delegate
+          ;;
+        launch_failed)
+          jq -e '.status == "ok" and .executor == "codex"
+            and .reason == "claude_unavailable" and .fell_back == true' <<<"$result"
+          assert_mock_called legion-delegate
+          ;;
+        refused)
+          jq -e '.status == "failed" and .reason == "admission_refused"
+            and .model == "model-b" and .attempt_receipt == null
+            and .failure_receipt == null' <<<"$result"
+          assert_mock_not_called legion-delegate
+          ;;
+      esac
+      : > "$MOCK_CALL_LOG"
+    done
 }
 
 @test "legion-claude: a single-model chain that declines is not reported ok" {

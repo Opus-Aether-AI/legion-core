@@ -129,6 +129,90 @@ def test_cost_for_bills_cached_tokens_at_cache_read_and_falls_back_to_default(tm
     assert unknown == 0.00162
 
 
+def test_matched_malformed_long_context_pricing_is_not_observed(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_stream(run_dir / "stream.jsonl")
+    malformed_blocks = (
+        None,
+        [],
+        {},
+        {"threshold_input_tokens": None},
+        {"threshold_input_tokens": -1},
+        {"threshold_input_tokens": True},
+        {"threshold_input_tokens": "272000"},
+        {"threshold_input_tokens": float("inf")},
+        {"threshold_input_tokens": 10**10000},
+        {"threshold_input_tokens": 1000, "input_multiplier": -1},
+        {"threshold_input_tokens": 1000, "input_multiplier": True},
+        {"threshold_input_tokens": 1000, "input_multiplier": "2"},
+        {"threshold_input_tokens": 1000, "output_multiplier": float("nan")},
+        {"threshold_input_tokens": 1000, "output_multiplier": 10**10000},
+    )
+
+    for long_context in malformed_blocks:
+        payload = _costs_payload()
+        payload["models"][0]["long_context"] = long_context
+        costs = activity._normalize_costs(payload)
+        _rates, observed = activity._rates_for_with_evidence(
+            "test-model-alpha", costs
+        )
+        assert observed is False
+        enriched = activity.enrich_run(
+            {
+                "run_id": "malformed-pricing",
+                "model": "test-model-alpha",
+                "lifecycle": {"phase": "running"},
+            },
+            str(run_dir),
+            costs,
+        )
+        assert enriched["cost_usd"] is None
+        assert enriched["cost_status"] == "unknown"
+
+
+def test_pricing_evidence_accepts_absent_or_valid_zero_long_context_fields():
+    without_tier = activity._normalize_costs(_costs_payload())
+    _rates, observed = activity._rates_for_with_evidence(
+        "test-model-alpha", without_tier
+    )
+    assert observed is True
+
+    payload = _costs_payload()
+    payload["models"][0]["long_context"] = {
+        "threshold_input_tokens": 0,
+        "input_multiplier": 0,
+        "output_multiplier": 0,
+    }
+    with_zero_tier = activity._normalize_costs(payload)
+    rates, observed = activity._rates_for_with_evidence(
+        "test-model-alpha", with_zero_tier
+    )
+    assert observed is True
+    assert rates["lc_threshold"] == 0
+    assert rates["lc_input_multiplier"] == 0
+    assert rates["lc_output_multiplier"] == 0
+
+
+def test_malformed_base_and_default_rates_fail_closed_without_huge_int_crash():
+    for value in (-1, True, "2", float("inf"), float("nan"), 10**10000):
+        matched_payload = _costs_payload()
+        matched_payload["models"][0]["input"] = value
+        matched = activity._normalize_costs(matched_payload)
+        _rates, matched_observed = activity._rates_for_with_evidence(
+            "test-model-alpha", matched
+        )
+        assert matched_observed is False
+
+        default_payload = _costs_payload()
+        default_payload["default"]["output"] = value
+        default = activity._normalize_costs(default_payload)
+        _rates, default_observed = activity._rates_for_with_evidence(
+            "unmatched-model", default
+        )
+        assert default_observed is False
+
+
 def test_parse_stream_sums_usage_and_collects_tools_files_and_items(tmp_path):
     stream_path = tmp_path / "stream.jsonl"
     _write_stream(stream_path)

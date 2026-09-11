@@ -707,29 +707,33 @@ def _span_token_total(tokens: Any) -> int:
 
 
 def _valid_nonnegative_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and value >= 0
-    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return False
+    return math.isfinite(numeric) and numeric >= 0
 
 
 def _positive_count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
-def _valid_token_count(value: Any) -> bool:
+def _valid_legacy_token_scalar(value: Any) -> bool:
     return _valid_nonnegative_number(value) and float(value).is_integer()
 
 
 def _usage_value(value: Any) -> dict[str, int] | None:
-    if _valid_token_count(value):
+    # Pre-provenance benchmark artifacts used a single numeric total. Preserve
+    # integral-float compatibility for that scalar form only; canonical span
+    # usage maps follow legion.span.v1 and require actual JSON integers.
+    if _valid_legacy_token_scalar(value):
         return {"total_tokens": int(value)}
     if not isinstance(value, dict):
         return None
     for item in value.values():
-        if not _valid_token_count(item):
+        if not isinstance(item, int) or isinstance(item, bool) or item < 0:
             return None
     return {"total_tokens": _span_token_total(value)}
 

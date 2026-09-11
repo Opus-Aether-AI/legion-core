@@ -92,9 +92,9 @@ on_signal() {
 }
 begin_signal_launch() {
   SIGNAL_LAUNCH_PENDING=""
-  trap 'SIGNAL_LAUNCH_PENDING=2' INT
-  trap 'SIGNAL_LAUNCH_PENDING=15' TERM
-  trap 'SIGNAL_LAUNCH_PENDING=1' HUP
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 2' INT
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 15' TERM
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 1' HUP
 }
 abort_pending_signal_launch() {
   local pending="$SIGNAL_LAUNCH_PENDING"

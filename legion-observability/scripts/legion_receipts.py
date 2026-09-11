@@ -42,24 +42,36 @@ def _validate_usage(value):
             raise ValueError(f"usage.{name} must be a non-negative integer")
 
 
+def _validate_cost(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError("cost_usd must be a finite non-negative number")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise ValueError("cost_usd must be a finite non-negative number")
+
+
 def _validate_provenance(kind, value, status, source, *, aggregate=False):
     allowed = PROVENANCE_STATUSES if aggregate else PROVENANCE_STATUSES - {"partial"}
     if status not in allowed:
         raise ValueError(f"{kind}_status must be one of {sorted(allowed)}")
+    if source is not None:
+        _require_string(f"{kind}_source", source)
     if status == "known":
         if value is None:
             raise ValueError(f"known {kind} requires a value")
-        _require_string(f"{kind}_source", source)
+        if source is None:
+            raise ValueError(f"{kind}_source must be a non-empty string")
     elif value is not None:
         raise ValueError(f"{kind} must be null when {kind}_status is {status}")
     elif status in {"unknown", "not_applicable"} and source is not None:
         raise ValueError(f"{kind}_source must be null when {kind}_status is {status}")
     if kind == "usage" and value is not None:
         _validate_usage(value)
-    if kind == "cost":
-        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
-                                  or not math.isfinite(value) or value < 0):
-            raise ValueError("cost_usd must be a finite non-negative number")
+    if kind == "cost" and value is not None:
+        _validate_cost(value)
 
 
 def _validate_reconciliation(value):
@@ -85,7 +97,7 @@ def _validate_reconciliation(value):
         raise ValueError("aggregate known_usage must be null when no usage is known")
     known_cost = value["known_cost_usd"]
     if value["known_cost_attempts"]:
-        _validate_provenance("cost", known_cost, "known", value["cost_source"] or "mixed")
+        _validate_cost(known_cost)
     elif known_cost is not None:
         raise ValueError("aggregate known_cost_usd must be null when no cost is known")
     _validate_provenance("usage", value["usage"], value["usage_status"], value["usage_source"], aggregate=True)
@@ -174,6 +186,8 @@ def attempt_receipt(*, run_id, ordinal, executor, provider, config_identity,
                         ("parent_attempt_id", parent_attempt_id)):
         if value is not None:
             _require_string(name, value)
+    if attempt_id is not None:
+        _require_string("attempt_id", attempt_id)
     if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 1:
         raise ValueError("ordinal must be a positive integer")
     if terminal_status not in TERMINAL_STATUSES:
@@ -202,11 +216,13 @@ def attempt_receipt(*, run_id, ordinal, executor, provider, config_identity,
         validate_failure(failure)
         if failure["run_id"] != run_id:
             raise ValueError("failure run_id does not match attempt")
-        if failure["attempt_id"] != (attempt_id or failure["attempt_id"]):
+        if attempt_id is not None and failure["attempt_id"] != attempt_id:
             raise ValueError("failure attempt_id does not match attempt")
         if failure["output_started"] != output_started:
             raise ValueError("failure output_started does not match attempt")
-    actual_attempt_id = attempt_id or (failure["attempt_id"] if failure is not None else _identifier("attempt"))
+    actual_attempt_id = attempt_id if attempt_id is not None else (
+        failure["attempt_id"] if failure is not None else _identifier("attempt")
+    )
     if child_attempts is not None:
         if any(child["run_id"] != run_id for child in child_attempts):
             raise ValueError("aggregate children must share the parent run_id")

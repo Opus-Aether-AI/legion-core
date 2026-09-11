@@ -60,8 +60,13 @@ DEFAULT_ROOT = legion_state.default_log_root()
 def _num(value: Any) -> float:
     if isinstance(value, bool):
         return 0.0
-    if isinstance(value, (int, float)) and math.isfinite(value):
-        return float(value)
+    if isinstance(value, (int, float)):
+        try:
+            numeric = float(value)
+        except OverflowError:
+            return 0.0
+        if math.isfinite(numeric):
+            return numeric
     return 0.0
 
 
@@ -153,11 +158,32 @@ def _valid_rate_table(value: Any) -> bool:
     table = _dict(value)
     return all(
         key in table
-        and isinstance(table[key], (int, float))
-        and not isinstance(table[key], bool)
-        and math.isfinite(table[key])
-        and table[key] >= 0
+        and _valid_pricing_number(table[key])
         for key in ("input", "output", "cache_read", "cache_write")
+    )
+
+
+def _valid_pricing_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return False
+    return math.isfinite(numeric) and numeric >= 0
+
+
+def _valid_long_context(entry: dict[str, Any]) -> bool:
+    if "long_context" not in entry:
+        return True
+    long_context = entry.get("long_context")
+    if not isinstance(long_context, dict):
+        return False
+    if not _valid_pricing_number(long_context.get("threshold_input_tokens")):
+        return False
+    return all(
+        field not in long_context or _valid_pricing_number(long_context[field])
+        for field in ("input_multiplier", "output_multiplier")
     )
 
 
@@ -212,7 +238,7 @@ def _rates_for_with_evidence(
                     if long_context.get("output_multiplier") is not None
                     else 1.0
                 ),
-            }, _valid_rate_table(entry))
+            }, _valid_rate_table(entry) and _valid_long_context(entry))
     default = _dict(costs.get("default"))
     return ({
         "input": _num(default.get("input")),

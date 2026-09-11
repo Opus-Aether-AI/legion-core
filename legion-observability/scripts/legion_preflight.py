@@ -9,9 +9,12 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 
 from legion_executor_registry import (
@@ -23,6 +26,15 @@ from legion_executor_registry import (
 
 SCHEMA = "legion.preflight.v1"
 PASSING_STATES = frozenset({"supported"})
+VERSION_DISCOVERY_SECONDS = 5
+VERSION_OUTPUT_BYTES = 4096
+VERSION_CACHE_CONTRACT = "legion.supervised-version.v1"
+PROCESS_SUPERVISOR = (
+    Path(__file__).resolve().parents[2]
+    / "legion-router"
+    / "scripts"
+    / "legion-process-supervisor.py"
+)
 
 
 def _sha256_bytes(value):
@@ -121,9 +133,100 @@ def _write_cache(path, value):
     return True
 
 
+def _version_deadline_ns(env):
+    own_deadline = time.monotonic_ns() + VERSION_DISCOVERY_SECONDS * 1_000_000_000
+    inherited = env.get("LEGION_CHILD_LEASE_DEADLINE_NS")
+    if inherited is None or inherited == "":
+        return own_deadline
+    try:
+        inherited_deadline = int(inherited)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid inherited child lease deadline") from exc
+    if inherited_deadline < 1:
+        raise ValueError("invalid inherited child lease deadline")
+    return min(own_deadline, inherited_deadline)
+
+
+def _supervised_version_output(executable, args, env):
+    """Run one version probe under the canonical descendant-aware lease."""
+
+    environment = dict(env)
+    environment["LEGION_CHILD_LEASE_DEADLINE_NS"] = str(_version_deadline_ns(environment))
+    captured = bytearray()
+
+    with tempfile.TemporaryDirectory(prefix="legion-preflight-version-") as temporary:
+        lease_path = Path(temporary) / "lease.json"
+        process = subprocess.Popen(
+            [
+                os.path.realpath(sys.executable),
+                "-I",
+                str(PROCESS_SUPERVISOR),
+                "--cwd",
+                temporary,
+                "--max-runtime-seconds",
+                str(VERSION_DISCOVERY_SECONDS),
+                "--status-file",
+                str(lease_path),
+                "--",
+                executable,
+                *args,
+            ],
+            cwd=temporary,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+        assert process.stdout is not None
+        output_fd = process.stdout.fileno()
+        supervisor_exited_at = None
+        output_closed = False
+        try:
+            while not output_closed:
+                readable, _writable, _exceptional = select.select(
+                    [output_fd], [], [], 0.1
+                )
+                if readable:
+                    chunk = os.read(output_fd, 64 * 1024)
+                    if not chunk:
+                        output_closed = True
+                    else:
+                        remaining = VERSION_OUTPUT_BYTES - len(captured)
+                        if remaining > 0:
+                            captured.extend(chunk[:remaining])
+                if process.poll() is not None:
+                    supervisor_exited_at = supervisor_exited_at or time.monotonic()
+                    if not output_closed and time.monotonic() - supervisor_exited_at >= 1.0:
+                        # An EOF holder survived the supervisor. Do not block,
+                        # cache, or trust the partial identity.
+                        return None, False
+            process.wait()
+        finally:
+            process.stdout.close()
+        try:
+            lease = json.loads(lease_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, False
+        if lease.get("schema") != "legion.child-execution-lease.v1" \
+                or lease.get("status") != "completed" \
+                or process.returncode is None \
+                or process.returncode < 0 \
+                or lease.get("child_exit_code") != process.returncode:
+            return None, False
+
+    raw = bytes(captured).decode("utf-8", errors="replace").strip()
+    return raw or None, True
+
+
 def _discover_version(executable, config, cache_dir, binary_digest, config_digest, env):
     key = _canonical_digest(
-        {"executable_path": executable, "binary_sha256": binary_digest, "config_sha256": config_digest}
+        {
+            "contract": VERSION_CACHE_CONTRACT,
+            "executable_path": executable,
+            "binary_sha256": binary_digest,
+            "config_sha256": config_digest,
+        }
     )
     cache_path = Path(cache_dir) / f"{key}.json"
     cached = _read_cache(cache_path, key)
@@ -133,23 +236,21 @@ def _discover_version(executable, config, cache_dir, binary_digest, config_diges
     args = config.get("version_args", ["--version"])
     raw = None
     version = None
+    safely_completed = True
     if args:
         try:
-            completed = subprocess.run(
-                [executable, *args], capture_output=True, text=True, timeout=5,
-                check=False, env=dict(env), stdin=subprocess.DEVNULL,
-            )
-            combined = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
-            raw = combined[:4096] if combined else None
-        except (OSError, subprocess.SubprocessError):
+            raw, safely_completed = _supervised_version_output(executable, args, env)
+        except (OSError, ValueError, subprocess.SubprocessError):
             raw = None
+            safely_completed = False
     if raw:
         pattern = config.get("version_regex") or r"(?P<version>[0-9]+(?:\.[0-9A-Za-z_-]+)+)"
         matched = re.search(pattern, raw)
         if matched:
             version = matched.groupdict().get("version") or matched.group(0)
     record = {"cache_key": key, "version_raw": raw, "version": version}
-    _write_cache(cache_path, record)
+    if safely_completed:
+        _write_cache(cache_path, record)
     return raw, version, False, key
 
 

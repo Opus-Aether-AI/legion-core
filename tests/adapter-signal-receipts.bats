@@ -124,6 +124,33 @@ assert_signal_receipt() {
   [ "$status" -eq 0 ]
 }
 
+@test "normal and delayed-signal publication share one durable provider-span claim" {
+  local art="$TEST_TMPDIR/shared-span-claim" spans="$TEST_TMPDIR/shared-span-claim-spans"
+  mkdir -p "$art" "$spans"
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    RUN_ID=shared-span-claim
+    LEGION_TELEMETRY_DIR="$3"
+    legion_adapter_arm_signal_receipt "$2" cursor cursor 1 fixture "" "" "" \
+      read-only 2026-01-01T00:00:00Z "$(date +%s000)" /dev/null
+    legion_adapter_write_attempt "$2" cursor cursor 1 fixture "" "" "" read-only \
+      succeeded 2026-01-01T00:00:00Z 2026-01-01T00:00:01Z 1000 \
+      "{}" unknown "" 0 unknown "" "" false true "" ""
+    emit_span() {
+      jq -cn --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        '\''{schema:"legion.span.v1",artifacts:{attempt_receipt:$attempt}}'\'' \
+        >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+    }
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"
+    legion_adapter_write_signal_receipt 15 127 ""
+    legion_adapter_emit_signal_span delayed "" || true
+    [[ -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
+    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d " ")" == 1 ]]
+  ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$art" "$spans"
+  [ "$status" -eq 0 ]
+}
+
 @test "Claude writes one terminal attempt when signalled after launch" {
   assert_signal_receipt claude 'claude -p' MOCK_CLAUDE_DELAY
 }

@@ -155,6 +155,10 @@ validate() {
 	        and (.run_id | type == "string")
 	        and (.executor | type == "string")
 	        and (.model | type == "string")
+	        and ((has("attempt_id") | not) or .attempt_id == null
+	          or ((.attempt_id | type) == "string" and (.attempt_id | length) >= 1))
+	        and ((has("attempt_ordinal") | not) or .attempt_ordinal == null
+	          or (.attempt_ordinal | positive_integer))
 	        and ((.archetype == null) or (.archetype | type == "string"))
 	        and (.status | IN("ok", "failed", "error", "over_budget", "blocked", "timed_out", "containment_failed"))
 	        and ((.duration_ms // 0) | type == "number" and . >= 0)

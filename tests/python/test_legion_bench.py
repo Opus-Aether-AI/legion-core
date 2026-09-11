@@ -895,6 +895,30 @@ def test_span_totals_roll_up_by_model(tmp_path):
     assert totals["models"]["test-model-beta"]["cost_usd"] == 0.5
 
 
+def test_span_totals_exclude_rollup_only_spans(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    provider = {
+        "schema": "legion.span.v1", "model": "test-model-beta",
+        "cost_usd": 0.5, "duration_ms": 30, "tokens": {"total_tokens": 90},
+        "artifacts": {"provider_attempt": True},
+    }
+    rollup = {
+        **provider, "duration_ms": 300, "artifacts": {"rollup_only": True},
+    }
+    (spans / "2026-06-27.jsonl").write_text(
+        "\n".join(json.dumps(span) for span in (provider, rollup)) + "\n",
+        encoding="utf-8",
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+
+    assert totals["span_count"] == 1
+    assert totals["cost_usd"] == 0.5
+    assert totals["span_duration_ms"] == 30
+    assert totals["tokens"] == 90
+
+
 def test_learning_lift_payload_scores_before_after_memory(tmp_path):
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
     payload = bench.learning_lift_payload(

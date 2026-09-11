@@ -258,6 +258,22 @@ def test_console_index_preserves_unknown_and_partial_metering(tmp_path):
     assert indexer._format_cost(None, "unknown") == "unknown"
 
 
+def test_console_index_excludes_rollup_only_span(tmp_path):
+    spans_dir = tmp_path / "spans"
+    provider = _span("single", cost_usd=0.5)
+    provider["artifacts"] = {"provider_attempt": True}
+    rollup = _span("single", ts="2026-06-15T10:11:00Z", cost_usd=0.0)
+    rollup["status"] = "failed"
+    rollup["artifacts"] = {"rollup_only": True}
+    _write_spans(spans_dir, provider, rollup)
+
+    span = indexer.load_spans(str(spans_dir))["single"]
+
+    assert span["status"] == "ok"
+    assert span["cost_usd"] == 0.5
+    assert span["known_cost_attempts"] == 1
+
+
 def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
     registry_dir = tmp_path / "registry"
     spans_dir = tmp_path / "spans"

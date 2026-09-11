@@ -724,7 +724,8 @@ cmd_run() {
       prior_artifacts="$(jq -cn --arg attempt "$prior_attempt" --arg lease "$lease_status" \
         '{provider_attempt:true,intermediate_attempt:true,attempt_receipt:$attempt,
           lease_receipt:$lease}')"
-      emit_span "claude" "$attempt_model" failed "$attempt_duration" \
+      legion_adapter_emit_normal_provider_span "$prior_attempt" \
+        "claude" "$attempt_model" failed "$attempt_duration" \
         "$prior_cost" "$prior_usage" "$task" "$prior_artifacts" \
         "$prior_usage_status" "$prior_cost_status"
       finish_claude_signal_accounting
@@ -842,7 +843,8 @@ cmd_run() {
     reason="containment_failed"
     status="containment_failed"
     result="$lease_reason"
-    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
@@ -857,7 +859,8 @@ cmd_run() {
     reason="$lease_reason"
     status="timed_out"
     result="$lease_reason"
-    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
@@ -885,7 +888,8 @@ cmd_run() {
     status="failed"
     [[ -n "$result" ]] && result="${result}"$'\n'
     result="${result}Claude produced file changes during a read-only run."
-    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
@@ -901,7 +905,8 @@ cmd_run() {
   # the refusal text as the run's result.
   if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" && "$declined_final" -eq 0 ]]; then
     status="ok"
-    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
@@ -936,7 +941,8 @@ cmd_run() {
       | .failure_receipt=(if $failure=="" then null else $failure end)
       | .lease_receipt=(if $lease=="" then null else $lease end)
     ' <<<"$artifacts")"
-    emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+    legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
       "$span_usage_status" "$span_cost_status"
     finish_claude_signal_accounting
     note "⚠ Claude failed ($reason): falling back to $fallback_model"
@@ -955,7 +961,8 @@ cmd_run() {
   else
     status="failed"
   fi
-  emit_span "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
+  legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    "claude" "$span_model" "$status" "$span_duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
     "$span_usage_status" "$span_cost_status"
   finish_claude_signal_accounting
   [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \

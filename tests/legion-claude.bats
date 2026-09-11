@@ -488,14 +488,14 @@ PY
     local script receipt_line span_line disarm_line
     for script in legion-cursor.sh legion-opencode.sh legion-deepseek.sh legion-pi-hermes.sh; do
       receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
-      span_line="$(grep -n '^  emit_span ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
+      span_line="$(grep -n '^  legion_adapter_emit_normal_provider_span ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
       disarm_line="$(grep -n '^  legion_adapter_disarm_signal_receipt$' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
       [ "$receipt_line" -lt "$span_line" ]
       [ "$span_line" -lt "$disarm_line" ]
     done
     local claude_script="$REPO_ROOT/legion-router/scripts/legion-claude.sh"
     receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$claude_script" | tail -1 | cut -d: -f1)"
-    span_line="$(grep -n '^  emit_span "claude"' "$claude_script" | tail -1 | cut -d: -f1)"
+    span_line="$(grep -n '^  legion_adapter_emit_normal_provider_span ' "$claude_script" | tail -1 | cut -d: -f1)"
     disarm_line="$(grep -n '^  finish_claude_signal_accounting$' "$claude_script" | tail -1 | cut -d: -f1)"
     [ "$receipt_line" -lt "$span_line" ]
     [ "$span_line" -lt "$disarm_line" ]

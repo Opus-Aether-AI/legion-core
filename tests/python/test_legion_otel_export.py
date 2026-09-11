@@ -65,6 +65,19 @@ def test_current_attempt_receipt_artifacts_disambiguate_provider_retries():
     assert attributes["legion.attempt_ordinal"]["intValue"] == 2
 
 
+def test_rollup_and_provider_with_same_receipt_never_share_span_id():
+    provider = dict(
+        _SPAN,
+        artifacts={"provider_attempt": True, "attempt_receipt": "/run/attempt-1.json"},
+    )
+    rollup = dict(
+        _SPAN,
+        artifacts={"rollup_only": True, "attempt_receipt": "/run/attempt-1.json"},
+    )
+
+    assert oe.span_to_otlp(provider)["spanId"] != oe.span_to_otlp(rollup)["spanId"]
+
+
 def test_span_schema_declares_attempt_identity_fields():
     schema_path = os.path.join(
         HERE, "..", "..", "legion-observability", "schema", "legion.span.v1.schema.json"

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import time
 
 import pytest
 
@@ -85,6 +86,25 @@ def run_preflight(tmp_path, version="1.2.3", **request):
     return result, binary, config, env
 
 
+def process_is_gone(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def wait_gone(pid):
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if process_is_gone(pid):
+            return True
+        time.sleep(0.02)
+    return process_is_gone(pid)
+
+
 def test_registry_rejects_declared_field_with_wrong_type(tmp_path):
     path = tmp_path / "bad.toml"
     path.write_text('[executors.bad]\nkind="coding"\nsupported_sandboxes="read-only"\n', encoding="utf-8")
@@ -161,6 +181,138 @@ def test_preflight_cache_invalidates_for_binary_and_configuration(tmp_path):
     config_changed = preflight.preflight("fixture", registry_path=config, cache_dir=tmp_path / "cache", env=env)
     assert config_changed["cache"]["hit"] is False
     assert config_changed["cache"]["key"] != binary_changed["cache"]["key"]
+
+
+def test_preflight_cached_version_does_not_relaunch_supervisor_or_binary(tmp_path):
+    binary = tmp_path / "fixture-provider"
+    probes = tmp_path / "version-probes"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "with open(os.environ['VERSION_PROBE_LOG'], 'a', encoding='utf-8') as log:\n"
+        "    log.write('probe\\n')\n"
+        "print('fixture-provider 1.2.3')\n",
+        encoding="utf-8",
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    config = tmp_path / "executors.toml"
+    write_registry(config, binary)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "VERSION_PROBE_LOG": str(probes),
+    }
+    # Records produced before version probes were supervised have no trusted
+    # containment provenance and must miss after the contract upgrade.
+    executor_config = registry.load_executor_registry(config)["fixture"]
+    legacy_key = preflight._canonical_digest(
+        {
+            "executable_path": str(binary.resolve()),
+            "binary_sha256": preflight._sha256_file(binary),
+            "config_sha256": preflight._config_identity(executor_config, env),
+        }
+    )
+    legacy_cache = tmp_path / "cache" / f"{legacy_key}.json"
+    legacy_cache.parent.mkdir()
+    legacy_cache.write_text(
+        json.dumps(
+            {
+                "cache_key": legacy_key,
+                "version_raw": "fixture-provider 1.2.3",
+                "version": "1.2.3",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=tmp_path / "cache", env=env
+    )
+    second = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=tmp_path / "cache", env=env
+    )
+
+    assert first["status"] == second["status"] == "supported"
+    assert first["cache"]["hit"] is False
+    assert second["cache"]["hit"] is True
+    assert probes.read_text(encoding="utf-8").splitlines() == ["probe"]
+
+
+def test_preflight_uncached_version_reaps_detached_output_holder_and_bounds_capture(tmp_path):
+    binary = tmp_path / "fixture-provider"
+    pid_path = tmp_path / "detached.pid"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, signal, time\n"
+        "print('fixture-provider 1.2.3', flush=True)\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "    with open(os.environ['DETACHED_PID'], 'w', encoding='utf-8') as out:\n"
+        "        out.write(str(os.getpid()))\n"
+        "    while True:\n"
+        "        os.write(1, b'x' * 65536)\n"
+        "time.sleep(0.2)\n",
+        encoding="utf-8",
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    config = tmp_path / "executors.toml"
+    write_registry(config, binary)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "DETACHED_PID": str(pid_path),
+    }
+
+    result = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=tmp_path / "cache", env=env
+    )
+
+    assert result["status"] == "supported"
+    assert result["cache"]["hit"] is False
+    assert len(result["identity"]["version_raw"].encode()) <= preflight.VERSION_OUTPUT_BYTES
+    assert wait_gone(int(pid_path.read_text(encoding="utf-8")))
+
+
+def test_preflight_version_probe_lowers_inherited_deadline_and_does_not_cache_timeout(tmp_path):
+    binary = tmp_path / "fixture-provider"
+    launched = tmp_path / "launched"
+    detached = tmp_path / "detached.pid"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, time\n"
+        "open(os.environ['LAUNCHED'], 'w').close()\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    with open(os.environ['DETACHED_PID'], 'w', encoding='utf-8') as out:\n"
+        "        out.write(str(os.getpid()))\n"
+        "    while True: time.sleep(1)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    config = tmp_path / "executors.toml"
+    write_registry(config, binary)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "LAUNCHED": str(launched),
+        "DETACHED_PID": str(detached),
+        "LEGION_CHILD_LEASE_DEADLINE_NS": str(time.monotonic_ns() + 2_000_000_000),
+    }
+    started = time.monotonic()
+
+    result = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=tmp_path / "cache", env=env
+    )
+
+    assert time.monotonic() - started < 4.5
+    assert launched.exists()
+    assert result["status"] == "untested"
+    assert result["identity"]["version"] is None
+    assert result["cache"]["hit"] is False
+    assert not list((tmp_path / "cache").glob("*.json"))
+    assert wait_gone(int(detached.read_text(encoding="utf-8")))
 
 
 def test_preflight_cache_invalidates_for_declared_config_file(tmp_path):

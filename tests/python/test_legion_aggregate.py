@@ -254,6 +254,25 @@ def test_aggregate_ignores_synthetic_opus_baselines():
     assert r["total"]["count"] == 1
 
 
+def test_aggregate_ignores_rollup_only_spans():
+    provider = {
+        "schema": "legion.span.v1", "executor": "codex-review", "model": "review",
+        "status": "ok", "cost_usd": 0.25, "duration_ms": 100,
+        "artifacts": {"provider_attempt": True},
+    }
+    rollup = {
+        **provider, "cost_usd": None, "duration_ms": 500,
+        "artifacts": {"rollup_only": True},
+    }
+
+    result = agg.aggregate([provider, rollup])
+
+    assert result["total"]["count"] == 1
+    assert result["total"]["cost_usd"] == 0.25
+    assert result["total"]["p50_ms"] == 100
+    assert result["classification"]["delegated_runs"] == 1
+
+
 def test_num_rejects_bool_nan_and_strings():
     assert agg._num(True) == 0          # bool is int 1 in Python — must be rejected
     assert agg._num(False) == 0

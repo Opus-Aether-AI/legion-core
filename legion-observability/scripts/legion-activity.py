@@ -469,6 +469,11 @@ def _durable_attempt_count(records: list[dict[str, Any]]) -> int:
     return count
 
 
+def _is_rollup_only(span: dict[str, Any]) -> bool:
+    artifacts = span.get("artifacts") or {}
+    return isinstance(artifacts, dict) and artifacts.get("rollup_only") is True
+
+
 def load_span_costs(spans_dir: str) -> dict[str, dict[str, Any]]:
     """run_id -> provenance-aware cost summary from the DURABLE spans. The stream lives in the
     repo's ephemeral .legion/runs/ and gets cleaned; the span (in
@@ -489,6 +494,8 @@ def load_span_costs(spans_dir: str) -> dict[str, dict[str, Any]]:
                     try:
                         span = json.loads(line)
                     except ValueError:
+                        continue
+                    if not isinstance(span, dict) or _is_rollup_only(span):
                         continue
                     rid = span.get("run_id")
                     if isinstance(rid, str):

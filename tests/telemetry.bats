@@ -124,6 +124,24 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
+@test "telemetry: validate enforces canonical attempt identity fields" {
+  local base='{"schema":"legion.span.v1","ts":"t","run_id":"r","executor":"e","model":"m","status":"ok"}'
+  run bash -c "jq -c '. + {attempt_id:\"attempt-1\",attempt_ordinal:1}' <<<'$base' | '$TEL' validate -"
+  [ "$status" -eq 0 ]
+  run bash -c "jq -c '. + {attempt_id:null,attempt_ordinal:null}' <<<'$base' | '$TEL' validate -"
+  [ "$status" -eq 0 ]
+  for invalid in \
+    '{"attempt_id":""}' \
+    '{"attempt_id":7}' \
+    '{"attempt_ordinal":0}' \
+    '{"attempt_ordinal":1.5}' \
+    '{"attempt_ordinal":true}' \
+    '{"attempt_ordinal":"1"}'; do
+    run bash -c "jq -c --argjson invalid '$invalid' '. + \$invalid' <<<'$base' | '$TEL' validate -"
+    [ "$status" -eq 1 ]
+  done
+}
+
 @test "telemetry: emit derives nullable unknown and not-applicable values" {
   run "$TEL" emit --executor codex --model fixture-codex --status failed \
     --cost-status unknown --usage-status unknown

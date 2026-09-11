@@ -154,8 +154,20 @@ def _is_synthetic_opus_baseline(span):
     return artifacts.get("synthetic_opus_baseline") is True or artifacts.get("synthetic_primary_baseline") is True
 
 
+def _is_rollup_only(span):
+    if not isinstance(span, dict):
+        return False
+    artifacts = span.get("artifacts") or {}
+    return isinstance(artifacts, dict) and artifacts.get("rollup_only") is True
+
+
 def _valid_spans(spans):
-    return [s for s in spans if isinstance(s, dict) and s.get("schema") == "legion.span.v1"]
+    return [
+        s for s in spans
+        if isinstance(s, dict)
+        and s.get("schema") == "legion.span.v1"
+        and not _is_rollup_only(s)
+    ]
 
 
 def _archetype_group(span):
@@ -185,7 +197,11 @@ def classification_summary(spans):
     total = classified = unclassified = 0
     unclassified_cost = _new_group()
     for span in spans:
-        if not is_delegated_executor(span.get("executor")):
+        if (
+            not isinstance(span, dict)
+            or _is_rollup_only(span)
+            or not is_delegated_executor(span.get("executor"))
+        ):
             continue
         total += 1
         archetype = span.get("archetype")

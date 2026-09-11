@@ -317,8 +317,16 @@ def test_build_report_scores_only_requested_day(tmp_path, monkeypatch):
         "target_type": "command",
         "target_name": "feature",
     }
+    rollup = {
+        **new,
+        "run_id": "new-rollup",
+        "status": "failed",
+        "artifacts": {"rollup_only": True},
+    }
     (spans / "2026-06-18.jsonl").write_text(json.dumps(old) + "\n", encoding="utf-8")
-    (spans / "2026-06-19.jsonl").write_text(json.dumps(new) + "\n", encoding="utf-8")
+    (spans / "2026-06-19.jsonl").write_text(
+        json.dumps(new) + "\n" + json.dumps(rollup) + "\n", encoding="utf-8"
+    )
     monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
     monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
     monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
@@ -807,6 +815,38 @@ def test_containment_failed_span_is_ingested_as_high_severity_outcome(tmp_path):
     assert len(outcomes) == 1
     assert outcomes[0]["severity"] == "high"
     assert "containment_failed" in outcomes[0]["summary"]
+
+
+def test_self_learning_excludes_rollup_only_spans(tmp_path):
+    provider = _span(
+        "provider", "2026-08-16T01:00:00Z", executor="codex", status="failed"
+    )
+    rollup = _span(
+        "rollup", "2026-08-16T01:00:01Z", executor="codex", status="failed"
+    )
+    rollup["artifacts"] = {"rollup_only": True}
+    catalog = _catalog(tmp_path)
+
+    outcomes = self_learn.span_outcomes([provider, rollup], catalog)
+    contrast = self_learn.trace_contrast([provider, rollup], catalog)
+
+    assert len(outcomes) == 1
+    assert outcomes[0]["run_id"] == "provider"
+    assert sum(entity["failed"] for entity in contrast["entities"].values()) == 1
+
+
+def test_self_learning_span_validation_matches_attempt_identity_schema():
+    valid = _span("attempt", "2026-08-16T01:00:00Z")
+    assert self_learn._validated_span({**valid, "attempt_id": None}) is not None
+    assert self_learn._validated_span({**valid, "attempt_id": "attempt-1"}) is not None
+    assert self_learn._validated_span({**valid, "attempt_ordinal": None}) is not None
+    assert self_learn._validated_span({**valid, "attempt_ordinal": 1}) is not None
+    assert self_learn._validated_span({**valid, "attempt_ordinal": 1.0}) is not None
+    for invalid in (
+        {"attempt_id": ""}, {"attempt_id": 7}, {"attempt_ordinal": 0},
+        {"attempt_ordinal": 1.5}, {"attempt_ordinal": True}, {"attempt_ordinal": "1"},
+    ):
+        assert self_learn._validated_span({**valid, **invalid}) is None
 
 
 def test_cached_sibling_requires_recorded_checkout_to_still_exist(

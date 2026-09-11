@@ -286,6 +286,31 @@ def test_completed_single_attempt_prefers_durable_provenance(tmp_path):
     assert enriched["activity"]["items"] == 3
 
 
+def test_activity_cost_loader_excludes_rollup_only_span(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    provider = {
+        "schema": "legion.span.v1", "run_id": "single", "cost_usd": 0.5,
+        "cost_status": "known", "artifacts": {"provider_attempt": True},
+    }
+    rollup = {
+        **provider, "cost_usd": None, "cost_status": "not_applicable",
+        "artifacts": {"rollup_only": True},
+    }
+    (spans / "2026-09-11.jsonl").write_text(
+        "\n".join(json.dumps(span) for span in (provider, rollup)) + "\n",
+        encoding="utf-8",
+    )
+
+    assert activity.load_span_costs(str(spans))["single"] == {
+        "cost_usd": 0.5,
+        "cost_status": "known",
+        "known_cost_usd": 0.5,
+        "known_cost_attempts": 1,
+        "attempt_count": 1,
+    }
+
+
 def test_group_by_session_merges_a_fanouts_agents_across_their_worktrees():
     # A session (trace_id) = one fan-out that spawned N agents in N ephemeral
     # worktrees. Grouping by trace_id collects them; grouping by worktree would be 1:1.

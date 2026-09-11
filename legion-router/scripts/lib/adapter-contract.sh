@@ -325,6 +325,42 @@ legion_adapter_disarm_signal_receipt() {
   LEGION_ADAPTER_SIGNAL_ARMED=0
 }
 
+legion_adapter_provider_span_is_durable() {
+  local attempt_path="$1" span_file
+  [[ -n "$attempt_path" && -d "${LEGION_TELEMETRY_DIR:-}" ]] || return 1
+  for span_file in "$LEGION_TELEMETRY_DIR"/*.jsonl; do
+    [[ -f "$span_file" ]] || continue
+    jq -e --arg attempt "$attempt_path" '
+      select(.schema == "legion.span.v1"
+        and .artifacts.attempt_receipt == $attempt)
+    ' "$span_file" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+legion_adapter_claim_provider_span() {
+  local attempt_path="$1"
+  [[ -n "$attempt_path" ]] || return 1
+  mkdir "$attempt_path.provider-span-emitted" 2>/dev/null
+}
+
+# Normal publication and signal recovery use the same attempt-bound claim.
+# If a trap interrupts after the claim but before/during emit_span, the signal
+# path checks the durable JSONL record and takes over publication only when the
+# normal append did not complete.
+legion_adapter_emit_normal_provider_span() {
+  local attempt_path="$1"
+  shift
+  if legion_adapter_claim_provider_span "$attempt_path"; then
+    emit_span "$@"
+    return 0
+  fi
+  legion_adapter_provider_span_is_durable "$attempt_path" && return 0
+  # An incomplete claim can survive abrupt termination. The immutable receipt
+  # plus absence of a matching durable span makes retrying publication safe.
+  emit_span "$@"
+}
+
 legion_adapter_write_signal_receipt() {
   local signum="$1" child_rc="${2:-}" lease_path="${3:-}"
   local ended_at end_ms duration output_started=false message
@@ -399,8 +435,11 @@ legion_adapter_emit_signal_span() {
   [[ "$LEGION_ADAPTER_SIGNAL_TERMINALIZED" == 1 ]] || return 0
   attempt_path="$LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json"
   [[ -f "$attempt_path" ]] || return 0
-  claim="$attempt_path.signal-span-emitted"
-  mkdir "$claim" 2>/dev/null || return 0
+  claim="$attempt_path.provider-span-emitted"
+  if ! legion_adapter_claim_provider_span "$attempt_path" \
+      && legion_adapter_provider_span_is_durable "$attempt_path"; then
+    return 0
+  fi
   if ! jq -e '.schema == "legion.attempt.v1" and .attempt_kind == "provider"' \
       "$attempt_path" >/dev/null 2>&1; then
     rmdir "$claim" 2>/dev/null || true

@@ -228,6 +228,9 @@ def load_spans(directory: str) -> dict[str, dict[str, Any]]:
                         continue
                     if not isinstance(span, dict) or span.get("schema") != SPAN_SCHEMA:
                         continue
+                    artifacts = span.get("artifacts") or {}
+                    if isinstance(artifacts, dict) and artifacts.get("rollup_only") is True:
+                        continue
                     run_id = span.get("run_id")
                     if not run_id:
                         continue

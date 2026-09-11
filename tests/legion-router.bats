@@ -164,9 +164,8 @@ if [[ "${1:-}" == */legion_preflight.py ]]; then
     jq -cn --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" '
       {schema:"legion.preflight.v1",executor:$executor,status:"incompatible",
        reason:"authenticated model incompatibility",
-       identity:{config_sha256:"fixture-config",executable_path:"/fixture/provider"},
-       cache:{hit:false,key:"fixture-cache"},
-       compatibility:{model:{requested:$model,status:"unsupported"},
+       identity:null,cache:{hit:false,key:null},
+       compatibility:{model:{requested:$model,status:"incompatible"},
                       sandbox:{requested:$sandbox,status:"supported"}}}'
     exit 1
   fi
@@ -1399,6 +1398,11 @@ $run_error" ]
     [ "$status" -ne 0 ]
     [[ "$output" == *"@ai-hero/sandcastle not installed. Run: npm i -D @ai-hero/sandcastle"* ]]
     [[ "$output" != *"invalid --sandbox"* ]]
+    echo "$output" | tail -n 1 | jq -e '.status == "refused"
+      and .attempt_receipt == null and .failure_receipt == null and .lease_receipt == null'
+    local art; art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    [ "$(find "$art" -maxdepth 1 -type f -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 0 ]
     assert_mock_called codex "--version"
     [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
 }
@@ -1933,6 +1937,76 @@ $run_error" ]
     [ "$(find "$repo/.legion/worktrees" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
 }
 
+@test "delegate review: a delayed signal preserves an authoritative completed receipt" {
+    local helper art receipt overwritten rollup artifact_status
+    helper="$TEST_TMPDIR/review-delayed-signal.sh"
+    art="$TEST_TMPDIR/review-delayed-signal-art"
+    receipt="$art/terminal.json"
+    overwritten="$art/overwritten"
+    rollup="$art/rollup"
+    artifact_status="$art/artifact-status"
+    mkdir -p "$art"
+    printf '%s\n' '{"schema":"legion.review-terminal.v1","status":"ok","reason":"completed","codex_exit":0}' > "$receipt"
+    {
+      sed -n '/^on_terminating_signal()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+REVIEW_RECEIPT_PATH="$1/terminal.json"
+REVIEW_RECEIPT_RUN_ID=review-complete
+REVIEW_RECEIPT_MODEL=fixture-model
+REVIEW_RECEIPT_ARCHETYPE=security-review
+REVIEW_RECEIPT_BASE_SHA=base
+REVIEW_RECEIPT_HEAD_SHA=head
+REVIEW_RECEIPT_PATCH=patch
+REVIEW_RECEIPT_ATTEMPT=1
+REVIEW_RECEIPT_MAX_ATTEMPTS=1
+REVIEW_ART_PATH="$1"
+REVIEW_WT_PATH=worktree
+REVIEW_START_MS="$(date +%s000)"
+REVIEW_EXECUTOR_LABEL=codex
+RUN_ID=review-complete
+CODEX_CHILD_RC=0
+CODEX_CHILD_PID=""
+CODEX_SIGNAL_CHILD_PID=""
+PROMPT_CHILD_PID=""
+PROMPT_LEASE_STATUS=""
+PROMPT_ATTEMPT_ART=""
+NATIVE_ATTEMPT_ART=""
+NATIVE_ATTEMPT_EXECUTOR=""
+NATIVE_ATTEMPT_MODEL=""
+NATIVE_ATTEMPT_ORDINAL=0
+NATIVE_LEASE_STATUS=""
+NATIVE_RESUME_ART=""
+LEGION_WT_KEEP=0
+TERMINATING_SIGNAL_ACTIVE=0
+OVERWRITTEN="$2"
+ROLLUP="$3"
+ARTIFACT_STATUS="$4"
+kill_codex_child() { :; }
+kill_prompt_child() { :; }
+legion_adapter_supervisor_cleanup_failed() { return 1; }
+write_interrupted_native_attempt() { :; }
+preserve_interrupted_prompt_receipts() { :; }
+terminalize_interrupted_native_run() { :; }
+terminalize_interrupted_native_resume() { :; }
+write_interrupted_review_receipt() { : > "$OVERWRITTEN"; }
+review_canonical_metering() { printf '%s\n' '{"reconciliation":{"usage":null,"cost_usd":null},"last":{}}'; }
+emit_review_rollup_span() { printf '%s\n' "$3" >> "$ROLLUP"; }
+write_run_state() { :; }
+write_run_artifact_status() { printf '%s\n' "$3:$6" > "$ARTIFACT_STATUS"; }
+_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+on_terminating_signal TERM
+SH
+    } > "$helper"
+
+    run bash "$helper" "$art" "$overwritten" "$rollup" "$artifact_status"
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$overwritten" ]
+    jq -e '.status == "ok" and .reason == "completed"' "$receipt"
+    [ "$(cat "$rollup")" = "ok" ]
+    [ "$(cat "$artifact_status")" = "completed:ok" ]
+}
+
 @test "delegate run: interruption writes one cancelled attempt and terminalizes state" {
     local repo pid_file stdout stderr run_pid run_rc run_dir run_id registry
     repo="$(make_test_repo run-interrupt)"
@@ -2026,6 +2100,69 @@ SH
     [ "$status" -eq 0 ]
     jq -e '.terminal_status == "succeeded" and .failure == null' "$art/attempt-1.json"
     [ ! -e "$art/failure-1.json" ]
+}
+
+@test "native provider span publication defers a signal until its claim is durable" {
+    local helper art signal_seen telemetry
+    helper="$TEST_TMPDIR/native-span-signal.sh"
+    art="$TEST_TMPDIR/native-span-signal-art"
+    signal_seen="$TEST_TMPDIR/native-span-signal.seen"
+    telemetry="$TEST_TMPDIR/native-span-signal.jsonl"
+    mkdir -p "$art"
+    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null}' > "$art/attempt-1.json"
+    {
+      sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
+      sed -n '/^emit_provider_attempt_span()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+TERMINATING_SIGNAL_ACTIVE=0
+NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=""
+NATIVE_SPAN_PUBLICATION_CRITICAL=0
+SIGNAL_SEEN="$2"
+TELEMETRY="$3"
+on_terminating_signal() { printf 'term\n' > "$SIGNAL_SEEN"; exit 143; }
+emit_span() { printf 'span\n' >> "$TELEMETRY"; kill -TERM "$$"; }
+ingest_usage() { :; }
+emit_provider_attempt_span "$1/attempt-1.json" fixture ""
+SH
+    } > "$helper"
+
+    run bash "$helper" "$art" "$signal_seen" "$telemetry"
+
+    [ "$status" -eq 143 ]
+    [ "$(wc -l < "$telemetry" | tr -d ' ')" -eq 1 ]
+    [ -f "$art/attempt-1.json.span-emitted/committed" ]
+    [ -f "$signal_seen" ]
+}
+
+@test "native review ingestion preserves the failed provider status" {
+    local helper art ingest
+    helper="$TEST_TMPDIR/native-review-ingest.sh"
+    art="$TEST_TMPDIR/native-review-ingest-art"
+    ingest="$TEST_TMPDIR/native-review-ingest.args"
+    mkdir -p "$art"
+    printf '%s\n' '{"executor":"codex-review","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"failed","duration_ms":1,"usage":{"input_tokens":1},"usage_status":"known","cost_usd":0.01,"cost_status":"known","failure":{"provider_code":17}}' > "$art/attempt-1.json"
+    {
+      sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
+      sed -n '/^emit_native_review_provider_span()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+TERMINATING_SIGNAL_ACTIVE=0
+NATIVE_SPAN_PUBLICATION_PENDING_SIGNAL=""
+NATIVE_SPAN_PUBLICATION_CRITICAL=0
+INGEST="$2"
+on_terminating_signal() { exit 143; }
+emit_span() { :; }
+ingest_usage() { printf '%s\n' "$3" > "$INGEST"; }
+emit_native_review_provider_span "$1/attempt-1.json" fixture ""
+SH
+    } > "$helper"
+
+    run bash "$helper" "$art" "$ingest"
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$ingest")" -eq 17 ]
+    [ -f "$art/attempt-1.json.span-emitted/committed" ]
 }
 
 @test "adapter receipts clear the mutable failure alias after a successful retry" {
@@ -2515,6 +2652,44 @@ PY
   [[ "$second_lease" == */resume-2/lease-2.json ]]
   jq -e '.status == "completed"' "$first_lease"
   jq -e '.status == "completed"' "$second_lease"
+}
+
+@test "delegate resume: interruption publishes one provider span and terminalizes the run" {
+  local repo rid pid_file stdout stderr resume_pid resume_rc run_dir
+  repo="$(make_test_repo resume-interrupt)"
+  out="$("$DELEGATE" run --model test-model-alpha --task initial --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+  pid_file="$TEST_TMPDIR/resume-interrupt-child.pid"
+  stdout="$TEST_TMPDIR/resume-interrupt.out"
+  stderr="$TEST_TMPDIR/resume-interrupt.err"
+
+  MOCK_CODEX_DELAY=30 MOCK_CODEX_DELAY_PID_FILE="$pid_file" \
+    "$DELEGATE" resume --run "$rid" --task interrupted --repo "$repo" --quiet \
+      >"$stdout" 2>"$stderr" &
+  resume_pid=$!
+  for _ in {1..100}; do
+    [[ -s "$pid_file" ]] && break
+    sleep 0.02
+  done
+  [ -s "$pid_file" ]
+
+  kill -TERM "$resume_pid"
+  resume_rc=0
+  wait "$resume_pid" || resume_rc=$?
+
+  if [[ "$resume_rc" -ne 143 ]]; then
+    printf 'resume exited %s\n' "$resume_rc" >&2
+    cat "$stderr" >&2
+    false
+  fi
+  run_dir="$repo/.legion/runs/$rid"
+  jq -e '.executor == "codex-resume" and .terminal_status == "cancelled"
+    and .failure.class == "cancelled"' "$run_dir/resume-1/attempt-1.json"
+  jq -e '.status == "failed" and .result_status == "failed"' "$run_dir/status.json"
+  [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s --arg run "$rid" '
+    [.[] | select(.run_id == $run and .executor == "codex-resume"
+      and .artifacts.provider_attempt == true)] | length')" -eq 1 ]
+  ! kill -0 "$(cat "$pid_file")" 2>/dev/null
 }
 
 @test "delegate resume: unavailable admission refuses before another provider launch" {
@@ -3099,7 +3274,8 @@ PY
       and (.preflight_receipt | contains("/prompt-review-"))'
     preflight="$(echo "$output" | jq -r .preflight_receipt)"
     jq -e '.schema == "legion.preflight.v1" and .executor == "cursor"
-      and .status == "incompatible" and (.identity | type) == "object"' "$preflight"
+      and .status == "incompatible" and .identity == null
+      and .compatibility.model.status == "incompatible"' "$preflight"
     assert_mock_not_called agent
     assert_mock_not_called opencode
     assert_mock_not_called claude

@@ -788,6 +788,20 @@ def _validated_span(payload: Any) -> dict[str, Any] | None:
             payload.get(field), str
         ):
             return None
+    if "attempt_id" in payload and payload.get("attempt_id") is not None and (
+        not isinstance(payload.get("attempt_id"), str) or not payload.get("attempt_id")
+    ):
+        return None
+    if "attempt_ordinal" in payload and payload.get("attempt_ordinal") is not None:
+        ordinal = payload.get("attempt_ordinal")
+        if (
+            isinstance(ordinal, bool)
+            or not isinstance(ordinal, (int, float))
+            or (isinstance(ordinal, float) and not math.isfinite(ordinal))
+            or ordinal < 1
+            or ordinal != math.floor(ordinal)
+        ):
+            return None
     for field in ("duration_ms",):
         if field not in payload:
             continue
@@ -868,6 +882,11 @@ def _validated_span(payload: Any) -> dict[str, Any] | None:
         if isinstance(bounded.get(field), str):
             bounded[field] = bounded[field][:MAX_SPAN_IDENTIFIER_LENGTH]
     return bounded
+
+
+def _is_rollup_only(span: dict[str, Any]) -> bool:
+    artifacts = span.get("artifacts") or {}
+    return isinstance(artifacts, dict) and artifacts.get("rollup_only") is True
 
 
 def _normalized_span_timestamp(value: Any) -> str:
@@ -1522,6 +1541,8 @@ def target_for_span(span: dict[str, Any], catalog: dict[str, Any]) -> tuple[str,
 def span_outcomes(spans: list[dict[str, Any]], catalog: dict[str, Any]) -> list[dict[str, Any]]:
     outcomes: list[dict[str, Any]] = []
     for span in spans:
+        if _is_rollup_only(span):
+            continue
         outcomes.extend(_verdict_outcomes(span, catalog))
         status = _text(span.get("status"))
         if status in SUCCESS_STATUSES:
@@ -2268,6 +2289,8 @@ def trace_contrast(spans: list[dict[str, Any]], catalog: dict[str, Any]) -> dict
     """Summarize pass/fail patterns by entity for future proposal generation."""
     entities: dict[str, dict[str, Any]] = {}
     for span in spans:
+        if _is_rollup_only(span):
+            continue
         etype, name = target_for_span(span, catalog)
         key = f"{etype}:{name}"
         entry = entities.setdefault(
@@ -2383,6 +2406,7 @@ def build_report(
             diagnostics=span_source_report,
         )
         manual_outcomes = load_manual_outcomes(log_root, scan_day)
+    spans = [span for span in spans if not _is_rollup_only(span)]
     outcomes = dedupe_outcomes(
         span_outcomes(spans, catalog)
         + trigger_eval_outcomes(repo, catalog)

@@ -150,6 +150,70 @@ def test_expired_inherited_deadline_refuses_before_child_launch(tmp_path: Path) 
     assert elapsed < 1
 
 
+def test_deadline_expiring_during_launch_setup_refuses_immediately_before_popen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_file = tmp_path / "setup-expired.json"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_setup_deadline", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    clock = iter((50, 101))
+    launched = False
+
+    def forbidden_popen(*_args, **_kwargs):
+        nonlocal launched
+        launched = True
+        raise AssertionError("Popen must not run after the absolute deadline")
+
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor.time, "monotonic_ns", lambda: next(clock))
+    monkeypatch.setattr(supervisor, "_darwin_inherited_host_sandboxed", lambda: False)
+    monkeypatch.setattr(
+        supervisor,
+        "_darwin_launch_fingerprint",
+        lambda command: (command, "/fixture/deny", "/fixture/allow", ""),
+    )
+    monkeypatch.setattr(supervisor, "_darwin_sandbox_probe", lambda *_args: True)
+    monkeypatch.setattr(
+        supervisor,
+        "_establish_darwin_owner_lease",
+        lambda *_args: (-1, "/fixture/owner", "fixture-nonce"),
+    )
+    monkeypatch.setattr(supervisor.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", forbidden_popen)
+    monkeypatch.setenv("LEGION_CHILD_LEASE_DEADLINE_NS", "100")
+    for name in (
+        "LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY",
+        "LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY",
+        "LEGION_ANCESTOR_SUPERVISOR_OWNER_PATH",
+        "LEGION_ANCESTOR_SUPERVISOR_OWNER_NONCE",
+        "LEGION_ANCESTOR_SUPERVISOR_OWNER_PID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        supervisor.sys,
+        "argv",
+        [
+            str(SUPERVISOR),
+            "--cwd",
+            str(tmp_path),
+            "--max-runtime-seconds",
+            "30",
+            "--status-file",
+            str(status_file),
+            "--",
+            "/fixture/provider",
+        ],
+    )
+
+    assert supervisor.main() == 124
+    assert not launched
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["status"] == "timed_out"
+    assert receipt["reason"] == "inherited child lease deadline expired during launch setup"
+
+
 def test_command_disappearing_before_popen_still_writes_lease_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

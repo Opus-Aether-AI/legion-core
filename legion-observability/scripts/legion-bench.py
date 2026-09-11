@@ -730,6 +730,9 @@ def _span_totals(logs: str) -> dict[str, Any]:
                         continue
                     if not isinstance(span, dict):
                         continue
+                    artifacts = span.get("artifacts") or {}
+                    if isinstance(artifacts, dict) and artifacts.get("rollup_only") is True:
+                        continue
                     span_cost = _num(span.get("cost_usd"))
                     span_duration = int(_num(span.get("duration_ms")))
                     span_tokens = _span_token_total(span.get("tokens"))

@@ -1100,6 +1100,17 @@ def main() -> int:
             environment["LEGION_ANCESTOR_SUPERVISOR_OWNER_PID"] = (
                 inherited_owner_pid if using_inherited else str(os.getpid())
             )
+        # Darwin fingerprint and owner establishment can perform several process
+        # inspections. An inherited/lowered absolute lease may expire during
+        # that setup, so recheck at the last possible point before any child can
+        # launch. The surrounding finally block releases all setup resources.
+        if absolute_deadline_ns is not None and absolute_deadline_ns <= time.monotonic_ns():
+            reason = "inherited child lease deadline expired during launch setup"
+            _write_status(
+                arguments.status_file, "timed_out", reason, arguments.max_runtime_seconds
+            )
+            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+            return 124
         process = subprocess.Popen(
             command,
             cwd=arguments.cwd,

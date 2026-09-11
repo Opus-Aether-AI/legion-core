@@ -42,7 +42,7 @@ def _positive_int(value):
 
 
 def _attempt_identity(span):
-    """Return stable provider-attempt identity while preserving legacy IDs."""
+    """Return stable attempt/rollup identity while preserving legacy IDs."""
     attempt_id = span.get("attempt_id")
     if not isinstance(attempt_id, str) or not attempt_id.strip():
         attempt_id = ""
@@ -56,7 +56,9 @@ def _attempt_identity(span):
 
     receipt = ""
     artifacts = span.get("artifacts")
+    rollup_only = False
     if isinstance(artifacts, dict):
+        rollup_only = artifacts.get("rollup_only") is True
         candidate = artifacts.get("attempt_receipt")
         if isinstance(candidate, str) and candidate.strip():
             receipt = candidate.strip()
@@ -72,6 +74,10 @@ def _attempt_identity(span):
         parts.append(f"ordinal:{ordinal}")
     if receipt:
         parts.append(f"receipt:{receipt}")
+    # A terminal rollup may deliberately point at its final provider receipt.
+    # Keep that provenance without letting it hash to the provider span itself.
+    if rollup_only:
+        parts.append("kind:rollup")
     return "|".join(parts), attempt_id, ordinal
 
 

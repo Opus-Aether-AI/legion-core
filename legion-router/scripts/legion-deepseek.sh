@@ -352,7 +352,8 @@ cmd_run() {
     '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
       dsh_profile:$profile,preflight_receipt:$preflight,attempt_receipt:$attempt,
       failure_receipt:(if $failure=="" then null else $failure end)}')"
-  emit_span "deepseek" "$reported_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts" \
+  legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    "deepseek" "$reported_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts" \
     unknown unknown
   legion_adapter_disarm_signal_receipt
   SIGNAL_CHILD_PID=""

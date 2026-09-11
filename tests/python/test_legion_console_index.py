@@ -258,6 +258,34 @@ def test_console_index_preserves_unknown_and_partial_metering(tmp_path):
     assert indexer._format_cost(None, "unknown") == "unknown"
 
 
+def test_console_index_known_plus_not_applicable_is_partial(tmp_path):
+    spans_dir = tmp_path / "spans"
+    known = _span("mixed-na", cost_usd=0.5, tokens={"input_tokens": 3})
+    known.update({"cost_status": "known", "usage_status": "known"})
+    not_applicable = _span(
+        "mixed-na", ts="2026-06-15T10:11:00Z", cost_usd=None, tokens=None
+    )
+    not_applicable.update({
+        "cost_status": "not_applicable", "usage_status": "not_applicable",
+    })
+    _write_spans(spans_dir, known, not_applicable)
+
+    span = indexer.load_spans(str(spans_dir))["mixed-na"]
+    assert span["cost_usd"] is None
+    assert span["cost_status"] == "partial"
+    assert span["known_cost_usd"] == 0.5
+    assert span["known_cost_attempts"] == 1
+    assert span["tokens"] is None
+    assert span["usage_status"] == "partial"
+    assert span["known_usage"] == {
+        "input_tokens": 3,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+    assert span["known_usage_attempts"] == 1
+
+
 def test_console_index_excludes_rollup_only_span(tmp_path):
     spans_dir = tmp_path / "spans"
     provider = _span("single", cost_usd=0.5)

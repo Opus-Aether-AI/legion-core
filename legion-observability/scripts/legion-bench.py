@@ -755,11 +755,10 @@ def _provenance_status(payload: dict[str, Any], kind: str) -> str:
 
 
 def _merged_status(known: int, partial: int, unknown: int, not_applicable: int) -> str:
-    del not_applicable
     applicable = known + partial + unknown
     if not applicable:
         return "not_applicable"
-    if known == applicable:
+    if known == applicable + not_applicable:
         return "known"
     if not known and not partial:
         return "unknown"

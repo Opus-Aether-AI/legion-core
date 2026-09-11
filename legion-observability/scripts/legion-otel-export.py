@@ -41,6 +41,39 @@ def _positive_int(value):
     )
 
 
+def _valid_usage(value):
+    if not isinstance(value, dict):
+        return False
+    return all(
+        isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        for item in value.values()
+    )
+
+
+def _metering_status(span, kind):
+    status = span.get(f"{kind}_status")
+    value = span.get("cost_usd" if kind == "cost" else "tokens")
+    if status == "known":
+        valid = _nonnegative_number(value) if kind == "cost" else _valid_usage(value)
+        return "known" if valid else "unknown"
+    if status == "partial":
+        known_value = span.get("known_cost_usd" if kind == "cost" else "known_usage")
+        attempts = span.get(
+            "known_cost_attempts" if kind == "cost" else "known_usage_attempts"
+        )
+        valid = (
+            _nonnegative_number(known_value)
+            if kind == "cost"
+            else _valid_usage(known_value)
+        )
+        return "partial" if valid and _positive_int(attempts) is not None else "unknown"
+    if status in {"unknown", "not_applicable"}:
+        return status
+    if kind == "cost":
+        return "known" if _nonnegative_number(value) else "unknown"
+    return "known" if _valid_usage(value) else "unknown"
+
+
 def _attempt_identity(span):
     """Return stable attempt/rollup identity while preserving legacy IDs."""
     attempt_id = span.get("attempt_id")
@@ -114,10 +147,8 @@ def span_to_otlp(s):
         a("legion.attempt_id", attempt_id)
     if attempt_ordinal is not None:
         a("legion.attempt_ordinal", attempt_ordinal, "intValue")
-    cost_status = str(s.get("cost_status") or (
-        "known" if _nonnegative_number(s.get("cost_usd")) else "unknown"
-    ))
-    usage_status = str(s.get("usage_status") or ("known" if isinstance(s.get("tokens"), dict) else "unknown"))
+    cost_status = _metering_status(s, "cost")
+    usage_status = _metering_status(s, "usage")
     a("legion.cost_status", cost_status)
     a("legion.usage_status", usage_status)
     if cost_status == "known" and s.get("cost_usd") is not None:
@@ -127,7 +158,7 @@ def span_to_otlp(s):
             a("legion.known_cost_usd", float(_num(s.get("known_cost_usd"))), "doubleValue")
         a("legion.known_cost_attempts", int(_num(s.get("known_cost_attempts"))), "intValue")
     tk = s.get("tokens") or {}
-    if isinstance(tk, dict):
+    if usage_status == "known" and isinstance(tk, dict):
         for key in ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"):
             if key in tk:
                 try:

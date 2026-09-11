@@ -85,7 +85,7 @@ def _merged_status(known, partial, unknown, not_applicable):
     applicable = known + partial + unknown
     if not applicable:
         return "not_applicable"
-    if known == applicable:
+    if known == applicable + not_applicable:
         return "known"
     if not known and not partial:
         return "unknown"

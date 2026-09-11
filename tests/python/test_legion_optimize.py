@@ -226,6 +226,23 @@ def test_route_stats_preserve_partial_and_not_applicable_cost_provenance():
     assert opt._eligible_routes(stats, 1) == {}
 
 
+def test_unclassified_known_plus_not_applicable_cost_is_partial():
+    common = {
+        "schema": "legion.span.v1",
+        "executor": "codex",
+        "status": "ok",
+    }
+    summary = opt.classification_summary([
+        {**common, "cost_usd": 0.4, "cost_status": "known"},
+        {**common, "cost_usd": None, "cost_status": "not_applicable"},
+    ])
+
+    assert summary["unclassified_cost_usd"] is None
+    assert summary["unclassified_cost_status"] == "partial"
+    assert summary["unclassified_known_cost_usd"] == 0.4
+    assert summary["unclassified_known_cost_runs"] == 1
+
+
 def test_propose_holds_when_current_is_already_cheapest_clearing_bar():
     stats = {
         "test-model-beta": {"runs": 7, "success_rate": 0.9, "mean_cost": 0.4, "p50_ms": 100, "p95_ms": 200},

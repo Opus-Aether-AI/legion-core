@@ -428,6 +428,30 @@ SH
   ' "$attempt"
 }
 
+@test "Pi malformed or negative provider cost remains unknown in canonical output" {
+  local repo result attempt invalid_cost case_name
+  for invalid_cost in -1 '"malformed"'; do
+    case_name="${invalid_cost//[^[:alnum:]]/x}"
+    repo="$(make_test_repo "pi-invalid-cost-$case_name")"
+
+    run env MOCK_PI_FINAL_COST_TOTAL="$invalid_cost" PI_BIN=pi \
+      "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+        --model openai/fixture-pi --repo "$repo" --quiet
+
+    [ "$status" -ne 0 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    jq -e '.usage_status == "known" and (.usage | type) == "object"
+      and .cost_status == "unknown" and .cost_usd == null
+      and (.attempt_receipt | type) == "string"' <<<"$result"
+    attempt="$(jq -r '.attempt_receipt' <<<"$result")"
+    jq -e --argjson result "$result" '
+      .usage == $result.usage and .usage_status == $result.usage_status
+      and .cost_usd == $result.cost_usd and .cost_status == $result.cost_status
+      and .terminal_status == "failed" and .failure.class == "malformed_event"
+    ' "$attempt"
+  done
+}
+
 @test "Hermes launched pre-metering failure emits nullable unknown metering" {
   local repo result attempt
   repo="$(make_test_repo hermes-pre-metering-failure)"
@@ -447,6 +471,101 @@ SH
     .usage == $result.usage and .usage_status == $result.usage_status
     and .cost_usd == $result.cost_usd and .cost_status == $result.cost_status
   ' "$attempt"
+}
+
+@test "Pi Hermes wrapper defers an assigned-child signal until the billable started receipt is durable" {
+  local repo run_id art wrapper provider harness receipt token_file assigned release child_pid_file signal_file
+  local wrapper_pid child_pid rc=0
+  repo="$(make_test_repo delayed-started-receipt)"
+  run_id=delayed-started-receipt
+  PI_BIN=pi run "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+    --repo "$repo" --run-id "$run_id" --keep --quiet
+  [ "$status" -eq 0 ]
+  art="$repo/.legion/runs/$run_id"
+  wrapper="$art/provider-launch-wrapper.py"
+  [ -x "$wrapper" ]
+
+  provider="$TEST_TMPDIR/delayed-start-provider"
+  child_pid_file="$TEST_TMPDIR/delayed-start-child.pid"
+  signal_file="$TEST_TMPDIR/delayed-start-child.signal"
+  cat > "$provider" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$$" > "$MOCK_DELAYED_CHILD_PID_FILE"
+trap 'printf "TERM\n" > "$MOCK_DELAYED_CHILD_SIGNAL_FILE"; exit 143' TERM
+while :; do sleep 0.05; done
+SH
+  chmod +x "$provider"
+  provider="$(cd "${provider%/*}" && pwd -P)/${provider##*/}"
+
+  harness="$TEST_TMPDIR/delayed-start-harness.py"
+  assigned="$TEST_TMPDIR/delayed-start-assigned"
+  release="$TEST_TMPDIR/delayed-start-release"
+  cat > "$harness" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+import time
+
+harness, wrapper, assigned, release, *wrapper_arguments = sys.argv
+spec = importlib.util.spec_from_file_location("legion_provider_launch_wrapper", wrapper)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+real_write_receipt = module.write_receipt
+
+def delayed_write_receipt(receipt, payload, token):
+    if payload.get("status") == "started":
+        Path(assigned).write_text("assigned\n", encoding="utf-8")
+        deadline = time.monotonic() + 10
+        while not Path(release).exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("timed out waiting to release started receipt")
+            time.sleep(0.01)
+    return real_write_receipt(receipt, payload, token)
+
+module.write_receipt = delayed_write_receipt
+sys.argv = [wrapper, *wrapper_arguments]
+raise SystemExit(module.main())
+PY
+  receipt="$TEST_TMPDIR/delayed-start-receipt.json"
+  token_file="$TEST_TMPDIR/delayed-start-token"
+  printf '%064d\n' 0 > "$token_file"
+  MOCK_DELAYED_CHILD_PID_FILE="$child_pid_file" \
+    MOCK_DELAYED_CHILD_SIGNAL_FILE="$signal_file" \
+    python3 "$harness" "$wrapper" "$assigned" "$release" \
+      "$receipt" "$token_file" -- "$provider" &
+  wrapper_pid=$!
+  for _ in $(seq 1 200); do
+    [[ -f "$assigned" && -f "$child_pid_file" ]] && break
+    kill -0 "$wrapper_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ -f "$assigned" ]
+  [ -f "$child_pid_file" ]
+  child_pid="$(cat "$child_pid_file")"
+  kill -TERM "$wrapper_pid"
+  sleep 0.2
+  kill -0 "$child_pid"
+  [ ! -e "$signal_file" ]
+  jq -e '.status == "pending"' "$receipt"
+
+  : > "$release"
+  wait "$wrapper_pid" || rc=$?
+  [ "$rc" -eq 143 ]
+  for _ in $(seq 1 100); do
+    ! kill -0 "$child_pid" 2>/dev/null && break
+    sleep 0.05
+  done
+  ! kill -0 "$child_pid" 2>/dev/null
+  grep -qx TERM "$signal_file"
+  jq -e --arg executable "$provider" '
+    .schema == "legion.provider-launch.v1" and .status == "started"
+    and .executable_path == $executable
+    and (.provider_pid | type == "number" and . >= 1)
+    and (.auth | type == "string" and length == 64)
+    and (has("token") | not)
+  ' "$receipt"
 }
 
 @test "a provider that really launches and exits 127 remains a billable attempt" {

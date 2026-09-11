@@ -448,7 +448,7 @@ def _span_cost_status(span: dict[str, Any]) -> str:
 
 
 def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
-    known = partial = unknown = known_count = 0
+    known = partial = unknown = not_applicable = known_count = 0
     subtotal = 0.0
     for record in records:
         status = _span_cost_status(record)
@@ -462,10 +462,12 @@ def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             subtotal += _num(record.get("known_cost_usd"))
         elif status == "unknown":
             unknown += 1
+        else:
+            not_applicable += 1
     applicable = known + partial + unknown
     status = (
         "not_applicable" if not applicable else
-        "known" if known == applicable else
+        "known" if known == applicable + not_applicable else
         "unknown" if not known and not partial else
         "partial"
     )

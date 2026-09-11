@@ -110,7 +110,21 @@ begin_signal_launch() {
   trap 'SIGNAL_LAUNCH_PENDING=1' HUP
 }
 abort_pending_signal_launch() {
-  [[ -z "$SIGNAL_LAUNCH_PENDING" ]] || finish_signal_launch
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  [[ -n "$pending" ]] || return 0
+  if ! legion_adapter_write_final_gate_no_launch "$SIGNAL_LEASE_STATUS" \
+      "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" "$pending"; then
+    trap - INT TERM HUP
+    keep=1
+    note "provider launch cancelled before Popen, but no-launch evidence could not be persisted; retaining containment"
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" "$art" \
+        "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
+  finish_signal_launch
 }
 finish_signal_launch() {
   local pending="$SIGNAL_LAUNCH_PENDING"

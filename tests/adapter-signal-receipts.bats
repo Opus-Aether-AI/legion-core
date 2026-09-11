@@ -119,7 +119,7 @@ install_signal_cleanup_failed_python() {
 
 assert_signal_receipt() {
   local adapter="$1" marker="$2" delay_name="$3" run_id="signal-$adapter"
-  local repo out err pid rc=0 art
+  local repo out err pid rc=0 art launch_receipt
   repo="$(make_test_repo "$adapter")"
   out="$TEST_TMPDIR/$adapter.out"
   err="$TEST_TMPDIR/$adapter.err"
@@ -135,6 +135,15 @@ assert_signal_receipt() {
     sleep 0.05
   done
   grep -q "$marker" "$MOCK_CALL_LOG"
+  if [[ "$adapter" == pi || "$adapter" == hermes ]]; then
+    launch_receipt="$art/tmp/provider-launch.json"
+    for _ in $(seq 1 200); do
+      jq -e '.status == "started"' "$launch_receipt" >/dev/null 2>&1 && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    jq -e '.status == "started"' "$launch_receipt" >/dev/null
+  fi
   kill -TERM "$pid"
   wait "$pid" || rc=$?
   [ "$rc" -eq 143 ]
@@ -202,11 +211,62 @@ assert_signal_receipt() {
 }
 
 @test "every foreground adapter aborts a signal pending at its final launch gate" {
-  local bash_env="$TEST_TMPDIR/pending-signal.bash" adapter provider_marker repo run_id rc art out err
+  local bash_env="$TEST_TMPDIR/pending-signal.bash" adapter provider_marker signal expected_rc repo run_id rc art out err lease
   install_mock_version_registry
   cat > "$bash_env" <<'SH'
 set -T
-trap 'case "$BASH_COMMAND" in abort_pending_signal_launch|abort_pending_claude_signal_launch) kill -TERM "$$";; esac' DEBUG
+trap 'case "$BASH_COMMAND" in abort_pending_signal_launch|abort_pending_claude_signal_launch) kill -"${LEGION_TEST_FINAL_GATE_SIGNAL:-TERM}" "$$";; esac' DEBUG
+SH
+  for adapter in claude cursor opencode deepseek pi hermes; do
+    case "$adapter" in
+      claude) provider_marker='claude -p'; signal=TERM; expected_rc=143 ;;
+      cursor) provider_marker='agent -p'; signal=INT; expected_rc=130 ;;
+      opencode) provider_marker='opencode run'; signal=HUP; expected_rc=129 ;;
+      deepseek) provider_marker='dsh --profile'; signal=TERM; expected_rc=143 ;;
+      pi) provider_marker='pi -p'; signal=INT; expected_rc=130 ;;
+      hermes) provider_marker='hermes --oneshot'; signal=HUP; expected_rc=129 ;;
+    esac
+    repo="$(make_test_repo "pending-$adapter")"
+    run_id="pending-$adapter"
+    out="$TEST_TMPDIR/$adapter-pending.out"
+    err="$TEST_TMPDIR/$adapter-pending.err"
+    rc=0
+    local -a extra_args=()
+    [[ "$adapter" != claude ]] || extra_args+=(--no-fallback)
+    BASH_ENV="$bash_env" LEGION_TEST_FINAL_GATE_SIGNAL="$signal" PI_BIN=pi HERMES_BIN=hermes \
+      "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task wait --repo "$repo" \
+        --run-id "$run_id" --quiet "${extra_args[@]}" >"$out" 2>"$err" || rc=$?
+    [ "$rc" -eq "$expected_rc" ] || { printf 'adapter=%s signal=%s rc=%s out=%s err=%s\n' "$adapter" "$signal" "$rc" "$(cat "$out")" "$(cat "$err")" >&2; return 1; }
+    ! grep -Fq "$provider_marker" "$MOCK_CALL_LOG" \
+      || { printf 'adapter=%s launched provider\n' "$adapter" >&2; return 1; }
+    art="$repo/.legion/runs/$run_id"
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    lease="$(find "$art" -maxdepth 1 -name 'lease*.json' -print -quit)"
+    [ -n "$lease" ]
+    jq -e '
+      .schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed"
+      and (.reason | contains("final pre-launch gate; no provider launched"))
+      and (.max_runtime_seconds | type == "number" and . >= 1 and . == floor)
+      and (has("child_exit_code") | not)
+      and ((keys_unsorted - ["schema","status","reason","max_runtime_seconds"]) | length == 0)
+    ' "$lease" || { printf 'adapter=%s invalid final-gate lease=%s\n' "$adapter" "$(cat "$lease")" >&2; return 1; }
+  done
+}
+
+@test "every foreground adapter retains containment when final-gate evidence collides" {
+  local bash_env="$TEST_TMPDIR/pending-signal-collision.bash" adapter provider_marker repo run_id rc art out err worktree
+  install_mock_version_registry
+  cat > "$bash_env" <<'SH'
+set -T
+trap 'case "$BASH_COMMAND" in abort_pending_signal_launch|abort_pending_claude_signal_launch)
+  if [[ "${LEGION_TEST_FINAL_GATE_INJECTED:-0}" == 0 ]]; then
+    LEGION_TEST_FINAL_GATE_INJECTED=1
+    : > "$SIGNAL_LEASE_STATUS"
+    kill -TERM "$$"
+  fi
+;; esac' DEBUG
 SH
   for adapter in claude cursor opencode deepseek pi hermes; do
     case "$adapter" in
@@ -217,22 +277,24 @@ SH
       pi) provider_marker='pi -p' ;;
       hermes) provider_marker='hermes --oneshot' ;;
     esac
-    repo="$(make_test_repo "pending-$adapter")"
-    run_id="pending-$adapter"
-    out="$TEST_TMPDIR/$adapter-pending.out"
-    err="$TEST_TMPDIR/$adapter-pending.err"
+    repo="$(make_test_repo "pending-collision-$adapter")"
+    run_id="pending-collision-$adapter"
+    out="$TEST_TMPDIR/$adapter-pending-collision.out"
+    err="$TEST_TMPDIR/$adapter-pending-collision.err"
     rc=0
     local -a extra_args=()
     [[ "$adapter" != claude ]] || extra_args+=(--no-fallback)
     BASH_ENV="$bash_env" PI_BIN=pi HERMES_BIN=hermes \
       "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task wait --repo "$repo" \
         --run-id "$run_id" --quiet "${extra_args[@]}" >"$out" 2>"$err" || rc=$?
-    [ "$rc" -eq 143 ] || { printf 'adapter=%s rc=%s out=%s err=%s\n' "$adapter" "$rc" "$(cat "$out")" "$(cat "$err")" >&2; return 1; }
-    ! grep -Fq "$provider_marker" "$MOCK_CALL_LOG" \
-      || { printf 'adapter=%s launched provider\n' "$adapter" >&2; return 1; }
+    [ "$rc" -eq 70 ] || { printf 'adapter=%s rc=%s out=%s err=%s\n' "$adapter" "$rc" "$(cat "$out")" "$(cat "$err")" >&2; return 1; }
+    ! grep -Fq "$provider_marker" "$MOCK_CALL_LOG"
     art="$repo/.legion/runs/$run_id"
     [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
     [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
+    worktree="$(jq -r '.worktree_dir' "$LEGION_REGISTRY_DIR/$run_id.json")"
+    [ -d "$worktree" ]
   done
 }
 

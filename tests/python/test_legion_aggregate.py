@@ -75,6 +75,25 @@ def test_aggregate_preserves_known_zero_as_measured():
     assert group["known_usage_runs"] == 1
 
 
+def test_aggregate_known_plus_not_applicable_is_partial_for_cost_and_usage():
+    result = agg.aggregate([
+        {"schema": "legion.span.v1", "executor": "mixed", "status": "ok",
+         "cost_usd": 0.25, "cost_status": "known",
+         "tokens": {"input_tokens": 2}, "usage_status": "known"},
+        {"schema": "legion.span.v1", "executor": "mixed", "status": "refused",
+         "cost_usd": None, "cost_status": "not_applicable",
+         "tokens": None, "usage_status": "not_applicable"},
+    ])
+
+    group = result["groups"]["mixed"]
+    assert group["cost_usd"] is None
+    assert group["cost_status"] == "partial"
+    assert group["known_cost_usd"] == 0.25
+    assert group["known_cost_runs"] == 1
+    assert group["usage_status"] == "partial"
+    assert group["known_usage_runs"] == 1
+
+
 def test_aggregate_partial_span_preserves_known_subtotal_and_attempt_counts():
     result = agg.aggregate([
         {"schema": "legion.span.v1", "executor": "rollup", "status": "ok",

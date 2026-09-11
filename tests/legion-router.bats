@@ -2009,6 +2009,69 @@ SH
     [ "$elapsed" -lt 10 ]
 }
 
+@test "delegate review: expiry before first native launch writes strict no-launch evidence" {
+    local repo result lease art
+    repo="$(make_test_repo review-first-prelaunch-expiry)"
+    install_exhausted_remaining_seconds_python_shim
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" \
+      --max-runtime-seconds 30 --quiet
+
+    [ "$status" -eq 1 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "timed_out" and .attempts == 0
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
+    lease="$(echo "$result" | jq -r .lease_receipt)"
+    art="$(dirname "$lease")"
+    jq -e '.schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    [ ! -e "$art/attempt.json" ]
+    [ ! -e "$art/failure.json" ]
+    [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
+}
+
+@test "delegate review: retry expiry retains prior paid receipt only in reconciliation" {
+    local repo result lease art
+    repo="$(make_test_repo review-retry-prelaunch-expiry)"
+    install_exhausted_remaining_seconds_python_shim
+    export LEGION_TEST_REMAINING_VALUES=30,0
+    export MOCK_CODEX_REVIEW_INVALID_VERDICTS=1
+    export MOCK_CODEX_REVIEW_INVALID_VERDICT_ATTEMPT_FILE="$TEST_TMPDIR/review-expiry-attempts"
+
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" \
+      --max-runtime-seconds 30 --max-attempts 2 --quiet
+
+    [ "$status" -eq 1 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "timed_out" and .attempts == 1
+      and .attempt_receipt == null and .failure_receipt == null
+      and (.usage | type) == "object" and .usage_status == "known"'
+    lease="$(echo "$result" | jq -r .lease_receipt)"
+    art="$(dirname "$lease")"
+    jq -e '.status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    jq -e '.executor == "codex-review" and .failure.class == "malformed_event"' \
+      "$art/attempt-1.json"
+    [ ! -e "$art/attempt.json" ]
+    [ ! -e "$art/failure.json" ]
+    [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 1 ]
+}
+
+@test "delegate review: invalid runtime bound creates no worktree or lifecycle" {
+    local repo
+    repo="$(make_test_repo review-invalid-runtime-bound)"
+
+    run "$DELEGATE" review --base HEAD --repo "$repo" --max-runtime-seconds 0 --quiet
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--max-runtime-seconds must be a positive integer"* ]]
+    [ ! -d "$repo/.legion/worktrees" ] \
+      || [ -z "$(find "$repo/.legion/worktrees" -mindepth 1 -print -quit)" ]
+    [ ! -d "$repo/.legion/runs" ] \
+      || [ -z "$(find "$repo/.legion/runs" -mindepth 1 -print -quit)" ]
+}
+
 @test "delegate review: fallback candidates share one absolute child lease" {
     local repo started elapsed
     repo="$(make_test_repo review-shared-candidate-lease)"

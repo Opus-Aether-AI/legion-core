@@ -391,6 +391,29 @@ def test_activity_cost_loader_excludes_rollup_only_span(tmp_path):
     }
 
 
+def test_activity_known_plus_not_applicable_cost_is_partial(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    payloads = [
+        {"schema": "legion.span.v1", "run_id": "mixed-applicability",
+         "cost_usd": 0.75, "cost_status": "known"},
+        {"schema": "legion.span.v1", "run_id": "mixed-applicability",
+         "cost_usd": None, "cost_status": "not_applicable"},
+    ]
+    (spans / "2026-09-11.jsonl").write_text(
+        "\n".join(json.dumps(span) for span in payloads) + "\n",
+        encoding="utf-8",
+    )
+
+    assert activity.load_span_costs(str(spans))["mixed-applicability"] == {
+        "cost_usd": None,
+        "cost_status": "partial",
+        "known_cost_usd": 0.75,
+        "known_cost_attempts": 1,
+        "attempt_count": 1,
+    }
+
+
 def test_group_by_session_merges_a_fanouts_agents_across_their_worktrees():
     # A session (trace_id) = one fan-out that spawned N agents in N ephemeral
     # worktrees. Grouping by trace_id collects them; grouping by worktree would be 1:1.

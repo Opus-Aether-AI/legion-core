@@ -92,7 +92,22 @@ begin_claude_signal_launch() {
   trap 'SIGNAL_LAUNCH_PENDING=1' HUP
 }
 abort_pending_claude_signal_launch() {
-  [[ -z "$SIGNAL_LAUNCH_PENDING" ]] || finish_claude_signal_launch
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  [[ -n "$pending" ]] || return 0
+  if ! legion_adapter_write_final_gate_no_launch "$SIGNAL_LEASE_STATUS" \
+      "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" "$pending"; then
+    trap - INT TERM HUP
+    keep=1
+    note "provider launch cancelled before Popen, but no-launch evidence could not be persisted; retaining containment"
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$contract_art" "$SIGNAL_WORKTREE" "${branch:-}" "$model" "$sandbox" \
+        "$base" "$archetype" "$effort" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
+  finish_claude_signal_launch
 }
 finish_claude_signal_launch() {
   local pending="$SIGNAL_LAUNCH_PENDING"
@@ -242,6 +257,16 @@ remaining = int(sys.argv[1]) - time.monotonic_ns()
 # a retry or fallback to extend the absolute boundary.
 print(max(0, (remaining + 999_999_999) // 1_000_000_000))
 PY
+}
+
+claude_write_strict_no_launch_lease() {
+  local path="$1" reason="$2" tmp="$1.tmp.$$"
+  jq -cn --arg reason "$reason" --argjson runtime "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" '
+    {schema:"legion.child-execution-lease.v1",status:"launch_failed",
+     reason:$reason,max_runtime_seconds:$runtime}
+  ' > "$tmp" || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$path"
 }
 
 archive_claude_fallback_receipts() {
@@ -405,10 +430,28 @@ run_fallback() {
   local fallback_branch="legion/delegate-$RUN_ID"
 
   archive_claude_fallback_receipts "$fallback_art"
+  # The archive is immutable paid-attempt evidence. The fallback candidate owns
+  # the mutable pointers and must start with none, even if it stops before its
+  # own preflight or launch.
+  LEGION_ADAPTER_PREFLIGHT_PATH=""
+  LEGION_ADAPTER_ATTEMPT_PATH=""
+  LEGION_ADAPTER_FAILURE_PATH=""
+  LEGION_CLAUDE_LEASE_RECEIPT=""
   claude_start_lease_deadline
   fallback_runtime="$(claude_remaining_lease_seconds)"
   if [[ "$fallback_runtime" -lt 1 ]]; then
     reason="child execution lease expired after $LEGION_ADAPTER_MAX_RUNTIME_SECONDS seconds"
+    LEGION_CLAUDE_LEASE_RECEIPT="$fallback_art/lease-1.json"
+    if ! claude_write_strict_no_launch_lease "$LEGION_CLAUDE_LEASE_RECEIPT" \
+        "child execution lease expired before Codex fallback launch"; then
+      reason="unable to persist authenticated no-launch Codex fallback lease evidence (expected: $LEGION_CLAUDE_LEASE_RECEIPT)"
+      [[ -z "${preset_run_id:-}" ]] || legion_write_adapter_run_state \
+        containment_failed "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
+        "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
+      [[ -z "${preset_run_id:-}" ]] || legion_disarm_adopted_run_guard
+      emit_fallback_no_launch "codex" "$model" "containment_failed" "$reason" true "$reason" "$fallback_art"
+      return 70
+    fi
     [[ -z "${preset_run_id:-}" ]] || legion_write_adapter_run_state \
       timed_out "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
       "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
@@ -726,9 +769,19 @@ cmd_run() {
     local attempt_runtime
     attempt_runtime="$(claude_remaining_lease_seconds)"
     if [[ "$attempt_runtime" -lt 1 ]]; then
-      lease_timed_out=1
       chain_stopped_before_launch=1
-      lease_reason="child execution lease expired after $LEGION_ADAPTER_MAX_RUNTIME_SECONDS seconds"
+      LEGION_CLAUDE_LEASE_RECEIPT="$contract_art/lease-$chain_idx.json"
+      lease_reason="child execution lease expired before Claude provider launch"
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      if claude_write_strict_no_launch_lease "$LEGION_CLAUDE_LEASE_RECEIPT" "$lease_reason"; then
+        lease_timed_out=1
+        lease_reason="child execution lease expired after $LEGION_ADAPTER_MAX_RUNTIME_SECONDS seconds"
+      else
+        containment_failed=1
+        keep=1
+        lease_reason="unable to persist authenticated no-launch Claude lease evidence (expected: $LEGION_CLAUDE_LEASE_RECEIPT; worktree retained: ${wt:-$repo})"
+      fi
       break
     fi
     note "→ ${claude_cmd[*]}"

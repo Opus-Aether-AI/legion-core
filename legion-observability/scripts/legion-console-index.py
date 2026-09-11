@@ -130,11 +130,11 @@ def _provenance_status(record: dict[str, Any], kind: str) -> str:
     return "known" if known_value else "unknown"
 
 
-def _merged_status(known: int, partial: int, unknown: int) -> str:
+def _merged_status(known: int, partial: int, unknown: int, not_applicable: int) -> str:
     applicable = known + partial + unknown
     if not applicable:
         return "not_applicable"
-    if known == applicable:
+    if known == applicable + not_applicable:
         return "known"
     if not known and not partial:
         return "unknown"
@@ -142,7 +142,7 @@ def _merged_status(known: int, partial: int, unknown: int) -> str:
 
 
 def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
-    known = partial = unknown = known_count = 0
+    known = partial = unknown = not_applicable = known_count = 0
     subtotal = 0.0
     for record in records:
         status = _provenance_status(record, "cost")
@@ -156,7 +156,9 @@ def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             subtotal += _num(record.get("known_cost_usd"))
         elif status == "unknown":
             unknown += 1
-    status = _merged_status(known, partial, unknown)
+        else:
+            not_applicable += 1
+    status = _merged_status(known, partial, unknown, not_applicable)
     subtotal = round(subtotal, 6)
     return {
         "cost_usd": subtotal if status == "known" else None,
@@ -243,6 +245,7 @@ def load_spans(directory: str) -> dict[str, dict[str, Any]]:
                             "usage_known": 0,
                             "usage_partial": 0,
                             "usage_unknown": 0,
+                            "usage_not_applicable": 0,
                             "known_usage_attempts": 0,
                         },
                     )
@@ -258,6 +261,8 @@ def load_spans(directory: str) -> dict[str, dict[str, Any]]:
                         _sum_tokens(totals["known_usage"], span.get("known_usage"))
                     elif usage_status == "unknown":
                         totals["usage_unknown"] += 1
+                    else:
+                        totals["usage_not_applicable"] += 1
 
                     current = latest_by_run.get(run_id)
                     if current is None or _ts_key(span.get("ts")) >= _ts_key(
@@ -271,7 +276,8 @@ def load_spans(directory: str) -> dict[str, dict[str, Any]]:
         totals = totals_by_run[run_id]
         span.update(_cost_summary(totals["records"]))
         usage_status = _merged_status(
-            totals["usage_known"], totals["usage_partial"], totals["usage_unknown"]
+            totals["usage_known"], totals["usage_partial"], totals["usage_unknown"],
+            totals["usage_not_applicable"],
         )
         span["usage_status"] = usage_status
         span["tokens"] = totals["known_usage"] if usage_status == "known" else None

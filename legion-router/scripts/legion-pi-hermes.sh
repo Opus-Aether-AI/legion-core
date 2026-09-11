@@ -203,7 +203,18 @@ begin_signal_launch() {
   trap 'SIGNAL_LAUNCH_PENDING=1' HUP
 }
 abort_pending_signal_launch() {
-  [[ -z "$SIGNAL_LAUNCH_PENDING" ]] || finish_signal_launch
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  [[ -n "$pending" ]] || return 0
+  if ! legion_adapter_write_final_gate_no_launch "$SIGNAL_LEASE_STATUS" \
+      "$MAX_RUNTIME_SECONDS" "$pending"; then
+    trap - INT TERM HUP
+    KEEP=1
+    note "provider launch cancelled before Popen, but no-launch evidence could not be persisted; retaining containment"
+    [[ -z "${RUN_ID:-}" || -z "${ART:-}" ]] || write_state containment_failed
+    [[ -z "${PRESET_RUN_ID:-}" ]] || legion_disarm_adopted_run_guard
+    exit 70
+  fi
+  finish_signal_launch
 }
 finish_signal_launch() {
   local pending="$SIGNAL_LAUNCH_PENDING"
@@ -361,6 +372,20 @@ pi_cost() {
       + [.[] | select(.type == "compaction_end" and .aborted == false and .result.usage != null) | .result.usage.cost.total])
     | add // 0' \
     "$file" 2>/dev/null || printf 0
+}
+pi_cost_known() {
+  local file="$1"
+  [[ -s "$file" ]] || return 1
+  jq -s -e '
+    def valid_cost:
+      type == "number"
+      and (isnan | not)
+      and (isinfinite | not)
+      and . >= 0;
+    ([.[] | select(.type == "message_end" and .message.role == "assistant") | .message.usage.cost.total]
+      + [.[] | select(.type == "compaction_end" and .aborted == false and .result.usage != null) | .result.usage.cost.total]) as $costs
+    | ($costs | length) > 0 and all($costs[]; valid_cost)
+  ' "$file" >/dev/null 2>&1
 }
 pi_result() {
   local file="$1"
@@ -749,16 +774,18 @@ def main() -> int:
         "executable_path": command[0],
     }
     child = None
+    started_durable = False
     pending_signal = None
 
     def forward(signum: int, _frame: object) -> None:
         nonlocal pending_signal
-        pending_signal = signum
-        if child is not None:
+        if child is not None and started_durable:
             try:
                 child.send_signal(signum)
             except ProcessLookupError:
                 pass
+        else:
+            pending_signal = signum
 
     # Install handlers before publishing pending. A signal before Popen then
     # becomes authenticated no-launch; a signal during Popen is remembered and
@@ -788,9 +815,12 @@ def main() -> int:
         print(f"legion provider launcher: {reason}", file=sys.stderr)
         return 127 if error.errno == 2 else 126
     write_receipt(receipt, {**base, "status": "started", "provider_pid": child.pid}, token)
+    started_durable = True
     if pending_signal is not None:
+        signum = pending_signal
+        pending_signal = None
         try:
-            child.send_signal(pending_signal)
+            child.send_signal(signum)
         except ProcessLookupError:
             pass
     return child.wait()
@@ -1062,6 +1092,7 @@ run_provider() {
       --darwin-sandbox-allow-canary "$SUPERVISOR_ALLOW_CANARY")
   fi
   supervisor_args+=(-- "${invocation[@]}")
+  SIGNAL_LEASE_STATUS="$ART/lease.json"
   begin_signal_launch
   abort_pending_signal_launch
   "${supervisor_args[@]}" >"$out" 2>"$err" &
@@ -1222,7 +1253,9 @@ cmd_run() {
       lease_reason="handoff broker reported incomplete descendant cleanup (evidence: $ART/broker.err; worktree retained: $WT_RECORD)"
     fi
   fi
-  if ! jq -en --argjson value "$cost" '$value | type == "number" and . >= 0' >/dev/null 2>&1; then cost=0; terminal_ok=0; fi
+  if ! jq -en --argjson value "$cost" '
+    $value | type == "number" and (isnan | not) and (isinfinite | not) and . >= 0
+  ' >/dev/null 2>&1; then cost=null; terminal_ok=0; fi
   if [[ "$containment_failed" -ne 1 ]] && ! capture_trusted_diff "$diff"; then
     status=error
     result="${result:+$result$'\n'}$ADAPTER_KIND modified trusted worktree metadata or diff capture failed; refusing unsandboxed Git evaluation."
@@ -1277,7 +1310,10 @@ cmd_run() {
   fi
   if [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == pi ]] \
      && jq -s -e '[.[] | select(.type == "message_end" and (.message.usage | type) == "object")] | length > 0' "$out" >/dev/null 2>&1; then
-    usage_status=known; usage_source=pi-jsonl; cost_status=known; cost_source=pi-jsonl
+    usage_status=known; usage_source=pi-jsonl
+    if pi_cost_known "$out"; then
+      cost_status=known; cost_source=pi-jsonl
+    fi
   elif [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == hermes ]] \
        && hermes_terminal_ok "$out" "$usage_art"; then
     usage_status=known; usage_source=hermes-usage-file

@@ -63,6 +63,51 @@ SH
     export PATH="$shim_dir:$PATH"
 }
 
+install_claude_remaining_seconds_python_shim() {
+    local shim_dir="$TEST_TMPDIR/claude-remaining-python" real_python
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == - ]]; then
+  source_file="$(mktemp)"
+  cat > "$source_file"
+  if grep -q 'remaining = int(sys.argv\[1\]) - time.monotonic_ns()' "$source_file"; then
+    count=0
+    [[ ! -s "$LEGION_TEST_CLAUDE_REMAINING_COUNT" ]] || count="$(cat "$LEGION_TEST_CLAUDE_REMAINING_COUNT")"
+    printf '%s\n' "$((count + 1))" > "$LEGION_TEST_CLAUDE_REMAINING_COUNT"
+    value="$(printf '%s\n' "${LEGION_TEST_CLAUDE_REMAINING_VALUES:-0}" | cut -d, -f"$((count + 1))")"
+    [[ -n "$value" ]] || value=0
+    rm -f "$source_file"
+    printf '%s\n' "$value"
+    exit 0
+  fi
+  "$LEGION_TEST_REAL_PYTHON" "$@" < "$source_file"
+  rc=$?
+  rm -f "$source_file"
+  exit "$rc"
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export LEGION_TEST_CLAUDE_REMAINING_COUNT="$TEST_TMPDIR/claude-remaining-count"
+    : > "$LEGION_TEST_CLAUDE_REMAINING_COUNT"
+    export PATH="$shim_dir:$PATH"
+}
+
+install_unavailable_delegate_shim() {
+    local shim_dir="$TEST_TMPDIR/unavailable-delegate"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"status":"refused","reason":"codex unavailable","preflight_receipt":null,"attempt_receipt":null,"failure_receipt":null}'
+exit 1
+SH
+    chmod +x "$shim_dir/legion-delegate"
+    export PATH="$shim_dir:$PATH"
+}
+
 @test "legion-claude: happy path uses claude and emits a claude span" {
     local repo; repo="$(make_test_repo ok1)"
     local context="$TEST_TMPDIR/context.log"
@@ -465,6 +510,96 @@ PY
     [ "$status" -eq 1 ]
     [ "$elapsed" -lt 5 ]
     echo "$output" | jq -e '.status == "timed_out" and (.lease_receipt | length > 0)'
+}
+
+@test "legion-claude: expiry before first provider launch writes strict no-launch evidence" {
+    local repo result lease run_id
+    repo="$(make_test_repo first-prelaunch-expiry)"
+    install_claude_remaining_seconds_python_shim
+
+    run "$LEGION_CLAUDE" run --task x --repo "$repo" \
+      --max-runtime-seconds 30 --no-fallback --quiet
+
+    [ "$status" -eq 1 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "timed_out" and .executor == "claude"
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
+    lease="$(echo "$result" | jq -r .lease_receipt)"
+    jq -e '.schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    [ "$(grep -Ec '^claude -p ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
+    run_id="$(echo "$result" | jq -r .run_id)"
+    [ ! -e "$repo/.legion/runs/$run_id/attempt.json" ]
+}
+
+@test "legion-claude: same-vendor retry expiry preserves prior paid reconciliation only" {
+    local repo result lease art
+    repo="$(make_test_repo retry-prelaunch-expiry)"
+    install_claude_remaining_seconds_python_shim
+    export LEGION_TEST_CLAUDE_REMAINING_VALUES=30,0
+
+    MOCK_CLAUDE_DECLINE_MODELS=model-a run "$LEGION_CLAUDE" run --task x \
+      --model model-a --fallback-models model-b --repo "$repo" \
+      --max-runtime-seconds 30 --no-fallback --quiet
+
+    [ "$status" -eq 1 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "timed_out" and .model == "model-b"
+      and .attempt_receipt == null and .failure_receipt == null
+      and (.usage | type) == "object" and .usage_status == "known"
+      and .cost_usd == null and .cost_status == "unknown"'
+    lease="$(echo "$result" | jq -r .lease_receipt)"
+    art="$(dirname "$lease")"
+    jq -e '.status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    jq -e '.executor == "claude" and .requested_model == "model-a"' \
+      "$art/attempt-1.json"
+    [ "$(grep -Ec '^claude -p ' "$MOCK_CALL_LOG" || true)" -eq 1 ]
+}
+
+@test "legion-claude: Codex fallback expiry exposes only its no-launch lease" {
+    local repo result lease art
+    repo="$(make_test_repo cross-fallback-prelaunch-expiry)"
+    install_claude_remaining_seconds_python_shim
+    export LEGION_TEST_CLAUDE_REMAINING_VALUES=30,0
+
+    MOCK_CLAUDE_LIMIT=1 run "$LEGION_CLAUDE" run --task x --repo "$repo" \
+      --max-runtime-seconds 30 --quiet
+
+    [ "$status" -eq 1 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "timed_out" and .executor == "codex"
+      and .fell_back == true and .attempt_receipt == null and .failure_receipt == null
+      and (.lease_receipt | type == "string" and length > 0)'
+    lease="$(echo "$result" | jq -r .lease_receipt)"
+    art="$(dirname "$lease")"
+    jq -e '.status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    jq -e '.executor == "claude" and .failure.class == "quota"' \
+      "$art/claude/attempt-1.json"
+    [ ! -e "$art/attempt.json" ]
+    [ ! -e "$art/failure.json" ]
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: unavailable Codex fallback cannot expose archived Claude aliases" {
+    local repo result art
+    repo="$(make_test_repo cross-fallback-unavailable-aliases)"
+    install_unavailable_delegate_shim
+
+    MOCK_CLAUDE_LIMIT=1 run "$LEGION_CLAUDE" run --task x --repo "$repo" --quiet
+
+    [ "$status" -eq 1 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "refused" and .fell_back == true
+      and .attempt_receipt == null and .failure_receipt == null
+      and .preflight_receipt == null
+      and .metering_reconciliation.attempt_count == 1'
+    art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    jq -e '.executor == "claude" and .failure.class == "quota"' \
+      "$art/claude/attempt-1.json"
+    [ ! -e "$art/attempt.json" ]
+    [ ! -e "$art/failure.json" ]
 }
 
 @test "legion-claude: environment archetype survives Codex fallback" {

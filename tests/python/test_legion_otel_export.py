@@ -157,5 +157,62 @@ def test_partial_metering_exports_lower_bound_values_and_counts():
     assert attributes["legion.known_usage_attempts"]["intValue"] == 1
 
 
+def test_invalid_partial_metering_is_downgraded_and_omitted():
+    invalid_costs = [
+        (-0.1, 1),
+        (float("nan"), 1),
+        (0.1, 0),
+        (0.1, 1.5),
+    ]
+    for known_cost, attempts in invalid_costs:
+        span = oe.span_to_otlp({
+            "schema": "legion.span.v1", "run_id": "invalid-cost", "status": "ok",
+            "cost_usd": None, "cost_status": "partial",
+            "known_cost_usd": known_cost, "known_cost_attempts": attempts,
+            "tokens": None, "usage_status": "unknown",
+        })
+        attributes = {item["key"]: item["value"] for item in span["attributes"]}
+        assert attributes["legion.cost_status"]["stringValue"] == "unknown"
+        assert "legion.known_cost_usd" not in attributes
+        assert "legion.known_cost_attempts" not in attributes
+
+    invalid_usage = [
+        ({"input_tokens": -1}, 1),
+        ({"input_tokens": float("nan")}, 1),
+        ({"input_tokens": 1.5}, 1),
+        ({"input_tokens": 1}, 0),
+        ({"input_tokens": 1}, 1.5),
+    ]
+    for known_usage, attempts in invalid_usage:
+        span = oe.span_to_otlp({
+            "schema": "legion.span.v1", "run_id": "invalid-usage", "status": "ok",
+            "cost_usd": None, "cost_status": "unknown",
+            "tokens": None, "usage_status": "partial",
+            "known_usage": known_usage, "known_usage_attempts": attempts,
+        })
+        attributes = {item["key"]: item["value"] for item in span["attributes"]}
+        assert attributes["legion.usage_status"]["stringValue"] == "unknown"
+        assert "legion.known_usage" not in attributes
+        assert not any(key.startswith("legion.known_tokens.") for key in attributes)
+        assert "legion.known_usage_attempts" not in attributes
+
+
+def test_invalid_known_usage_is_downgraded_and_omitted():
+    for tokens in (
+        {"input_tokens": -1},
+        {"input_tokens": float("nan")},
+        {"input_tokens": 1.5},
+        {"input_tokens": True},
+    ):
+        span = oe.span_to_otlp({
+            "schema": "legion.span.v1", "run_id": "invalid-known-usage",
+            "status": "ok", "cost_usd": None, "cost_status": "unknown",
+            "tokens": tokens, "usage_status": "known",
+        })
+        attributes = {item["key"]: item["value"] for item in span["attributes"]}
+        assert attributes["legion.usage_status"]["stringValue"] == "unknown"
+        assert not any(key.startswith("legion.tokens.") for key in attributes)
+
+
 def _to_jsonl(d):
     return json.dumps(d) + "\n"

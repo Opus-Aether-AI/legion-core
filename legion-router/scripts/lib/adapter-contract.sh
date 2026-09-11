@@ -131,6 +131,38 @@ legion_adapter_supervisor_launch_failed() {
     ' "$status_file" >/dev/null 2>&1
 }
 
+# Persist the same strict no-launch shape as the process supervisor when a
+# foreground adapter receives a signal at its final shell gate, before Popen
+# and before provider-attempt accounting are armed. The caller remains
+# responsible for retaining containment if this trusted write fails.
+legion_adapter_write_final_gate_no_launch() {
+  local status_file="$1" max_runtime="$2" signum="$3" directory temp
+  [[ -n "$status_file" && "$max_runtime" =~ ^[1-9][0-9]*$ \
+      && "$signum" =~ ^(1|2|15)$ ]] || return 1
+  directory="${status_file%/*}"
+  [[ "$directory" != "$status_file" && -d "$directory" && ! -L "$directory" ]] || return 1
+  [[ ! -e "$status_file" && ! -L "$status_file" ]] || return 1
+  temp="$(mktemp "$directory/.final-gate-lease.XXXXXX")" || return 1
+  if ! jq -cn --argjson runtime "$max_runtime" --arg signum "$signum" '
+      {schema:"legion.child-execution-lease.v1",status:"launch_failed",
+       reason:("provider launch cancelled by signal " + $signum
+               + " at final pre-launch gate; no provider launched"),
+       max_runtime_seconds:$runtime}
+    ' > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  chmod 600 "$temp" || { rm -f "$temp"; return 1; }
+  # Publish without replacing a raced or pre-existing claimant. A hard link in
+  # the same trusted directory is atomic and portable across Darwin/Linux.
+  if ! ln "$temp" "$status_file"; then
+    rm -f "$temp"
+    return 1
+  fi
+  rm -f "$temp"
+  legion_adapter_supervisor_launch_failed "$status_file"
+}
+
 legion_adapter_supervisor_reason() {
   local status_file="$1" fallback="${2:-child supervisor reported an internal containment failure}" reason=""
   reason="$(jq -r '.reason // empty' "$status_file" 2>/dev/null || true)"

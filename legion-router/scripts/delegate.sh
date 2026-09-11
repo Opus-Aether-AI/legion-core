@@ -3510,6 +3510,16 @@ cmd_review() {
   [[ "${#task}" -le 16384 ]] || die "review: --task exceeds 16384 characters"
   [[ -z "$task" ]] || scan_task_text "$task"
 
+  # Validate the operator bound against every candidate before creating a
+  # worktree or publishing a running lifecycle. A later-candidate-only invalid
+  # bound must not strand the already-created review run either.
+  local _lease_candidate _lease_executor _lease_kind _lease_model_ref
+  for _lease_candidate in "${review_candidates[@]}"; do
+    IFS='|' read -r _lease_executor _lease_kind _lease_model_ref <<< "$_lease_candidate"
+    legion_adapter_resolve_lease "$_lease_executor" "$max_runtime_seconds" \
+      || die "$LEGION_ADAPTER_LEASE_REASON"
+  done
+
   repo="$(cd "$repo" && pwd)"; require_git_repo "$repo"; resolve_runtime_state "$repo"
   local base_sha head_sha
   base_sha="$(git -C "$repo" rev-parse --verify "$base^{commit}" 2>/dev/null)" \
@@ -3645,14 +3655,38 @@ cmd_review() {
     REVIEW_RECEIPT_MODEL="$model"
     status="failed"; reason="review-failed"
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    # A retry has not launched yet. Keep prior paid evidence only in immutable
+    # numbered receipts/reconciliation so a zero-attempt stop cannot expose it
+    # as the current attempt.
+    rm -f "$art/attempt.json" "$art/failure.json"
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
+    review_attempt_receipt=""
+    review_failure_receipt=""
     local attempt_runtime
     attempt_runtime="$(child_lease_remaining_seconds)"
     if [[ "$attempt_runtime" -lt 1 ]]; then
       attempt=$((attempt - 1))
       REVIEW_RECEIPT_ATTEMPT="$attempt"
-      status="timed_out"
-      reason="shared child execution lease expired before the next review attempt"
-      rc=124
+      if [[ "$review_kind" == "native" ]]; then
+        review_lease_receipt="$art/attempt-$((attempt + 1)).lease.json"
+        reason="shared child execution lease expired before native reviewer launch"
+        if write_strict_no_launch_lease "$review_lease_receipt" "$reason" \
+            "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"; then
+          status="timed_out"
+          rc=124
+        else
+          review_containment_failed=1
+          LEGION_WT_KEEP=1
+          status="containment_failed"
+          reason="unable to persist authenticated no-launch review lease evidence (expected: $review_lease_receipt; worktree retained: $wt)"
+          rc=70
+        fi
+      else
+        status="timed_out"
+        reason="shared child execution lease expired before the next review attempt"
+        rc=124
+      fi
       break
     fi
     REVIEW_RECEIPT_ATTEMPT="$attempt"
@@ -3963,6 +3997,14 @@ cmd_review() {
   known_usage_attempts="$(jq -r '.reconciliation.known_usage_attempts' <<<"$review_metering")"
   known_cost="$(jq -c '.reconciliation.known_cost_usd' <<<"$review_metering")"
   known_cost_attempts="$(jq -r '.reconciliation.known_cost_attempts' <<<"$review_metering")"
+  if [[ "$status" == "timed_out" && "${#review_attempt_receipts[@]}" -eq 0 \
+      && -n "$review_lease_receipt" ]] \
+      && legion_adapter_supervisor_launch_failed "$review_lease_receipt"; then
+    usage=null
+    cost=null
+    usage_status=not_applicable
+    cost_status=not_applicable
+  fi
   local effective_review_model actual_review_executor
   effective_review_model="$(jq -r '.last.model // empty' <<<"$review_metering")"
   actual_review_executor="$(jq -r '.last.executor // empty' <<<"$review_metering")"

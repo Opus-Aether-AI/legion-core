@@ -181,7 +181,7 @@ def _cost_provenance(span):
 
 
 def _cost_summary(spans):
-    known = partial = unknown = known_runs = 0
+    known = partial = unknown = not_applicable = known_runs = 0
     lower_bound = 0.0
     for span in spans:
         status = _cost_provenance(span)
@@ -195,10 +195,12 @@ def _cost_summary(spans):
             lower_bound += _nonnegative_num(span.get("known_cost_usd")) or 0.0
         elif status == "unknown":
             unknown += 1
+        else:
+            not_applicable += 1
     applicable = known + partial + unknown
     status = (
         "not_applicable" if not applicable
-        else "known" if known == applicable
+        else "known" if known == applicable + not_applicable
         else "unknown" if not known and not partial
         else "partial"
     )

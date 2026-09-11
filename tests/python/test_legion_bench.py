@@ -976,6 +976,31 @@ def test_span_totals_accept_legacy_numeric_metering_and_measured_zero(tmp_path):
     assert totals["tokens"] == 0
 
 
+def test_span_totals_known_plus_not_applicable_is_partial(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    payloads = [
+        {"model": "mixed", "cost_usd": 0.5, "cost_status": "known",
+         "tokens": {"input_tokens": 4}, "usage_status": "known"},
+        {"model": "mixed", "cost_usd": None, "cost_status": "not_applicable",
+         "tokens": None, "usage_status": "not_applicable"},
+    ]
+    (spans / "mixed.jsonl").write_text(
+        "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+        encoding="utf-8",
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+    assert totals["cost_usd"] is None
+    assert totals["cost_status"] == "partial"
+    assert totals["known_cost_usd"] == 0.5
+    assert totals["known_cost_attempts"] == 1
+    assert totals["tokens"] is None
+    assert totals["usage_status"] == "partial"
+    assert totals["known_usage"] == {"total_tokens": 4}
+    assert totals["known_usage_attempts"] == 1
+
+
 def test_span_totals_do_not_classify_fractional_tokens_as_known(tmp_path):
     spans = tmp_path / "logs" / "spans"
     spans.mkdir(parents=True)

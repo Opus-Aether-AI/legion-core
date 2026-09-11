@@ -362,6 +362,15 @@ assert_signal_receipt() {
   [ "$status" -eq 0 ]
   [ "$output" = launch_failed ]
 
+  jq '
+    .compatibility.version.probe_reason="executor binary disappeared or changed during version probe"
+    | .compatibility.version.probe_lease.reason="child launch failed: command not found: /tmp/provider"
+  ' "$receipt" > "$receipt.tmp"; mv "$receipt.tmp" "$receipt"
+  run bash -c 'source "$1"; legion_adapter_preflight_failure_disposition "$2"' \
+    _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$receipt"
+  [ "$status" -eq 0 ]
+  [ "$output" = launch_failed ]
+
   jq '.compatibility.version.probe_reason="contradictory evidence"' \
     "$receipt" > "$receipt.tmp"; mv "$receipt.tmp" "$receipt"
   run bash -c 'source "$1"; legion_adapter_preflight_failure_disposition "$2"' \

@@ -313,7 +313,7 @@ def _discover_version(executable, config, cache_dir, binary_digest, config_diges
                 "reason": f"version probe supervisor could not start: {exc}",
                 "lease": None,
             }
-        if probe["status"] == "completed":
+        if probe["status"] in {"completed", "launch_failed"}:
             try:
                 current_digest = _sha256_file(executable)
                 executable_still_valid = os.path.isfile(executable) \
@@ -322,11 +322,10 @@ def _discover_version(executable, config, cache_dir, binary_digest, config_diges
                 current_digest = None
                 executable_still_valid = False
             if not executable_still_valid or current_digest != binary_digest:
-                # Darwin's Seatbelt launcher can itself start successfully and
-                # report the missing nested executable as its exit code. Bind
-                # admission to the same executable bytes checked before the
-                # probe so that wrapper completion cannot masquerade as an
-                # ordinary unparseable version.
+                # Darwin's Seatbelt launcher can complete while its nested
+                # executable is missing, whereas Linux reports launch_failed
+                # directly. Bind both shapes to the same executor identity so
+                # platform details cannot change the public failure contract.
                 raw = None
                 probe = {
                     "status": "launch_failed",

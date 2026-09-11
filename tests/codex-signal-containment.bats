@@ -473,8 +473,11 @@ SH
         export MOCK_SANDCASTLE_MARKER_EXIT_IMMEDIATELY=0
       fi
       rc=0
+      # Admission and Sandcastle setup share this absolute lease. Leave enough
+      # setup margin for the mock to publish its deliberately unresolved marker;
+      # the timeout branch still outlives the lease with its 30-second sleep.
       "$DELEGATE" run --model "$CODEX_MODEL" --sandbox docker --task wait \
-        --repo "$repo" --run-id "sandcastle-$state-$mode" --max-runtime-seconds 1 \
+        --repo "$repo" --run-id "sandcastle-$state-$mode" --max-runtime-seconds 5 \
         --keep --quiet >"$TEST_TMPDIR/$state-$mode.out" 2>"$TEST_TMPDIR/$state-$mode.err" || rc=$?
       [ "$rc" -eq 1 ] || { printf 'state=%s mode=%s rc=%s out=%s err=%s\n' \
         "$state" "$mode" "$rc" "$(cat "$TEST_TMPDIR/$state-$mode.out")" \
@@ -482,7 +485,11 @@ SH
       result="$(tail -n 1 "$TEST_TMPDIR/$state-$mode.out")"
       jq -e '.status == "containment_failed" and .attempt_receipt == null
         and .failure_receipt == null and .usage_status == "unknown"
-        and .cost_status == "unknown"' <<<"$result"
+        and .cost_status == "unknown"' <<<"$result" || {
+          printf 'state=%s mode=%s result=%s err=%s\n' \
+            "$state" "$mode" "$result" "$(cat "$TEST_TMPDIR/$state-$mode.err")" >&2
+          return 1
+        }
       art="$repo/.legion/runs/sandcastle-$state-$mode"
       lease="$(jq -r .lease_receipt <<<"$result")"
       jq -e '.status == "cleanup_failed" and (.reason | contains("provider launch evidence"))' "$lease"

@@ -442,13 +442,22 @@ legion_adapter_preflight_failure_disposition() {
           or
           (.compatibility.version.probe_reason
             == "executor binary disappeared or changed during version probe"
-            and .compatibility.version.probe_lease.status == "completed"
-            and .compatibility.version.probe_lease.reason == "child completed"
-            and (.compatibility.version.probe_lease.child_exit_code
-              | type == "number" and . >= 0 and . <= 255 and . == floor)
-            and ((.compatibility.version.probe_lease | keys_unsorted)
-              - ["schema","status","reason","max_runtime_seconds","child_exit_code"]
-              | length == 0))
+            and (
+              (.compatibility.version.probe_lease.status == "completed"
+                and .compatibility.version.probe_lease.reason == "child completed"
+                and (.compatibility.version.probe_lease.child_exit_code
+                  | type == "number" and . >= 0 and . <= 255 and . == floor)
+                and ((.compatibility.version.probe_lease | keys_unsorted)
+                  - ["schema","status","reason","max_runtime_seconds","child_exit_code"]
+                  | length == 0))
+              or
+              (.compatibility.version.probe_lease.status == "launch_failed"
+                and (.compatibility.version.probe_lease.reason
+                  | startswith("child launch failed: command not found: "))
+                and ((.compatibility.version.probe_lease | keys_unsorted)
+                  - ["schema","status","reason","max_runtime_seconds"]
+                  | length == 0))
+            ))
         )
       ' "$receipt" >/dev/null 2>&1; then
         printf launch_failed

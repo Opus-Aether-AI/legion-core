@@ -668,13 +668,51 @@ provider_launch_status() {
 import hashlib
 import hmac
 import json
-from pathlib import Path
+import os
+import stat
 import sys
 
 path, token, executable = sys.argv[1:]
-raw = Path(path).read_bytes()
-if len(raw) > 4096:
-    raise SystemExit(1)
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+if hasattr(os, "O_NONBLOCK"):
+    flags |= os.O_NONBLOCK
+descriptor = os.open(path, flags)
+try:
+    opened = os.fstat(descriptor)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_size > 4096:
+        raise SystemExit(1)
+    path_stat = os.stat(path, follow_symlinks=False)
+    if (path_stat.st_dev, path_stat.st_ino) != (opened.st_dev, opened.st_ino):
+        raise SystemExit(1)
+    # Read one byte beyond the contract maximum so concurrent growth cannot be
+    # mistaken for an accepted prefix. This is the only provider-controlled
+    # read in the parent-side launch classifier.
+    chunks = []
+    total = 0
+    while total <= 4096:
+        chunk = os.read(descriptor, min(4096, 4097 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    raw = b"".join(chunks)
+    closed = os.fstat(descriptor)
+    path_stat = os.stat(path, follow_symlinks=False)
+    if (
+        len(raw) > 4096
+        or not stat.S_ISREG(closed.st_mode)
+        or closed.st_nlink != 1
+        or closed.st_size > 4096
+        or (closed.st_dev, closed.st_ino) != (opened.st_dev, opened.st_ino)
+        or (path_stat.st_dev, path_stat.st_ino) != (opened.st_dev, opened.st_ino)
+        or closed.st_mtime_ns != opened.st_mtime_ns
+        or closed.st_ctime_ns != opened.st_ctime_ns
+    ):
+        raise SystemExit(1)
+finally:
+    os.close(descriptor)
 value = json.loads(raw)
 if not isinstance(value, dict):
     raise SystemExit(1)
@@ -1169,12 +1207,21 @@ cmd_run() {
   [[ -z "$PRESET_RUN_ID" ]] || legion_arm_adopted_run_guard "$RUN_ID" "$REPO" "$ART" "$WT" "$BRANCH" "$MODEL" "$SANDBOX" "$BASE" "$ARCHETYPE" "$THINKING"
   if ! legion_adapter_preflight "$ADAPTER_KIND" "$ART" "$SANDBOX" argv "$MODEL" \
       "$([[ "$ADAPTER_KIND" == pi ]] && printf '%s' "$THINKING")" 0 "$PROVIDER_BIN"; then
-    write_state failed
+    local preflight_disposition terminal_status=refused
+    preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+    case "$preflight_disposition" in
+      timed_out) terminal_status=timed_out; write_state timed_out ;;
+      containment_failed) terminal_status=containment_failed; write_state containment_failed ;;
+      launch_failed) terminal_status=failed; write_state failed ;;
+      *) write_state failed ;;
+    esac
     [[ -z "$PRESET_RUN_ID" ]] || legion_disarm_adopted_run_guard
     jq -cn --arg run "$RUN_ID" --arg executor "$ADAPTER_KIND" --arg model "$MODEL" \
+      --arg status "$terminal_status" \
       --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
-      {run_id:$run,status:"refused",executor:$executor,model:$model,reason:$reason,
+      {run_id:$run,status:$status,executor:$executor,model:$model,reason:$reason,
        preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
        usage:null,tokens:null,usage_status:"not_applicable",
        cost_usd:null,cost_status:"not_applicable"}'
@@ -1235,12 +1282,17 @@ cmd_run() {
   fi
   MODEL="$actual_model"
   [[ -n "$usage" ]] || usage='{}'
-  local lease_reason="" containment_failed=0 launch_failed=0 provider_launch_unresolved=0 provider_launch_state=""
+  local lease_reason="" containment_failed=0 launch_failed=0 launch_timed_out=0
+  local provider_launch_unresolved=0 provider_launch_state=""
   if legion_adapter_supervisor_cleanup_failed "$ART/lease.json"; then
     containment_failed=1
     legion_adapter_supervisor_cleanup_failed_before_launch "$ART/lease.json" \
       && launch_failed=1
     lease_reason="$(legion_adapter_supervisor_reason "$ART/lease.json") (evidence: $ART/lease.json; worktree retained: $WT_RECORD)"
+  elif legion_adapter_supervisor_timed_out_before_launch "$ART/lease.json" "$PROVIDER_RC"; then
+    launch_failed=1
+    launch_timed_out=1
+    lease_reason="$(legion_adapter_lease_reason "$ART/lease.json")"
   elif legion_adapter_supervisor_launch_failed "$ART/lease.json"; then
     launch_failed=1
     lease_reason="$(legion_adapter_supervisor_reason "$ART/lease.json" "provider launch failed before process creation")"
@@ -1299,6 +1351,12 @@ cmd_run() {
     status=containment_failed
     KEEP=1
     result="$lease_reason"
+  elif [[ "$launch_timed_out" == 1 ]]; then
+    status=timed_out
+    KEEP=0
+    result="$lease_reason"
+    usage=null
+    cost=null
   elif [[ "$launch_failed" == 1 ]]; then
     status=failed
     result="$lease_reason"

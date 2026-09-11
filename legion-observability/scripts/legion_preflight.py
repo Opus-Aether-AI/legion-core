@@ -106,7 +106,16 @@ def _read_cache(path, key):
         return None
     if not isinstance(value, dict):
         return None
-    return value if value.get("cache_key") == key else None
+    if set(value) != {"cache_key", "version_raw", "version"}:
+        return None
+    if value.get("cache_key") != key:
+        return None
+    if any(
+        field is not None and not isinstance(field, str)
+        for field in (value.get("version_raw"), value.get("version"))
+    ):
+        return None
+    return value
 
 
 def _write_cache(path, value):
@@ -202,23 +211,76 @@ def _supervised_version_output(executable, args, env):
                     if not output_closed and time.monotonic() - supervisor_exited_at >= 1.0:
                         # An EOF holder survived the supervisor. Do not block,
                         # cache, or trust the partial identity.
-                        return None, False
+                        return None, {
+                            "status": "invalid",
+                            "reason": "version probe supervisor exited without closing output",
+                            "lease": None,
+                        }
             process.wait()
         finally:
             process.stdout.close()
         try:
             lease = json.loads(lease_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return None, False
-        if lease.get("schema") != "legion.child-execution-lease.v1" \
-                or lease.get("status") != "completed" \
-                or process.returncode is None \
-                or process.returncode < 0 \
-                or lease.get("child_exit_code") != process.returncode:
-            return None, False
+            return None, {
+                "status": "invalid",
+                "reason": "version probe supervisor did not publish a valid lease receipt",
+                "lease": None,
+            }
+        allowed = {
+            "schema", "status", "reason", "max_runtime_seconds",
+            "child_started", "child_exit_code",
+        }
+        lease_status = lease.get("status") if isinstance(lease, dict) else None
+        lease_valid = (
+            isinstance(lease, dict)
+            and set(lease).issubset(allowed)
+            and lease.get("schema") == "legion.child-execution-lease.v1"
+            and lease_status in {
+                "completed", "cancelled", "timed_out", "cleanup_failed", "launch_failed"
+            }
+            and isinstance(lease.get("reason"), str)
+            and bool(lease["reason"])
+            and type(lease.get("max_runtime_seconds")) is int
+            and lease["max_runtime_seconds"] >= 1
+            and (
+                "child_started" not in lease
+                or lease.get("child_started") is False
+            )
+            and (
+                "child_exit_code" not in lease
+                or (
+                    type(lease.get("child_exit_code")) is int
+                    and 0 <= lease["child_exit_code"] <= 255
+                )
+            )
+        )
+        completed = (
+            lease_valid
+            and lease_status == "completed"
+            and process.returncode is not None
+            and process.returncode >= 0
+            and lease.get("child_exit_code") == process.returncode
+        )
+        if not lease_valid or (lease_status == "completed" and not completed):
+            return None, {
+                "status": "invalid",
+                "reason": "version probe supervisor published malformed lease evidence",
+                "lease": None,
+            }
+        probe_status = lease_status
+        if lease_status == "launch_failed" and process.returncode == 124 \
+                and "deadline" in lease["reason"].lower():
+            # The supervisor correctly records that Popen never happened, but
+            # callers still need the causal timeout to terminate the lease.
+            probe_status = "timed_out"
 
     raw = bytes(captured).decode("utf-8", errors="replace").strip()
-    return raw or None, True
+    return (raw or None if completed else None), {
+        "status": probe_status,
+        "reason": lease["reason"],
+        "lease": lease,
+    }
 
 
 def _discover_version(executable, config, cache_dir, binary_digest, config_digest, env):
@@ -233,27 +295,53 @@ def _discover_version(executable, config, cache_dir, binary_digest, config_diges
     cache_path = Path(cache_dir) / f"{key}.json"
     cached = _read_cache(cache_path, key)
     if cached is not None:
-        return cached.get("version_raw"), cached.get("version"), True, key
+        return cached.get("version_raw"), cached.get("version"), True, key, {
+            "status": "cached", "reason": "trusted version probe cache hit", "lease": None,
+        }
 
     args = config.get("version_args", ["--version"])
     raw = None
     version = None
-    safely_completed = True
+    probe = {"status": "not_requested", "reason": None, "lease": None}
     if args:
         try:
-            raw, safely_completed = _supervised_version_output(executable, args, env)
-        except (OSError, ValueError, subprocess.SubprocessError):
+            raw, probe = _supervised_version_output(executable, args, env)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
             raw = None
-            safely_completed = False
+            probe = {
+                "status": "invalid",
+                "reason": f"version probe supervisor could not start: {exc}",
+                "lease": None,
+            }
+        if probe["status"] == "completed":
+            try:
+                current_digest = _sha256_file(executable)
+                executable_still_valid = os.path.isfile(executable) \
+                    and os.access(executable, os.X_OK)
+            except OSError:
+                current_digest = None
+                executable_still_valid = False
+            if not executable_still_valid or current_digest != binary_digest:
+                # Darwin's Seatbelt launcher can itself start successfully and
+                # report the missing nested executable as its exit code. Bind
+                # admission to the same executable bytes checked before the
+                # probe so that wrapper completion cannot masquerade as an
+                # ordinary unparseable version.
+                raw = None
+                probe = {
+                    "status": "launch_failed",
+                    "reason": "executor binary disappeared or changed during version probe",
+                    "lease": probe["lease"],
+                }
     if raw:
         pattern = config.get("version_regex") or r"(?P<version>[0-9]+(?:\.[0-9A-Za-z_-]+)+)"
         matched = re.search(pattern, raw)
         if matched:
             version = matched.groupdict().get("version") or matched.group(0)
     record = {"cache_key": key, "version_raw": raw, "version": version}
-    if safely_completed:
+    if probe["status"] in {"completed", "not_requested"}:
         _write_cache(cache_path, record)
-    return raw, version, False, key
+    return raw, version, False, key, probe
 
 
 def _matches_any(value, patterns):
@@ -429,9 +517,26 @@ def preflight(executor, *, registry_path=None, models_path=None, cache_dir=None,
             env.get("XDG_CACHE_HOME") or os.path.join(default_home, ".cache"),
             "legion", "preflight",
         )
-    raw, version, cache_hit, cache_key = _discover_version(
+    raw, version, cache_hit, cache_key, version_probe = _discover_version(
         executable, config, cache_dir, binary_digest, config_digest, env
     )
+    if version_probe["status"] not in {"completed", "cached", "not_requested"}:
+        checks["version"] = {
+            "discovered": None,
+            "status": "unavailable",
+            "probe_status": version_probe["status"],
+            "probe_reason": version_probe["reason"],
+            "probe_lease": version_probe["lease"],
+        }
+        return {
+            "schema": SCHEMA, "checked_at": checked_at, "executor": executor,
+            "status": "unavailable",
+            "reason": f"executor version probe {version_probe['status']}: "
+                      f"{version_probe['reason']}",
+            "identity": None,
+            "cache": {"hit": False, "key": cache_key},
+            "compatibility": checks,
+        }
     known_bad_version = _matches_any(version, config.get("known_bad_version_patterns", []))
     version_patterns = config.get("supported_version_patterns", [])
     supported_version = _matches_any(version, version_patterns)
@@ -447,6 +552,9 @@ def preflight(executor, *, registry_path=None, models_path=None, cache_dir=None,
     checks["version"] = {
         "discovered": version,
         "status": "supported" if supported_version or open_version else "untested",
+        "probe_status": version_probe["status"],
+        "probe_reason": version_probe["reason"],
+        "probe_lease": version_probe["lease"],
     }
 
     untested_checks = sorted(

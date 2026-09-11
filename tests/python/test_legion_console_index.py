@@ -286,6 +286,61 @@ def test_console_index_known_plus_not_applicable_is_partial(tmp_path):
     assert span["known_usage_attempts"] == 1
 
 
+def test_console_index_rejects_malformed_partial_known_attempt_counts(tmp_path):
+    spans_dir = tmp_path / "spans"
+    spans = []
+    for index, count in enumerate([True, 0, -1, 1.5, "2"]):
+        span = _span(f"invalid-count-{index}", cost_usd=None)
+        span.update(
+            {
+                "cost_status": "partial",
+                "known_cost_usd": 0.5,
+                "known_cost_attempts": count,
+            }
+        )
+        spans.append(span)
+    _write_spans(spans_dir, *spans)
+
+    loaded = indexer.load_spans(str(spans_dir))
+    for index in range(len(spans)):
+        summary = loaded[f"invalid-count-{index}"]
+        assert summary["cost_usd"] is None
+        assert summary["cost_status"] == "unknown"
+        assert summary["known_cost_usd"] is None
+        assert summary["known_cost_attempts"] == 0
+
+
+def test_console_index_rejects_invalid_values_in_usage_maps(tmp_path):
+    spans_dir = tmp_path / "spans"
+    invalid_values = [-1, 1.5, True, float("nan"), float("inf"), "4", None]
+    spans = []
+    for index, value in enumerate(invalid_values):
+        known = _span(f"invalid-known-{index}", tokens={"input_tokens": value})
+        known["usage_status"] = "known"
+        spans.append(known)
+
+        partial = _span(f"invalid-partial-{index}")
+        partial.update(
+            {
+                "tokens": None,
+                "usage_status": "partial",
+                "known_usage": {"input_tokens": value},
+                "known_usage_attempts": 1,
+            }
+        )
+        spans.append(partial)
+    _write_spans(spans_dir, *spans)
+
+    loaded = indexer.load_spans(str(spans_dir))
+    for index in range(len(invalid_values)):
+        for prefix in ("invalid-known", "invalid-partial"):
+            summary = loaded[f"{prefix}-{index}"]
+            assert summary["usage_status"] == "unknown"
+            assert summary["tokens"] is None
+            assert summary["known_usage"] is None
+            assert summary["known_usage_attempts"] == 0
+
+
 def test_console_index_excludes_rollup_only_span(tmp_path):
     spans_dir = tmp_path / "spans"
     provider = _span("single", cost_usd=0.5)

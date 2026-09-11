@@ -33,6 +33,48 @@
       "required": ["hit", "key"],
       "properties": {"hit": {"type": "boolean"}, "key": {"type": ["string", "null"]}}
     },
-    "compatibility": {"type": "object"}
+    "compatibility": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["discovered", "status", "probe_status", "probe_reason", "probe_lease"],
+          "properties": {
+            "discovered": {"type": ["string", "null"]},
+            "status": {"enum": ["supported", "untested", "unavailable"]},
+            "probe_status": {
+              "enum": [
+                "completed", "cached", "not_requested", "launch_failed",
+                "timed_out", "cancelled", "cleanup_failed", "invalid"
+              ]
+            },
+            "probe_reason": {"type": ["string", "null"]},
+            "probe_lease": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["schema", "status", "reason", "max_runtime_seconds"],
+                  "properties": {
+                    "schema": {"const": "legion.child-execution-lease.v1"},
+                    "status": {
+                      "enum": [
+                        "completed", "cancelled", "timed_out", "cleanup_failed", "launch_failed"
+                      ]
+                    },
+                    "reason": {"type": "string", "minLength": 1},
+                    "max_runtime_seconds": {"type": "integer", "minimum": 1},
+                    "child_started": {"const": false},
+                    "child_exit_code": {"type": "integer", "minimum": 0, "maximum": 255}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
   }
 }

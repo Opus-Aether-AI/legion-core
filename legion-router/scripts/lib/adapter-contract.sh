@@ -134,6 +134,23 @@ legion_adapter_supervisor_launch_failed() {
     ' "$status_file" >/dev/null 2>&1
 }
 
+# A supervisor timeout before Popen necessarily uses the no-launch
+# `launch_failed` shape, because there is no child whose terminal state could
+# be `timed_out`.  The authenticated supervisor exit code and its bounded
+# deadline reason distinguish that case from an unavailable executable.  Keep
+# this predicate ahead of generic launch-failure handling so an inherited
+# absolute lease cannot silently trigger provider fallback.
+legion_adapter_supervisor_timed_out_before_launch() {
+  local status_file="$1" supervisor_rc="${2:-}"
+  [[ "$supervisor_rc" == 124 ]] || return 1
+  legion_adapter_supervisor_launch_failed "$status_file" || return 1
+  jq -e '
+    .reason == "inherited child lease deadline expired before launch"
+    or .reason == "inherited child lease deadline expired during launch setup"
+    or .reason == "pre-launch supervisor gate timed out before launch authorization"
+  ' "$status_file" >/dev/null 2>&1
+}
+
 # Persist the same strict no-launch shape as the process supervisor when a
 # foreground adapter receives a signal at its final shell gate, before Popen
 # and before provider-attempt accounting are armed. The caller remains
@@ -357,6 +374,90 @@ legion_adapter_preflight() {
   LEGION_ADAPTER_CONFIG_IDENTITY="$(jq -r '.identity.config_sha256 // empty' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   LEGION_ADAPTER_PREFLIGHT_CACHE_KEY="$(jq -r '.cache.key // empty' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   [[ "$rc" -eq 0 && "$LEGION_ADAPTER_PREFLIGHT_STATUS" == supported ]]
+}
+
+# Classify a failed shared preflight without allowing its public top-level
+# `unavailable` status to erase a terminal version-probe outcome. The embedded
+# supervisor lease is authoritative only when its complete no-launch/timeout
+# shape agrees with the probe fields. Any contradictory or partial provenance
+# is containment failure, never permission to spend through another route.
+legion_adapter_preflight_failure_disposition() {
+  local receipt="$1" status probe
+  [[ -f "$receipt" && ! -L "$receipt" ]] || { printf containment_failed; return 0; }
+  status="$(jq -r 'if .schema == "legion.preflight.v1" then (.status // "") else "" end' \
+    "$receipt" 2>/dev/null || true)"
+  [[ "$status" == unavailable ]] || { printf refused; return 0; }
+  probe="$(jq -r '.compatibility.version.probe_status // empty' "$receipt" 2>/dev/null || true)"
+  if [[ -z "$probe" ]]; then
+    printf unavailable
+    return 0
+  fi
+  case "$probe" in
+    timed_out)
+      if jq -e '
+        .schema == "legion.preflight.v1" and .status == "unavailable"
+        and .identity == null
+        and (.compatibility.version | type == "object")
+        and .compatibility.version.probe_status == "timed_out"
+        and (.compatibility.version.probe_reason | type == "string" and length > 0)
+        and (.compatibility.version.probe_lease | type == "object")
+        and .compatibility.version.probe_lease.schema == "legion.child-execution-lease.v1"
+        and .compatibility.version.probe_reason == .compatibility.version.probe_lease.reason
+        and (.compatibility.version.probe_lease.max_runtime_seconds
+          | type == "number" and . >= 1 and . == floor)
+        and (
+          (.compatibility.version.probe_lease.status == "launch_failed"
+            and (.compatibility.version.probe_lease.reason | ascii_downcase | contains("deadline"))
+            and ((.compatibility.version.probe_lease | keys_unsorted)
+              - ["schema","status","reason","max_runtime_seconds"] | length == 0))
+          or
+          (.compatibility.version.probe_lease.status == "timed_out"
+            and (.compatibility.version.probe_lease.reason | ascii_downcase
+              | test("lease.*expired|timed out"))
+            and ((.compatibility.version.probe_lease | keys_unsorted)
+              - ["schema","status","reason","max_runtime_seconds"] | length == 0))
+        )
+      ' "$receipt" >/dev/null 2>&1; then
+        printf timed_out
+      else
+        printf containment_failed
+      fi
+      ;;
+    launch_failed)
+      if jq -e '
+        .schema == "legion.preflight.v1" and .status == "unavailable"
+        and .identity == null
+        and .compatibility.version.probe_status == "launch_failed"
+        and (.compatibility.version.probe_reason | type == "string" and length > 0)
+        and (.compatibility.version.probe_reason | ascii_downcase | contains("deadline") | not)
+        and (.compatibility.version.probe_lease | type == "object")
+        and .compatibility.version.probe_lease.schema == "legion.child-execution-lease.v1"
+        and (.compatibility.version.probe_lease.max_runtime_seconds
+          | type == "number" and . >= 1 and . == floor)
+        and (
+          (.compatibility.version.probe_lease.status == "launch_failed"
+            and .compatibility.version.probe_reason == .compatibility.version.probe_lease.reason
+            and ((.compatibility.version.probe_lease | keys_unsorted)
+              - ["schema","status","reason","max_runtime_seconds"] | length == 0))
+          or
+          (.compatibility.version.probe_reason
+            == "executor binary disappeared or changed during version probe"
+            and .compatibility.version.probe_lease.status == "completed"
+            and .compatibility.version.probe_lease.reason == "child completed"
+            and (.compatibility.version.probe_lease.child_exit_code
+              | type == "number" and . >= 0 and . <= 255 and . == floor)
+            and ((.compatibility.version.probe_lease | keys_unsorted)
+              - ["schema","status","reason","max_runtime_seconds","child_exit_code"]
+              | length == 0))
+        )
+      ' "$receipt" >/dev/null 2>&1; then
+        printf launch_failed
+      else
+        printf containment_failed
+      fi
+      ;;
+    *) printf containment_failed ;;
+  esac
 }
 
 legion_adapter_write_attempt() {
@@ -638,6 +739,51 @@ def valid_incarnation(value, pid):
 def valid_token(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{48}", value) is not None
 
+def read_bounded_regular(path, limit=4096):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_size > limit
+        ):
+            raise OSError("owner is not a bounded singly-linked regular file")
+        path_stat = os.stat(path, follow_symlinks=False)
+        if (path_stat.st_dev, path_stat.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError("owner path changed while opening")
+        chunks = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(descriptor, min(4096, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > limit:
+            raise OSError("owner exceeds size limit")
+        closed = os.fstat(descriptor)
+        path_stat = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(closed.st_mode)
+            or closed.st_nlink != 1
+            or closed.st_size > limit
+            or (closed.st_dev, closed.st_ino) != (opened.st_dev, opened.st_ino)
+            or (path_stat.st_dev, path_stat.st_ino) != (opened.st_dev, opened.st_ino)
+            or closed.st_mtime_ns != opened.st_mtime_ns
+            or closed.st_ctime_ns != opened.st_ctime_ns
+        ):
+            raise OSError("owner changed while reading")
+        return raw.decode("utf-8"), opened.st_mtime
+    finally:
+        os.close(descriptor)
+
 flags = os.O_RDWR | os.O_CREAT
 if hasattr(os, "O_NOFOLLOW"):
     flags |= os.O_NOFOLLOW
@@ -662,9 +808,8 @@ with os.fdopen(descriptor, "r+", encoding="utf-8") as lock:
     legacy_owner = None
     owner_mtime = None
     try:
-        owner_mtime = os.stat(owner_path, follow_symlinks=False).st_mtime
-        with open(owner_path, encoding="utf-8") as source:
-            candidate = json.load(source)
+        owner_text, owner_mtime = read_bounded_regular(owner_path)
+        candidate = json.loads(owner_text)
         if (
             isinstance(candidate, dict)
             and candidate.get("schema") == "legion.provider-span-claim.v1"
@@ -799,6 +944,51 @@ def process_incarnation(pid):
         return f"supervisor:{supervisor_token}:pid:{pid}"
     return None
 
+def read_bounded_regular(path, limit=4096):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_size > limit
+        ):
+            raise OSError("owner is not a bounded singly-linked regular file")
+        path_stat = os.stat(path, follow_symlinks=False)
+        if (path_stat.st_dev, path_stat.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError("owner path changed while opening")
+        chunks = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(descriptor, min(4096, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > limit:
+            raise OSError("owner exceeds size limit")
+        closed = os.fstat(descriptor)
+        path_stat = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(closed.st_mode)
+            or closed.st_nlink != 1
+            or closed.st_size > limit
+            or (closed.st_dev, closed.st_ino) != (opened.st_dev, opened.st_ino)
+            or (path_stat.st_dev, path_stat.st_ino) != (opened.st_dev, opened.st_ino)
+            or closed.st_mtime_ns != opened.st_mtime_ns
+            or closed.st_ctime_ns != opened.st_ctime_ns
+        ):
+            raise OSError("owner changed while reading")
+        return raw.decode("utf-8")
+    finally:
+        os.close(descriptor)
+
 publisher_incarnation = process_incarnation(publisher_pid)
 if not publisher_incarnation:
     raise SystemExit(1)
@@ -815,8 +1005,7 @@ with os.fdopen(descriptor, "r+", encoding="utf-8") as lock:
     if (path_stat.st_dev, path_stat.st_ino) != (lock_stat.st_dev, lock_stat.st_ino):
         raise SystemExit(1)
     try:
-        with open(owner_path, encoding="utf-8") as source:
-            owner = json.load(source)
+        owner = json.loads(read_bounded_regular(owner_path))
     except (OSError, ValueError, TypeError):
         owner = None
     if (

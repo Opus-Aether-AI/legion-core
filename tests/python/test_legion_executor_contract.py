@@ -46,6 +46,16 @@ def test_contract_schemas_are_public_strict_versioned_documents():
     assert {"cancellation", "max_runtime_seconds"} <= set(
         registry_schema["$defs"]["executor"]["required"]
     )
+    preflight_schema = json.loads(
+        (schema_dir / "legion.preflight.v1.schema.json").read_text(encoding="utf-8")
+    )
+    version_check = preflight_schema["properties"]["compatibility"]["properties"]["version"]
+    assert {"probe_status", "probe_reason", "probe_lease"} <= set(
+        version_check["required"]
+    )
+    assert {"launch_failed", "timed_out", "cleanup_failed", "invalid"} <= set(
+        version_check["properties"]["probe_status"]["enum"]
+    )
 
 
 def executable(path, version="1.2.3"):
@@ -308,11 +318,86 @@ def test_preflight_version_probe_lowers_inherited_deadline_and_does_not_cache_ti
 
     assert time.monotonic() - started < 4.5
     assert launched.exists()
-    assert result["status"] == "untested"
-    assert result["identity"]["version"] is None
+    assert result["status"] == "unavailable"
+    assert result["identity"] is None
     assert result["cache"]["hit"] is False
+    assert result["compatibility"]["version"] == {
+        "discovered": None,
+        "status": "unavailable",
+        "probe_status": "timed_out",
+        "probe_reason": "child execution lease expired after 5 seconds",
+        "probe_lease": {
+            "schema": "legion.child-execution-lease.v1",
+            "status": "timed_out",
+            "reason": "child execution lease expired after 5 seconds",
+            "max_runtime_seconds": 5,
+        },
+    }
     assert not list((tmp_path / "cache").glob("*.json"))
     assert wait_gone(int(detached.read_text(encoding="utf-8")))
+
+
+def test_preflight_expired_inherited_deadline_is_typed_timeout_without_launch(tmp_path):
+    binary = tmp_path / "fixture-provider"
+    launched = tmp_path / "launched"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "open(os.environ['LAUNCHED'], 'w').close()\n"
+        "print('fixture-provider 1.2.3')\n",
+        encoding="utf-8",
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    config = tmp_path / "executors.toml"
+    write_registry(config, binary)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "LAUNCHED": str(launched),
+        "LEGION_CHILD_LEASE_DEADLINE_NS": str(time.monotonic_ns() - 1),
+    }
+
+    result = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=tmp_path / "cache", env=env
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["identity"] is None
+    assert result["compatibility"]["version"]["probe_status"] == "timed_out"
+    assert result["compatibility"]["version"]["probe_lease"]["status"] == "launch_failed"
+    assert "deadline expired before launch" in result["reason"]
+    assert not launched.exists()
+    assert not list((tmp_path / "cache").glob("*.json"))
+
+
+def test_preflight_preserves_supervised_launch_failure_when_binary_disappears(
+    tmp_path, monkeypatch
+):
+    binary = tmp_path / "fixture-provider"
+    executable(binary)
+    config = tmp_path / "executors.toml"
+    write_registry(config, binary)
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+    real_popen = preflight.subprocess.Popen
+
+    def disappear_before_supervisor_launch(*args, **kwargs):
+        binary.unlink()
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(preflight.subprocess, "Popen", disappear_before_supervisor_launch)
+    result = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=tmp_path / "cache", env=env
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["identity"] is None
+    assert result["cache"]["hit"] is False
+    version = result["compatibility"]["version"]
+    assert version["status"] == "unavailable"
+    assert version["probe_status"] == "launch_failed"
+    assert version["probe_lease"]["status"] in {"completed", "launch_failed"}
+    assert "binary disappeared or changed" in version["probe_reason"]
+    assert not list((tmp_path / "cache").glob("*.json"))
 
 
 def test_preflight_cache_invalidates_for_declared_config_file(tmp_path):

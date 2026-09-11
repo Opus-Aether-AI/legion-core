@@ -78,6 +78,29 @@ SH
   export LEGION_FS_SANDBOX_BIN="$shim_dir/sandbox-exec"
 }
 
+install_unsafe_launch_receipt_sandbox() {
+  local shim_dir="$TEST_TMPDIR/unsafe-launch-receipt-sandbox"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/sandbox-exec" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == -f && -f "${2:-}" ]]
+shift 2
+receipt="$3"
+rm -f "$receipt"
+case "$LEGION_TEST_UNSAFE_LAUNCH_RECEIPT" in
+  symlink) ln -s "$LEGION_TEST_LAUNCH_RECEIPT_VICTIM" "$receipt" ;;
+  hardlink) ln "$LEGION_TEST_LAUNCH_RECEIPT_VICTIM" "$receipt" ;;
+  fifo) mkfifo "$receipt" ;;
+  oversized) "$MOCK_REAL_PYTHON" -c 'print("x" * 4097)' > "$receipt" ;;
+  *) exit 2 ;;
+esac
+exit 127
+SH
+  chmod +x "$shim_dir/sandbox-exec"
+  export LEGION_FS_SANDBOX_BIN="$shim_dir/sandbox-exec"
+}
+
 install_pending_launch_sandbox() {
   local shim_dir="$TEST_TMPDIR/pending-sandbox"
   mkdir -p "$shim_dir"
@@ -342,8 +365,35 @@ assert_typed_pre_provider_timeout() {
   fi
 }
 
+@test "Pi provider launch receipt rejects links FIFOs and oversized content with bounded reads" {
+  local kind repo run_id result_file rc victim
+  install_unsafe_launch_receipt_sandbox
+  export MOCK_REAL_PYTHON="$(command -v python3)"
+  for kind in symlink hardlink fifo oversized; do
+    repo="$(make_test_repo "unsafe-launch-receipt-$kind")"
+    run_id="unsafe-launch-receipt-$kind"
+    result_file="$TEST_TMPDIR/$kind-result.json"
+    victim="$TEST_TMPDIR/$kind-launch-victim"
+    printf 'provider-controlled-target\n' > "$victim"
+    rc=0
+    LEGION_TEST_UNSAFE_LAUNCH_RECEIPT="$kind" \
+      LEGION_TEST_LAUNCH_RECEIPT_VICTIM="$victim" PI_BIN=pi \
+      "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+        --model openai/fixture-pi --repo "$repo" --run-id "$run_id" \
+        --keep --quiet > "$result_file" 2>/dev/null || rc=$?
+    [ "$rc" -ne 0 ]
+    jq -e '
+      .status == "containment_failed"
+      and .usage == null and .usage_status == "unknown"
+      and .cost_usd == null and .cost_status == "unknown"
+      and (.reason | contains("provider launch evidence remained malformed"))
+    ' "$result_file" || { cat "$result_file" >&2; return 1; }
+    [[ "$(cat "$victim")" == provider-controlled-target ]]
+  done
+}
+
 @test "Pi and Hermes type provider disappearance during post-admission re-resolution as no-launch" {
-  local adapter repo provider run_id result_file lease rc
+  local adapter repo provider run_id result_file preflight rc
   for adapter in pi hermes; do
     repo="$(make_test_repo "reresolve-disappears-$adapter")"
     provider="$TEST_TMPDIR/$adapter-self-removing-provider"
@@ -373,16 +423,23 @@ SH
     [ "$rc" -eq 1 ]
     jq -e --arg executor "$adapter" '
       .status == "failed" and .executor == $executor
-      and (.reason | contains("disappeared after successful admission"))
+      and (.reason | contains("binary disappeared or changed during version probe"))
       and .attempt_receipt == null and .failure_receipt == null
-      and .provider_launch_receipt == null and .provider_exit == null
+      and ((.provider_launch_receipt? // null) == null)
+      and ((.provider_exit? // null) == null)
       and .usage == null and .tokens == null and .usage_status == "not_applicable"
       and .cost_usd == null and .cost_status == "not_applicable"
-      and (.worktree | contains("not created"))
-    ' "$result_file"
-    lease="$(jq -r .lease_receipt "$result_file")"
-    jq -e '.schema == "legion.child-execution-lease.v1"
-      and .status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    ' "$result_file" || { cat "$result_file" >&2; return 1; }
+    preflight="$(jq -r .preflight_receipt "$result_file")"
+    jq -e '
+      .schema == "legion.preflight.v1" and .status == "unavailable"
+      and .compatibility.version.probe_status == "launch_failed"
+      and (.compatibility.version.probe_reason
+        | contains("binary disappeared or changed during version probe"))
+      and .compatibility.version.probe_lease.schema == "legion.child-execution-lease.v1"
+      and .compatibility.version.probe_lease.status == "completed"
+      and (.compatibility.version.probe_lease.child_exit_code | type) == "number"
+    ' "$preflight"
     [ ! -d "$repo/.legion/worktrees/$run_id" ]
   done
 }

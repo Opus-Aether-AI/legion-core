@@ -65,6 +65,14 @@ def _num(value: Any) -> float:
     return 0.0
 
 
+def _positive_int(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
+
+
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -440,7 +448,7 @@ def _span_cost_status(span: dict[str, Any]) -> str:
         count = span.get("known_cost_attempts")
         return "partial" if (
             isinstance(lower, (int, float)) and not isinstance(lower, bool)
-            and math.isfinite(lower) and lower >= 0 and _num(count) >= 1
+            and math.isfinite(lower) and lower >= 0 and _positive_int(count) is not None
         ) else "unknown"
     if status in {"unknown", "not_applicable"}:
         return status
@@ -454,11 +462,11 @@ def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         status = _span_cost_status(record)
         if status == "known":
             known += 1
-            known_count += int(_num(record.get("known_cost_attempts"))) or 1
+            known_count += _positive_int(record.get("known_cost_attempts")) or 1
             subtotal += _num(record.get("cost_usd"))
         elif status == "partial":
             partial += 1
-            known_count += int(_num(record.get("known_cost_attempts")))
+            known_count += _positive_int(record.get("known_cost_attempts")) or 0
             subtotal += _num(record.get("known_cost_usd"))
         elif status == "unknown":
             unknown += 1
@@ -487,7 +495,7 @@ def _durable_attempt_count(records: list[dict[str, Any]]) -> int:
         status = _span_cost_status(record)
         if status == "not_applicable":
             continue
-        explicit = int(_num(record.get("known_cost_attempts")))
+        explicit = _positive_int(record.get("known_cost_attempts")) or 0
         if status == "known":
             count += max(1, explicit)
         elif status == "partial":

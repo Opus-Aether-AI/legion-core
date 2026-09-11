@@ -2166,12 +2166,21 @@ cmd_run() {
   [[ -n "$model" ]] || die "run: --model or --archetype required"
 
   if ! legion_adapter_preflight codex "$art" "$sandbox" stdin "$model" "$effort" 0 "$CODEX_BIN"; then
-    write_run_state failed
+    local preflight_disposition
+    preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+    local terminal_status=refused lifecycle_status=failed
+    case "$preflight_disposition" in
+      timed_out) terminal_status=timed_out; lifecycle_status=timed_out ;;
+      containment_failed) terminal_status=containment_failed; lifecycle_status=containment_failed ;;
+      launch_failed) terminal_status=failed ;;
+    esac
+    write_run_state "$lifecycle_status"
     declare -F legion_disarm_adopted_run_guard >/dev/null 2>&1 && legion_disarm_adopted_run_guard
-    jq -cn --arg run "$RUN_ID" --arg model "$model" \
+    jq -cn --arg run "$RUN_ID" --arg model "$model" --arg status "$terminal_status" \
       --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
-      {run_id:$run,status:"refused",executor:"codex",model:$model,reason:$reason,
+      {run_id:$run,status:$status,executor:"codex",model:$model,reason:$reason,
        preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
        usage:null,usage_status:"not_applicable",
        cost_usd:null,cost_status:"not_applicable"}'
@@ -2301,9 +2310,24 @@ cmd_run() {
       lease_receipt=""
       if ! legion_adapter_preflight codex "$art" "$sandbox" stdin "$attempt" "$effort" 0 "$CODEX_BIN"; then
         cp "$LEGION_ADAPTER_PREFLIGHT_PATH" "$art/codex-preflight-$candidate_ordinal.json"
-        if [[ "$LEGION_ADAPTER_PREFLIGHT_STATUS" == unavailable ]]; then
+        local fallback_preflight_disposition
+        fallback_preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+          "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+        if [[ "$fallback_preflight_disposition" == unavailable \
+            || "$fallback_preflight_disposition" == launch_failed ]]; then
           note "⚠ $attempt failed admission as unavailable — trying next fallback model"
           continue
+        elif [[ "$fallback_preflight_disposition" == timed_out ]]; then
+          lease_exhausted=1
+          rc=124
+          lease_reason="$LEGION_ADAPTER_PREFLIGHT_REASON"
+          note "⚠ shared child execution lease expired during fallback admission"
+          break
+        elif [[ "$fallback_preflight_disposition" == containment_failed ]]; then
+          containment_failed=1
+          LEGION_WT_KEEP=1
+          lease_reason="version-probe evidence was malformed or incomplete; worktree retained: $wt; preflight: $LEGION_ADAPTER_PREFLIGHT_PATH"
+          break
         fi
         note "⚠ $attempt failed admission — refusing fallback spend"
         fallback_admission_refused=1
@@ -2380,6 +2404,21 @@ cmd_run() {
       lease_receipt="$NATIVE_LEASE_STATUS"
       lease_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; worktree retained: $wt)"
       LEGION_WT_KEEP=1
+      rm -f "$art/attempt.json" "$art/failure.json"
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      NATIVE_ATTEMPT_ART=""
+      NATIVE_ATTEMPT_LAUNCHED=0
+      CODEX_SIGNAL_CHILD_PID=""
+      CODEX_CHILD_RC=0
+      break
+    elif legion_adapter_supervisor_timed_out_before_launch "$NATIVE_LEASE_STATUS" "$rc"; then
+      # The strict sidecar proves no provider launch, while rc 124 proves the
+      # shared lease—not executor availability—ended candidate selection.
+      lease_exhausted=1
+      launch_failed=1
+      lease_receipt="$NATIVE_LEASE_STATUS"
+      lease_reason="$(legion_adapter_lease_reason "$NATIVE_LEASE_STATUS")"
       rm -f "$art/attempt.json" "$art/failure.json"
       LEGION_ADAPTER_ATTEMPT_PATH=""
       LEGION_ADAPTER_FAILURE_PATH=""
@@ -2732,8 +2771,6 @@ cmd_run() {
     --arg reason "$(
       if [[ "$status" == containment_failed ]]; then
         printf '%s' "$lease_reason"
-      elif [[ "$launch_failed" -eq 1 ]]; then
-        printf '%s (no provider launched; evidence: %s)' "$launch_failure_reason" "$lease_receipt"
       elif [[ "$status" == refused && "$sandcastle_setup_refused" -eq 1 ]]; then
         printf '%s' "$sandcastle_setup_reason"
       elif [[ "$status" == timed_out ]]; then
@@ -2742,6 +2779,8 @@ cmd_run() {
         else
           legion_adapter_lease_reason "$art/lease-$attempt_ordinal.json"
         fi
+      elif [[ "$launch_failed" -eq 1 ]]; then
+        printf '%s (no provider launched; evidence: %s)' "$launch_failure_reason" "$lease_receipt"
       fi
     )" '
     {run_id:$run, status:$status, executor:"codex", model:$model, thread_id:$thread, codex_exit:$rc,
@@ -3795,10 +3834,25 @@ cmd_review() {
       if ! legion_adapter_preflight codex "$art" "$sandbox" stdin "$model" "$effort" 0 "$CODEX_BIN"; then
         review_preflight_receipt="$LEGION_ADAPTER_PREFLIGHT_PATH"
         reason="$LEGION_ADAPTER_PREFLIGHT_REASON"
-        if [[ "$LEGION_ADAPTER_PREFLIGHT_STATUS" == "unavailable" ]]; then
+        local review_preflight_disposition
+        review_preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+          "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+        if [[ "$review_preflight_disposition" == "unavailable" \
+            || "$review_preflight_disposition" == launch_failed ]]; then
           note "⚠ reviewer '$review_executor' is unavailable at admission; trying the next candidate"
           reason="reviewer-unavailable"
           continue
+        elif [[ "$review_preflight_disposition" == timed_out ]]; then
+          status="timed_out"
+          rc=124
+          break
+        elif [[ "$review_preflight_disposition" == containment_failed ]]; then
+          review_containment_failed=1
+          LEGION_WT_KEEP=1
+          status="containment_failed"
+          reason="version-probe evidence was malformed or incomplete; worktree retained: $wt; preflight: $review_preflight_receipt"
+          rc=70
+          break
         fi
         # Incompatible versions/configuration and policy refusals are not
         # outages. Stop rather than allowing a later reviewer to erase them.
@@ -4002,6 +4056,22 @@ cmd_review() {
         LEGION_WT_KEEP=1
         status="containment_failed"
         reason="$(legion_adapter_supervisor_reason "$attempt_lease") (evidence: $attempt_lease; worktree retained: $wt)"
+        attempt=$((attempt - 1))
+        REVIEW_RECEIPT_ATTEMPT="$attempt"
+        review_attempt_receipt=""
+        review_failure_receipt=""
+        NATIVE_ATTEMPT_ART=""
+        NATIVE_ATTEMPT_LAUNCHED=0
+        NATIVE_LEASE_STATUS=""
+        CODEX_SIGNAL_CHILD_PID=""
+        CODEX_CHILD_RC=0
+        break
+      elif legion_adapter_supervisor_timed_out_before_launch "$attempt_lease" "$rc"; then
+        # No reviewer process existed, but the common absolute deadline is a
+        # terminal timeout. It must not be relabelled unavailable and walked to
+        # a later reviewer.
+        status="timed_out"
+        reason="$(legion_adapter_lease_reason "$attempt_lease")"
         attempt=$((attempt - 1))
         REVIEW_RECEIPT_ATTEMPT="$attempt"
         review_attempt_receipt=""
@@ -4386,10 +4456,19 @@ cmd_resume() {
   # shellcheck disable=SC2034
   LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID="$previous_attempt_id"
   if ! legion_adapter_preflight codex "$resume_art" "$resume_sandbox" stdin "$model" "$effort" 0 "$CODEX_BIN"; then
+    local preflight_disposition terminal_status=refused
+    preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+    case "$preflight_disposition" in
+      timed_out) terminal_status=timed_out ;;
+      containment_failed) terminal_status=containment_failed; LEGION_WT_KEEP=1 ;;
+      launch_failed) terminal_status=failed ;;
+    esac
     jq -cn --arg run "$RUN_ID" --arg model "$model" --arg archetype "$archetype" \
+      --arg status "$terminal_status" \
       --arg thread "$thread_id" --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
-      {run_id:$run,status:"refused",executor:"codex-resume",model:$model,
+      {run_id:$run,status:$status,executor:"codex-resume",model:$model,
        archetype:(if $archetype=="" then null else $archetype end),thread_id:$thread,
        reason:$reason,preflight_receipt:$preflight,attempt_receipt:null,
        failure_receipt:null,usage:null,usage_status:"not_applicable",
@@ -4482,6 +4561,16 @@ cmd_resume() {
       CODEX_SIGNAL_CHILD_PID=""
       CODEX_CHILD_RC=0
     fi
+  elif legion_adapter_supervisor_timed_out_before_launch "$lease_status" "$rc"; then
+    launch_failed=1
+    status="timed_out"
+    usage=null
+    cost=null
+    reason="$(legion_adapter_lease_reason "$lease_status")"
+    NATIVE_ATTEMPT_ART=""
+    NATIVE_ATTEMPT_LAUNCHED=0
+    CODEX_SIGNAL_CHILD_PID=""
+    CODEX_CHILD_RC=0
   elif legion_adapter_supervisor_launch_failed "$lease_status"; then
     launch_failed=1
     status="failed"

@@ -39,6 +39,21 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _positive_int(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
+
+
+def _valid_usage(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        for item in value.values()
+    )
+
+
 def _parse_epoch(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -111,7 +126,7 @@ def _provenance_status(record: dict[str, Any], kind: str) -> str:
     value = record.get("cost_usd" if kind == "cost" else "tokens")
     known_value = (
         (kind == "cost" and isinstance(value, (int, float)) and not isinstance(value, bool))
-        or (kind == "usage" and isinstance(value, dict))
+        or (kind == "usage" and _valid_usage(value))
     )
     if kind == "cost" and known_value:
         known_value = math.isfinite(value) and value >= 0
@@ -123,8 +138,8 @@ def _provenance_status(record: dict[str, Any], kind: str) -> str:
         lower_valid = (
             isinstance(lower, (int, float)) and not isinstance(lower, bool)
             and math.isfinite(lower) and lower >= 0
-        ) if kind == "cost" else isinstance(lower, dict)
-        return "partial" if lower_valid and _num(count) >= 1 else "unknown"
+        ) if kind == "cost" else _valid_usage(lower)
+        return "partial" if lower_valid and _positive_int(count) is not None else "unknown"
     if status in {"unknown", "not_applicable"}:
         return status
     return "known" if known_value else "unknown"
@@ -148,11 +163,11 @@ def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         status = _provenance_status(record, "cost")
         if status == "known":
             known += 1
-            known_count += int(_num(record.get("known_cost_attempts"))) or 1
+            known_count += _positive_int(record.get("known_cost_attempts")) or 1
             subtotal += _num(record.get("cost_usd"))
         elif status == "partial":
             partial += 1
-            known_count += int(_num(record.get("known_cost_attempts")))
+            known_count += _positive_int(record.get("known_cost_attempts")) or 0
             subtotal += _num(record.get("known_cost_usd"))
         elif status == "unknown":
             unknown += 1
@@ -257,7 +272,9 @@ def load_spans(directory: str) -> dict[str, dict[str, Any]]:
                         _sum_tokens(totals["known_usage"], span.get("tokens"))
                     elif usage_status == "partial":
                         totals["usage_partial"] += 1
-                        totals["known_usage_attempts"] += int(_num(span.get("known_usage_attempts")))
+                        totals["known_usage_attempts"] += (
+                            _positive_int(span.get("known_usage_attempts")) or 0
+                        )
                         _sum_tokens(totals["known_usage"], span.get("known_usage"))
                     elif usage_status == "unknown":
                         totals["usage_unknown"] += 1

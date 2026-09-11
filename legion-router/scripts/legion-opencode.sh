@@ -300,14 +300,23 @@ cmd_run() {
   [[ -n "$preflight_binary" || ! -x "$HOME/.opencode/bin/opencode" ]] \
     || preflight_binary="$HOME/.opencode/bin/opencode"
   if ! legion_adapter_preflight opencode "$art" "$sandbox" stdin "$model" "" 0 "$preflight_binary"; then
+    local preflight_disposition
+    preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+    local terminal_status=refused lifecycle_status=failed
+    case "$preflight_disposition" in
+      timed_out) terminal_status=timed_out; lifecycle_status=timed_out ;;
+      containment_failed) terminal_status=containment_failed; lifecycle_status=containment_failed ;;
+      launch_failed) terminal_status=failed ;;
+    esac
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
-      failed "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+      "$lifecycle_status" "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
       "$base" "$archetype"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    jq -cn --arg run "$RUN_ID" --arg model "$model" \
+    jq -cn --arg run "$RUN_ID" --arg model "$model" --arg status "$terminal_status" \
       --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
-      {run_id:$run,status:"refused",executor:"opencode",model:$model,reason:$reason,
+      {run_id:$run,status:$status,executor:"opencode",model:$model,reason:$reason,
        preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
        usage:null,usage_status:"not_applicable",
        cost_usd:null,cost_status:"not_applicable"}'
@@ -413,9 +422,11 @@ cmd_run() {
     fi
   fi
 
-  local containment_failed=0 launch_failed=0
+  local containment_failed=0 launch_failed=0 launch_timed_out=0
   legion_adapter_supervisor_cleanup_failed "$lease_status" && containment_failed=1
   legion_adapter_supervisor_launch_failed "$lease_status" && launch_failed=1
+  legion_adapter_supervisor_timed_out_before_launch "$lease_status" "$rc" \
+    && launch_timed_out=1
   if [[ "$containment_failed" -ne 1 ]]; then
     git -C "$wt" add -A 2>/dev/null || diff_rc=1
   # Diff against the worktree's STARTING commit, not HEAD. `diff --cached` alone
@@ -432,6 +443,12 @@ cmd_run() {
     status="containment_failed"
     keep=1
     result="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+  elif [[ "$launch_timed_out" -eq 1 ]]; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+    usage=null
+    cost=null
   elif [[ "$launch_failed" -eq 1 ]]; then
     status="failed"
     result="$(legion_adapter_supervisor_reason "$lease_status" "provider launch failed before process creation")"

@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 from pathlib import Path
 import stat
@@ -65,6 +66,71 @@ def test_non_object_cache_entries_are_cache_misses(
     cache.write_text(payload, encoding="utf-8")
 
     assert preflight._read_cache(cache, "expected-key") is None
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"cache_key": "expected-key", "version_raw": "fixture 1.2.3", "version": []},
+        {"cache_key": "expected-key", "version_raw": {}, "version": "1.2.3"},
+        {"cache_key": "expected-key", "version_raw": "fixture 1.2.3"},
+        {
+            "cache_key": "expected-key",
+            "version_raw": "fixture 1.2.3",
+            "version": "1.2.3",
+            "unexpected": True,
+        },
+    ],
+)
+def test_noncanonical_matching_cache_records_are_cache_misses(
+    tmp_path: Path, record: dict[str, object]
+) -> None:
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps(record), encoding="utf-8")
+
+    assert preflight._read_cache(cache, "expected-key") is None
+
+
+@pytest.mark.parametrize("version_raw", [None, "fixture 1.2.3"])
+@pytest.mark.parametrize("version", [None, "1.2.3"])
+def test_canonical_cache_field_types_are_accepted(
+    tmp_path: Path, version_raw, version
+) -> None:
+    cache = tmp_path / "cache.json"
+    record = {
+        "cache_key": "expected-key",
+        "version_raw": version_raw,
+        "version": version,
+    }
+    cache.write_text(json.dumps(record), encoding="utf-8")
+
+    assert preflight._read_cache(cache, "expected-key") == record
+
+
+def test_malformed_matching_cache_reprobes_without_crashing(tmp_path: Path) -> None:
+    binary = executable(tmp_path / "fixture")
+    config = registry(
+        tmp_path / "executors.toml",
+        binary,
+        provider_sandboxes='["read-only", "workspace-write"]',
+    )
+    cache_dir = tmp_path / "cache"
+    environment = {"HOME": str(tmp_path / "home"), "PATH": os.environ["PATH"]}
+    first = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=cache_dir, env=environment
+    )
+    cache_file = next(cache_dir.glob("*.json"))
+    malformed = json.loads(cache_file.read_text(encoding="utf-8"))
+    malformed["version"] = []
+    cache_file.write_text(json.dumps(malformed), encoding="utf-8")
+
+    second = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=cache_dir, env=environment
+    )
+
+    assert first["status"] == second["status"] == "supported"
+    assert second["cache"]["hit"] is False
+    assert second["identity"]["version"] == "1.2.3"
 
 
 @pytest.mark.parametrize(

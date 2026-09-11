@@ -115,6 +115,53 @@ teardown() {
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
 }
 
+@test "claim owner reads reject links FIFOs and oversized files without blocking or touching targets" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    base="$2"
+    for kind in symlink hardlink fifo oversized; do
+      attempt="$base-$kind.json"
+      claim="$attempt.provider-span-emitted"
+      owner="$claim/owner.json"
+      victim="$base-$kind.victim"
+      printf "{}\n" > "$attempt"
+      mkdir -p "$claim"
+      printf "do-not-touch-%s\n" "$kind" > "$victim"
+      case "$kind" in
+        symlink) ln -s "$victim" "$owner" ;;
+        hardlink) ln "$victim" "$owner" ;;
+        fifo) mkfifo "$owner" ;;
+        oversized) python3 -c '\''print("x" * 4097)'\'' > "$owner" ;;
+      esac
+      legion_adapter_claim_provider_span "$attempt"
+      jq -e '\''
+        .schema == "legion.provider-span-claim.v1"
+        and (.publisher_pid | type) == "number"
+        and (.publisher_incarnation | type) == "string"
+        and (.token | test("^[0-9a-f]{48}$"))
+      '\'' "$owner" >/dev/null
+      [[ "$(cat "$victim")" == "do-not-touch-$kind" ]]
+      legion_adapter_release_provider_span_claim "$attempt"
+    done
+
+    # Release must also refuse a replaced owner path rather than following or
+    # unlinking a target selected after acquisition.
+    attempt="$base-release.json"
+    victim="$base-release.victim"
+    printf "{}\n" > "$attempt"
+    printf "release-target\n" > "$victim"
+    legion_adapter_claim_provider_span "$attempt"
+    owner="$attempt.provider-span-emitted/owner.json"
+    rm -f "$owner"; ln -s "$victim" "$owner"
+    legion_adapter_release_provider_span_claim "$attempt"
+    [[ -L "$owner" ]]
+    [[ "$(cat "$victim")" == release-target ]]
+  ' _ "$CONTRACT" "$TEST_TMPDIR/unsafe-owner"
+
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
 @test "concurrent publishers reconcile to exactly one durable provider span" {
   local calls="$TEST_TMPDIR/concurrent-calls" pid rc=0
   local -a pids=()

@@ -635,20 +635,36 @@ cmd_run() {
   local contract_art="$repo/.legion/runs/$RUN_ID"
   if ! legion_adapter_preflight claude "$contract_art" "$sandbox" stdin "$model" "$effort" \
       "$premium_consent" "$CLAUDE_BIN"; then
+    local preflight_disposition
+    preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH")"
     # An unavailable CLI may safely route to the already-configured alternate;
     # incompatible policy/model/billing requests are terminal refusals and may
     # not spend through a different provider.
-    if [[ "$LEGION_ADAPTER_PREFLIGHT_STATUS" == unavailable && "$allow_fallback" -eq 1 ]]; then
+    if [[ ( "$preflight_disposition" == unavailable \
+          || "$preflight_disposition" == launch_failed ) && "$allow_fallback" -eq 1 ]]; then
       reason=claude_unavailable
       run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
       return $?
     fi
+    local terminal_status=refused lifecycle_status=failed terminal_reason=admission_refused
+    case "$preflight_disposition" in
+      timed_out)
+        terminal_status=timed_out; lifecycle_status=timed_out
+        terminal_reason=version_probe_timed_out
+        ;;
+      containment_failed)
+        terminal_status=containment_failed; lifecycle_status=containment_failed
+        terminal_reason=version_probe_containment_failed
+        ;;
+      launch_failed) terminal_status=failed; terminal_reason=version_probe_launch_failed ;;
+    esac
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
-      failed "$RUN_ID" "$repo" "$contract_art" "$wt" "$branch" "$model" "$sandbox" \
+      "$lifecycle_status" "$RUN_ID" "$repo" "$contract_art" "$wt" "$branch" "$model" "$sandbox" \
       "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json claude "$model" refused "$LEGION_ADAPTER_PREFLIGHT_REASON" null null false \
-      admission_refused not_applicable not_applicable
+    emit_terminal_json claude "$model" "$terminal_status" "$LEGION_ADAPTER_PREFLIGHT_REASON" \
+      null null false "$terminal_reason" not_applicable not_applicable
     return 1
   fi
   CLAUDE_BIN="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
@@ -850,6 +866,15 @@ cmd_run() {
       keep=1
       LEGION_CLAUDE_LEASE_RECEIPT="$lease_status"
       lease_reason="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; no provider launched; worktree retained: ${wt:-$repo})"
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      break
+    elif legion_adapter_supervisor_timed_out_before_launch "$lease_status" "$rc"; then
+      # Popen never happened, but the governing lease—not provider
+      # availability—ended the route. Do not walk the model/fallback chain.
+      lease_timed_out=1
+      chain_stopped_before_launch=1
+      lease_reason="$(legion_adapter_lease_reason "$lease_status")"
       LEGION_ADAPTER_ATTEMPT_PATH=""
       LEGION_ADAPTER_FAILURE_PATH=""
       break

@@ -203,6 +203,46 @@ install_signal_cleanup_failed_python() {
   install_cleanup_failed_python signal
 }
 
+install_prelaunch_timeout_python() {
+  local shim_dir="$TEST_TMPDIR/prelaunch-timeout-python" real_python
+  real_python="$(command -v python3)"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion-process-supervisor.py && " $* " == *" --launch-gate-file "* ]]; then
+  status_file="" launch_gate="" launch_token="" max_runtime=30
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status-file) status_file="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime="$2"; shift 2 ;;
+      --launch-gate-file) launch_gate="$2"; shift 2 ;;
+      --launch-gate-token) launch_token="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  temp="$(mktemp "${launch_gate%/*}/.timeout-ready.XXXXXX")" || exit 70
+  jq -cn --arg token "$launch_token" --argjson pid "$$" \
+    '{schema:"legion.child-launch-gate.v1",status:"ready",token:$token,supervisor_pid:$pid}' > "$temp"
+  chmod 600 "$temp"; mv -f "$temp" "$launch_gate"
+  for ((i = 0; i < 500; i++)); do
+    jq -e --arg token "$launch_token" --argjson pid "$$" \
+      '.status == "go" and .token == $token and .supervisor_pid == $pid' \
+      "$launch_gate" >/dev/null 2>&1 && break
+    /bin/sleep 0.02
+  done
+  jq -cn --argjson runtime "$max_runtime" '
+    {schema:"legion.child-execution-lease.v1",status:"launch_failed",
+     reason:"inherited child lease deadline expired during launch setup",
+     max_runtime_seconds:$runtime}' > "$status_file"
+  exit 124
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+  chmod +x "$shim_dir/python3"
+  export LEGION_TEST_REAL_PYTHON="$real_python"
+  export PATH="$shim_dir:$PATH"
+}
+
 assert_signal_receipt() {
   local adapter="$1" marker="$2" delay_name="$3" run_id="signal-$adapter"
   local repo out err pid rc=0 art launch_receipt
@@ -296,6 +336,53 @@ assert_signal_receipt() {
   [ "$status" -eq 0 ]
 }
 
+@test "version-probe preflight disposition authenticates timeout unavailable and malformed evidence" {
+  local receipt="$TEST_TMPDIR/version-probe-preflight.json"
+  jq -cn '
+    {schema:"legion.preflight.v1",status:"unavailable",identity:null,
+     compatibility:{version:{discovered:null,status:"unavailable",
+       probe_status:"timed_out",
+       probe_reason:"inherited child lease deadline expired during launch setup",
+       probe_lease:{schema:"legion.child-execution-lease.v1",status:"launch_failed",
+         reason:"inherited child lease deadline expired during launch setup",
+         max_runtime_seconds:30}}}}
+  ' > "$receipt"
+  run bash -c 'source "$1"; legion_adapter_preflight_failure_disposition "$2"' \
+    _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$receipt"
+  [ "$status" -eq 0 ]
+  [ "$output" = timed_out ]
+
+  jq '
+    .compatibility.version.probe_status="launch_failed"
+    | .compatibility.version.probe_reason="child launch failed: command not found"
+    | .compatibility.version.probe_lease.reason=.compatibility.version.probe_reason
+  ' "$receipt" > "$receipt.tmp"; mv "$receipt.tmp" "$receipt"
+  run bash -c 'source "$1"; legion_adapter_preflight_failure_disposition "$2"' \
+    _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$receipt"
+  [ "$status" -eq 0 ]
+  [ "$output" = launch_failed ]
+
+  jq '.compatibility.version.probe_reason="contradictory evidence"' \
+    "$receipt" > "$receipt.tmp"; mv "$receipt.tmp" "$receipt"
+  run bash -c 'source "$1"; legion_adapter_preflight_failure_disposition "$2"' \
+    _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$receipt"
+  [ "$status" -eq 0 ]
+  [ "$output" = containment_failed ]
+
+  jq -cn '{schema:"legion.preflight.v1",status:"unavailable",identity:null,compatibility:{}}' \
+    > "$receipt"
+  run bash -c 'source "$1"; legion_adapter_preflight_failure_disposition "$2"' \
+    _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$receipt"
+  [ "$status" -eq 0 ]
+  [ "$output" = unavailable ]
+
+  jq '.status="incompatible"' "$receipt" > "$receipt.tmp"; mv "$receipt.tmp" "$receipt"
+  run bash -c 'source "$1"; legion_adapter_preflight_failure_disposition "$2"' \
+    _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$receipt"
+  [ "$status" -eq 0 ]
+  [ "$output" = refused ]
+}
+
 @test "every foreground adapter aborts a signal pending at its final launch gate" {
   local bash_env="$TEST_TMPDIR/pending-signal.bash" adapter provider_marker signal expected_rc repo run_id rc art out err lease
   install_mock_version_registry
@@ -338,6 +425,51 @@ SH
       and (has("child_exit_code") | not)
       and ((keys_unsorted - ["schema","status","reason","max_runtime_seconds"]) | length == 0)
     ' "$lease" || { printf 'adapter=%s invalid final-gate lease=%s\n' "$adapter" "$(cat "$lease")" >&2; return 1; }
+  done
+}
+
+@test "every foreground adapter preserves a prelaunch supervisor deadline as timed_out" {
+  local adapter repo run_id result_file err_file rc art lease provider_marker
+  install_mock_version_registry
+  install_prelaunch_timeout_python
+  for adapter in claude cursor opencode deepseek pi hermes; do
+    case "$adapter" in
+      claude) provider_marker='claude -p' ;;
+      cursor) provider_marker='agent -p' ;;
+      opencode) provider_marker='opencode run' ;;
+      deepseek) provider_marker='dsh --profile' ;;
+      pi) provider_marker='pi -p' ;;
+      hermes) provider_marker='hermes --oneshot' ;;
+    esac
+    repo="$(make_test_repo "prelaunch-timeout-$adapter")"
+    run_id="prelaunch-timeout-$adapter"
+    result_file="$TEST_TMPDIR/$adapter-prelaunch-timeout.out"
+    err_file="$TEST_TMPDIR/$adapter-prelaunch-timeout.err"
+    rc=0
+    local -a extra_args=()
+    [[ "$adapter" != claude ]] || extra_args+=(--no-fallback)
+    PI_BIN=pi HERMES_BIN=hermes \
+      "$REPO_ROOT/legion-router/bin/legion-$adapter" run --task wait --repo "$repo" \
+        --run-id "$run_id" --quiet "${extra_args[@]}" > "$result_file" 2>"$err_file" || rc=$?
+    [ "$rc" -ne 0 ]
+    jq -e '
+      .status == "timed_out"
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"
+      and (.reason | contains("deadline expired"))
+    ' "$result_file" || {
+      printf 'adapter=%s rc=%s output=%s err=%s\n' \
+        "$adapter" "$rc" "$(cat "$result_file")" "$(cat "$err_file")" >&2
+      return 1
+    }
+    lease="$(jq -r '.lease_receipt // empty' "$result_file")"
+    [ -n "$lease" ]
+    jq -e '.status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    art="$repo/.legion/runs/$run_id"
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    ! grep -Fq "$provider_marker" "$MOCK_CALL_LOG"
   done
 }
 

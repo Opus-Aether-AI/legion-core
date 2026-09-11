@@ -139,7 +139,7 @@ teardown() {
   [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 3 ]
 }
 
-@test "process incarnation reclaims a reused PID while live legacy owners remain conservative" {
+@test "process incarnation reclaims a same-PID collision while legacy live owners remain conservative" {
   run bash -c '
     set -euo pipefail
     source "$1"
@@ -147,30 +147,34 @@ teardown() {
     claim="$attempt.provider-span-emitted"
     mkdir -p "$claim"
 
-    jq -cn --argjson pid "$$" \
-      '\''{schema:"legion.provider-span-claim.v1",publisher_pid:$pid,
-          publisher_incarnation:"forged-prior-incarnation",token:"prior"}'\'' \
-      > "$claim/owner.json"
     legion_adapter_claim_provider_span "$attempt"
-    jq -e --argjson pid "$$" \
-      '\''.publisher_pid == $pid and .publisher_incarnation != "forged-prior-incarnation"'\'' \
-      "$claim/owner.json"
+    incarnation="$(jq -r .publisher_incarnation "$claim/owner.json")"
+    legion_adapter_release_provider_span_claim "$attempt"
+    case "$incarnation" in
+      linux:*) collision="${incarnation%:*}:$(( ${incarnation##*:} + 1 ))" ;;
+      darwin:*) collision="${incarnation%:*}:$(( ${incarnation##*:} + 1 ))" ;;
+      *) exit 1 ;;
+    esac
+    jq -cn --argjson pid "$$" --arg incarnation "$collision" \
+      '\''{schema:"legion.provider-span-claim.v1",publisher_pid:$pid,
+          publisher_incarnation:$incarnation,token:"prior"}'\'' > "$claim/owner.json"
+    legion_adapter_claim_provider_span "$attempt"
+    jq -e --arg incarnation "$incarnation" \
+      '\''.publisher_incarnation == $incarnation'\'' "$claim/owner.json"
     legion_adapter_release_provider_span_claim "$attempt"
 
     jq -cn --argjson pid "$$" \
       '\''{schema:"legion.provider-span-claim.v1",publisher_pid:$pid,token:"legacy"}'\'' \
       > "$claim/owner.json"
     ! legion_adapter_claim_provider_span "$attempt"
-    touch -t 200001010000 "$claim/owner.json"
-    legion_adapter_claim_provider_span "$attempt"
-    legion_adapter_release_provider_span_claim "$attempt"
   ' _ "$CONTRACT" "$ATTEMPT"
 
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
 }
 
 @test "a supervisor token supplies publisher incarnation inside restricted process sandboxes" {
-  run bash -c '
+  [[ "$(uname -s)" == Darwin && -x /usr/bin/sandbox-exec ]] || skip "requires Darwin sandbox-exec"
+  run /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny process-info*)' bash -c '
     set -euo pipefail
     source "$1"
     attempt="$2"
@@ -184,4 +188,53 @@ teardown() {
   ' _ "$CONTRACT" "$ATTEMPT"
 
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "an already-owned claim is reusable by a signal path in the same shell" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    legion_adapter_claim_provider_span "$2"
+    first_token="$LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN"
+    first_owner="$(cat "$2.provider-span-emitted/owner.json")"
+    legion_adapter_claim_provider_span "$2"
+    [[ "$LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN" == "$first_token" ]]
+    [[ "$(cat "$2.provider-span-emitted/owner.json")" == "$first_owner" ]]
+    legion_adapter_release_provider_span_claim "$2"
+  ' _ "$CONTRACT" "$ATTEMPT"
+
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "a different restricted supervisor cannot reclaim a live supervised owner" {
+  [[ "$(uname -s)" == Darwin && -x /usr/bin/sandbox-exec ]] || skip "requires Darwin sandbox-exec"
+  local entered="$TEST_TMPDIR/restricted-entered" release="$TEST_TMPDIR/restricted-release" publisher
+  env LEGION_SUPERVISOR_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny process-info*)' bash -c '
+      set -euo pipefail
+      source "$1"
+      legion_adapter_claim_provider_span "$2"
+      : > "$3"
+      while [[ ! -e "$4" ]]; do sleep 0.02; done
+      legion_adapter_release_provider_span_claim "$2"
+    ' _ "$CONTRACT" "$ATTEMPT" "$entered" "$release" &
+  publisher=$!
+  SPAN_CLAIM_PUBLISHER_PID="$publisher"
+  for _ in $(seq 1 100); do
+    [[ -e "$entered" ]] && break
+    sleep 0.02
+  done
+  [ -e "$entered" ]
+
+  run env LEGION_SUPERVISOR_TOKEN=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny process-info*)' bash -c '
+      set -euo pipefail
+      source "$1"
+      ! legion_adapter_claim_provider_span "$2"
+    ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ]
+
+  : > "$release"
+  wait "$publisher"
+  SPAN_CLAIM_PUBLISHER_PID=""
 }

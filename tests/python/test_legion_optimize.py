@@ -161,6 +161,71 @@ def test_stats_preserve_known_zero_but_exclude_route_with_any_unknown_cost():
     assert stats["mixed"]["known_cost_usd"] == 0.5
 
 
+def test_route_stats_preserve_partial_and_not_applicable_cost_provenance():
+    common = {
+        "schema": "legion.span.v1",
+        "executor": "codex",
+        "archetype": "implement-feature",
+        "status": "ok",
+        "duration_ms": 1,
+    }
+    spans = [
+        {
+            **common,
+            "model": "mixed",
+            "cost_usd": 0.2,
+            "cost_status": "known",
+        },
+        {
+            **common,
+            "model": "mixed",
+            "cost_usd": None,
+            "cost_status": "partial",
+            "known_cost_usd": 0.5,
+            "known_cost_attempts": 2,
+        },
+        {
+            **common,
+            "model": "included",
+            "cost_usd": None,
+            "cost_status": "not_applicable",
+        },
+        {
+            **common,
+            "model": "mixed-applicability",
+            "cost_usd": 0.4,
+            "cost_status": "known",
+        },
+        {
+            **common,
+            "model": "mixed-applicability",
+            "cost_usd": None,
+            "cost_status": "not_applicable",
+        },
+        {
+            **common,
+            "model": "included",
+            "cost_usd": None,
+            "cost_status": "not_applicable",
+        },
+    ]
+
+    stats = opt.stats_by_arch_model(spans)["implement-feature"]
+    assert stats["mixed"]["cost_status"] == "partial"
+    assert stats["mixed"]["mean_cost"] is None
+    assert stats["mixed"]["known_cost_usd"] == 0.7
+    assert stats["mixed"]["known_cost_runs"] == 2
+    assert stats["mixed"]["known_cost_attempts"] == 3
+    assert stats["included"]["cost_status"] == "not_applicable"
+    assert stats["included"]["known_cost_usd"] is None
+    assert stats["included"]["known_cost_runs"] == 0
+    assert stats["included"]["known_cost_attempts"] == 0
+    assert stats["mixed-applicability"]["cost_status"] == "partial"
+    assert stats["mixed-applicability"]["mean_cost"] is None
+    assert stats["mixed-applicability"]["known_cost_usd"] == 0.4
+    assert opt._eligible_routes(stats, 1) == {}
+
+
 def test_propose_holds_when_current_is_already_cheapest_clearing_bar():
     stats = {
         "test-model-beta": {"runs": 7, "success_rate": 0.9, "mean_cost": 0.4, "p50_ms": 100, "p95_ms": 200},

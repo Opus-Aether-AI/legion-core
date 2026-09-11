@@ -462,6 +462,8 @@ cmd_run() {
       failure_class=internal
     fi
   fi
+  local terminal_usage=null terminal_cost=null
+  local terminal_usage_status=not_applicable terminal_cost_status=not_applicable
   if [[ "$launch_failed" -eq 1 ]]; then
     LEGION_ADAPTER_ATTEMPT_PATH=""
     LEGION_ADAPTER_FAILURE_PATH=""
@@ -470,6 +472,10 @@ cmd_run() {
       "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
       "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
       "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
+    terminal_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     local artifacts
     artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
       --arg stdout "$out_file" --arg stderr "$err_file" \
@@ -527,16 +533,13 @@ cmd_run() {
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg reason "$receipt_reason" \
     --arg lease "$lease_status" \
-    --arg usage_status "$usage_status" --arg cost_status "$cost_status" \
-    --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" \
-    --argjson launch_failed "$launch_failed" '
+    --arg usage_status "$terminal_usage_status" --arg cost_status "$terminal_cost_status" \
+    --argjson usage "$terminal_usage" --argjson cost "$terminal_cost" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"opencode", model:$model, opencode_exit:$rc,
      result:$result, opencode_error:(if $opencode_error == "" then null else $opencode_error end),
      worktree:$wt, diff_path:$diff, last_message_path:$last,
-     usage:(if $launch_failed == 1 or $usage_status != "known" then null else $usage end),
-     usage_status:(if $launch_failed == 1 then "not_applicable" else $usage_status end),
-     cost_usd:(if $launch_failed == 1 or $cost_status != "known" then null else $cost end),
-     cost_status:(if $launch_failed == 1 then "not_applicable" else $cost_status end),
+     usage:$usage,usage_status:$usage_status,
+     cost_usd:$cost,cost_status:$cost_status,
      preflight_receipt:$preflight,
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}

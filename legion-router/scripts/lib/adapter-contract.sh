@@ -381,19 +381,19 @@ legion_adapter_claim_provider_span() {
   lock_path="$claim_path/owner.lock"
   [[ ! -L "$claim_path" ]] || return 1
   mkdir -p "$claim_path" 2>/dev/null || return 1
-  outcome="$(python3 - "$lock_path" "$owner_path" "$$" <<'PY'
+  outcome="$(python3 - "$lock_path" "$owner_path" "$$" \
+    "${LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN:-}" <<'PY'
+import ctypes
 import fcntl
 import json
 import os
 import re
 import secrets
 import stat
-import subprocess
 import sys
 import tempfile
-from datetime import datetime
 
-lock_path, owner_path, publisher_pid_text = sys.argv[1:]
+lock_path, owner_path, publisher_pid_text, current_claim_token = sys.argv[1:]
 publisher_pid = int(publisher_pid_text)
 
 def process_snapshot(pid):
@@ -403,50 +403,73 @@ def process_snapshot(pid):
         return False, None, None
     except PermissionError:
         pass
-    boot = None
     if sys.platform.startswith("linux"):
         try:
             with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as source:
                 boot = source.read(80).strip()
-        except OSError:
-            pass
-    elif sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
-                check=False, capture_output=True, text=True, timeout=1,
-                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin"},
-            )
-            match = re.search(r"sec\s*=\s*(\d+)", result.stdout[:256])
-            if result.returncode == 0 and match:
-                boot = match.group(1)
-        except (OSError, subprocess.SubprocessError):
-            pass
-    try:
-        result = subprocess.run(
-            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
-            check=False, capture_output=True, text=True, timeout=1,
-            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
-        )
-        started = result.stdout.strip()
-        if result.returncode != 0 or not started or len(started) > 128 or not boot:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as source:
+                fields = source.read(4096).rsplit(")", 1)[1].split()
+            start_ticks = int(fields[19])
+            with open("/proc/stat", encoding="ascii") as source:
+                boot_epoch = next(int(line.split()[1]) for line in source if line.startswith("btime "))
+            start_epoch = boot_epoch + start_ticks / os.sysconf("SC_CLK_TCK")
+            if not re.fullmatch(r"[0-9a-f-]{32,64}", boot) or start_ticks < 1:
+                raise ValueError("invalid Linux process identity")
+            return True, f"linux:{boot}:{start_ticks}", start_epoch
+        except (OSError, IndexError, StopIteration, ValueError):
             return True, None, None
-        started_epoch = datetime.strptime(started, "%a %b %d %H:%M:%S %Y").timestamp()
-        return True, f"{sys.platform}:{boot}:{started}", started_epoch
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return True, None, None
+    if sys.platform == "darwin":
+        class DarwinUniqueInfo(ctypes.Structure):
+            _fields_ = (
+                ("p_uuid", ctypes.c_uint8 * 16),
+                ("p_uniqueid", ctypes.c_uint64),
+                ("p_puniqueid", ctypes.c_uint64),
+                ("p_idversion", ctypes.c_int32),
+                ("p_orig_ppidversion", ctypes.c_int32),
+                ("p_reserve2", ctypes.c_uint64),
+                ("p_reserve3", ctypes.c_uint64),
+            )
+        try:
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            function = libproc.proc_pidinfo
+            function.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
+            function.restype = ctypes.c_int
+            info = DarwinUniqueInfo()
+            found = function(pid, 17, 0, ctypes.byref(info), ctypes.sizeof(info))
+            if found == 0:
+                # kill(0) already proved a live or permission-hidden process.
+                # proc_pidinfo denial is not proof of death.
+                return True, None, None
+            if found != ctypes.sizeof(info) or info.p_uniqueid == 0:
+                return True, None, None
+            return True, f"darwin:{info.p_uniqueid}:{info.p_idversion}", None
+        except (AttributeError, OSError):
+            return True, None, None
+    return True, None, None
 
 def current_publisher_incarnation(pid):
-    # A process supervisor contributes a fresh, unguessable token to exactly
-    # one supervised execution tree.  Prefer that token for the publisher
-    # itself: macOS Seatbelt intentionally denies the process inspection that
-    # ps(1) needs inside brokered harnesses.  Other-owner checks still use the
-    # host start time when it is observable.
+    # Prefer the kernel identity so every publisher compares the same identity
+    # kind. A supervisor token is a restricted-sandbox fallback only.
+    alive, incarnation, _ = process_snapshot(pid)
+    if alive and incarnation:
+        return incarnation
     supervisor_token = os.environ.get("LEGION_SUPERVISOR_TOKEN", "")
     if re.fullmatch(r"[0-9a-f]{48}", supervisor_token):
         return f"supervisor:{supervisor_token}:pid:{pid}"
-    alive, incarnation, _ = process_snapshot(pid)
-    return incarnation if alive else None
+    return None
+
+def valid_incarnation(value, pid):
+    return bool(
+        isinstance(value, str)
+        and (
+            re.fullmatch(r"linux:[0-9a-f-]{32,64}:[1-9][0-9]*", value)
+            or re.fullmatch(r"darwin:[1-9][0-9]*:-?[0-9]+", value)
+            or re.fullmatch(rf"supervisor:[0-9a-f]{{48}}:pid:{pid}", value)
+        )
+    )
+
+def valid_token(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{48}", value) is not None
 
 flags = os.O_RDWR | os.O_CREAT
 if hasattr(os, "O_NOFOLLOW"):
@@ -479,10 +502,8 @@ with os.fdopen(descriptor, "r+", encoding="utf-8") as lock:
             candidate.get("schema") == "legion.provider-span-claim.v1"
             and isinstance(candidate.get("publisher_pid"), int)
             and candidate["publisher_pid"] > 0
-            and isinstance(candidate.get("publisher_incarnation"), str)
-            and candidate["publisher_incarnation"]
-            and isinstance(candidate.get("token"), str)
-            and candidate["token"]
+            and valid_incarnation(candidate.get("publisher_incarnation"), candidate["publisher_pid"])
+            and valid_token(candidate.get("token"))
             and set(candidate) == {"schema", "publisher_pid", "publisher_incarnation", "token"}
         ):
             owner = candidate
@@ -498,13 +519,22 @@ with os.fdopen(descriptor, "r+", encoding="utf-8") as lock:
     except (OSError, ValueError, TypeError):
         pass
     if owner:
-        if owner["publisher_pid"] == publisher_pid:
-            owner_alive, owner_incarnation = True, publisher_incarnation
-        else:
-            owner_alive, owner_incarnation, _ = process_snapshot(owner["publisher_pid"])
-        if owner_alive and (owner_incarnation is None or owner_incarnation == owner["publisher_incarnation"]):
-            print("busy")
+        if (
+            owner["publisher_pid"] == publisher_pid
+            and owner["publisher_incarnation"] == publisher_incarnation
+            and valid_token(current_claim_token)
+            and owner["token"] == current_claim_token
+        ):
+            print(f"reused:{current_claim_token}")
             raise SystemExit(0)
+        owner_alive, owner_incarnation, _ = process_snapshot(owner["publisher_pid"])
+        if owner_alive:
+            stored_kind = owner["publisher_incarnation"].split(":", 1)[0]
+            observed_kind = owner_incarnation.split(":", 1)[0] if owner_incarnation else None
+            if owner_incarnation is None or stored_kind != observed_kind \
+                    or owner_incarnation == owner["publisher_incarnation"]:
+                print("busy")
+                raise SystemExit(0)
     elif legacy_owner:
         owner_alive, _, owner_started = process_snapshot(legacy_owner["publisher_pid"])
         if owner_alive and (owner_started is None or owner_mtime is None or owner_started <= owner_mtime + 1.0):
@@ -540,6 +570,7 @@ PY
 )" || return 1
   case "$outcome" in
     acquired:*) LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN="${outcome#acquired:}"; return 0 ;;
+    reused:*) LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN="${outcome#reused:}"; return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -549,53 +580,55 @@ legion_adapter_release_provider_span_claim() {
   local claim_path="$attempt_path.provider-span-emitted"
   [[ -n "$attempt_path" && -n "$token" && -d "$claim_path" && ! -L "$claim_path" ]] || return 0
   python3 - "$claim_path/owner.lock" "$claim_path/owner.json" "$token" "$$" <<'PY'
+import ctypes
 import fcntl
 import json
 import os
 import re
 import stat
-import subprocess
 import sys
-from datetime import datetime
 
 lock_path, owner_path, token, publisher_pid_text = sys.argv[1:]
 publisher_pid = int(publisher_pid_text)
 
 def process_incarnation(pid):
-    supervisor_token = os.environ.get("LEGION_SUPERVISOR_TOKEN", "")
-    if re.fullmatch(r"[0-9a-f]{48}", supervisor_token):
-        return f"supervisor:{supervisor_token}:pid:{pid}"
-    boot = None
     if sys.platform.startswith("linux"):
         try:
             with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as source:
                 boot = source.read(80).strip()
-        except OSError:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as source:
+                fields = source.read(4096).rsplit(")", 1)[1].split()
+            start_ticks = int(fields[19])
+            if re.fullmatch(r"[0-9a-f-]{32,64}", boot) and start_ticks > 0:
+                return f"linux:{boot}:{start_ticks}"
+        except (OSError, IndexError, ValueError):
             pass
     elif sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
-                check=False, capture_output=True, text=True, timeout=1,
-                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin"},
+        class DarwinUniqueInfo(ctypes.Structure):
+            _fields_ = (
+                ("p_uuid", ctypes.c_uint8 * 16),
+                ("p_uniqueid", ctypes.c_uint64),
+                ("p_puniqueid", ctypes.c_uint64),
+                ("p_idversion", ctypes.c_int32),
+                ("p_orig_ppidversion", ctypes.c_int32),
+                ("p_reserve2", ctypes.c_uint64),
+                ("p_reserve3", ctypes.c_uint64),
             )
-            match = re.search(r"sec\s*=\s*(\d+)", result.stdout[:256])
-            if result.returncode == 0 and match:
-                boot = match.group(1)
-        except (OSError, subprocess.SubprocessError):
+        try:
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            function = libproc.proc_pidinfo
+            function.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
+            function.restype = ctypes.c_int
+            info = DarwinUniqueInfo()
+            found = function(pid, 17, 0, ctypes.byref(info), ctypes.sizeof(info))
+            if found == ctypes.sizeof(info) and info.p_uniqueid:
+                return f"darwin:{info.p_uniqueid}:{info.p_idversion}"
+        except (AttributeError, OSError):
             pass
-    try:
-        result = subprocess.run(
-            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
-            check=False, capture_output=True, text=True, timeout=1,
-            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
-        )
-        started = result.stdout.strip()
-        if result.returncode != 0 or not started or len(started) > 128 or not boot:
-            return None
-        return f"{sys.platform}:{boot}:{started}"
-    except (OSError, subprocess.SubprocessError):
-        return None
+    supervisor_token = os.environ.get("LEGION_SUPERVISOR_TOKEN", "")
+    if re.fullmatch(r"[0-9a-f]{48}", supervisor_token):
+        return f"supervisor:{supervisor_token}:pid:{pid}"
+    return None
 
 publisher_incarnation = process_incarnation(publisher_pid)
 if not publisher_incarnation:

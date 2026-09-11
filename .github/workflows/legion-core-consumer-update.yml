@@ -239,8 +239,7 @@ jobs:
                 authoritative_pin="$candidate_pin"
               elif [ "$comparison" -lt 0 ]; then
                 candidate_is_stale=true
-              elif [ "$comparison" -eq 0 ] && \
-                   ! diff -u \
+              elif ! diff -u \
                      <(printf '%s' "$base_pin" | jq -S '{version,tag,source_sha}') \
                      <(printf '%s' "$candidate_pin" | jq -S '{version,tag,source_sha}') \
                      >/dev/null; then
@@ -256,6 +255,10 @@ jobs:
                 printf '### Legion Core update receipt\n\n~~~json\n%s\n~~~\n' "$receipt" >> "$GITHUB_STEP_SUMMARY"
                 echo "::error::checked-in and stable-candidate pins disagree at version $base_version"
                 exit 1
+              else
+                # The checked-in default branch is authoritative. An identical
+                # candidate is redundant and must be retired on already_current.
+                candidate_is_stale=true
               fi
             fi
           fi

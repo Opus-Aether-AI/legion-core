@@ -183,7 +183,11 @@ else
   printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"'"$msg"'"}}'
 fi
 
-printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":10}}'
+if [[ $resume -eq 1 && "${MOCK_CODEX_RESUME_NEGATIVE_METERING:-0}" == 1 ]]; then
+  printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":-1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":10}}'
+else
+  printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":10}}'
+fi
 if [[ -n "$out_file" ]]; then
   if [[ $review -ne 1 || "${MOCK_CODEX_REVIEW_NO_VERDICT:-}" != "1" ]]; then
     printf '%s\n' "$msg" > "$out_file"

@@ -604,6 +604,28 @@ SH
     [ "$output" = false ]
 }
 
+@test "consumer update treats an identical checked-in candidate as stale" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+    local decision="$TEST_TMPDIR/identical-candidate.sh"
+    {
+      printf '%s\n' 'set -euo pipefail' 'semver_cmp() { printf "0\n"; }'
+      awk '
+        /^          authoritative_kind=none$/ { in_block = 1 }
+        /^          mode=apply$/ { in_block = 0 }
+        in_block { sub(/^          /, ""); print }
+      ' "$consumer"
+      printf '%s\n' 'printf "%s|%s\n" "$authoritative_kind" "$candidate_is_stale"'
+    } > "$decision"
+
+    local pin='{"schema":"legion.core-pin.v1","package":"@opus-aether-ai/legion-core","version":"1.2.3","tag":"v1.2.3","source_sha":"1111111111111111111111111111111111111111"}'
+    run env base_pin="$pin" candidate_pin="$pin" LEGION_CORE_VERSION=1.2.3 \
+      GITHUB_OUTPUT="$TEST_TMPDIR/output" GITHUB_STEP_SUMMARY="$TEST_TMPDIR/summary" \
+      bash "$decision"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "checked_in|true" ]
+}
+
 @test "recovery verifies a v0.19.0-style legacy tag with current controls" {
     local release_dir="$TEST_TMPDIR/legacy-v0.19.0"
     local outputs="$TEST_TMPDIR/recovery-outputs"

@@ -1151,10 +1151,13 @@ SH
     > "$BATS_TEST_TMPDIR/prune-once.jsonl"
 
   PATH="$bin:$PATH" run "$FANOUT" \
-    --slices "$BATS_TEST_TMPDIR/prune-once.jsonl" --repo "$REPO"
+    --slices "$BATS_TEST_TMPDIR/prune-once.jsonl" --repo "$REPO" --max-concurrency 1
 
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.ok == 3 and .failed == 0'
+  echo "$output" | jq -e '.ok == 3 and .failed == 0' || {
+    printf 'fanout output: %s\n' "$output" >&2
+    false
+  }
   [ "$(grep -cE '^git -C .+ worktree prune$' "$FANOUT_GIT_CALL_LOG")" -eq 1 ]
 }
 

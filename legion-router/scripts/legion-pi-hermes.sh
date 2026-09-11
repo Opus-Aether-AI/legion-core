@@ -256,6 +256,36 @@ terminalize_pre_provider_timeout() {
   [[ "$terminal_status" != containment_failed ]] || exit 70
   exit 1
 }
+
+terminalize_pre_provider_launch_failure() {
+  local launch_reason="$1" terminal_status=failed terminal_reason="$1"
+  local report='(not created; provider disappeared before launch)' diff="$ART/diff.patch"
+  local last="$ART/last-message.txt"
+
+  if ! write_pre_provider_no_launch_lease "$launch_reason"; then
+    terminal_status=containment_failed
+    terminal_reason="unable to persist authenticated no-launch lease evidence; worktree retained: $WT_RECORD"
+    report="$WT_RECORD"
+    KEEP=1
+  fi
+  : > "$diff"
+  printf '%s\n' "$terminal_reason" > "$last"
+  write_state "$terminal_status"
+  [[ -z "$PRESET_RUN_ID" ]] || legion_disarm_adopted_run_guard
+  jq -cn --arg run "$RUN_ID" --arg status "$terminal_status" \
+    --arg executor "$ADAPTER_KIND" --arg model "$MODEL" --arg result "$terminal_reason" \
+    --arg worktree "$report" --arg diff "$diff" --arg last "$last" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg lease "$ART/lease.json" '
+    {run_id:$run,status:$status,executor:$executor,model:$model,result:$result,
+     worktree:$worktree,diff_path:$diff,last_message_path:$last,
+     usage:null,tokens:null,usage_status:"not_applicable",
+     cost_usd:null,cost_status:"not_applicable",provider_exit:null,
+     preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+     lease_receipt:$lease,provider_launch_receipt:null,reason:$result}
+  '
+  [[ "$terminal_status" != containment_failed ]] || exit 70
+  exit 1
+}
 emit_span() {
   local status="$1" duration="$2" cost="$3" usage="$4" task="$5" artifacts="$6"
   local usage_status="${7:-known}" cost_status="${8:-known}"
@@ -422,10 +452,11 @@ hermes_terminal_ok() {
 }
 hermes_actual_model() { jq -r '.model // empty' "$1" 2>/dev/null || true; }
 provider_ready() {
-  local env_prefix
+  local env_prefix resolved
   env_prefix="$(printf '%s' "$ADAPTER_KIND" | tr '[:lower:]' '[:upper:]')"
-  PROVIDER_BIN="$(command -v "$PROVIDER_BIN" 2>/dev/null || true)"
-  [[ -n "$PROVIDER_BIN" ]] || die "$ADAPTER_KIND CLI not found. Install it or set ${env_prefix}_BIN to its executable."
+  resolved="$(command -v "$PROVIDER_BIN" 2>/dev/null || true)"
+  [[ -n "$resolved" ]] || return 127
+  PROVIDER_BIN="$resolved"
   [[ "$MODEL" != "$ADAPTER_KIND-default" ]] || die "no concrete model configured: set ${env_prefix}_MODEL or update ${ADAPTER_KIND}_default in models.toml."
 }
 
@@ -962,7 +993,8 @@ cmd_run() {
     return 1
   fi
   PROVIDER_BIN="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
-  provider_ready
+  provider_ready || terminalize_pre_provider_launch_failure \
+    "$ADAPTER_KIND CLI disappeared after successful admission; no provider launched"
   resolve_fs_sandbox
   git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repo: $REPO"
   prepare_runtime_roots

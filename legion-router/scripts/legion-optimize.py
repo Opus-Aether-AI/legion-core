@@ -332,7 +332,10 @@ def stats_by_arch_route(spans):
                 "_success": 0,
                 "_cost": 0.0,
                 "_known_cost_runs": 0,
+                "_known_cost_attempts": 0,
+                "_partial_cost_runs": 0,
                 "_unknown_cost_runs": 0,
+                "_not_applicable_cost_runs": 0,
                 "_dur": [],
                 "_executor": executor,
                 "_model": model,
@@ -341,16 +344,22 @@ def stats_by_arch_route(spans):
         bucket["runs"] += 1
         if span.get("status") in SUCCESS_STATUSES:
             bucket["_success"] += 1
-        cost = _nonnegative_num(span.get("cost_usd"))
-        cost_status = span.get("cost_status")
-        # Backward compatibility: before provenance fields existed, a finite
-        # non-negative numeric cost was the only representation of known cost.
-        cost_known = cost is not None and cost_status in (None, "known")
-        if cost_known:
-            bucket["_cost"] += cost
+        cost_status = _cost_provenance(span)
+        if cost_status == "known":
+            bucket["_cost"] += _nonnegative_num(span.get("cost_usd")) or 0.0
             bucket["_known_cost_runs"] += 1
-        else:
+            bucket["_known_cost_attempts"] += 1
+        elif cost_status == "partial":
+            bucket["_cost"] += _nonnegative_num(span.get("known_cost_usd")) or 0.0
+            bucket["_known_cost_runs"] += 1
+            bucket["_known_cost_attempts"] += _positive_count(
+                span.get("known_cost_attempts")
+            )
+            bucket["_partial_cost_runs"] += 1
+        elif cost_status == "unknown":
             bucket["_unknown_cost_runs"] += 1
+        else:
+            bucket["_not_applicable_cost_runs"] += 1
         duration = _nonnegative_num(span.get("duration_ms"))
         if duration is not None:
             bucket["_dur"].append(duration)
@@ -362,9 +371,14 @@ def stats_by_arch_route(spans):
             runs = bucket["runs"]
             durs = bucket["_dur"]
             known_cost_runs = bucket["_known_cost_runs"]
+            known_cost_attempts = bucket["_known_cost_attempts"]
+            partial_cost_runs = bucket["_partial_cost_runs"]
+            unknown_cost_runs = bucket["_unknown_cost_runs"]
             cost_status = (
-                "known" if known_cost_runs == runs
-                else "partial" if known_cost_runs
+                "not_applicable" if bucket["_not_applicable_cost_runs"] == runs
+                else "known" if known_cost_runs == runs
+                    and partial_cost_runs == 0 and unknown_cost_runs == 0
+                else "partial" if known_cost_attempts
                 else "unknown"
             )
             out[archetype][route] = {
@@ -377,8 +391,9 @@ def stats_by_arch_route(spans):
                     else None
                 ),
                 "cost_status": cost_status,
-                "known_cost_usd": round(bucket["_cost"], 6) if known_cost_runs else None,
+                "known_cost_usd": round(bucket["_cost"], 6) if known_cost_attempts else None,
                 "known_cost_runs": known_cost_runs,
+                "known_cost_attempts": known_cost_attempts,
                 "p50_ms": round(percentile(durs, 50), 1),
                 "p95_ms": round(percentile(durs, 95), 1),
             }

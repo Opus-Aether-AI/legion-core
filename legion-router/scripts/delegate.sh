@@ -262,6 +262,11 @@ write_interrupted_native_attempt() {
     NATIVE_ATTEMPT_ART=""
     return 0
   fi
+  if legion_adapter_supervisor_cleanup_failed_before_launch "$NATIVE_LEASE_STATUS"; then
+    NATIVE_ATTEMPT_ART=""
+    NATIVE_ATTEMPT_LAUNCHED=0
+    return 0
+  fi
   if legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
     # Popen never returned a child, so even a signal arriving after the
     # supervisor exits must not invent a cancelled provider attempt.
@@ -1035,18 +1040,17 @@ native_provider_span_claim() {
   # O_NOFOLLOW plus the regular-file check keeps an artifact-path substitution
   # from turning the lock operation into an arbitrary file write.
   local lock_outcome
-  lock_outcome="$(python3 - "$lock" "$$" <<'PY'
+  lock_outcome="$(python3 - "$lock" "$$" "${NATIVE_PROVIDER_SPAN_CLAIM_TOKEN:-}" <<'PY'
+import ctypes
 import fcntl
 import json
 import os
 import re
 import secrets
 import stat
-import subprocess
 import sys
-from datetime import datetime
 
-path, owner_text = sys.argv[1:]
+path, owner_text, current_claim_token = sys.argv[1:]
 owner_pid = int(owner_text)
 
 def process_snapshot(pid):
@@ -1056,38 +1060,71 @@ def process_snapshot(pid):
         return False, None, None
     except PermissionError:
         pass
-    boot = None
     if sys.platform.startswith("linux"):
         try:
             with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as source:
                 boot = source.read(80).strip()
-        except OSError:
-            pass
-    elif sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
-                check=False, capture_output=True, text=True, timeout=1,
-                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin"},
-            )
-            match = re.search(r"sec\s*=\s*(\d+)", result.stdout[:256])
-            if result.returncode == 0 and match:
-                boot = match.group(1)
-        except (OSError, subprocess.SubprocessError):
-            pass
-    try:
-        result = subprocess.run(
-            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
-            check=False, capture_output=True, text=True, timeout=1,
-            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
-        )
-        started = result.stdout.strip()
-        if result.returncode != 0 or not started or len(started) > 128 or not boot:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as source:
+                fields = source.read(4096).rsplit(")", 1)[1].split()
+            start_ticks = int(fields[19])
+            with open("/proc/stat", encoding="ascii") as source:
+                boot_epoch = next(int(line.split()[1]) for line in source if line.startswith("btime "))
+            start_epoch = boot_epoch + start_ticks / os.sysconf("SC_CLK_TCK")
+            if not re.fullmatch(r"[0-9a-f-]{32,64}", boot) or start_ticks < 1:
+                raise ValueError("invalid Linux process identity")
+            return True, f"linux:{boot}:{start_ticks}", start_epoch
+        except (OSError, IndexError, StopIteration, ValueError):
             return True, None, None
-        started_epoch = datetime.strptime(started, "%a %b %d %H:%M:%S %Y").timestamp()
-        return True, f"{sys.platform}:{boot}:{started}", started_epoch
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return True, None, None
+    if sys.platform == "darwin":
+        class DarwinUniqueInfo(ctypes.Structure):
+            _fields_ = (
+                ("p_uuid", ctypes.c_uint8 * 16),
+                ("p_uniqueid", ctypes.c_uint64),
+                ("p_puniqueid", ctypes.c_uint64),
+                ("p_idversion", ctypes.c_int32),
+                ("p_orig_ppidversion", ctypes.c_int32),
+                ("p_reserve2", ctypes.c_uint64),
+                ("p_reserve3", ctypes.c_uint64),
+            )
+        try:
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            function = libproc.proc_pidinfo
+            function.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
+            function.restype = ctypes.c_int
+            info = DarwinUniqueInfo()
+            found = function(pid, 17, 0, ctypes.byref(info), ctypes.sizeof(info))
+            if found == 0:
+                # A denied proc_pidinfo query is not proof that a process which
+                # passed kill(0) is dead; preserve the live owner conservatively.
+                return True, None, None
+            if found != ctypes.sizeof(info) or info.p_uniqueid == 0:
+                return True, None, None
+            return True, f"darwin:{info.p_uniqueid}:{info.p_idversion}", None
+        except (AttributeError, OSError):
+            return True, None, None
+    return True, None, None
+
+def current_publisher_incarnation(pid):
+    alive, incarnation, _ = process_snapshot(pid)
+    if alive and incarnation:
+        return incarnation
+    supervisor_token = os.environ.get("LEGION_SUPERVISOR_TOKEN", "")
+    if re.fullmatch(r"[0-9a-f]{48}", supervisor_token):
+        return f"supervisor:{supervisor_token}:pid:{pid}"
+    return None
+
+def valid_incarnation(value, pid):
+    return bool(
+        isinstance(value, str)
+        and (
+            re.fullmatch(r"linux:[0-9a-f-]{32,64}:[1-9][0-9]*", value)
+            or re.fullmatch(r"darwin:[1-9][0-9]*:-?[0-9]+", value)
+            or re.fullmatch(rf"supervisor:[0-9a-f]{{48}}:pid:{pid}", value)
+        )
+    )
+
+def valid_token(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{48}", value) is not None
 
 flags = os.O_RDWR | os.O_CREAT
 if hasattr(os, "O_NOFOLLOW"):
@@ -1113,8 +1150,8 @@ try:
     if (path_stat.st_dev, path_stat.st_ino) != (descriptor_stat.st_dev, descriptor_stat.st_ino):
         raise SystemExit(1)
     descriptor_stat = os.fstat(descriptor)
-    owner_alive, owner_incarnation, _ = process_snapshot(owner_pid)
-    if not owner_alive or not owner_incarnation:
+    owner_incarnation = current_publisher_incarnation(owner_pid)
+    if not owner_incarnation:
         raise SystemExit(1)
     os.lseek(descriptor, 0, os.SEEK_SET)
     try:
@@ -1133,20 +1170,30 @@ try:
             and candidate.get("schema") == "legion.native-provider-span-claim.v1"
             and isinstance(candidate.get("publisher_pid"), int)
             and candidate["publisher_pid"] > 0
-            and isinstance(candidate.get("publisher_incarnation"), str)
-            and candidate["publisher_incarnation"]
-            and isinstance(candidate.get("token"), str)
-            and candidate["token"]
+            and valid_incarnation(candidate.get("publisher_incarnation"), candidate["publisher_pid"])
+            and valid_token(candidate.get("token"))
             and set(candidate) == {"schema", "publisher_pid", "publisher_incarnation", "token"}
         ):
             prior_owner = candidate
         elif len(raw_owner) <= 64 and raw_owner.isdigit() and int(raw_owner) > 0:
             legacy_pid = int(raw_owner)
     if prior_owner:
-        prior_alive, prior_incarnation, _ = process_snapshot(prior_owner["publisher_pid"])
-        if prior_alive and (prior_incarnation is None or prior_incarnation == prior_owner["publisher_incarnation"]):
-            print("busy")
+        if (
+            prior_owner["publisher_pid"] == owner_pid
+            and prior_owner["publisher_incarnation"] == owner_incarnation
+            and valid_token(current_claim_token)
+            and prior_owner["token"] == current_claim_token
+        ):
+            print(f"reused:{current_claim_token}")
             raise SystemExit(0)
+        prior_alive, prior_incarnation, _ = process_snapshot(prior_owner["publisher_pid"])
+        if prior_alive:
+            stored_kind = prior_owner["publisher_incarnation"].split(":", 1)[0]
+            observed_kind = prior_incarnation.split(":", 1)[0] if prior_incarnation else None
+            if prior_incarnation is None or stored_kind != observed_kind \
+                    or prior_incarnation == prior_owner["publisher_incarnation"]:
+                print("busy")
+                raise SystemExit(0)
     elif legacy_pid is not None:
         prior_alive, _, prior_started = process_snapshot(legacy_pid)
         if prior_alive and (prior_started is None or prior_started <= descriptor_stat.st_mtime + 1.0):
@@ -1176,6 +1223,7 @@ PY
 )" || return 1
   case "$lock_outcome" in
     acquired:*) NATIVE_PROVIDER_SPAN_CLAIM_TOKEN="${lock_outcome#acquired:}" ;;
+    reused:*) NATIVE_PROVIDER_SPAN_CLAIM_TOKEN="${lock_outcome#reused:}" ;;
     *) return 1 ;;
   esac
   # The prior owner may have appended just before it died. Reconcile after
@@ -1206,51 +1254,55 @@ native_provider_span_release_lock() {
   local lock="$1.span-publishing" token="${NATIVE_PROVIDER_SPAN_CLAIM_TOKEN:-}" outcome
   [[ -n "$token" && -e "$lock" && ! -L "$lock" ]] || return 1
   outcome="$(python3 - "$lock" "$$" "$token" <<'PY'
+import ctypes
 import fcntl
 import json
 import os
 import re
 import stat
-import subprocess
 import sys
-from datetime import datetime
 
 path, owner_text, token = sys.argv[1:]
 owner_pid = int(owner_text)
 
 def process_incarnation(pid):
-    boot = None
     if sys.platform.startswith("linux"):
         try:
             with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as source:
                 boot = source.read(80).strip()
-        except OSError:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as source:
+                fields = source.read(4096).rsplit(")", 1)[1].split()
+            start_ticks = int(fields[19])
+            if re.fullmatch(r"[0-9a-f-]{32,64}", boot) and start_ticks > 0:
+                return f"linux:{boot}:{start_ticks}"
+        except (OSError, IndexError, ValueError):
             pass
     elif sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
-                check=False, capture_output=True, text=True, timeout=1,
-                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin"},
+        class DarwinUniqueInfo(ctypes.Structure):
+            _fields_ = (
+                ("p_uuid", ctypes.c_uint8 * 16),
+                ("p_uniqueid", ctypes.c_uint64),
+                ("p_puniqueid", ctypes.c_uint64),
+                ("p_idversion", ctypes.c_int32),
+                ("p_orig_ppidversion", ctypes.c_int32),
+                ("p_reserve2", ctypes.c_uint64),
+                ("p_reserve3", ctypes.c_uint64),
             )
-            match = re.search(r"sec\s*=\s*(\d+)", result.stdout[:256])
-            if result.returncode == 0 and match:
-                boot = match.group(1)
-        except (OSError, subprocess.SubprocessError):
+        try:
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            function = libproc.proc_pidinfo
+            function.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
+            function.restype = ctypes.c_int
+            info = DarwinUniqueInfo()
+            found = function(pid, 17, 0, ctypes.byref(info), ctypes.sizeof(info))
+            if found == ctypes.sizeof(info) and info.p_uniqueid:
+                return f"darwin:{info.p_uniqueid}:{info.p_idversion}"
+        except (AttributeError, OSError):
             pass
-    try:
-        result = subprocess.run(
-            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
-            check=False, capture_output=True, text=True, timeout=1,
-            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
-        )
-        started = result.stdout.strip()
-        if result.returncode != 0 or not started or len(started) > 128 or not boot:
-            return None
-        datetime.strptime(started, "%a %b %d %H:%M:%S %Y")
-        return f"{sys.platform}:{boot}:{started}"
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
+    supervisor_token = os.environ.get("LEGION_SUPERVISOR_TOKEN", "")
+    if re.fullmatch(r"[0-9a-f]{48}", supervisor_token):
+        return f"supervisor:{supervisor_token}:pid:{pid}"
+    return None
 
 owner_incarnation = process_incarnation(owner_pid)
 if not owner_incarnation:
@@ -2106,7 +2158,7 @@ cmd_run() {
   local start_ms end_ms dur rc=0 used_model="" attempt_ordinal=0 attempt_contract_failure=0
   local candidate_ordinal=0 lease_exhausted=0 fallback_admission_refused=0 launch_failed=0
   local sandcastle_setup_refused=0 sandcastle_setup_reason=""
-  local containment_failed=0 lease_receipt="" launch_failure_reason=""
+  local containment_failed=0 lease_receipt="" launch_failure_reason="" lease_reason=""
   start_ms="$(date +%s000)"
   child_lease_tighten_deadline "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
   # Try the chosen model, then the archetype's fallback chain on a quota/rate-limit error.
@@ -2125,6 +2177,7 @@ cmd_run() {
       # evidence and may count the previous attempt twice.
       LEGION_ADAPTER_ATTEMPT_PATH=""
       LEGION_ADAPTER_FAILURE_PATH=""
+      rm -f "$art/attempt.json" "$art/failure.json"
       NATIVE_LEASE_STATUS=""
       lease_receipt=""
       if ! legion_adapter_preflight codex "$art" "$sandbox" stdin "$attempt" "$effort" 0 "$CODEX_BIN"; then
@@ -2173,7 +2226,20 @@ cmd_run() {
       run_codex "$attempt"
     fi
     attempt_end_ms="$(date +%s000)"; attempt_ended_at="$(_now)"
-    if legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
+    if legion_adapter_supervisor_cleanup_failed_before_launch "$NATIVE_LEASE_STATUS"; then
+      containment_failed=1
+      lease_receipt="$NATIVE_LEASE_STATUS"
+      lease_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; worktree retained: $wt)"
+      LEGION_WT_KEEP=1
+      rm -f "$art/attempt.json" "$art/failure.json"
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
+      NATIVE_ATTEMPT_ART=""
+      NATIVE_ATTEMPT_LAUNCHED=0
+      CODEX_SIGNAL_CHILD_PID=""
+      CODEX_CHILD_RC=0
+      break
+    elif legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
       launch_failed=1
       lease_receipt="$NATIVE_LEASE_STATUS"
       launch_failure_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS")"
@@ -2205,7 +2271,7 @@ cmd_run() {
     attempt_duration=$((attempt_end_ms-attempt_start_ms))
     local attempt_output_started=false attempt_usage attempt_cost attempt_usage_status=unknown
     local attempt_cost_status=unknown attempt_failure="" attempt_retryable=false attempt_terminal=succeeded
-    local attempt_timed_out=0 lease_status="$art/lease-$attempt_ordinal.json" lease_reason=""
+    local attempt_timed_out=0 lease_status="$art/lease-$attempt_ordinal.json"
     lease_receipt="$lease_status"
     if legion_adapter_supervisor_cleanup_failed "$lease_status"; then
       containment_failed=1
@@ -2874,6 +2940,10 @@ prompt_review_preflight_no_spend_status() {
 prompt_review_launch_failed_no_spend() {
   local preflight="$1" lease="$2" executor="$3" model="$4" sandbox="$5"
   [[ -f "$preflight" && -f "$lease" ]] || return 1
+  # cleanup_failed is also accepted by the generic launch-failed helper when
+  # child_started=false. Containment failure must remain fail-closed instead of
+  # being reclassified as an unavailable reviewer.
+  legion_adapter_supervisor_cleanup_failed "$lease" && return 1
   legion_adapter_supervisor_launch_failed "$lease" || return 1
   jq -e --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" '
     .schema == "legion.preflight.v1"
@@ -3085,6 +3155,9 @@ $(cat "$patch")
     elif [[ -n "$review_lease_receipt" ]] && prompt_review_launch_failed_no_spend \
         "$review_preflight_receipt" "$review_lease_receipt" "$ex" "$model" "$review_sandbox"; then
       preflight_no_spend_status=launch_failed
+      # This authenticated zero-attempt result means only that this candidate
+      # could not launch. Let the outer immutable reviewer walk try the next one.
+      review_launch_failed=1
     fi
   fi
   if [[ -z "$review_preflight_receipt" || -z "$review_attempt_receipt" || -z "$review_lease_receipt" ||
@@ -3657,7 +3730,22 @@ cmd_review() {
       set -e
       native_attempt_end_ms="$(date +%s000)"
       native_attempt_ended_at="$(_now)"
-      if legion_adapter_supervisor_launch_failed "$attempt_lease"; then
+      if legion_adapter_supervisor_cleanup_failed_before_launch "$attempt_lease"; then
+        review_containment_failed=1
+        LEGION_WT_KEEP=1
+        status="containment_failed"
+        reason="$(legion_adapter_supervisor_reason "$attempt_lease") (evidence: $attempt_lease; worktree retained: $wt)"
+        attempt=$((attempt - 1))
+        REVIEW_RECEIPT_ATTEMPT="$attempt"
+        review_attempt_receipt=""
+        review_failure_receipt=""
+        NATIVE_ATTEMPT_ART=""
+        NATIVE_ATTEMPT_LAUNCHED=0
+        NATIVE_LEASE_STATUS=""
+        CODEX_SIGNAL_CHILD_PID=""
+        CODEX_CHILD_RC=0
+        break
+      elif legion_adapter_supervisor_launch_failed "$attempt_lease"; then
         review_launch_failed=1
         status="failed"
         reason="$(legion_adapter_supervisor_reason "$attempt_lease") (no provider launched; evidence: $attempt_lease)"
@@ -4090,7 +4178,21 @@ cmd_resume() {
   local launch_failed=0
   usage="$(codex_usage "$art/resume-stream.jsonl")"
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
-  if legion_adapter_supervisor_launch_failed "$lease_status"; then
+  if legion_adapter_supervisor_cleanup_failed "$lease_status"; then
+    containment_failed=1
+    LEGION_WT_KEEP=1
+    status="containment_failed"
+    reason="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+    if legion_adapter_supervisor_cleanup_failed_before_launch "$lease_status"; then
+      launch_failed=1
+      usage=null
+      cost=null
+      NATIVE_ATTEMPT_ART=""
+      NATIVE_ATTEMPT_LAUNCHED=0
+      CODEX_SIGNAL_CHILD_PID=""
+      CODEX_CHILD_RC=0
+    fi
+  elif legion_adapter_supervisor_launch_failed "$lease_status"; then
     launch_failed=1
     status="failed"
     usage=null
@@ -4100,11 +4202,6 @@ cmd_resume() {
     NATIVE_ATTEMPT_LAUNCHED=0
     CODEX_SIGNAL_CHILD_PID=""
     CODEX_CHILD_RC=0
-  elif legion_adapter_supervisor_cleanup_failed "$lease_status"; then
-    containment_failed=1
-    LEGION_WT_KEEP=1
-    status="containment_failed"
-    reason="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
   elif legion_adapter_supervisor_timed_out "$lease_status"; then
     status="timed_out"
     reason="$(legion_adapter_lease_reason "$lease_status")"
@@ -4150,6 +4247,8 @@ cmd_resume() {
       failure_class=internal
     fi
   fi
+  local terminal_usage=null terminal_cost=null
+  local terminal_usage_status=not_applicable terminal_cost_status=not_applicable
   if [[ "$launch_failed" -ne 1 ]]; then
     legion_adapter_write_attempt "$resume_art" codex-resume openai "$resume_ordinal" \
       "$model" "" "$effort" "$effort" "$resume_sandbox" "$terminal_status" \
@@ -4157,6 +4256,10 @@ cmd_resume() {
       "$([[ "$usage_status" == known ]] && printf codex-jsonl)" "$cost" "$cost_status" \
       "$([[ "$cost_status" == known ]] && printf legion-cost-table)" "$failure_class" false \
       "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$reason"
+    terminal_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     emit_provider_attempt_span "$LEGION_ADAPTER_ATTEMPT_PATH" "resume $run: $task" "$lease_status"
   else
     LEGION_ADAPTER_ATTEMPT_PATH=""
@@ -4192,14 +4295,14 @@ cmd_resume() {
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg run "$run" --arg reason "$reason" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" --arg lease "$lease_status" \
-    --argjson usage "$usage" --arg usage_status "$usage_status" \
-    --argjson cost "${cost:-null}" --arg cost_status "$cost_status" '
+    --argjson usage "$terminal_usage" --arg usage_status "$terminal_usage_status" \
+    --argjson cost "$terminal_cost" --arg cost_status "$terminal_cost_status" '
     {run_id:$run, status:$status, model:$model,
      archetype:(if $archetype=="" then null else $archetype end),
      thread_id:$thread, worktree:$wt, diff_path:$diff,
-     usage:(if $usage_status == "known" then $usage else null end),
+     usage:$usage,
      usage_status:$usage_status,
-     cost_usd:(if $cost_status == "known" then $cost else null end),
+     cost_usd:$cost,
      cost_status:$cost_status,
      preflight_receipt:$preflight,
      attempt_receipt:(if $attempt=="" then null else $attempt end),

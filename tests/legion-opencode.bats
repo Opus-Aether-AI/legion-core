@@ -126,6 +126,24 @@ make_test_repo() {
     [ "$status" -eq 0 ]
 }
 
+@test "legion-opencode: terminal metering follows canonical normalization" {
+    local repo attempt result
+    repo="$(make_test_repo negative-metering)"
+
+    MOCK_OPENCODE_NEGATIVE_METERING=1 run "$LEGION_OPENCODE" run \
+      --task "do the thing" --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.usage == null and .usage_status == "unknown"
+      and .cost_usd == null and .cost_status == "unknown"'
+    attempt="$(echo "$result" | jq -r .attempt_receipt)"
+    jq -e --argjson terminal "$result" '
+      .usage == $terminal.usage and .usage_status == $terminal.usage_status
+      and .cost_usd == $terminal.cost_usd and .cost_status == $terminal.cost_status
+    ' "$attempt"
+}
+
 @test "legion-opencode: parses OpenCode 1.3 top-level text and step events" {
     local repo; repo="$(make_test_repo current-stream)"
     MOCK_OPENCODE_CURRENT_STREAM=1 run "$LEGION_OPENCODE" run --task "inspect" \

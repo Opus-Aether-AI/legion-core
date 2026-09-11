@@ -255,6 +255,51 @@ assert_typed_pre_provider_timeout() {
   fi
 }
 
+@test "Pi and Hermes type provider disappearance during post-admission re-resolution as no-launch" {
+  local adapter repo provider run_id result_file lease rc
+  for adapter in pi hermes; do
+    repo="$(make_test_repo "reresolve-disappears-$adapter")"
+    provider="$TEST_TMPDIR/$adapter-self-removing-provider"
+    cat > "$provider" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" || "${1:-}" == "version" ]]; then
+  rm -f "$0"
+  printf '1.0.0\n'
+  exit 0
+fi
+printf 'provider must not execute\n' >&2
+exit 99
+SH
+    chmod +x "$provider"
+    run_id="reresolve-disappears-$adapter"
+    result_file="$TEST_TMPDIR/$adapter-reresolve-disappears.json"
+    rc=0
+    if [[ "$adapter" == pi ]]; then
+      PI_BIN="$provider" "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+        --model openai/fixture-pi --repo "$repo" --run-id "$run_id" --quiet \
+        > "$result_file" 2>/dev/null || rc=$?
+    else
+      HERMES_BIN="$provider" "$REPO_ROOT/legion-router/bin/legion-hermes" run --task inspect \
+        --model openai/fixture-hermes --repo "$repo" --run-id "$run_id" --quiet \
+        > "$result_file" 2>/dev/null || rc=$?
+    fi
+    [ "$rc" -eq 1 ]
+    jq -e --arg executor "$adapter" '
+      .status == "failed" and .executor == $executor
+      and (.reason | contains("disappeared after successful admission"))
+      and .attempt_receipt == null and .failure_receipt == null
+      and .provider_launch_receipt == null and .provider_exit == null
+      and .usage == null and .tokens == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"
+      and (.worktree | contains("not created"))
+    ' "$result_file"
+    lease="$(jq -r .lease_receipt "$result_file")"
+    jq -e '.schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    [ ! -d "$repo/.legion/worktrees/$run_id" ]
+  done
+}
+
 @test "malformed inner no-launch evidence fails closed as a provider attempt" {
   local repo result attempt launch
   repo="$(make_test_repo malformed)"

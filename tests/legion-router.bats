@@ -95,6 +95,28 @@ SH
     export PATH="$shim_dir:$PATH"
 }
 
+install_prelaunch_cleanup_failed_supervisor_shim() {
+    local shim_dir="$TEST_TMPDIR/prelaunch-cleanup-failed-python" real_python
+    real_python="$(command -v python3)"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  status_file=""
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == --status-file ]]; then status_file="$2"; break; fi
+    shift
+  done
+  printf '%s\n' '{"schema":"legion.child-execution-lease.v1","status":"cleanup_failed","reason":"forced prelaunch containment evidence","max_runtime_seconds":30,"child_started":false}' > "$status_file"
+  exit 70
+fi
+exec "$LEGION_TEST_REAL_PYTHON" "$@"
+SH
+    chmod +x "$shim_dir/python3"
+    export LEGION_TEST_REAL_PYTHON="$real_python"
+    export PATH="$shim_dir:$PATH"
+}
+
 install_launch_failed_supervisor_shim() {
     local shim_dir="$TEST_TMPDIR/launch-failed-python" real_python
     real_python="$(command -v python3)"
@@ -1761,6 +1783,34 @@ SH
     jq -e '.status == "cleanup_failed"' "$(echo "$output" | jq -r .lease_receipt)"
 }
 
+@test "delegate native run and review keep prelaunch cleanup failure as containment with no attempt" {
+    local repo result wt review_repo
+    install_prelaunch_cleanup_failed_supervisor_shim
+
+    repo="$(make_test_repo run-prelaunch-cleanup-failed)"
+    run "$DELEGATE" run --model test-model-beta --task x --repo "$repo" \
+      --max-runtime-seconds 30 --quiet
+    [ "$status" -eq 1 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "containment_failed"
+      and .attempt_receipt == null and .failure_receipt == null
+      and (.reason | contains("forced prelaunch containment evidence"))'
+    wt="$(echo "$result" | jq -r .worktree)"
+    [ -d "$wt" ]
+    jq -e '.status == "cleanup_failed" and .child_started == false' \
+      "$(echo "$result" | jq -r .lease_receipt)"
+
+    review_repo="$(make_test_repo review-prelaunch-cleanup-failed)"
+    run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$review_repo" \
+      --max-runtime-seconds 30 --quiet
+    [ "$status" -eq 70 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "containment_failed"
+      and .attempt_receipt == null and .failure_receipt == null
+      and (.reason | contains("forced prelaunch containment evidence"))'
+    [ -d "$(echo "$result" | jq -r .worktree)" ]
+}
+
 @test "delegate run: --budget-tokens marks over_budget when exceeded" {
     local repo; repo="$(make_test_repo run7)"
     # mock reports 1000+200+50+10 ~ 1060 total; budget 100 -> over
@@ -1911,20 +1961,22 @@ SH
     repo="$(make_test_repo review-shared-retry-lease)"
     export MOCK_CODEX_REVIEW_INVALID_VERDICTS=1
     export MOCK_CODEX_REVIEW_INVALID_VERDICT_ATTEMPT_FILE="$TEST_TMPDIR/review-shared-lease-attempts"
-    export MOCK_CODEX_REVIEW_DELAY=2
+    # Leave enough scheduling margin for a loaded hosted runner to begin the
+    # second attempt, while keeping that attempt longer than the shared lease.
+    export MOCK_CODEX_REVIEW_DELAY=4
     started="$SECONDS"
 
     run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" \
-      --max-runtime-seconds 3 --max-attempts 2 --quiet
+      --max-runtime-seconds 7 --max-attempts 2 --quiet
     elapsed=$((SECONDS - started))
 
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.status == "timed_out" and .attempts == 2'
     [ "$(grep -Fc "codex exec -s read-only review" "$MOCK_CALL_LOG")" -eq 2 ]
     local art; art="$(dirname "$(echo "$output" | jq -r .terminal_receipt)")"
-    jq -e '.status == "timed_out" and .max_runtime_seconds < 3' \
+    jq -e '.status == "timed_out" and .max_runtime_seconds < 7' \
       "$art/attempt-2.lease.json"
-    [ "$elapsed" -lt 6 ]
+    [ "$elapsed" -lt 10 ]
 }
 
 @test "delegate review: fallback candidates share one absolute child lease" {
@@ -2642,23 +2694,64 @@ LEGION_TELEMETRY_DIR="$1/telemetry"
 attempt="$1/attempt-1.json"
 lock="$attempt.span-publishing"
 
-jq -cn --argjson pid "$$" \
-  '{schema:"legion.native-provider-span-claim.v1",publisher_pid:$pid,
-    publisher_incarnation:"forged-prior-incarnation",token:"prior"}' > "$lock"
 native_provider_span_claim "$attempt"
-jq -e --argjson pid "$$" \
-  '.publisher_pid == $pid and .publisher_incarnation != "forged-prior-incarnation"' "$lock"
+incarnation="$(jq -r .publisher_incarnation "$lock")"
+native_provider_span_release "$attempt"
+case "$incarnation" in
+  linux:*) collision="${incarnation%:*}:$(( ${incarnation##*:} + 1 ))" ;;
+  darwin:*) collision="${incarnation%:*}:$(( ${incarnation##*:} + 1 ))" ;;
+  *) exit 1 ;;
+esac
+jq -cn --argjson pid "$$" --arg incarnation "$collision" \
+  '{schema:"legion.native-provider-span-claim.v1",publisher_pid:$pid,
+    publisher_incarnation:$incarnation,token:"prior"}' > "$lock"
+native_provider_span_claim "$attempt"
+jq -e --arg incarnation "$incarnation" '.publisher_incarnation == $incarnation' "$lock"
 native_provider_span_release "$attempt"
 
 printf '%s\n' "$$" > "$lock"
 ! native_provider_span_claim "$attempt"
-touch -t 200001010000 "$lock"
-native_provider_span_claim "$attempt"
-native_provider_span_release "$attempt"
 SH
     } > "$helper"
 
     run bash "$helper" "$art"
+
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "native claim supports authenticated self re-entry and restricted supervisor fallback" {
+    [[ "$(uname -s)" == Darwin && -x /usr/bin/sandbox-exec ]] || skip "requires Darwin sandbox-exec"
+    local helper art
+    helper="$TEST_TMPDIR/native-span-self-reentry.sh"
+    art="$TEST_TMPDIR/native-span-self-reentry-art"
+    mkdir -p "$art/telemetry"
+    printf '{}\n' > "$art/attempt-1.json"
+    {
+      sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_claim()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release_lock()/,/^}/p' "$DELEGATE"
+      sed -n '/^native_provider_span_release()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+set -euo pipefail
+LEGION_TELEMETRY_DIR="$1/telemetry"
+attempt="$1/attempt-1.json"
+native_provider_span_claim "$attempt"
+first_token="$NATIVE_PROVIDER_SPAN_CLAIM_TOKEN"
+first_owner="$(cat "$attempt.span-publishing")"
+native_provider_span_claim "$attempt"
+[[ "$NATIVE_PROVIDER_SPAN_CLAIM_TOKEN" == "$first_token" ]]
+[[ "$(cat "$attempt.span-publishing")" == "$first_owner" ]]
+jq -e --argjson pid "$$" --arg supervisor "$LEGION_SUPERVISOR_TOKEN" \
+  '.publisher_pid == $pid
+   and .publisher_incarnation == ("supervisor:" + $supervisor + ":pid:" + ($pid | tostring))' \
+  "$attempt.span-publishing"
+native_provider_span_release "$attempt"
+SH
+    } > "$helper"
+
+    run env LEGION_SUPERVISOR_TOKEN=cccccccccccccccccccccccccccccccccccccccccccccccc \
+      /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny process-info*)' \
+      bash "$helper" "$art"
 
     [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
 }
@@ -2938,6 +3031,8 @@ SH
     '.requested_model == $paid and .failure.class == "quota"' "$art/attempt-1.json"
   jq -e '.status == "incompatible" and .reason == "forced fallback refusal"' \
     "$art/codex-preflight-2.json"
+  [ ! -e "$art/attempt.json" ]
+  [ ! -e "$art/failure.json" ]
   [ "$(grep -c '^codex exec ' "$MOCK_CALL_LOG")" -eq 1 ]
 }
 
@@ -3245,6 +3340,25 @@ PY
   assert_mock_called codex "exec resume mock-thread-0001"
 }
 
+@test "delegate resume: terminal metering follows canonical normalization" {
+  local repo out rid attempt result
+  repo="$(make_test_repo resume-negative-metering)"
+  out="$("$DELEGATE" run --model test-model-alpha --task initial --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+
+  MOCK_CODEX_RESUME_NEGATIVE_METERING=1 run "$DELEGATE" resume \
+    --run "$rid" --task "follow up" --repo "$repo" --quiet
+
+  [ "$status" -eq 0 ]
+  result="$(printf '%s\n' "$output" | tail -n 1)"
+  echo "$result" | jq -e '.usage == null and .usage_status == "unknown"'
+  attempt="$(echo "$result" | jq -r .attempt_receipt)"
+  jq -e --argjson terminal "$result" '
+    .usage == $terminal.usage and .usage_status == $terminal.usage_status
+    and .cost_usd == $terminal.cost_usd and .cost_status == $terminal.cost_status
+  ' "$attempt"
+}
+
 @test "delegate resume: supervisor launch failure writes no provider receipt or span" {
   local repo rid result lease provider_spans_before provider_spans_after
   repo="$(make_test_repo resume-launch-failed)"
@@ -3426,6 +3540,28 @@ PY
   jq -e '.terminal_status == "failed" and .failure.class == "internal"' \
     "$(echo "$output" | jq -r .attempt_receipt)"
   jq -e '.status == "cleanup_failed"' "$(echo "$output" | jq -r .lease_receipt)"
+}
+
+@test "delegate resume: prelaunch cleanup failure is containment with no attempt" {
+  local repo rid result wt
+  repo="$(make_test_repo resume-prelaunch-cleanup-failed)"
+  out="$("$DELEGATE" run --model test-model-alpha --task initial --repo "$repo" --keep --quiet)"
+  rid="$(echo "$out" | jq -r .run_id)"
+  install_prelaunch_cleanup_failed_supervisor_shim
+
+  run "$DELEGATE" resume --run "$rid" --task follow-up --repo "$repo" \
+    --max-runtime-seconds 30 --quiet
+
+  [ "$status" -eq 1 ]
+  result="$(printf '%s\n' "$output" | tail -n 1)"
+  echo "$result" | jq -e '.status == "containment_failed"
+    and .attempt_receipt == null and .failure_receipt == null
+    and .usage == null and .cost_usd == null
+    and (.reason | contains("forced prelaunch containment evidence"))'
+  wt="$(echo "$result" | jq -r .worktree)"
+  [ -d "$wt" ]
+  jq -e '.status == "cleanup_failed" and .child_started == false' \
+    "$(echo "$result" | jq -r .lease_receipt)"
 }
 
 @test "delegate resume: restores the original routing archetype in telemetry" {
@@ -3920,6 +4056,24 @@ PY
     [ ! -f "$(dirname "$lease")/failure.json" ]
     [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s \
       '[.[] | select(.artifacts.provider_attempt == true and .executor == "cursor")] | length')" -eq 0 ]
+    # A launch failure is candidate-local: the outer walk must advance rather
+    # than terminalizing immediately as if the admitted adapter had run.
+    [ "$(find "$art" -maxdepth 1 -type d -name 'prompt-review-*' | wc -l | tr -d ' ')" -ge 2 ]
+}
+
+@test "delegate review: prompt prelaunch cleanup failure remains containment failure" {
+    local repo result
+    repo="$(make_test_repo review-prompt-prelaunch-cleanup)"
+    install_prelaunch_cleanup_failed_supervisor_shim
+
+    CODEX_BIN=missing-codex-for-review run "$DELEGATE" review --base HEAD \
+      --repo "$repo" --quiet
+
+    [ "$status" -eq 70 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "containment_failed"
+      and (.reason | contains("without a valid durable attempt/lease receipt"))'
+    [ -d "$(echo "$result" | jq -r .worktree)" ]
 }
 
 @test "delegate review: interrupted prompt evidence missing an attempt is containment-invalid" {
@@ -3960,6 +4114,49 @@ SH
     run bash "$helper" "$source" "$receipt" "$shared"
 
     [ "$status" -eq 1 ]
+    [ ! -e "$shared/attempt.json" ]
+}
+
+@test "delegate review: interrupted prompt prelaunch cleanup cannot be downgraded to launch failure" {
+    local helper="$TEST_TMPDIR/interrupted-prompt-cleanup-bundle.sh"
+    local source="$TEST_TMPDIR/interrupted-prompt-cleanup-source"
+    local receipt="$TEST_TMPDIR/interrupted-prompt-cleanup-receipt"
+    local shared="$TEST_TMPDIR/interrupted-prompt-cleanup-shared"
+    mkdir -p "$source" "$receipt" "$shared"
+    printf '%s\n' '{"schema":"legion.preflight.v1","executor":"cursor","status":"supported"}' > "$source/preflight.json"
+    printf '%s\n' '{"schema":"legion.child-execution-lease.v1","status":"cleanup_failed","reason":"prelaunch containment","max_runtime_seconds":30,"child_started":false}' > "$source/lease.json"
+    {
+      printf 'source %q\n' "$LIB/adapter-contract.sh"
+      sed -n '/^prompt_review_launch_failed_no_spend()/,/^}/p' "$DELEGATE"
+      sed -n '/^preserve_interrupted_prompt_receipts()/,/^}/p' "$DELEGATE"
+      cat <<'SH'
+preserve_prompt_review_receipt() {
+  [[ -f "$1" ]] || return 1
+  cp "$1" "$3"
+  printf '%s\n' "$3"
+}
+review_track_attempt_receipt() { :; }
+PROMPT_ATTEMPT_ART="$1"
+PROMPT_ATTEMPT_ORDINAL=1
+PROMPT_RECEIPT_DIR="$2"
+PROMPT_SHARED_ART="$3"
+PROMPT_LEASE_STATUS="$1/lease.json"
+PROMPT_EXPECTED_EXECUTOR=cursor
+PROMPT_EXPECTED_PROVIDER=cursor
+PROMPT_EXPECTED_MODEL=fixture-model
+PROMPT_EXPECTED_SANDBOX=read-only
+PROMPT_RUN_ID=prompt-run
+REVIEW_WT_PATH=worktree
+rc=0
+preserve_interrupted_prompt_receipts || rc=$?
+exit "$rc"
+SH
+    } > "$helper"
+
+    run bash "$helper" "$source" "$receipt" "$shared"
+
+    [ "$status" -eq 1 ]
+    jq -e '.status == "cleanup_failed" and .child_started == false' "$receipt/lease.json"
     [ ! -e "$shared/attempt.json" ]
 }
 

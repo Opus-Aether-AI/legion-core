@@ -42,6 +42,7 @@ LEGION_ADAPTER_SIGNAL_STARTED_AT=""
 LEGION_ADAPTER_SIGNAL_START_MS=""
 LEGION_ADAPTER_SIGNAL_OUTPUT_FILE=""
 LEGION_ADAPTER_SIGNAL_TERMINALIZED=0
+LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN=""
 
 legion_adapter_contract_root() {
   local lib_dir
@@ -358,9 +359,136 @@ legion_adapter_provider_span_is_durable() {
 }
 
 legion_adapter_claim_provider_span() {
-  local attempt_path="$1"
+  local attempt_path="$1" claim_path owner_path lock_path outcome
   [[ -n "$attempt_path" ]] || return 1
-  mkdir "$attempt_path.provider-span-emitted" 2>/dev/null
+  claim_path="$attempt_path.provider-span-emitted"
+  owner_path="$claim_path/owner.json"
+  lock_path="$claim_path/owner.lock"
+  [[ ! -L "$claim_path" ]] || return 1
+  mkdir -p "$claim_path" 2>/dev/null || return 1
+  outcome="$(python3 - "$lock_path" "$owner_path" "$$" <<'PY'
+import fcntl
+import json
+import os
+import secrets
+import sys
+import tempfile
+
+lock_path, owner_path, publisher_pid_text = sys.argv[1:]
+publisher_pid = int(publisher_pid_text)
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+with open(lock_path, "a+", encoding="utf-8") as lock:
+    os.chmod(lock_path, 0o600)
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("busy")
+        raise SystemExit(0)
+    owner = None
+    try:
+        with open(owner_path, encoding="utf-8") as source:
+            candidate = json.load(source)
+        if (
+            candidate.get("schema") == "legion.provider-span-claim.v1"
+            and isinstance(candidate.get("publisher_pid"), int)
+            and candidate["publisher_pid"] > 0
+            and isinstance(candidate.get("token"), str)
+            and candidate["token"]
+            and set(candidate) == {"schema", "publisher_pid", "token"}
+        ):
+            owner = candidate
+    except (OSError, ValueError, TypeError):
+        pass
+    if owner and owner["publisher_pid"] != publisher_pid and alive(owner["publisher_pid"]):
+        print("busy")
+        raise SystemExit(0)
+    token = secrets.token_hex(24)
+    directory = os.path.dirname(owner_path)
+    descriptor, temporary = tempfile.mkstemp(prefix=".owner.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+            json.dump(
+                {
+                    "schema": "legion.provider-span-claim.v1",
+                    "publisher_pid": publisher_pid,
+                    "token": token,
+                },
+                destination,
+                separators=(",", ":"),
+            )
+            destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, owner_path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    print(f"acquired:{token}")
+PY
+)" || return 1
+  case "$outcome" in
+    acquired:*) LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN="${outcome#acquired:}"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+legion_adapter_release_provider_span_claim() {
+  local attempt_path="$1" token="${LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN:-}"
+  local claim_path="$attempt_path.provider-span-emitted"
+  [[ -n "$attempt_path" && -n "$token" && -d "$claim_path" && ! -L "$claim_path" ]] || return 0
+  python3 - "$claim_path/owner.lock" "$claim_path/owner.json" "$token" "$$" <<'PY'
+import fcntl
+import json
+import os
+import sys
+
+lock_path, owner_path, token, publisher_pid_text = sys.argv[1:]
+publisher_pid = int(publisher_pid_text)
+with open(lock_path, "a+", encoding="utf-8") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    try:
+        with open(owner_path, encoding="utf-8") as source:
+            owner = json.load(source)
+    except (OSError, ValueError, TypeError):
+        owner = None
+    if (
+        isinstance(owner, dict)
+        and owner.get("schema") == "legion.provider-span-claim.v1"
+        and owner.get("publisher_pid") == publisher_pid
+        and owner.get("token") == token
+    ):
+        try:
+            os.unlink(owner_path)
+        except FileNotFoundError:
+            pass
+PY
+  LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_TOKEN=""
+}
+
+legion_adapter_acquire_provider_span_claim() {
+  local attempt_path="$1" wait_ms="${LEGION_ADAPTER_PROVIDER_SPAN_CLAIM_WAIT_MILLISECONDS:-5000}"
+  local elapsed=0 interval_ms=50
+  [[ "$wait_ms" =~ ^[0-9]+$ ]] || wait_ms=5000
+  while true; do
+    legion_adapter_provider_span_is_durable "$attempt_path" && return 1
+    legion_adapter_claim_provider_span "$attempt_path" && return 0
+    legion_adapter_provider_span_is_durable "$attempt_path" && return 1
+    (( elapsed >= wait_ms )) && return 1
+    sleep 0.05
+    elapsed=$((elapsed + interval_ms))
+  done
 }
 
 # Normal publication and signal recovery use the same attempt-bound claim.
@@ -368,25 +496,22 @@ legion_adapter_claim_provider_span() {
 # path checks the durable JSONL record and takes over publication only when the
 # normal append did not complete.
 legion_adapter_emit_normal_provider_span() {
-  local attempt_path="$1" claim_path
+  local attempt_path="$1"
   shift
-  claim_path="$attempt_path.provider-span-emitted"
-  if legion_adapter_claim_provider_span "$attempt_path"; then
-    # Some adapter-local emitters deliberately swallow their underlying append
-    # error. The durable attempt-bound record, rather than the emitter's return
-    # code, is therefore the publication acknowledgement.
-    emit_span "$@" || true
+  if ! legion_adapter_acquire_provider_span_claim "$attempt_path"; then
     legion_adapter_provider_span_is_durable "$attempt_path" && return 0
-    rmdir "$claim_path" 2>/dev/null || true
     return 1
   fi
+  # A prior owner may have died immediately after its atomic append while this
+  # contender observed a transient partial JSON line. Reconcile once more after
+  # serialized takeover before starting another publication.
   legion_adapter_provider_span_is_durable "$attempt_path" && return 0
-  # An incomplete claim can survive abrupt termination. The immutable receipt
-  # plus absence of a matching durable span makes retrying publication safe.
+  # Some adapter-local emitters deliberately swallow their underlying append
+  # error. The durable attempt-bound record, rather than the emitter's return
+  # code, is therefore the publication acknowledgement.
   emit_span "$@" || true
   legion_adapter_provider_span_is_durable "$attempt_path" && return 0
-  # Do not remove a claim this invocation did not acquire: its owner may still
-  # be publishing. Absence of a durable span remains retryable on the next call.
+  legion_adapter_release_provider_span_claim "$attempt_path"
   return 1
 }
 
@@ -469,20 +594,22 @@ legion_adapter_write_signal_receipt() {
 # pending outer signal and an adapter-local trap safe to retry without double
 # counting the same paid call.
 legion_adapter_emit_signal_span() {
-  local task_text="${1:-}" lease_path="${2:-}" attempt_path claim root trace_bin
+  local task_text="${1:-}" lease_path="${2:-}" attempt_path root trace_bin
   local executor model terminal span_status duration usage cost usage_status cost_status artifacts
   [[ "$LEGION_ADAPTER_SIGNAL_TERMINALIZED" == 1 ]] || return 0
   attempt_path="$LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json"
   [[ -f "$attempt_path" ]] || return 0
-  claim="$attempt_path.provider-span-emitted"
-  if ! legion_adapter_claim_provider_span "$attempt_path" \
-      && legion_adapter_provider_span_is_durable "$attempt_path"; then
-    return 0
+  if ! legion_adapter_acquire_provider_span_claim "$attempt_path"; then
+    legion_adapter_provider_span_is_durable "$attempt_path" && return 0
+    return 1
   fi
   if ! jq -e '.schema == "legion.attempt.v1" and .attempt_kind == "provider"' \
       "$attempt_path" >/dev/null 2>&1; then
-    rmdir "$claim" 2>/dev/null || true
+    legion_adapter_release_provider_span_claim "$attempt_path"
     return 1
+  fi
+  if legion_adapter_provider_span_is_durable "$attempt_path"; then
+    return 0
   fi
   executor="$(jq -r '.executor' "$attempt_path")"
   model="$(jq -r '.effective_model // .requested_model // "unknown"' "$attempt_path")"
@@ -509,9 +636,12 @@ legion_adapter_emit_signal_span() {
       --duration-ms "$duration" --cost "$cost" --cost-status "$cost_status" \
       --task "$task_text" --tokens "$usage" --usage-status "$usage_status" \
       --artifacts "$artifacts" >/dev/null 2>&1; then
-    rmdir "$claim" 2>/dev/null || true
+    legion_adapter_release_provider_span_claim "$attempt_path"
     return 1
   fi
+  legion_adapter_provider_span_is_durable "$attempt_path" && return 0
+  legion_adapter_release_provider_span_claim "$attempt_path"
+  return 1
 }
 
 # Reclassify an already-recorded provider call when an adapter-level invariant

@@ -37,6 +37,8 @@ TARGET_SUPERVISOR_DENY_CANARY="" TARGET_SUPERVISOR_ALLOW_CANARY=""
 WT_GIT_FILE_ID="" BASE_SHA="" SAFE_GIT_DIR="" COMMON_GIT_OBJECTS=""
 PROVIDER_OUT="" PROVIDER_ERR="" PROVIDER_USAGE=""
 PROVIDER_OUT_ID="" PROVIDER_ERR_ID="" PROVIDER_USAGE_ID=""
+PROVIDER_LAUNCH_WRAPPER="" PROVIDER_LAUNCH_WRAPPER_ID=""
+PROVIDER_LAUNCH_RECEIPT="" PROVIDER_LAUNCH_TOKEN=""
 FS_SANDBOX_BIN="" FS_SANDBOX_KIND=""
 MAX_RUNTIME_SECONDS=""
 CHILD_LEASE_DEADLINE_NS=""
@@ -145,7 +147,13 @@ on_signal() {
   elif [[ "$BROKER_RC" -eq 70 ]]; then
     containment_reason="handoff broker reported incomplete descendant cleanup (evidence: $ART/broker.err; worktree retained: $WT_RECORD)"
   fi
-  legion_adapter_write_signal_receipt "$signum" "$CHILD_WAIT_RC" "${ART:-}/lease.json"
+  if provider_launch_failed; then
+    # The authenticated inner wrapper proves that the admitted provider never
+    # existed, so a late signal must not manufacture a provider attempt.
+    legion_adapter_disarm_signal_receipt
+  else
+    legion_adapter_write_signal_receipt "$signum" "$CHILD_WAIT_RC" "${ART:-}/lease.json"
+  fi
   if [[ -n "$containment_reason" ]]; then
     KEEP=1
     legion_adapter_fail_recorded_attempt "$ART" "$ADAPTER_KIND" 1 internal 70 "$containment_reason" || true
@@ -484,17 +492,93 @@ verify_provider_file() {
   [[ -f "$file" && ! -L "$file" && "$(file_identity "$file" 2>/dev/null || true)" == "$expected" ]]
 }
 
+provider_launch_failed() {
+  [[ -n "$PROVIDER_LAUNCH_RECEIPT" && -n "$PROVIDER_LAUNCH_TOKEN" \
+      && -f "$PROVIDER_LAUNCH_RECEIPT" && ! -L "$PROVIDER_LAUNCH_RECEIPT" ]] || return 1
+  jq -e --arg token "$PROVIDER_LAUNCH_TOKEN" --arg executable "$PROVIDER_BIN" '
+    .schema == "legion.provider-launch.v1"
+    and .status == "launch_failed"
+    and .token == $token
+    and .executable_path == $executable
+    and (.reason | type == "string" and length > 0)
+    and (.errno | type == "number" and . >= 1 and . == floor)
+    and ((keys_unsorted - ["schema", "status", "token", "executable_path", "reason", "errno"]) | length == 0)
+  ' "$PROVIDER_LAUNCH_RECEIPT" >/dev/null 2>&1
+}
+
+provider_launch_reason() {
+  jq -r '.reason // "provider launch failed before process creation"' \
+    "$PROVIDER_LAUNCH_RECEIPT" 2>/dev/null \
+    || printf 'provider launch failed before process creation'
+}
+
 prepare_provider_files() {
   PROVIDER_OUT="$ART/$ADAPTER_KIND.out.jsonl"
   PROVIDER_ERR="$ART/$ADAPTER_KIND.err"
   PROVIDER_USAGE="$ART/$ADAPTER_KIND.usage.json"
+  PROVIDER_LAUNCH_WRAPPER="$ART/provider-launch-wrapper.py"
+  PROVIDER_LAUNCH_RECEIPT="$ART/tmp/provider-launch.json"
   : > "$PROVIDER_OUT"
   : > "$PROVIDER_ERR"
   : > "$PROVIDER_USAGE"
   : > "$ART/telemetry.err"
+  cat > "$PROVIDER_LAUNCH_WRAPPER" <<'PY'
+#!/usr/bin/env python3
+"""Exec the admitted provider and attest only a pre-provider exec failure."""
+
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+
+def main() -> int:
+    receipt = Path(sys.argv[1])
+    command = sys.argv[3:]
+    token = os.environ.pop("LEGION_PROVIDER_LAUNCH_TOKEN", "")
+    if not token or not command:
+        return 126
+    try:
+        os.execve(command[0], command, os.environ)
+    except OSError as error:
+        reason = f"provider launch failed before process creation: {error}"
+        payload = {
+            "schema": "legion.provider-launch.v1",
+            "status": "launch_failed",
+            "token": token,
+            "executable_path": command[0],
+            "reason": reason,
+            "errno": error.errno or 1,
+        }
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{receipt.name}.", suffix=".tmp", dir=receipt.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+                json.dump(payload, destination, separators=(",", ":"))
+                destination.write("\n")
+                destination.flush()
+                os.fsync(destination.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, receipt)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+        print(f"legion provider launcher: {reason}", file=sys.stderr)
+        return 127 if error.errno == 2 else 126
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+  chmod 500 "$PROVIDER_LAUNCH_WRAPPER"
   PROVIDER_OUT_ID="$(file_identity "$PROVIDER_OUT")"
   PROVIDER_ERR_ID="$(file_identity "$PROVIDER_ERR")"
   PROVIDER_USAGE_ID="$(file_identity "$PROVIDER_USAGE")"
+  PROVIDER_LAUNCH_WRAPPER_ID="$(file_identity "$PROVIDER_LAUNCH_WRAPPER")"
 }
 
 copy_private_runtime_file() {
@@ -717,19 +801,29 @@ run_provider() {
   build_fs_sandbox_command
   local supervisor="$_self_dir/legion-process-supervisor.py"
   [[ -x "$supervisor" ]] || die 'portable Legion process supervisor is unavailable'
+  local launch_python
+  launch_python="$(command -v python3 2>/dev/null || true)"
+  [[ -n "$launch_python" && -x "$launch_python" ]] || die 'trusted Python runtime is unavailable for provider launch attestation'
+  [[ -f "$PROVIDER_LAUNCH_WRAPPER" && ! -L "$PROVIDER_LAUNCH_WRAPPER" \
+      && "$(file_identity "$PROVIDER_LAUNCH_WRAPPER" 2>/dev/null || true)" == "$PROVIDER_LAUNCH_WRAPPER_ID" ]] \
+    || die 'provider launch attestation wrapper was modified before execution'
+  PROVIDER_LAUNCH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
+    || die 'unable to create provider launch attestation token'
   local -a invocation=(env \
     -u DOCKER_HOST -u CONTAINER_HOST -u BUILDKIT_HOST -u SSH_AUTH_SOCK -u KUBECONFIG -u CONTAINERD_ADDRESS \
     "TMPDIR=$ART/tmp" "TMP=$ART/tmp" "TEMP=$ART/tmp" \
     "XDG_CACHE_HOME=$ART/cache" "PYTHONDONTWRITEBYTECODE=1" \
     "PATH=$SANITIZED_PROVIDER_PATH" \
     "LEGION_HANDOFF_BROKER_SOCKET=$BROKER_SOCKET" "LEGION_HANDOFF_BROKER_TOKEN=$BROKER_TOKEN" \
+    "LEGION_PROVIDER_LAUNCH_TOKEN=$PROVIDER_LAUNCH_TOKEN" \
     "HERMES_ENABLE_PROJECT_PLUGINS=0" "HERMES_ACCEPT_HOOKS=0")
   if [[ "$ADAPTER_KIND" == pi ]]; then
     invocation+=("PI_CODING_AGENT_DIR=$PI_PRIVATE_AGENT_DIR")
   else
     invocation+=("HERMES_HOME=$HERMES_PRIVATE_HOME")
   fi
-  invocation+=("${FS_SANDBOX_COMMAND[@]}" "$@")
+  invocation+=("${FS_SANDBOX_COMMAND[@]}" "$launch_python" "$PROVIDER_LAUNCH_WRAPPER" \
+    "$PROVIDER_LAUNCH_RECEIPT" -- "$@")
   local provider_runtime
   provider_runtime="$(remaining_child_lease_seconds)"
   [[ "$provider_runtime" -ge 1 ]] || die 'child execution lease expired before provider launch'
@@ -797,7 +891,8 @@ cmd_run() {
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
       {run_id:$run,status:"refused",executor:$executor,model:$model,reason:$reason,
        preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
-       usage:{},cost_usd:0}'
+       usage:null,tokens:null,usage_status:"not_applicable",
+       cost_usd:null,cost_status:"not_applicable"}'
     return 1
   fi
   PROVIDER_BIN="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
@@ -860,6 +955,9 @@ cmd_run() {
   elif legion_adapter_supervisor_launch_failed "$ART/lease.json"; then
     launch_failed=1
     lease_reason="$(legion_adapter_supervisor_reason "$ART/lease.json" "provider launch failed before process creation")"
+  elif provider_launch_failed; then
+    launch_failed=1
+    lease_reason="$(provider_launch_reason)"
   elif legion_adapter_supervisor_timed_out "$ART/lease.json"; then
     lease_reason="$(legion_adapter_lease_reason "$ART/lease.json")"
   fi
@@ -912,6 +1010,10 @@ cmd_run() {
     cost_provenance="$(hermes_cost_provenance "$usage_art")"
   fi
   local usage_status=unknown usage_source="" cost_status=unknown cost_source="" output_started=false
+  if [[ "$launch_failed" == 1 ]]; then
+    usage_status=not_applicable
+    cost_status=not_applicable
+  fi
   if [[ "$provider_files_ok" == 1 && "$ADAPTER_KIND" == pi ]] \
      && jq -s -e '[.[] | select(.type == "message_end" and .message.role == "assistant")
        | .message.content[]? | select(.type == "text" and ((.text // "") | length > 0))] | length > 0' \
@@ -994,9 +1096,13 @@ cmd_run() {
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg executor "$ADAPTER_KIND" --arg model "$actual_model" --arg result "$result" --arg worktree "$report" --arg diff "$diff" --arg last "$ART/last-message.txt" \
     --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg reason "$lease_reason" --arg lease "$ART/lease.json" \
+    --arg provider_launch "$([[ "$launch_failed" == 1 && -f "$PROVIDER_LAUNCH_RECEIPT" ]] && printf '%s' "$PROVIDER_LAUNCH_RECEIPT")" \
+    --arg usage_status "$usage_status" --arg cost_status "$cost_status" \
     --argjson usage "$usage" --argjson cost "$cost" --argjson rc "$PROVIDER_RC" \
     '{run_id:$run,status:$status,executor:$executor,model:$model,result:$result,worktree:$worktree,diff_path:$diff,last_message_path:$last,usage:$usage,cost_usd:$cost,provider_exit:$rc,
-      preflight_receipt:$preflight,attempt_receipt:(if $attempt=="" then null else $attempt end),failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
+      tokens:$usage,usage_status:$usage_status,cost_status:$cost_status,
+      preflight_receipt:$preflight,attempt_receipt:(if $attempt=="" then null else $attempt end),failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease,
+      provider_launch_receipt:(if $provider_launch=="" then null else $provider_launch end)}
       + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == ok ]] || exit 1
 }

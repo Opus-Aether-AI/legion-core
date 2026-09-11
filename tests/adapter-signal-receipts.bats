@@ -166,7 +166,8 @@ assert_signal_receipt() {
     if legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"; then
       exit 10
     fi
-    [[ ! -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
+    [[ -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
+    [[ ! -f "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted/owner.json" ]]
     emit_span() {
       jq -cn --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
         '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \

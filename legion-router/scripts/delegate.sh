@@ -434,6 +434,10 @@ on_terminating_signal() {
       terminal_status=refused
       provider_exit=1
       terminal_reason="prompt reviewer preflight refused execution before provider launch"
+    elif [[ "$prompt_preserve_rc" -eq 3 ]]; then
+      terminal_status=failed
+      provider_exit=1
+      terminal_reason="prompt reviewer child launch failed before provider launch (evidence: $review_lease_receipt)"
     elif [[ "$prompt_preserve_rc" -ne 0 ]]; then
       terminal_status=containment_failed
       provider_exit=70
@@ -672,7 +676,8 @@ is_sandcastle_sandbox() {
 # Sandcastle writes the diff directly to $art/diff.patch; the rest of the
 # delegate flow consumes that same artifact path.
 run_sandcastle() {
-  local node_bin sandcastle_script provider_wrapper_dir provider_wrapper provider_marker
+  local node_bin python_bin sandcastle_script provider_wrapper_dir provider_wrapper
+  local provider_launcher provider_marker
   SANDCASTLE_SETUP_REFUSED=0
   node_bin="$(command -v node 2>/dev/null || true)"
   [[ -n "$node_bin" ]] || {
@@ -682,13 +687,52 @@ run_sandcastle() {
     return 0
   }
   sandcastle_script="$_self_dir/sandcastle-run.mjs"
+  python_bin="$(command -v python3 2>/dev/null || true)"
+  [[ -n "$python_bin" ]] || {
+    printf 'legion-delegate: python3 is required for authoritative Sandcastle provider launch evidence\n' >&2
+    SANDCASTLE_SETUP_REFUSED=1
+    rc=127
+    return 0
+  }
   provider_wrapper_dir="$art/sandcastle-provider-bin"
   provider_wrapper="$provider_wrapper_dir/codex"
+  provider_launcher="$provider_wrapper_dir/provider-launch.py"
   provider_marker="$art/sandcastle-provider-launched"
   mkdir -p "$provider_wrapper_dir"
   rm -f "$provider_marker"
-  printf '#!/usr/bin/env bash\nset -e\n: > %q\nexec %q "$@"\n' \
-    "$provider_marker" "$CODEX_BIN" > "$provider_wrapper"
+  printf '%s\n' '#!/usr/bin/env python3' \
+    'import os, signal, subprocess, sys' \
+    'marker, executable, *arguments = sys.argv[1:]' \
+    'marker_file = open(marker, "w", encoding="utf-8")' \
+    'marker_file.write("pending\n")' \
+    'marker_file.flush()' \
+    'os.fsync(marker_file.fileno())' \
+    'try:' \
+    '    child = subprocess.Popen([executable, *arguments])' \
+    'except OSError as error:' \
+    '    marker_file.seek(0)' \
+    '    marker_file.truncate()' \
+    '    marker_file.write("not-started\n")' \
+    '    marker_file.flush()' \
+    '    os.fsync(marker_file.fileno())' \
+    '    print(f"provider launch failed: {error}", file=sys.stderr)' \
+    '    raise SystemExit(127 if getattr(error, "errno", None) == 2 else 126)' \
+    'marker_file.seek(0)' \
+    'marker_file.truncate()' \
+    'marker_file.write("started\n")' \
+    'marker_file.flush()' \
+    'os.fsync(marker_file.fileno())' \
+    'marker_file.close()' \
+    'def forward(signum, _frame):' \
+    '    try:' \
+    '        child.send_signal(signum)' \
+    '    except ProcessLookupError:' \
+    '        pass' \
+    'for caught in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):' \
+    '    signal.signal(caught, forward)' \
+    'raise SystemExit(child.wait())' > "$provider_launcher"
+  printf '#!/usr/bin/env bash\nexec %q %q %q %q "$@"\n' \
+    "$python_bin" "$provider_launcher" "$provider_marker" "$CODEX_BIN" > "$provider_wrapper"
   chmod 700 "$provider_wrapper"
   : > "$art/stream.jsonl"
   local input="$art/sandcastle-input.json"
@@ -718,7 +762,8 @@ run_sandcastle() {
   # Sandcastle can fail while importing/configuring its backend with many exit
   # codes and messages. The trusted codex launcher marker distinguishes every
   # such no-spend setup failure from a real provider process that later failed.
-  if [[ "$rc" -ne 0 && ! -f "$provider_marker" ]] \
+  if [[ "$rc" -ne 0 \
+      && ( ! -f "$provider_marker" || "$(cat "$provider_marker" 2>/dev/null || true)" == not-started ) ]] \
       && ! legion_adapter_supervisor_timed_out "$art/lease-$attempt_ordinal.json" \
       && ! legion_adapter_supervisor_cleanup_failed "$art/lease-$attempt_ordinal.json"; then
     SANDCASTLE_SETUP_REFUSED=1
@@ -890,7 +935,7 @@ native_provider_span_is_recorded() {
 # Returns 0 with a newly owned claim, 2 when telemetry already proves the span
 # durable, and 1 when another live publisher owns the claim.
 native_provider_span_claim() {
-  local attempt_path="$1" claim lock owner=""
+  local attempt_path="$1" claim lock
   claim="$attempt_path.span-emitted"
   lock="$attempt_path.span-publishing"
   if native_provider_span_is_recorded "$attempt_path"; then
@@ -898,16 +943,14 @@ native_provider_span_claim() {
     : > "$claim/committed"
     return 2
   fi
-  # A symlink is the atomic ownership record. Creating a directory and then an
-  # owner file has a race in which a second publisher can observe the empty
-  # directory, call it stale, and remove a live publisher's claim.
-  if ! ln -s "$$" "$lock" 2>/dev/null; then
-    owner="$(readlink "$lock" 2>/dev/null || true)"
-    if [[ "$owner" =~ ^[1-9][0-9]*$ && "$owner" != "$$" ]] && kill -0 "$owner" 2>/dev/null; then
-      return 1
-    fi
-    rm -f "$lock" 2>/dev/null || return 1
-    ln -s "$$" "$lock" 2>/dev/null || return 1
+  # shlock's link(2)-based transition atomically replaces a stale owner. Two
+  # reclaimers therefore cannot unlink one another's newly acquired live lock.
+  # On platforms without shlock, acquire only a fresh lock via O_EXCL and leave
+  # stale recovery fail-closed rather than using a racy read/unlink/write cycle.
+  if command -v shlock >/dev/null 2>&1; then
+    shlock -p "$$" -f "$lock" >/dev/null 2>&1 || return 1
+  else
+    ( set -C; printf '%s\n' "$$" > "$lock" ) 2>/dev/null || return 1
   fi
   # The prior owner may have appended just before it died. Reconcile after
   # acquiring ownership so telemetry, rather than a marker directory, wins.
@@ -934,7 +977,7 @@ native_provider_span_release() {
   local claim="$1.span-emitted" lock="$1.span-publishing"
   rm -f "$claim/owner" "$claim/committed" 2>/dev/null || true
   rmdir "$claim" 2>/dev/null || true
-  [[ "$(readlink "$lock" 2>/dev/null || true)" != "$$" ]] || rm -f "$lock"
+  [[ "$(cat "$lock" 2>/dev/null || true)" != "$$" ]] || rm -f "$lock"
 }
 
 native_provider_span_commit() {
@@ -942,7 +985,7 @@ native_provider_span_commit() {
   native_provider_span_is_recorded "$attempt_path" || return 1
   : > "$claim/committed"
   rm -f "$claim/owner"
-  [[ "$(readlink "$lock" 2>/dev/null || true)" != "$$" ]] || rm -f "$lock"
+  [[ "$(cat "$lock" 2>/dev/null || true)" != "$$" ]] || rm -f "$lock"
 }
 
 emit_review_rollup_span() {
@@ -1774,6 +1817,13 @@ cmd_run() {
       launch_failed=1
       lease_receipt="$NATIVE_LEASE_STATUS"
       launch_failure_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS")"
+      # The mutable aliases describe the current candidate. A prior paid
+      # fallback attempt remains in its numbered receipts and provider span,
+      # but must not be paired with this candidate's preflight and no-launch
+      # lease in the terminal result.
+      rm -f "$art/attempt.json" "$art/failure.json"
+      LEGION_ADAPTER_ATTEMPT_PATH=""
+      LEGION_ADAPTER_FAILURE_PATH=""
       NATIVE_ATTEMPT_ART=""
       NATIVE_ATTEMPT_LAUNCHED=0
       CODEX_SIGNAL_CHILD_PID=""
@@ -1911,6 +1961,10 @@ cmd_run() {
   fi
   # Cost math must never abort the run (codex already did the work); default to 0.
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
+  if [[ "$launch_failed" -eq 1 ]]; then
+    usage=null
+    cost=null
+  fi
 
   local diff_rc=0
   if [[ "$containment_failed" -eq 1 ]]; then
@@ -2427,6 +2481,20 @@ prompt_review_preflight_no_spend_status() {
   ' "$path"
 }
 
+prompt_review_launch_failed_no_spend() {
+  local preflight="$1" lease="$2" executor="$3" model="$4" sandbox="$5"
+  [[ -f "$preflight" && -f "$lease" ]] || return 1
+  legion_adapter_supervisor_launch_failed "$lease" || return 1
+  jq -e --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" '
+    .schema == "legion.preflight.v1"
+    and .status == "supported"
+    and .executor == $executor
+    and (.identity | type) == "object"
+    and .compatibility.model.requested == $model
+    and .compatibility.sandbox.requested == $sandbox
+  ' "$preflight" >/dev/null 2>&1
+}
+
 preserve_interrupted_prompt_receipts() {
   [[ -n "$PROMPT_ATTEMPT_ART" && -n "$PROMPT_RECEIPT_DIR" && -n "$PROMPT_SHARED_ART" ]] \
     || return 0
@@ -2476,6 +2544,13 @@ preserve_interrupted_prompt_receipts() {
         "$PROMPT_EXPECTED_EXECUTOR" "$PROMPT_EXPECTED_MODEL" "$PROMPT_EXPECTED_SANDBOX" \
         >/dev/null; then
     return 2
+  fi
+  if [[ -n "$review_preflight_receipt" && -n "$review_lease_receipt" \
+      && ! -f "$source_attempt" && ! -f "$source_failure" ]] \
+      && prompt_review_launch_failed_no_spend "$review_preflight_receipt" \
+        "$review_lease_receipt" "$PROMPT_EXPECTED_EXECUTOR" \
+        "$PROMPT_EXPECTED_MODEL" "$PROMPT_EXPECTED_SANDBOX"; then
+    return 3
   fi
   return 1
 }
@@ -2613,10 +2688,14 @@ $(cat "$patch")
     rc=70
   fi
   local preflight_no_spend_status=""
-  if [[ -n "$review_preflight_receipt" && -z "$source_attempt" && -z "$source_failure" \
-        && -z "$source_lease" ]]; then
-    preflight_no_spend_status="$(prompt_review_preflight_no_spend_status \
-      "$review_preflight_receipt" "$ex" "$model" "$review_sandbox" 2>/dev/null || true)"
+  if [[ -n "$review_preflight_receipt" && -z "$source_attempt" && -z "$source_failure" ]]; then
+    if [[ -z "$source_lease" ]]; then
+      preflight_no_spend_status="$(prompt_review_preflight_no_spend_status \
+        "$review_preflight_receipt" "$ex" "$model" "$review_sandbox" 2>/dev/null || true)"
+    elif [[ -n "$review_lease_receipt" ]] && prompt_review_launch_failed_no_spend \
+        "$review_preflight_receipt" "$review_lease_receipt" "$ex" "$model" "$review_sandbox"; then
+      preflight_no_spend_status=launch_failed
+    fi
   fi
   if [[ -z "$review_preflight_receipt" || -z "$review_attempt_receipt" || -z "$review_lease_receipt" ||
         ( -n "$source_failure" && -z "$review_failure_receipt" ) ]]; then
@@ -3019,6 +3098,7 @@ cmd_review() {
     review_attempt_receipt=""
     review_failure_receipt=""
     review_lease_receipt=""
+    review_launch_failed=0
     if [[ "$_cand_n" -eq 1 && -n "$explicit_review_model" ]]; then
       model="$explicit_review_model"
     else
@@ -3342,7 +3422,11 @@ cmd_review() {
     if [[ "$status" == "ok" ]]; then
       break
     fi
-    [[ "$review_launch_failed" -ne 1 ]] || break
+    if [[ "$review_launch_failed" -eq 1 ]]; then
+      note "⚠ reviewer '$review_executor' failed to launch after admission; trying the next candidate"
+      reason="reviewer-unavailable"
+      continue
+    fi
     [[ "$status" != "timed_out" && "$status" != "containment_failed" ]] || break
     if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
       note "⚠ reviewer '$review_executor' is unavailable (exit $rc); trying the next candidate"
@@ -3603,6 +3687,8 @@ cmd_resume() {
   if legion_adapter_supervisor_launch_failed "$lease_status"; then
     launch_failed=1
     status="failed"
+    usage=null
+    cost=null
     reason="$(legion_adapter_supervisor_reason "$lease_status") (no provider launched; evidence: $lease_status)"
     NATIVE_ATTEMPT_ART=""
     NATIVE_ATTEMPT_LAUNCHED=0

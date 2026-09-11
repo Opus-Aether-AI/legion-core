@@ -102,14 +102,29 @@ install_launch_failed_supervisor_shim() {
     cat > "$shim_dir/python3" <<'SH'
 #!/usr/bin/env bash
 if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
-  status_file="" max_runtime=""
+  status_file="" max_runtime="" child="" model="" after_separator=0 should_fail=1
   for ((i=1; i <= $#; i++)); do
     if [[ "${!i}" == --status-file ]]; then
       j=$((i + 1)); status_file="${!j}"
     elif [[ "${!i}" == --max-runtime-seconds ]]; then
       j=$((i + 1)); max_runtime="${!j}"
+    elif [[ "${!i}" == -- ]]; then
+      after_separator=1
+    elif [[ "$after_separator" -eq 1 && -z "$child" ]]; then
+      child="${!i}"
+    elif [[ "${!i}" == -m || "${!i}" == --model ]]; then
+      j=$((i + 1)); model="${!j}"
     fi
   done
+  if [[ -n "${LEGION_TEST_LAUNCH_FAIL_EXECUTABLE:-}" \
+        && "${child##*/}" != "$LEGION_TEST_LAUNCH_FAIL_EXECUTABLE" ]]; then
+    should_fail=0
+  fi
+  if [[ -n "${LEGION_TEST_LAUNCH_FAIL_MODEL:-}" \
+        && "$model" != "$LEGION_TEST_LAUNCH_FAIL_MODEL" ]]; then
+    should_fail=0
+  fi
+  [[ "$should_fail" -eq 1 ]] || exec "$LEGION_TEST_REAL_PYTHON" "$@"
   jq -cn --arg reason 'child launch failed: command not found: admitted-provider' \
     --argjson runtime "$max_runtime" \
     '{schema:"legion.child-execution-lease.v1",status:"launch_failed",
@@ -1529,10 +1544,45 @@ SH
       and .attempt_receipt != null and .failure_receipt != null and .lease_receipt != null'
     art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
     [ -f "$art/sandcastle-provider-launched" ]
+    [ "$(cat "$art/sandcastle-provider-launched")" = started ]
     attempt="$(find "$art" -maxdepth 1 -type f -name 'attempt-*.json' -print -quit)"
     jq -e '.terminal_status == "failed" and .failure.class == "provider"' "$attempt"
     [ "$(grep -Ec '^codex exec ' "$MOCK_CALL_LOG" || true)" -eq 1 ]
     [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 1 ]
+}
+
+@test "delegate run: Sandcastle Codex disappearing after admission remains no-launch" {
+    local repo shim real_node admitted art
+    repo="$(make_test_repo run-sandcastle-disappearing-codex)"
+    shim="$TEST_TMPDIR/sandcastle-disappearing-node"
+    real_node="$(command -v node)"
+    admitted="$TEST_TMPDIR/admitted-codex"
+    printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$(command -v codex)" > "$admitted"
+    chmod +x "$admitted"
+    mkdir -p "$shim"
+    cat > "$shim/node" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */sandcastle-run.mjs ]]; then
+  cat >/dev/null
+  rm -f "$LEGION_TEST_ADMITTED_CODEX"
+  codex exec --json -m test-model-alpha -s workspace-write --skip-git-repo-check - >/dev/null
+  exit $?
+fi
+exec "$LEGION_TEST_REAL_NODE" "$@"
+SH
+    chmod +x "$shim/node"
+
+    CODEX_BIN="$admitted" LEGION_TEST_REAL_NODE="$real_node" LEGION_TEST_ADMITTED_CODEX="$admitted" \
+      PATH="$shim:$PATH" run "$DELEGATE" run --model test-model-alpha \
+        --sandbox docker --task x --repo "$repo" --quiet
+
+    [ "$status" -ne 0 ]
+    echo "$output" | tail -n 1 | jq -e '.status == "refused"
+      and .attempt_receipt == null and .failure_receipt == null'
+    art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    [ "$(cat "$art/sandcastle-provider-launched")" = not-started ]
+    [ "$(find "$art" -maxdepth 1 -type f -name 'attempt-[0-9]*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 0 ]
 }
 
 @test "delegate run: native and Sandcastle supervisor launch failure retain only no-launch lease evidence" {
@@ -1548,6 +1598,7 @@ SH
       result="$(printf '%s\n' "$output" | tail -n 1)"
       jq -e '.status == "failed"
         and .attempt_receipt == null and .failure_receipt == null
+        and .usage == null and .cost_usd == null
         and (.reason | contains("no provider launched"))
         and (.lease_receipt | type == "string" and length > 0)' <<<"$result"
       lease="$(jq -r .lease_receipt <<<"$result")"
@@ -1740,27 +1791,28 @@ SH
     ! kill -0 "$child" 2>/dev/null
 }
 
-@test "delegate review: native supervisor launch failure is zero-attempt with durable lease evidence" {
+@test "delegate review: native launch failure retains its lease and falls through to the next reviewer" {
     local repo result lease art
     repo="$(make_test_repo review-launch-failed)"
+    export LEGION_TEST_LAUNCH_FAIL_EXECUTABLE=codex
+    export MOCK_CURSOR_RESULT='{"verdict":"approve","summary":"No blocking findings.","findings":[]}'
     install_launch_failed_supervisor_shim
 
     run "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" \
       --max-attempts 2 --quiet
 
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 0 ]
     result="$(printf '%s\n' "$output" | tail -n 1)"
-    jq -e '.status == "failed" and .attempts == 0
-      and .attempt_receipt == null and .failure_receipt == null
-      and (.reason | contains("no provider launched"))
-      and (.lease_receipt | type == "string" and length > 0)' <<<"$result"
-    lease="$(jq -r .lease_receipt <<<"$result")"
+    jq -e '.status == "ok" and .attempts == 1
+      and (.attempt_receipt | contains("/prompt-review-"))' <<<"$result"
+    art="$(dirname "$(jq -r .terminal_receipt <<<"$result")")"
+    lease="$art/attempt-1.lease.json"
     jq -e '.status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
-    art="$(dirname "$lease")"
     [ ! -f "$art/attempt-1.json" ]
-    [ "$(find "$art" -maxdepth 1 -type f -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    jq -e '.executor == "cursor" and .terminal_status == "succeeded"' \
+      "$(jq -r .attempt_receipt <<<"$result")"
     [ "$(grep -Fc 'codex exec -s read-only review' "$MOCK_CALL_LOG" || true)" -eq 0 ]
-    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 0 ]
+    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 1 ]
 }
 
 @test "delegate review: returns a verdict + emits span" {
@@ -2407,7 +2459,7 @@ SH
     [ -f "$signal_seen" ]
 }
 
-@test "native provider span publication reclaims an incomplete claim and deduplicates from telemetry" {
+@test "native provider span publication atomically arbitrates concurrent stale-lock reclaimers" {
     local helper art telemetry
     helper="$TEST_TMPDIR/native-span-reclaim.sh"
     art="$TEST_TMPDIR/native-span-reclaim-art"
@@ -2416,6 +2468,7 @@ SH
     printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null}' > "$art/attempt-1.json"
     printf '%s\n' 99999999 > "$art/attempt-1.json.span-emitted/owner"
     : > "$art/attempt-1.json.span-emitted/committed"
+    printf '%s\n' 99999999 > "$art/attempt-1.json.span-publishing"
     {
       sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
       sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
@@ -2432,22 +2485,28 @@ TELEMETRY="$2"
 LEGION_TELEMETRY_DIR="$(dirname "$TELEMETRY")"
 on_terminating_signal() { exit 143; }
 emit_span() {
+  sleep 0.1
   jq -cn --arg attempt "$ATTEMPT_ROOT/attempt-1.json" \
     '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
     >> "$TELEMETRY"
 }
 ingest_usage() { :; }
-emit_provider_attempt_span "$ATTEMPT_ROOT/attempt-1.json" fixture ""
-emit_provider_attempt_span "$ATTEMPT_ROOT/attempt-1.json" fixture ""
+for _retry in $(seq 1 100); do
+  emit_provider_attempt_span "$ATTEMPT_ROOT/attempt-1.json" fixture "" && exit 0
+  sleep 0.01
+done
+exit 1
 SH
     } > "$helper"
 
-    run bash "$helper" "$art" "$telemetry"
+    run bash -c 'bash "$1" "$2" "$3" & one=$!; bash "$1" "$2" "$3" & two=$!; wait "$one"; wait "$two"' \
+      _ "$helper" "$art" "$telemetry"
 
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ] || { printf 'concurrent publishers: %s\n' "$output" >&2; false; }
     [ "$(wc -l < "$telemetry" | tr -d ' ')" -eq 1 ]
     [ -f "$art/attempt-1.json.span-emitted/committed" ]
     [ ! -e "$art/attempt-1.json.span-emitted/owner" ]
+    [ ! -e "$art/attempt-1.json.span-publishing" ]
 }
 
 @test "native review ingestion preserves the failed provider status" {
@@ -2656,6 +2715,40 @@ SH
   rollup="$(jq -c 'select(.executor == "codex" and .artifacts.rollup_only == true)' <<<"$spans")"
   jq -e '.cost_usd == null and .cost_status == "not_applicable"
     and .tokens == null and .usage_status == "not_applicable"' <<<"$rollup"
+}
+
+@test "delegate run: fallback launch_failed clears current aliases without losing prior paid spend" {
+  local repo result art lease
+  repo="$(make_test_repo fallback-launch-failed-aliases)"
+  export LEGION_TEST_LAUNCH_FAIL_MODEL=test-model-beta
+  install_launch_failed_supervisor_shim
+
+  LEGION_ROUTE_PRE_RESOLVED=1 LEGION_RESOLVED_EXECUTOR=codex \
+    LEGION_RESOLVED_FALLBACK=test-model-beta MOCK_CODEX_QUOTA_FAIL="$CODEX_WORKHORSE" \
+    run "$DELEGATE" run --archetype route-does-not-exist --executor codex \
+      --model "$CODEX_WORKHORSE" --sandbox workspace-write --reasoning-effort high \
+      --task x --repo "$repo" --quiet
+
+  [ "$status" -ne 0 ]
+  result="$(printf '%s\n' "$output" | tail -n 1)"
+  jq -e '.status == "failed" and .model == "test-model-beta"
+    and .attempt_receipt == null and .failure_receipt == null
+    and .usage == null and .cost_usd == null
+    and (.reason | contains("no provider launched"))' <<<"$result"
+  lease="$(jq -r .lease_receipt <<<"$result")"
+  art="$(dirname "$lease")"
+  jq -e '.status == "launch_failed"' "$lease"
+  jq -e --arg model "$CODEX_WORKHORSE" '.requested_model == $model
+    and .terminal_status == "failed" and .failure.class == "quota"' "$art/attempt-1.json"
+  [ -f "$art/failure-1.json" ]
+  [ ! -e "$art/attempt.json" ]
+  [ ! -e "$art/failure.json" ]
+  jq -e '.compatibility.model.requested == "test-model-beta"' "$art/preflight.json"
+  [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s \
+    '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 1 ]
+  [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s \
+    '[.[] | select(.artifacts.provider_attempt == true)
+      | .artifacts.attempt_receipt | select(endswith("/attempt-1.json"))] | length')" -eq 1 ]
 }
 
 @test "delegate run: a refused fallback never replaces the paid model identity" {
@@ -2998,6 +3091,7 @@ PY
   result="$(printf '%s\n' "$output" | tail -n 1)"
   jq -e '.status == "failed"
     and .attempt_receipt == null and .failure_receipt == null
+    and .usage == null and .cost_usd == null
     and (.reason | contains("no provider launched"))
     and (.lease_receipt | type == "string" and length > 0)' <<<"$result" || {
       printf 'resume result: %s\n' "$result" >&2
@@ -3628,6 +3722,29 @@ PY
     [ -f "$art/prompt-review-2-1/attempt.json" ]
     [ ! -f "$art/prompt-review-2-1/lease.json" ]
     [ -d "$(echo "$output" | jq -r .worktree)" ]
+}
+
+@test "delegate review: prompt launch_failed bundle is authenticated no-spend rather than containment failure" {
+    local repo art lease
+    repo="$(make_test_repo review-prompt-launch-failed)"
+    export LEGION_TEST_LAUNCH_FAIL_EXECUTABLE=agent
+    install_launch_failed_supervisor_shim
+
+    CODEX_BIN=missing-codex-for-review OPENCODE_BIN=missing-opencode-for-review \
+      CLAUDE_BIN=missing-claude-for-review run "$DELEGATE" review --base HEAD \
+        --repo "$repo" --quiet
+
+    [ "$status" -ne 70 ]
+    echo "$output" | tail -n 1 | jq -e '.status != "containment_failed"'
+    art="$(dirname "$(echo "$output" | tail -n 1 | jq -r .terminal_receipt)")"
+    lease="$(find "$art" -path '*/prompt-review-*/lease.json' -type f \
+      -exec sh -c 'jq -e '\''.status == "launch_failed"'\'' "$1" >/dev/null' _ {} \; -print -quit)"
+    [ -n "$lease" ]
+    jq -e '.schema == "legion.child-execution-lease.v1" and .status == "launch_failed"' "$lease"
+    [ ! -f "$(dirname "$lease")/attempt.json" ]
+    [ ! -f "$(dirname "$lease")/failure.json" ]
+    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s \
+      '[.[] | select(.artifacts.provider_attempt == true and .executor == "cursor")] | length')" -eq 0 ]
 }
 
 @test "delegate review: interrupted prompt evidence missing an attempt is containment-invalid" {

@@ -116,7 +116,9 @@ make_test_repo() {
     [ "$status" -ne 0 ]
     echo "$output" | jq -e '
       .status == "refused" and (.reason | contains("unsupported sandbox"))
-      and .attempt_receipt == null and .failure_receipt == null'
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
     assert_mock_not_called dsh
     [ ! -d "$repo/.legion/worktrees" ]
 }
@@ -128,7 +130,9 @@ make_test_repo() {
     [ "$status" -ne 0 ]
     echo "$output" | jq -e '
       .status == "refused" and (.reason | contains("unsupported model"))
-      and .attempt_receipt == null and .failure_receipt == null'
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
     assert_mock_not_called dsh
     [ ! -d "$repo/.legion/worktrees" ]
 }

@@ -252,7 +252,9 @@ make_test_repo() {
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '
       .status == "refused" and (.reason | contains("binary not found"))
-      and .attempt_receipt == null and .failure_receipt == null'
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
     assert_mock_not_called opencode
     [ ! -d "$repo/.legion/worktrees" ]
     jq -e '

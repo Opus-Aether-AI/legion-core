@@ -293,12 +293,15 @@ resolve_delegate_bin() {
 
 emit_terminal_json() {
   local executor="$1" model="$2" status="$3" result="$4" usage="$5" cost="$6" fell_back="$7" reason="${8:-}"
+  local usage_status="${9:-}" cost_status="${10:-}" known_cost_usd="${11:-null}" known_cost_attempts="${12:-0}"
   # LEGION_CLAUDE_WORKTREE / _DIFF are set by cmd_run once a worktree exists, so a caller can
   # review the run as a diff instead of diffing the operator's tree by hand.
   jq -cn \
     --arg run_id "$RUN_ID" --arg executor "$executor" --arg model "$model" \
     --arg status "$status" --arg result "$result" --argjson usage "$usage" \
     --argjson cost "${cost:-0}" --argjson fell_back "$fell_back" --arg reason "$reason" \
+    --arg usage_status "$usage_status" --arg cost_status "$cost_status" \
+    --argjson known_cost_usd "$known_cost_usd" --argjson known_cost_attempts "$known_cost_attempts" \
     --arg wt "${LEGION_CLAUDE_WORKTREE:-}" --arg diff "${LEGION_CLAUDE_DIFF:-}" \
     --arg preflight "${LEGION_ADAPTER_PREFLIGHT_PATH:-}" \
     --arg attempt "${LEGION_ADAPTER_ATTEMPT_PATH:-}" \
@@ -310,6 +313,11 @@ emit_terminal_json() {
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),
      lease_receipt:(if $lease=="" then null else $lease end)}
+    + (if $usage_status == "" then {} else {usage_status:$usage_status} end)
+    + (if $cost_status == "" then {} else {cost_status:$cost_status} end)
+    + (if $cost_status == "partial" then
+         {known_cost_usd:$known_cost_usd,known_cost_attempts:$known_cost_attempts}
+       else {} end)
     + (if $reason == "" then {} else {fell_back_reason:$reason, reason:$reason} end)
     + (if $wt == "" then {} else {worktree:$wt} end)
     + (if $diff == "" then {} else {diff_path:$diff} end)'
@@ -495,7 +503,8 @@ cmd_run() {
       failed "$RUN_ID" "$repo" "$contract_art" "$wt" "$branch" "$model" "$sandbox" \
       "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json claude "$model" refused "$LEGION_ADAPTER_PREFLIGHT_REASON" '{}' 0 false admission_refused
+    emit_terminal_json claude "$model" refused "$LEGION_ADAPTER_PREFLIGHT_REASON" null null false \
+      admission_refused not_applicable not_applicable
     return 1
   fi
   CLAUDE_BIN="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
@@ -505,7 +514,8 @@ cmd_run() {
       "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
     emit_terminal_json claude "$model" refused \
-      "unattended Claude runs forbid --dangerously-skip-permissions" '{}' 0 false permission_policy_refused
+      "unattended Claude runs forbid --dangerously-skip-permissions" null null false \
+      permission_policy_refused not_applicable not_applicable
     return 1
   fi
 
@@ -533,7 +543,8 @@ cmd_run() {
       failed "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "" "" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "claude" "$model" "failed" "" "{}" 0 false "$reason"
+    emit_terminal_json "claude" "$model" "failed" "" null null false "$reason" \
+      not_applicable not_applicable
     return 1
   fi
 
@@ -544,7 +555,8 @@ cmd_run() {
     note "⚠ repository is not a git worktree"
     emit_span "claude" "$model" "failed" 0 null null "$task" "$artifacts" \
       not_applicable not_applicable
-    emit_terminal_json "claude" "$model" "failed" "" "{}" 0 false "worktree_setup_failed"
+    emit_terminal_json "claude" "$model" "failed" "" null null false \
+      worktree_setup_failed not_applicable not_applicable
     return 1
   fi
   mkdir -p "$repo/.legion/worktrees"
@@ -568,7 +580,8 @@ cmd_run() {
       failed "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "claude" "$model" "failed" "" "{}" 0 false "worktree_setup_failed"
+    emit_terminal_json "claude" "$model" "failed" "" null null false \
+      worktree_setup_failed not_applicable not_applicable
     return 1
   fi
 
@@ -593,6 +606,7 @@ cmd_run() {
 
   start_ms="$(date +%s000)"
   local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0 chain_cost=0
+  local chain_paid_attempts=0 chain_known_cost=0 chain_known_cost_attempts=0
   local any_output_started=0 permission_refused=0 chain_admission_refused=0
   local chain_stopped_before_launch=0
   local lease_timed_out=0 containment_failed=0 lease_reason=""
@@ -762,6 +776,13 @@ cmd_run() {
       prior_cost="$(jq -c '.cost_usd' "$prior_attempt")"
       prior_usage_status="$(jq -r '.usage_status' "$prior_attempt")"
       prior_cost_status="$(jq -r '.cost_status' "$prior_attempt")"
+      chain_paid_attempts=$((chain_paid_attempts + 1))
+      if [[ "$prior_cost_status" == known ]] \
+          && jq -e 'type == "number" and . >= 0' <<<"$prior_cost" >/dev/null 2>&1; then
+        chain_known_cost="$(awk -v a="$chain_known_cost" -v b="$prior_cost" \
+          'BEGIN{printf "%.6f", a + b}')"
+        chain_known_cost_attempts=$((chain_known_cost_attempts + 1))
+      fi
       prior_artifacts="$(jq -cn --arg attempt "$prior_attempt" --arg lease "$lease_status" \
         '{provider_attempt:true,intermediate_attempt:true,attempt_receipt:$attempt,
           lease_receipt:$lease}')"
@@ -836,8 +857,14 @@ cmd_run() {
   dur=$(( end_ms - start_ms ))
 
   if [[ "$launch_failed" -eq 1 ]]; then
-    usage='{}'
-    cost="$chain_cost"
+    usage=null
+    if [[ "$chain_paid_attempts" -eq 0 ]]; then
+      cost=null
+    elif [[ "$chain_known_cost_attempts" -eq "$chain_paid_attempts" ]]; then
+      cost="$chain_known_cost"
+    else
+      cost=null
+    fi
     result="$launch_reason"
   elif [[ "$chain_stopped_before_launch" -eq 1 ]]; then
     # out_file still belongs to the previous paid decline. It already has its
@@ -889,12 +916,28 @@ cmd_run() {
   if [[ "$launch_failed" -eq 1 ]]; then
     status="failed"
     reason="$launch_reason"
+    local terminal_usage_status=not_applicable terminal_cost_status=not_applicable
+    local terminal_known_cost=null terminal_known_cost_attempts=0
+    if [[ "$chain_paid_attempts" -gt 0 ]]; then
+      terminal_usage_status=unknown
+      terminal_known_cost_attempts="$chain_known_cost_attempts"
+      if [[ "$chain_known_cost_attempts" -eq "$chain_paid_attempts" ]]; then
+        terminal_cost_status=known
+      elif [[ "$chain_known_cost_attempts" -gt 0 ]]; then
+        terminal_cost_status=partial
+        terminal_known_cost="$chain_known_cost"
+      else
+        terminal_cost_status=unknown
+      fi
+    fi
     finish_claude_signal_accounting
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
     [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason"
+    emit_terminal_json "claude" "$model" "$status" "$result" "$usage" "$cost" false "$reason" \
+      "$terminal_usage_status" "$terminal_cost_status" \
+      "$terminal_known_cost" "$terminal_known_cost_attempts"
     return 1
   fi
 

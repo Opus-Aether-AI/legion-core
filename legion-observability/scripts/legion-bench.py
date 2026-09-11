@@ -706,17 +706,131 @@ def _span_token_total(tokens: Any) -> int:
     return total
 
 
+def _valid_nonnegative_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def _positive_count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _valid_token_count(value: Any) -> bool:
+    return _valid_nonnegative_number(value) and float(value).is_integer()
+
+
+def _usage_value(value: Any) -> dict[str, int] | None:
+    if _valid_token_count(value):
+        return {"total_tokens": int(value)}
+    if not isinstance(value, dict):
+        return None
+    for item in value.values():
+        if not _valid_token_count(item):
+            return None
+    return {"total_tokens": _span_token_total(value)}
+
+
+def _provenance_status(payload: dict[str, Any], kind: str) -> str:
+    status = payload.get(f"{kind}_status")
+    value = payload.get("cost_usd" if kind == "cost" else "tokens")
+    value_is_known = _valid_nonnegative_number(value) if kind == "cost" else _usage_value(value) is not None
+    if status == "known":
+        return "known" if value_is_known else "unknown"
+    if status == "partial":
+        known_value = payload.get("known_cost_usd" if kind == "cost" else "known_usage")
+        known_count = payload.get("known_cost_attempts" if kind == "cost" else "known_usage_attempts")
+        known_value_is_valid = (
+            _valid_nonnegative_number(known_value)
+            if kind == "cost"
+            else _usage_value(known_value) is not None
+        )
+        return "partial" if known_value_is_valid and _positive_count(known_count) else "unknown"
+    if status in {"unknown", "not_applicable"}:
+        return status
+    return "known" if value_is_known else "unknown"
+
+
+def _merged_status(known: int, partial: int, unknown: int, not_applicable: int) -> str:
+    del not_applicable
+    applicable = known + partial + unknown
+    if not applicable:
+        return "not_applicable"
+    if known == applicable:
+        return "known"
+    if not known and not partial:
+        return "unknown"
+    return "partial"
+
+
+def _new_metering_accumulator() -> dict[str, Any]:
+    return {
+        "_cost_known": 0, "_cost_partial": 0, "_cost_unknown": 0, "_cost_na": 0,
+        "_usage_known": 0, "_usage_partial": 0, "_usage_unknown": 0, "_usage_na": 0,
+        "_known_cost": 0.0, "_known_cost_attempts": 0,
+        "_known_usage": {}, "_known_usage_attempts": 0,
+    }
+
+
+def _merge_usage(target: dict[str, int], usage: dict[str, int]) -> None:
+    for key, value in usage.items():
+        target[key] = target.get(key, 0) + value
+
+
+def _record_metering(accumulator: dict[str, Any], payload: dict[str, Any]) -> None:
+    for kind in ("cost", "usage"):
+        status = _provenance_status(payload, kind)
+        accumulator[f"_{kind}_{'na' if status == 'not_applicable' else status}"] += 1
+        if kind == "cost" and status == "known":
+            accumulator["_known_cost"] += float(payload["cost_usd"])
+            accumulator["_known_cost_attempts"] += _positive_count(payload.get("known_cost_attempts")) or 1
+        elif kind == "cost" and status == "partial":
+            accumulator["_known_cost"] += float(payload["known_cost_usd"])
+            accumulator["_known_cost_attempts"] += _positive_count(payload.get("known_cost_attempts"))
+        elif kind == "usage" and status == "known":
+            _merge_usage(accumulator["_known_usage"], _usage_value(payload["tokens"]) or {})
+            accumulator["_known_usage_attempts"] += _positive_count(payload.get("known_usage_attempts")) or 1
+        elif kind == "usage" and status == "partial":
+            _merge_usage(accumulator["_known_usage"], _usage_value(payload["known_usage"]) or {})
+            accumulator["_known_usage_attempts"] += _positive_count(payload.get("known_usage_attempts"))
+
+
+def _finalize_metering(accumulator: dict[str, Any]) -> dict[str, Any]:
+    cost_status = _merged_status(
+        accumulator["_cost_known"], accumulator["_cost_partial"],
+        accumulator["_cost_unknown"], accumulator["_cost_na"],
+    )
+    usage_status = _merged_status(
+        accumulator["_usage_known"], accumulator["_usage_partial"],
+        accumulator["_usage_unknown"], accumulator["_usage_na"],
+    )
+    known_cost = round(accumulator["_known_cost"], 6)
+    known_usage = dict(sorted(accumulator["_known_usage"].items()))
+    return {
+        "cost_usd": known_cost if cost_status == "known" else None,
+        "cost_status": cost_status,
+        "known_cost_usd": known_cost if accumulator["_known_cost_attempts"] else None,
+        "known_cost_attempts": accumulator["_known_cost_attempts"],
+        "tokens": _span_token_total(known_usage) if usage_status == "known" else None,
+        "usage_status": usage_status,
+        "known_usage": known_usage if accumulator["_known_usage_attempts"] else None,
+        "known_usage_attempts": accumulator["_known_usage_attempts"],
+    }
+
+
 def _span_totals(logs: str) -> dict[str, Any]:
     spans_dir = os.path.join(logs, "spans")
     totals: dict[str, Any] = {
         "span_count": 0,
-        "cost_usd": 0.0,
         "span_duration_ms": 0,
-        "tokens": 0,
         "models": {},
     }
+    metering = _new_metering_accumulator()
     if not os.path.isdir(spans_dir):
-        return totals
+        return {**totals, **_finalize_metering(metering)}
     for name in sorted(os.listdir(spans_dir)):
         if not name.endswith(".jsonl"):
             continue
@@ -733,24 +847,23 @@ def _span_totals(logs: str) -> dict[str, Any]:
                     artifacts = span.get("artifacts") or {}
                     if isinstance(artifacts, dict) and artifacts.get("rollup_only") is True:
                         continue
-                    span_cost = _num(span.get("cost_usd"))
                     span_duration = int(_num(span.get("duration_ms")))
-                    span_tokens = _span_token_total(span.get("tokens"))
                     model = _text(span.get("model")) or "unknown"
                     totals["span_count"] += 1
-                    totals["cost_usd"] = round(float(totals["cost_usd"]) + span_cost, 6)
                     totals["span_duration_ms"] += span_duration
-                    totals["tokens"] += span_tokens
+                    _record_metering(metering, span)
                     model_totals = totals["models"].setdefault(
                         model,
-                        {"span_count": 0, "cost_usd": 0.0, "span_duration_ms": 0, "tokens": 0},
+                        {"span_count": 0, "span_duration_ms": 0, "_metering": _new_metering_accumulator()},
                     )
                     model_totals["span_count"] += 1
-                    model_totals["cost_usd"] = round(float(model_totals["cost_usd"]) + span_cost, 6)
                     model_totals["span_duration_ms"] += span_duration
-                    model_totals["tokens"] += span_tokens
+                    _record_metering(model_totals["_metering"], span)
         except OSError:
             continue
+    totals.update(_finalize_metering(metering))
+    for model_totals in totals["models"].values():
+        model_totals.update(_finalize_metering(model_totals.pop("_metering")))
     totals["models"] = dict(sorted(totals["models"].items()))
     return totals
 
@@ -1456,10 +1569,55 @@ def _metric(summary: dict[str, Any], key: str) -> float:
     return _num(_dict(summary.get("metrics")).get(key))
 
 
+def _metering_metric_comparison(
+    baseline_metrics: dict[str, Any], candidate_metrics: dict[str, Any], kind: str
+) -> dict[str, Any]:
+    value_key = "cost_usd" if kind == "cost" else "tokens"
+    baseline_status = _provenance_status(baseline_metrics, kind)
+    candidate_status = _provenance_status(candidate_metrics, kind)
+    baseline_value = baseline_metrics.get(value_key) if baseline_status == "known" else None
+    candidate_value = candidate_metrics.get(value_key) if candidate_status == "known" else None
+    delta = None
+    if _valid_nonnegative_number(baseline_value) and _valid_nonnegative_number(candidate_value):
+        delta = round(float(candidate_value) - float(baseline_value), 6)
+    payload: dict[str, Any] = {
+        "baseline": baseline_value,
+        "candidate": candidate_value,
+        "delta": delta,
+        "baseline_status": baseline_status,
+        "candidate_status": candidate_status,
+        "relative_change_pct": (
+            _relative_delta_pct(float(baseline_value), float(candidate_value))
+            if delta is not None else None
+        ),
+    }
+    if kind == "cost":
+        for side, metrics in (("baseline", baseline_metrics), ("candidate", candidate_metrics)):
+            payload[f"{side}_known_cost_usd"] = metrics.get("known_cost_usd")
+            payload[f"{side}_known_cost_attempts"] = metrics.get("known_cost_attempts")
+    else:
+        for side, metrics in (("baseline", baseline_metrics), ("candidate", candidate_metrics)):
+            payload[f"{side}_known_usage"] = metrics.get("known_usage")
+            payload[f"{side}_known_usage_attempts"] = metrics.get("known_usage_attempts")
+    return payload
+
+
 def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
-    keys = sorted(set(_dict(baseline.get("metrics"))) | set(_dict(candidate.get("metrics"))))
+    baseline_metrics = _dict(baseline.get("metrics"))
+    candidate_metrics = _dict(candidate.get("metrics"))
+    companion_keys = {
+        "cost_status", "known_cost_usd", "known_cost_attempts",
+        "usage_status", "known_usage", "known_usage_attempts", "models",
+    }
+    keys = sorted((set(baseline_metrics) | set(candidate_metrics)) - companion_keys)
     metrics: dict[str, dict[str, Any]] = {}
     for key in keys:
+        if key == "cost_usd":
+            metrics[key] = _metering_metric_comparison(baseline_metrics, candidate_metrics, "cost")
+            continue
+        if key == "tokens":
+            metrics[key] = _metering_metric_comparison(baseline_metrics, candidate_metrics, "usage")
+            continue
         baseline_value = _metric(baseline, key)
         candidate_value = _metric(candidate, key)
         delta = round(candidate_value - baseline_value, 6)
@@ -1528,7 +1686,10 @@ def gate_decision(compare: dict[str, Any], gate: dict[str, Any] | None = None) -
         failures.append("false_success")
     max_cost_delta = gate.get("max_cost_delta")
     if isinstance(max_cost_delta, (int, float)):
-        if _num(_dict(metrics.get("cost_usd")).get("delta")) > float(max_cost_delta):
+        cost_delta = _dict(metrics.get("cost_usd")).get("delta")
+        if not isinstance(cost_delta, (int, float)) or isinstance(cost_delta, bool) or not math.isfinite(cost_delta):
+            failures.append("cost_usd")
+        elif float(cost_delta) > float(max_cost_delta):
             failures.append("cost_usd")
     max_duration_ms_delta = gate.get("max_duration_ms_delta")
     if isinstance(max_duration_ms_delta, (int, float)):
@@ -2401,8 +2562,10 @@ def _summarize_corpus_mode(results: list[dict[str, Any]]) -> dict[str, Any]:
     durations = [int(_dict(result.get("metrics")).get("duration_ms") or 0) for result in results]
     dimensions: dict[str, dict[str, Any]] = {}
     models: dict[str, dict[str, Any]] = {}
+    metering = _new_metering_accumulator()
     for result in results:
         result_metrics = _dict(result.get("metrics"))
+        _record_metering(metering, result_metrics)
         dimension = _text(result.get("dimension")) or "corpus"
         entry = dimensions.setdefault(dimension, {"case_runs": 0, "pass": 0, "fail": 0, "blocked": 0})
         entry["case_runs"] += 1
@@ -2418,17 +2581,15 @@ def _summarize_corpus_mode(results: list[dict[str, Any]]) -> dict[str, Any]:
             model_metrics = _dict(model_metrics_raw)
             model_entry = models.setdefault(
                 model_name,
-                {"span_count": 0, "cost_usd": 0.0, "span_duration_ms": 0, "tokens": 0},
+                {"span_count": 0, "span_duration_ms": 0, "_metering": _new_metering_accumulator()},
             )
             model_entry["span_count"] += int(model_metrics.get("span_count") or 0)
-            model_entry["cost_usd"] = round(
-                float(model_entry["cost_usd"]) + _num(model_metrics.get("cost_usd")),
-                6,
-            )
             model_entry["span_duration_ms"] += int(_num(model_metrics.get("span_duration_ms")))
-            model_entry["tokens"] += int(_num(model_metrics.get("tokens")))
+            _record_metering(model_entry["_metering"], model_metrics)
     for entry in dimensions.values():
         entry["pass_rate"] = _rate(int(entry["pass"]), int(entry["case_runs"]))
+    for model_entry in models.values():
+        model_entry.update(_finalize_metering(model_entry.pop("_metering")))
     metrics = {
         "case_runs": case_runs,
         "pass": passed,
@@ -2445,10 +2606,9 @@ def _summarize_corpus_mode(results: list[dict[str, Any]]) -> dict[str, Any]:
         "duration_ms": sum(int(_dict(result.get("metrics")).get("duration_ms") or 0) for result in results),
         "mean_duration_ms": _mean(durations),
         "p95_duration_ms": _percentile(durations, 95),
-        "cost_usd": round(sum(float(_dict(result.get("metrics")).get("cost_usd") or 0.0) for result in results), 6),
-        "tokens": sum(int(_dict(result.get("metrics")).get("tokens") or 0) for result in results),
         "span_count": sum(int(_dict(result.get("metrics")).get("span_count") or 0) for result in results),
         "models": dict(sorted(models.items())),
+        **_finalize_metering(metering),
     }
     return {"metrics": metrics, "dimensions": dict(sorted(dimensions.items()))}
 
@@ -2500,6 +2660,8 @@ def summarize_corpus_run(
             baseline_mode=baseline_mode,
             candidate_mode=mode_id,
         )
+        cost_comparison = _metering_metric_comparison(baseline, candidate, "cost")
+        usage_comparison = _metering_metric_comparison(baseline, candidate, "usage")
         comparisons[f"{baseline_mode}..{mode_id}"] = {
             "baseline": baseline_mode,
             "candidate": mode_id,
@@ -2513,9 +2675,11 @@ def summarize_corpus_run(
             "reliable": case_runs >= reliability_min_cases,
             "reliability_min_cases": reliability_min_cases,
             "paired": paired,
-            "cost_usd_delta": round(float(candidate.get("cost_usd") or 0.0) - float(baseline.get("cost_usd") or 0.0), 6),
+            "cost_usd_delta": cost_comparison["delta"],
+            "cost": cost_comparison,
             "duration_ms_delta": int(candidate.get("duration_ms") or 0) - int(baseline.get("duration_ms") or 0),
-            "tokens_delta": int(candidate.get("tokens") or 0) - int(baseline.get("tokens") or 0),
+            "tokens_delta": usage_comparison["delta"],
+            "usage": usage_comparison,
         }
     return {
         "schema": "legion.bench.corpus-summary.v1",
@@ -2660,6 +2824,33 @@ def _markdown_float(value: Any, digits: int = 3) -> str:
         return "n/a"
 
 
+def _cost_text(metrics: dict[str, Any]) -> str:
+    status = _provenance_status(metrics, "cost")
+    if status == "known":
+        return f"${float(metrics['cost_usd']):.6f}"
+    if status == "partial":
+        return f">=${float(metrics['known_cost_usd']):.6f} (partial)"
+    return "unknown" if status == "unknown" else "n/a"
+
+
+def _usage_text(metrics: dict[str, Any]) -> str:
+    status = _provenance_status(metrics, "usage")
+    if status == "known":
+        return str(_span_token_total(metrics["tokens"]))
+    if status == "partial":
+        return f">={_span_token_total(metrics['known_usage'])} (partial)"
+    return "unknown" if status == "unknown" else "n/a"
+
+
+def _cost_delta_text(comparison: dict[str, Any]) -> str:
+    delta = comparison.get("cost_usd_delta")
+    if isinstance(delta, (int, float)) and not isinstance(delta, bool) and math.isfinite(delta):
+        return f"${float(delta):+.6f}"
+    cost = _dict(comparison.get("cost"))
+    statuses = {cost.get("baseline_status"), cost.get("candidate_status")}
+    return "unknown" if "unknown" in statuses else "n/a"
+
+
 def render_corpus_markdown(summary: dict[str, Any], artifacts: dict[str, str]) -> str:
     lines = [
         f"# Legion Corpus Benchmark: {summary.get('corpus')}",
@@ -2688,8 +2879,8 @@ def render_corpus_markdown(summary: dict[str, Any], artifacts: dict[str, str]) -
             f"{int(metrics.get('case_runs') or 0)} | "
             f"{_markdown_float(metrics.get('pass_rate'))} | "
             f"{ci_text} | "
-            f"${float(metrics.get('cost_usd') or 0):.6f} | "
-            f"{int(metrics.get('tokens') or 0)} | "
+            f"{_cost_text(metrics)} | "
+            f"{_usage_text(metrics)} | "
             f"{int(metrics.get('span_count') or 0)} | "
             f"{_markdown_float(metrics.get('mean_duration_ms'))} | "
             f"{int(metrics.get('p95_duration_ms') or 0)} |"
@@ -2709,8 +2900,8 @@ def render_corpus_markdown(summary: dict[str, Any], artifacts: dict[str, str]) -
                 f"`{mode_id}` | "
                 f"`{model}` | "
                 f"{int(model_metrics.get('span_count') or 0)} | "
-                f"${float(model_metrics.get('cost_usd') or 0):.6f} | "
-                f"{int(model_metrics.get('tokens') or 0)} | "
+                f"{_cost_text(model_metrics)} | "
+                f"{_usage_text(model_metrics)} | "
                 f"{int(model_metrics.get('span_duration_ms') or 0)} |"
             )
     else:
@@ -2734,7 +2925,7 @@ def render_corpus_markdown(summary: dict[str, Any], artifacts: dict[str, str]) -
             f"{int(paired.get('candidate_only_pass') or 0)} | "
             f"{int(paired.get('baseline_only_pass') or 0)} | "
             f"{'n/a' if p_value is None else f'{float(p_value):.6f}'} | "
-            f"${float(comparison.get('cost_usd_delta') or 0):+.6f} | "
+            f"{_cost_delta_text(comparison)} | "
             f"{int(comparison.get('duration_ms_delta') or 0):+d} |"
         )
     clusters = _list(summary.get("failure_clusters"))
@@ -2858,8 +3049,8 @@ def corpus_command(args: argparse.Namespace) -> int:
             print(
                 f"  {mode_id}: {int(metrics.get('pass') or 0)}/{int(metrics.get('case_runs') or 0)} "
                 f"pass_rate={float(metrics.get('pass_rate') or 0):.3f} "
-                f"cost=${float(metrics.get('cost_usd') or 0):.6f} "
-                f"tokens={int(metrics.get('tokens') or 0)}"
+                f"cost={_cost_text(metrics)} "
+                f"tokens={_usage_text(metrics)}"
             )
         for key, comparison in _dict(summary.get("comparisons")).items():
             reliable = "reliable" if comparison.get("reliable") else "small-sample"

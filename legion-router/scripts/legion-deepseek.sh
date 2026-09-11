@@ -418,10 +418,13 @@ cmd_run() {
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg reason "$receipt_reason" \
     --arg lease "$lease_status" \
+    --argjson launch_failed "$launch_failed" \
     '{run_id:$run_id, executor:$executor, model:$model, status:$status,
       diff_path:$diff, last_message:$last, worktree:$wt,
-      usage:$usage,tokens:$usage,usage_status:"unknown",
-      cost_usd:$cost,cost_status:"unknown",
+      usage:$usage,tokens:$usage,
+      usage_status:(if $launch_failed == 1 then "not_applicable" else "unknown" end),
+      cost_usd:$cost,
+      cost_status:(if $launch_failed == 1 then "not_applicable" else "unknown" end),
       preflight_receipt:$preflight,attempt_receipt:(if $attempt=="" then null else $attempt end),
       failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
       + (if $reason=="" then {} else {reason:$reason} end)'

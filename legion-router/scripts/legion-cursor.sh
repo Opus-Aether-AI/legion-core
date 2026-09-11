@@ -273,7 +273,8 @@ cmd_run() {
       --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
       {run_id:$run,status:"refused",executor:"cursor",model:$model,reason:$reason,
        preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
-       usage:{},cost_usd:0}'
+       usage:null,usage_status:"not_applicable",
+       cost_usd:null,cost_status:"not_applicable"}'
     return 1
   fi
   agent_bin="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
@@ -494,12 +495,17 @@ cmd_run() {
     --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
     --arg reason "$receipt_reason" \
     --arg lease "$lease_status" \
-    --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
+    --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" \
+    --argjson launch_failed "$launch_failed" '
     {run_id:$run, status:$status, executor:"cursor", model:$model, cursor_exit:$rc,
      result:$result, worktree:$wt, diff_path:$diff, last_message_path:$last,
-     usage:$usage, cost_usd:$cost,preflight_receipt:$preflight,
+     usage:(if $launch_failed == 1 then null else $usage end),
+     cost_usd:(if $launch_failed == 1 then null else $cost end),preflight_receipt:$preflight,
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
+    + (if $launch_failed == 1 then
+         {usage_status:"not_applicable",cost_status:"not_applicable"}
+       else {} end)
     + (if $reason=="" then {} else {reason:$reason} end)
     + (if $auth_note == "" then {} else {auth_error:$auth_note} end)'
   [[ "$status" == "ok" ]] || exit 1

@@ -31,6 +31,16 @@ install_launch_failed_python() {
     cat > "$shim_dir/python3" <<'SH'
 #!/usr/bin/env bash
 if [[ "${1:-}" == */legion-process-supervisor.py ]]; then
+  should_fail=1
+  if [[ -n "${LEGION_TEST_LAUNCH_FAIL_MODEL:-}" ]]; then
+    should_fail=0
+    for arg in "$@"; do
+      [[ "$arg" != "$LEGION_TEST_LAUNCH_FAIL_MODEL" ]] || should_fail=1
+    done
+  fi
+  if [[ "$should_fail" -ne 1 ]]; then
+    exec "$LEGION_TEST_REAL_PYTHON" "$@"
+  fi
   status_file=""
   max_runtime=""
   for ((i=1; i <= $#; i++)); do
@@ -99,6 +109,8 @@ SH
     echo "$output" | jq -e '
       .status == "failed"
       and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"
       and (.reason | contains("child launch failed"))
       and (.lease_receipt | type == "string" and length > 0)
     '
@@ -117,6 +129,48 @@ SH
         "$LEGION_TELEMETRY_DIR"/*.jsonl
       [ "$status" -ne 0 ]
     fi
+}
+
+@test "legion-claude: later launch failure retains only earlier paid spend" {
+    local repo run_id art lease prior_attempt provider_spans provider_receipt first_model second_model
+    repo="$(make_test_repo later-launch-failed)"
+    run_id="later-launch-failed-claude"
+    install_launch_failed_python
+    first_model="$(python3 "$REPO_ROOT/legion-router/scripts/legion-route.py" \
+      frontend-polish | jq -r .model)"
+    second_model="$CLAUDE_DEFAULT"
+
+    LEGION_TEST_LAUNCH_FAIL_MODEL="$second_model" \
+      MOCK_CLAUDE_DECLINE_MODELS="$first_model" \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --model "$first_model" \
+        --fallback-models "$second_model" --allow-premium-credit --quiet --no-fallback
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e --arg second "$second_model" '
+      .status == "failed" and .model == $second
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "unknown"
+      and (.cost_usd | type == "number" and . > 0)
+      and .cost_status == "known"
+      and (.reason | contains("child launch failed"))
+    '
+    lease="$(echo "$output" | jq -r .lease_receipt)"
+    jq -e '.status == "launch_failed" and (has("child_exit_code") | not)' "$lease"
+    art="$repo/.legion/runs/$run_id"
+    prior_attempt="$art/attempt-1.json"
+    jq -e '.executor == "claude" and .terminal_status == "failed" and .cost_status == "known"' \
+      "$prior_attempt"
+    jq -en --argjson reported "$(echo "$output" | jq -c .cost_usd)" \
+      --argjson prior "$(jq -c .cost_usd "$prior_attempt")" '$reported == $prior'
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+    provider_spans="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c \
+      'select(.executor == "claude" and .artifacts.provider_attempt == true)')"
+    [ "$(wc -l <<<"$provider_spans" | tr -d ' ')" -eq 1 ]
+    provider_receipt="$(jq -r '.artifacts.attempt_receipt' <<<"$provider_spans")"
+    [ "${provider_receipt##*/}" = "attempt-1.json" ]
+    cmp "$prior_attempt" "$provider_receipt"
+    ! grep -q -- "--model $second_model" "$MOCK_CALL_LOG"
 }
 
 @test "legion-claude: timeout never applies a partial diff" {
@@ -198,7 +252,9 @@ SH
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '
       .status == "refused" and .reason == "permission_policy_refused"
-      and .attempt_receipt == null and .failure_receipt == null'
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
     ! grep -q '^claude -p ' "$MOCK_CALL_LOG"
     assert_mock_not_called legion-delegate
 }
@@ -223,7 +279,9 @@ SH
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '
       .status == "refused" and .reason == "admission_refused"
-      and .attempt_receipt == null and .failure_receipt == null'
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
     assert_mock_not_called claude
     assert_mock_not_called legion-delegate
 
@@ -462,6 +520,7 @@ PY
     jq -e '
       .status == "failed" and .cost_status == "not_applicable"
       and .usage_status == "not_applicable"
+      and .usage == null and .cost_usd == null
       and .artifacts.provider_attempt != true
     ' <<<"$span"
 }

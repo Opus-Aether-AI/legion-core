@@ -1,12 +1,12 @@
 {
   "name": "legion-codex-mode",
   "description": "The Codex-primary routing guide for Legion. It keeps the active primary inline where it has context and routes bounded work by the configured archetype and model role, rather than treating another harness as the default secondary. It also maps Codex-native MCPs, mirrored skills, and bridged commands/agents.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "author": {
     "name": "legion-core"
   },
   "homepage": "https://github.com/Opus-Aether-AI/legion-core/tree/main/legion-codex-mode",
-  "license": "UNLICENSED",
+  "license": "BUSL-1.1",
   "keywords": [
     "codex",
     "codex_workhorse",

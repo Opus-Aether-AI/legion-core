@@ -8,7 +8,6 @@ setup() {
     export LEGION_TELEMETRY_DIR="$TEST_TMPDIR/spans"
     export LEGION_REGISTRY_DIR="$LEGION_STATE_ROOT/registry"
     export LEGION_DEEPSEEK="$REPO_ROOT/legion-router/bin/legion-deepseek"
-    DEEPSEEK_DEFAULT="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref deepseek_default)"
 }
 
 make_test_repo() {
@@ -28,8 +27,16 @@ make_test_repo() {
     local context="$TEST_TMPDIR/context.log"
     MOCK_CONTEXT_LOG="$context" run "$LEGION_DEEPSEEK" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e --arg m "$DEEPSEEK_DEFAULT" \
-        '.status == "ok" and .executor == "deepseek" and .model == $m'
+    echo "$output" | jq -e \
+        '.status == "ok" and .executor == "deepseek" and .model == "unknown"'
+    jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    jq -e '
+      .schema == "legion.attempt.v1" and .terminal_status == "succeeded"
+      and .requested_model == null and .effective_model == null
+      and .usage_status == "unknown" and .usage == null
+      and .cost_status == "unknown" and .cost_usd == null' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
 
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
@@ -40,23 +47,26 @@ make_test_repo() {
     # difference between a working adapter and one that opens a web server.
     assert_mock_called dsh "--profile legion-headless"
 
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
-    [ "$output" = "deepseek" ]
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '[.executor,.model] | join(\"|\")'"
+    [ "$output" = "deepseek|unknown" ]
     grep -Eq '^dsh active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
-@test "legion-deepseek: reports zero usage rather than inventing it" {
+@test "legion-deepseek: preserves unknown usage and cost rather than inventing free work" {
     # dsh publishes no headless usage contract. A fabricated number would flow
     # into cost reports and routing decisions that are meant to be evidence-
     # based, so the adapter meters nothing and says so.
     local repo; repo="$(make_test_repo usage1)"
     run "$LEGION_DEEPSEEK" run --task "measure me" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e '.cost_usd == 0 and (.usage | length) == 0'
+    echo "$output" | jq -e '
+      .cost_usd == null and .cost_status == "unknown"
+      and .usage == null and .tokens == null and .usage_status == "unknown"'
 
-    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '.cost_usd, (.tokens | length)'"
-    [ "${lines[0]}" = "0" ]
-    [ "${lines[1]}" = "0" ]
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e '
+      .cost_usd == null and .cost_status == \"unknown\"
+      and .tokens == null and .usage_status == \"unknown\"'"
+    [ "$status" -eq 0 ]
 }
 
 @test "legion-deepseek: an executor that commits its work is not lost" {
@@ -77,6 +87,10 @@ make_test_repo() {
     MOCK_DSH_FAIL=1 run "$LEGION_DEEPSEEK" run --task "break" --repo "$repo" --quiet
     [ "$status" -ne 0 ]
     echo "$output" | jq -e '.status == "failed"'
+    jq -e '
+      .terminal_status == "failed" and .failure.schema == "legion.failure.v1"
+      and .failure.class == "provider" and .failure.output_started == false' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
 }
 
 @test "legion-deepseek: a missing profile fails loudly, not silently" {
@@ -96,15 +110,31 @@ make_test_repo() {
     grep -qi "refusing to report an empty success" "$(echo "$output" | jq -r .last_message)"
 }
 
-@test "legion-deepseek: a read-only run that writes is refused" {
-    # dsh exposes no flag that withholds the write tools, so unlike the other
-    # adapters this backstop is the ONLY thing enforcing read-only. It has to
-    # actually fire.
+@test "legion-deepseek: rejects read-only before dsh resolution or launch" {
     local repo; repo="$(make_test_repo ro1)"
     run "$LEGION_DEEPSEEK" run --task "just look" --repo "$repo" --sandbox read-only --quiet
     [ "$status" -ne 0 ]
-    echo "$output" | jq -e '.status == "error"'
-    grep -qi "read-only" "$(echo "$output" | jq -r .last_message)"
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("unsupported sandbox"))
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
+    assert_mock_not_called dsh
+    [ ! -d "$repo/.legion/worktrees" ]
+}
+
+@test "legion-deepseek: rejects ineffective model overrides before dsh resolution or launch" {
+    local repo; repo="$(make_test_repo model-refusal)"
+    run "$LEGION_DEEPSEEK" run --task "inspect" --repo "$repo" \
+      --model deepseek-v3.2 --quiet
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("unsupported model"))
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
+    assert_mock_not_called dsh
+    [ ! -d "$repo/.legion/worktrees" ]
 }
 
 @test "legion-deepseek: honours LEGION_DSH_PROFILE" {
@@ -115,14 +145,18 @@ make_test_repo() {
     assert_mock_called dsh "--profile my-profile"
 }
 
-@test "legion-deepseek: takes the task from a file, not argv" {
-    # A task carrying a diff or a long spec exceeds ARG_MAX.
+@test "legion-deepseek: task-file input is truthfully forwarded to dsh on argv" {
+    # The adapter can read a task file, but dsh-headless still receives those
+    # bytes positionally; executors.toml must therefore keep task_file=false.
     local repo; repo="$(make_test_repo tf1)"
     local tf="$TEST_TMPDIR/task.txt"
     printf 'implement the thing described at length\n' > "$tf"
     run "$LEGION_DEEPSEEK" run --task-file "$tf" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
+    assert_mock_called dsh "implement the thing described at length"
+    run "$REPO_ROOT/legion-router/bin/legion-route" --executor-info deepseek
+    echo "$output" | jq -e '.task_file == false and .supported_task_transports == ["argv"]'
 }
 
 @test "legion-deepseek: is registered as a diff executor that cannot review" {

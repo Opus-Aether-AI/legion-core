@@ -1,0 +1,32 @@
+schema = "legion.executor-registry.v1"
+
+[executors.fixture]
+kind = "coding"
+adapter = "legion-fixture"
+contract = "diff"
+model_ref = "fixture_default"
+binary = "fixture-provider"
+version_args = ["--version"]
+version_regex = "fixture-provider (?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)"
+version_policy = "open"
+supported_version_patterns = ["^1\\.2\\.3$"]
+known_bad_version_patterns = ["^0\\."]
+config_fingerprint_env = ["FIXTURE_PROVIDER_MODE"]
+config_fingerprint_files = []
+required_config_env = []
+supported_config_env = ["FIXTURE_PROVIDER_MODE=^(new|broken)$"]
+known_bad_config_env = ["FIXTURE_PROVIDER_MODE=^broken$"]
+supported_sandboxes = ["read-only", "workspace-write"]
+supported_read_modes = ["provider-tools"]
+supported_task_transports = ["stdin"]
+supported_model_patterns = ["^fixture-"]
+supported_efforts = ["low", "high"]
+billing_class = "metered"
+requires_explicit_consent = false
+explicit_consent_model_patterns = ["^fixture-premium$"]
+usage_reliability = "provider_reported"
+usage_source = "fixture-json"
+cost_reliability = "provider_reported"
+cost_source = "fixture-json"
+cancellation = "process_group"
+max_runtime_seconds = 600

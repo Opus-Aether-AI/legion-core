@@ -163,6 +163,28 @@ def test_derive_status_state_machine():
     ) == "failed"
 
 
+def test_refusal_timeout_and_containment_failure_are_terminal_failures():
+    for status in ("refused", "timed_out", "containment_failed"):
+        record = _record(f"run-{status}", phase=status)
+        span = _span(f"run-{status}", status=status)
+        assert indexer.derive_status(
+            record,
+            span,
+            alive=False,
+            worktree_exists=True,
+            diff_exists=True,
+        ) == "failed"
+
+        running_record = _record(f"stale-{status}", phase="running")
+        assert indexer.derive_status(
+            running_record,
+            span,
+            alive=False,
+            worktree_exists=True,
+            diff_exists=False,
+        ) == "failed"
+
+
 def test_load_spans_latest_ts_wins_and_sums_cost_and_tokens(tmp_path):
     spans_dir = tmp_path / "spans"
     _write_spans(
@@ -197,12 +219,168 @@ def test_load_spans_latest_ts_wins_and_sums_cost_and_tokens(tmp_path):
 
     assert spans["run-1"]["status"] == "ok"
     assert spans["run-1"]["cost_usd"] == 1.0
+    assert spans["run-1"]["cost_status"] == "known"
+    assert spans["run-1"]["known_cost_attempts"] == 2
     assert spans["run-1"]["tokens"] == {
         "input_tokens": 30,
         "cached_input_tokens": 3,
         "output_tokens": 6,
         "reasoning_output_tokens": 9,
     }
+
+
+def test_console_downgrades_huge_cost_and_preserves_huge_token_map(tmp_path):
+    huge = 10**1000
+    span = _span("huge", cost_usd=huge, tokens={"input_tokens": huge})
+    span.update({"cost_status": "known", "usage_status": "known", "duration_ms": huge})
+    _write_spans(tmp_path / "spans", span)
+
+    loaded = indexer.load_spans(str(tmp_path / "spans"))["huge"]
+    assert loaded["cost_status"] == "unknown"
+    assert loaded["cost_usd"] is None
+    assert loaded["known_cost_usd"] is None
+    assert loaded["tokens"]["input_tokens"] == huge
+    run = indexer.build_run(_record("huge"), loaded)
+    assert run["tokens_total"] == huge
+    assert indexer._format_cost(huge, "known") == "unknown"
+
+    overflow_dir = tmp_path / "overflow-spans"
+    _write_spans(
+        overflow_dir,
+        _span("overflow", cost_usd=1e308),
+        _span("overflow", ts="2026-06-15T10:11:00Z", cost_usd=1e308),
+    )
+    overflow = indexer.load_spans(str(overflow_dir))["overflow"]
+    assert overflow["cost_status"] == "unknown"
+    assert overflow["known_cost_usd"] is None
+
+
+def test_console_index_preserves_unknown_and_partial_metering(tmp_path):
+    spans_dir = tmp_path / "spans"
+    known = _span("mixed", cost_usd=0)
+    known.update({"cost_status": "known", "usage_status": "known"})
+    unknown = _span("mixed", ts="2026-06-15T10:11:00Z", cost_usd=None, tokens={})
+    unknown.update({"cost_status": "unknown", "tokens": None, "usage_status": "unknown"})
+    _write_spans(spans_dir, known, unknown)
+
+    span = indexer.load_spans(str(spans_dir))["mixed"]
+    assert span["cost_usd"] is None
+    assert span["cost_status"] == "partial"
+    assert span["known_cost_usd"] == 0
+    assert span["known_cost_attempts"] == 1
+    assert span["tokens"] is None
+    assert span["usage_status"] == "partial"
+    assert span["known_usage_attempts"] == 1
+
+    run = indexer._build_run(_record("mixed", phase="ok"), span)
+    assert run["cost_usd"] is None
+    assert run["cost_status"] == "partial"
+    assert run["known_cost_usd"] == 0
+    assert run["tokens_total"] is None
+    assert run["known_tokens_total"] == 0
+    assert indexer._format_cost(
+        run["cost_usd"], run["cost_status"], run["known_cost_usd"]
+    ) == ">=0.0000"
+    assert indexer._format_cost(None, "unknown") == "unknown"
+
+
+def test_console_index_known_plus_not_applicable_is_partial(tmp_path):
+    spans_dir = tmp_path / "spans"
+    known = _span("mixed-na", cost_usd=0.5, tokens={"input_tokens": 3})
+    known.update({"cost_status": "known", "usage_status": "known"})
+    not_applicable = _span(
+        "mixed-na", ts="2026-06-15T10:11:00Z", cost_usd=None, tokens=None
+    )
+    not_applicable.update({
+        "cost_status": "not_applicable", "usage_status": "not_applicable",
+    })
+    _write_spans(spans_dir, known, not_applicable)
+
+    span = indexer.load_spans(str(spans_dir))["mixed-na"]
+    assert span["cost_usd"] is None
+    assert span["cost_status"] == "partial"
+    assert span["known_cost_usd"] == 0.5
+    assert span["known_cost_attempts"] == 1
+    assert span["tokens"] is None
+    assert span["usage_status"] == "partial"
+    assert span["known_usage"] == {
+        "input_tokens": 3,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+    assert span["known_usage_attempts"] == 1
+
+
+def test_console_index_rejects_malformed_partial_known_attempt_counts(tmp_path):
+    spans_dir = tmp_path / "spans"
+    spans = []
+    for index, count in enumerate([True, 0, -1, 1.5, "2"]):
+        span = _span(f"invalid-count-{index}", cost_usd=None)
+        span.update(
+            {
+                "cost_status": "partial",
+                "known_cost_usd": 0.5,
+                "known_cost_attempts": count,
+            }
+        )
+        spans.append(span)
+    _write_spans(spans_dir, *spans)
+
+    loaded = indexer.load_spans(str(spans_dir))
+    for index in range(len(spans)):
+        summary = loaded[f"invalid-count-{index}"]
+        assert summary["cost_usd"] is None
+        assert summary["cost_status"] == "unknown"
+        assert summary["known_cost_usd"] is None
+        assert summary["known_cost_attempts"] == 0
+
+
+def test_console_index_rejects_invalid_values_in_usage_maps(tmp_path):
+    spans_dir = tmp_path / "spans"
+    invalid_values = [-1, 1.5, True, float("nan"), float("inf"), "4", None]
+    spans = []
+    for index, value in enumerate(invalid_values):
+        known = _span(f"invalid-known-{index}", tokens={"input_tokens": value})
+        known["usage_status"] = "known"
+        spans.append(known)
+
+        partial = _span(f"invalid-partial-{index}")
+        partial.update(
+            {
+                "tokens": None,
+                "usage_status": "partial",
+                "known_usage": {"input_tokens": value},
+                "known_usage_attempts": 1,
+            }
+        )
+        spans.append(partial)
+    _write_spans(spans_dir, *spans)
+
+    loaded = indexer.load_spans(str(spans_dir))
+    for index in range(len(invalid_values)):
+        for prefix in ("invalid-known", "invalid-partial"):
+            summary = loaded[f"{prefix}-{index}"]
+            assert summary["usage_status"] == "unknown"
+            assert summary["tokens"] is None
+            assert summary["known_usage"] is None
+            assert summary["known_usage_attempts"] == 0
+
+
+def test_console_index_excludes_rollup_only_span(tmp_path):
+    spans_dir = tmp_path / "spans"
+    provider = _span("single", cost_usd=0.5)
+    provider["artifacts"] = {"provider_attempt": True}
+    rollup = _span("single", ts="2026-06-15T10:11:00Z", cost_usd=0.0)
+    rollup["status"] = "failed"
+    rollup["artifacts"] = {"rollup_only": True}
+    _write_spans(spans_dir, provider, rollup)
+
+    span = indexer.load_spans(str(spans_dir))["single"]
+
+    assert span["status"] == "ok"
+    assert span["cost_usd"] == 0.5
+    assert span["known_cost_attempts"] == 1
 
 
 def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
@@ -288,11 +466,12 @@ def test_build_snapshot_aggregates_traces_and_sorting(tmp_path):
     assert snapshot["aggregates"]["by_status"] == {"awaiting_human": 1, "failed": 1, "done": 1}
     # by_model carries COST (+ run count), not just a count (the "$16 vs $1" bug).
     assert snapshot["aggregates"]["by_model"] == {
-        "test-model-alpha": {"runs": 1, "cost_usd": 1.5},
-        "test-model-alpha-mini": {"runs": 1, "cost_usd": 2.0},
-        "test-model-opus": {"runs": 1, "cost_usd": 3.0},
+        "test-model-alpha": {"runs": 1, "cost_usd": 1.5, "cost_status": "known", "known_cost_usd": 1.5, "known_cost_attempts": 1},
+        "test-model-alpha-mini": {"runs": 1, "cost_usd": 2.0, "cost_status": "known", "known_cost_usd": 2.0, "known_cost_attempts": 1},
+        "test-model-opus": {"runs": 1, "cost_usd": 3.0, "cost_status": "known", "known_cost_usd": 3.0, "known_cost_attempts": 1},
     }
     assert snapshot["aggregates"]["total_cost_usd"] == 6.5
+    assert snapshot["aggregates"]["total_cost_status"] == "known"
     assert snapshot["aggregates"]["running"] == 0
     assert snapshot["aggregates"]["awaiting_human"] == 1
 

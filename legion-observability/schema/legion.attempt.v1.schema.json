@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/legion-observability/schema/legion.attempt.v1.schema.json",
+  "title": "legion.attempt.v1",
+  "description": "One actual provider call with model, configuration, lineage, usage/cost provenance, timing, sandbox, and terminal truth.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "attempt_id", "attempt_kind", "run_id", "parent_attempt_id", "ordinal", "executor", "provider", "config_identity", "requested_model", "effective_model", "requested_effort", "effective_effort", "cache_lineage", "usage", "usage_status", "usage_source", "cost_usd", "cost_status", "cost_source", "failure", "output_started", "started_at", "ended_at", "duration_ms", "sandbox", "terminal_status", "child_attempt_ids", "reconciliation"],
+  "properties": {
+    "schema": {"const": "legion.attempt.v1"},
+    "attempt_id": {"type": "string", "minLength": 1},
+    "attempt_kind": {"enum": ["provider", "aggregate"]},
+    "run_id": {"type": "string", "minLength": 1},
+    "parent_attempt_id": {"type": ["string", "null"], "minLength": 1},
+    "ordinal": {"type": "integer", "minimum": 1},
+    "executor": {"type": "string", "minLength": 1},
+    "provider": {"type": "string", "minLength": 1},
+    "config_identity": {"type": "string", "minLength": 1},
+    "requested_model": {"type": ["string", "null"], "minLength": 1},
+    "effective_model": {"type": ["string", "null"], "minLength": 1},
+    "requested_effort": {"type": ["string", "null"], "minLength": 1},
+    "effective_effort": {"type": ["string", "null"], "minLength": 1},
+    "cache_lineage": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["preflight_cache_key", "previous_attempt_id"],
+          "properties": {
+            "preflight_cache_key": {"type": ["string", "null"], "minLength": 1},
+            "previous_attempt_id": {"type": ["string", "null"], "minLength": 1}
+          }
+        }
+      ]
+    },
+    "usage": {"$ref": "#/$defs/nullableUsage"},
+    "usage_status": {"enum": ["known", "partial", "unknown", "not_applicable"]},
+    "usage_source": {"type": ["string", "null"], "minLength": 1},
+    "cost_usd": {"type": ["number", "null"], "minimum": 0},
+    "cost_status": {"enum": ["known", "partial", "unknown", "not_applicable"]},
+    "cost_source": {"type": ["string", "null"], "minLength": 1},
+    "failure": {"anyOf": [{"$ref": "legion.failure.v1.schema.json"}, {"type": "null"}]},
+    "output_started": {"type": "boolean"},
+    "started_at": {"type": "string", "minLength": 1},
+    "ended_at": {"type": "string", "minLength": 1},
+    "duration_ms": {"type": "number", "minimum": 0},
+    "sandbox": {"type": "string", "minLength": 1},
+    "terminal_status": {"enum": ["succeeded", "failed", "cancelled", "timed_out", "refused"]},
+    "child_attempt_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "reconciliation": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["usage", "usage_status", "usage_source", "known_usage", "known_usage_attempts", "cost_usd", "cost_status", "cost_source", "known_cost_usd", "known_cost_attempts", "attempt_count"],
+          "properties": {
+            "usage": {"$ref": "#/$defs/nullableUsage"},
+            "usage_status": {"enum": ["known", "partial", "unknown", "not_applicable"]},
+            "usage_source": {"type": ["string", "null"], "minLength": 1},
+            "known_usage": {"$ref": "#/$defs/nullableUsage"},
+            "known_usage_attempts": {"type": "integer", "minimum": 0},
+            "cost_usd": {"type": ["number", "null"], "minimum": 0},
+            "cost_status": {"enum": ["known", "partial", "unknown", "not_applicable"]},
+            "cost_source": {"type": ["string", "null"], "minLength": 1},
+            "known_cost_usd": {"type": ["number", "null"], "minimum": 0},
+            "known_cost_attempts": {"type": "integer", "minimum": 0},
+            "attempt_count": {"type": "integer", "minimum": 1}
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"usage_status": {"const": "known"}}},
+      "then": {"properties": {"usage": {"type": "object"}, "usage_source": {"type": "string"}}},
+      "else": {"properties": {"usage": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"usage_status": {"enum": ["unknown", "not_applicable"]}}},
+      "then": {"properties": {"usage_source": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"cost_status": {"const": "known"}}},
+      "then": {"properties": {"cost_usd": {"type": "number"}, "cost_source": {"type": "string"}}},
+      "else": {"properties": {"cost_usd": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"cost_status": {"enum": ["unknown", "not_applicable"]}}},
+      "then": {"properties": {"cost_source": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"attempt_kind": {"const": "provider"}}},
+      "then": {
+        "properties": {
+          "usage_status": {"enum": ["known", "unknown", "not_applicable"]},
+          "cost_status": {"enum": ["known", "unknown", "not_applicable"]},
+          "child_attempt_ids": {"maxItems": 0},
+          "reconciliation": {"type": "null"}
+        }
+      },
+      "else": {"properties": {"child_attempt_ids": {"minItems": 1}, "reconciliation": {"type": "object"}}}
+    },
+    {
+      "if": {"properties": {"terminal_status": {"const": "succeeded"}}},
+      "then": {"properties": {"failure": {"type": "null"}}},
+      "else": {"properties": {"failure": {"type": "object"}}}
+    }
+  ],
+  "$defs": {
+    "nullableUsage": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+      ]
+    }
+  }
+}

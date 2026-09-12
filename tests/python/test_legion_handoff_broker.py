@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import socket
 import subprocess
@@ -54,6 +55,171 @@ def test_complete_span_validation_rejects_missing_invalid_and_nonfinite_values()
     nonfinite["cost_usd"] = float("nan")
     with pytest.raises(ValueError, match="nonnegative number"):
         BROKER._validate_span(nonfinite, "parent-run")
+
+
+def test_complete_span_validation_accepts_containment_failure() -> None:
+    containment = valid_span()
+    containment["status"] = "containment_failed"
+    assert BROKER._validate_span(containment, "parent-run")["status"] == "containment_failed"
+
+
+@pytest.mark.parametrize("status", ["unknown", "not_applicable"])
+def test_complete_span_validation_accepts_nullable_unknown_telemetry(status: str) -> None:
+    span = valid_span()
+    span.update(
+        {
+            "cost_usd": None,
+            "cost_status": status,
+            "known_cost_usd": None,
+            "tokens": None,
+            "usage_status": status,
+            "known_usage": None,
+        }
+    )
+    assert BROKER._validate_span(span, "parent-run")["cost_status"] == status
+
+
+def test_complete_span_validation_accepts_partial_telemetry_lower_bounds() -> None:
+    span = valid_span()
+    span.update(
+        {
+            "cost_usd": None,
+            "cost_status": "partial",
+            "known_cost_usd": 0.25,
+            "known_cost_attempts": 1,
+            "tokens": None,
+            "usage_status": "partial",
+            "known_usage": {"input_tokens": 7},
+            "known_usage_attempts": 1,
+        }
+    )
+    assert BROKER._validate_span(span, "parent-run")["known_cost_usd"] == 0.25
+
+
+@pytest.mark.parametrize("field", ["tokens", "known_usage"])
+@pytest.mark.parametrize("value", [-1, 1.5, True, "7", None])
+def test_complete_span_validation_rejects_malformed_usage_map_values(
+    field: str, value: object
+) -> None:
+    span = valid_span()
+    if field == "known_usage":
+        span.update(
+            {
+                "tokens": None,
+                "usage_status": "partial",
+                "known_usage": {"input_tokens": value},
+                "known_usage_attempts": 1,
+            }
+        )
+    else:
+        span.update({"usage_status": "known", "tokens": {"input_tokens": value}})
+    with pytest.raises(ValueError, match=field):
+        BROKER._validate_span(span, "parent-run")
+
+
+@pytest.mark.parametrize(
+    ("changes", "field"),
+    [
+        ({"cost_status": "known", "cost_usd": None}, "cost_usd"),
+        ({"cost_status": "unknown", "cost_usd": 0.0}, "cost_usd"),
+        ({"cost_status": "not_applicable", "cost_usd": None, "known_cost_usd": 0.0}, "known_cost_usd"),
+        ({"cost_status": "partial", "cost_usd": 0.0, "known_cost_usd": 0.0, "known_cost_attempts": 1}, "cost_usd"),
+        ({"cost_status": "partial", "cost_usd": None, "known_cost_usd": 0.0}, "known_cost_attempts"),
+        ({"usage_status": "known", "tokens": None}, "tokens"),
+        ({"usage_status": "unknown", "tokens": {}}, "tokens"),
+        ({"usage_status": "not_applicable", "tokens": None, "known_usage": {}}, "known_usage"),
+        ({"usage_status": "partial", "tokens": {}, "known_usage": {}, "known_usage_attempts": 1}, "tokens"),
+        ({"usage_status": "partial", "tokens": None, "known_usage": {}}, "known_usage_attempts"),
+    ],
+)
+def test_complete_span_validation_rejects_status_value_contradictions(
+    changes: dict[str, object], field: str
+) -> None:
+    span = valid_span()
+    span.update(changes)
+    with pytest.raises(ValueError, match=field):
+        BROKER._validate_span(span, "parent-run")
+
+
+def test_broker_protocol_accepts_only_a_positive_typed_child_lease() -> None:
+    assert BROKER._validated_args(
+        ["run", "--executor", "cursor", "--max-runtime-seconds", "7"]
+    ) == ["run", "--executor", "cursor", "--max-runtime-seconds", "7"]
+    for value in ("0", "-1", "1.5", "$(id)"):
+        with pytest.raises(ValueError, match="max-runtime-seconds"):
+            BROKER._validated_args(
+                ["run", "--executor", "cursor", "--max-runtime-seconds", value]
+            )
+
+
+def test_broker_protocol_uses_registry_executor_and_effort_capabilities() -> None:
+    assert BROKER._validated_args(["run", "--executor", "deepseek"]) == [
+        "run", "--executor", "deepseek"
+    ]
+    for effort in ("off", "minimal"):
+        assert BROKER._validated_args(
+            ["run", "--executor", "pi", "--reasoning-effort", effort]
+        )[-1] == effort
+    with pytest.raises(ValueError, match="invalid for executor cursor"):
+        BROKER._validated_args(
+            ["run", "--executor", "cursor", "--reasoning-effort", "minimal"]
+        )
+
+
+def test_broker_protocol_fails_closed_on_an_invalid_executor_registry(tmp_path: Path) -> None:
+    registry = tmp_path / "executors.toml"
+    registry.write_text(
+        'schema = "legion.executor-registry.v1"\n'
+        '[executors.cursor]\n'
+        'kind = "primary coding"\n'
+        'supported_efforts = []\n'
+        'typo_capability = true\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="executor registry is invalid"):
+        BROKER._validated_args(
+            ["run", "--executor", "cursor"], registry_path=registry
+        )
+
+
+def test_broker_inherits_or_lowers_but_never_raises_parent_lease() -> None:
+    inherited = BROKER._bounded_lease_args(["run", "--executor", "cursor"], 12)
+    assert inherited[-2:] == ["--max-runtime-seconds", "12"]
+    assert BROKER._bounded_lease_args(
+        ["run", "--executor", "cursor", "--max-runtime-seconds", "7"], 12
+    )[-1] == "7"
+    with pytest.raises(ValueError, match="may lower but not raise"):
+        BROKER._bounded_lease_args(
+            ["run", "--executor", "cursor", "--max-runtime-seconds", "13"], 12
+        )
+
+
+def test_broker_uses_remaining_monotonic_parent_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "LEGION_CHILD_LEASE_DEADLINE_NS", str(time.monotonic_ns() + 1_100_000_000)
+    )
+    broker = BROKER.Broker(
+        socket_path=tmp_path / "broker.sock",
+        token="token",
+        delegate=tmp_path / "delegate",
+        source_repo=tmp_path,
+        broker_root=tmp_path / "root",
+        base_sha="deadbeef",
+        sandbox_bin=Path("/usr/bin/true"),
+        sandbox_kind="bwrap",
+        supervisor=MODULE_PATH,
+        supervisor_deny_canary=tmp_path / "deny",
+        supervisor_allow_canary=tmp_path / "allow",
+        telemetry_dir=None,
+        expected_parent="parent",
+        max_runtime_seconds=30,
+    )
+    assert broker._remaining_runtime_seconds() in {1, 2}
+    assert BROKER._bounded_lease_args(
+        ["run", "--executor", "cursor"], broker._remaining_runtime_seconds()
+    )[-1] in {"1", "2"}
 
 
 def test_short_telemetry_append_rolls_back_the_partial_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,6 +294,76 @@ def test_incomplete_descendant_supervisor_exit_fails_closed(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="incomplete cleanup"):
         BROKER._terminate_supervisor(process)
+
+
+def test_broker_lease_reaps_a_silent_setsid_nested_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = tmp_path / "nested.pid"
+    delegate = tmp_path / "fake-delegate"
+    delegate.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, signal, time\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"    open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        "    while True: time.sleep(1)\n"
+        "while True: time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    delegate.chmod(0o700)
+    broker_root = tmp_path / "broker-root"
+    broker = BROKER.Broker(
+        socket_path=tmp_path / "unused.sock",
+        token="test-token",
+        delegate=delegate,
+        source_repo=tmp_path,
+        broker_root=broker_root,
+        base_sha="deadbeef",
+        sandbox_bin=Path("/usr/bin/true"),
+        sandbox_kind="bwrap",
+        supervisor=ROOT / "legion-router" / "scripts" / "legion-process-supervisor.py",
+        supervisor_deny_canary=tmp_path / "deny",
+        supervisor_allow_canary=tmp_path / "allow",
+        telemetry_dir=None,
+        expected_parent="parent",
+        max_runtime_seconds=1,
+    )
+    broker.broker_repo = tmp_path
+    monkeypatch.setattr(broker, "_prepare_repository", lambda: None)
+    monkeypatch.setattr(broker, "_sandbox_command", lambda command: command)
+    monkeypatch.setattr(broker, "_target_environment", os.environ.copy)
+
+    client, server = socket.socketpair()
+    thread = threading.Thread(target=broker._handle, args=(server,))
+    thread.start()
+    BROKER._send_json(
+        client,
+        {
+            "token": "test-token",
+            "argv": ["run", "--executor", "cursor", "--max-runtime-seconds", "1"],
+            "stdin": "",
+        },
+        BROKER.MAX_REQUEST_BYTES,
+    )
+    response = BROKER._recv_json(client, BROKER.MAX_RESPONSE_BYTES)
+    client.close()
+    thread.join(timeout=8)
+
+    assert not thread.is_alive()
+    assert response["returncode"] == 124
+    assert json.loads((broker_root / "lease.json").read_text(encoding="utf-8"))["status"] == "timed_out"
+    child = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("nested setsid child survived broker lease expiry")
 
 
 def test_abandoned_client_preserves_supervisor_exit_70(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

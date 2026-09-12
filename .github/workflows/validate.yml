@@ -12,6 +12,30 @@ permissions:
   contents: read
 
 jobs:
+  validate-python-runtime:
+    name: validate-python-runtime-${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Pack npm runtime without external Python dependencies
+        run: |
+          set -euo pipefail
+          pack_dir="$(mktemp -d)"
+          npm pack --json --pack-destination "$pack_dir" > "$pack_dir/pack.json"
+          tarball="$pack_dir/$(jq -r '.[0].filename' "$pack_dir/pack.json")"
+          mkdir "$pack_dir/unpacked"
+          tar -xzf "$tarball" -C "$pack_dir/unpacked"
+          PYTHONNOUSERSITE=1 python3 -S \
+            "$pack_dir/unpacked/package/legion-observability/scripts/legion_executor_registry.py" \
+            --family codex | grep -Fx codex
+
   validate-marketplace:
     name: validate-marketplace
     runs-on: ubuntu-latest
@@ -20,6 +44,9 @@ jobs:
 
       - name: Marketplace JSON parses
         run: jq empty .claude-plugin/marketplace.json
+
+      - name: Release licence metadata is coherent
+        run: python3 scripts/check-license-metadata.py --root .
 
       - name: Marketplace has required top-level fields
         run: |
@@ -393,14 +420,26 @@ jobs:
       - name: Verify bats tests pass without coverage instrumentation
         run: bats tests/
 
-      - name: Run bats under kcov for coverage
+      - name: Run installer and release tests under kcov for coverage
         run: |
           mkdir -p coverage-output
+          # The complete Bats suite already ran above. Instrument only the test
+          # files that exercise root scripts/: kcov rewrites every nested
+          # `bash -c`, which can perturb strict signal/provenance tests outside
+          # this job's installer/release coverage boundary.
           kcov \
             --include-path=scripts \
             --exclude-pattern=/tests/ \
             coverage-output \
-            bats tests/
+            bats \
+              tests/bin-path.bats \
+              tests/conventional-title.bats \
+              tests/install.bats \
+              tests/legion-primary-setup.bats \
+              tests/npm-runtime-surface.bats \
+              tests/refresh.bats \
+              tests/release-controls.bats \
+              tests/uninstall.bats
 
       - name: Report coverage summary
         run: |

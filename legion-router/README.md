@@ -20,6 +20,7 @@ archetype, and evidence contracts are not limited to coding.
 | `legion-deepseek` | `scripts/legion-deepseek.sh` | Delegate through a user-authored DeepSeek Harness profile in an isolated worktree. DeepSeek Harness ships no headless preset. |
 | `legion-pi` | `scripts/legion-pi.sh` | Delegate through Pi's official `-p --mode json --no-session` stream inside a filesystem write sandbox; validate the final settled `agent_end`, meter every `message_end` plus compaction call exactly once, and return a patch captured with parent-owned Git metadata. |
 | `legion-hermes` | `scripts/legion-hermes.sh` | Delegate through Hermes `--oneshot` inside a filesystem write sandbox; parse its complete `--usage-file` JSON document while preserving stdout as opaque final text. |
+| `legion-preflight` | `../legion-observability/scripts/legion_preflight.py` | Make a no-spend, JSON-only local availability/compatibility decision from the executor registry. It may run the binary's local version command but never supplies a task or model prompt. |
 | `legion-intake` | `scripts/legion-intake.sh` | GitHub issue intake wrapper. Runs a compatible Legion worker (`delegate`, `cursor`, or `custom`) in explore or implement mode, comments assessment results, and opens review PRs for implementation diffs. |
 | `legion-router` | `scripts/router.sh` | Manage the loopback `:8082` Anthropic-compatible metering proxy as a launchd service: `install`/`uninstall`/`start`/`stop`/`restart`/`status`/`logs`/`errors`/`dev`. Endpoints: `/health`, `/stats`, `POST /ingest`. Keys optional (runs as a pure meter). |
 
@@ -84,6 +85,56 @@ through `legion-route.py` rather than parsing `models.toml` a second time. If no
 interpreter resolves, the proxy still starts and warns, but every model role
 falls through to its default.
 
+## Executor contract and no-spend preflight
+
+`config/executors.toml` is a versioned but backwards-compatible registry.
+Legacy entries still load; declarations for versions, known-bad configuration,
+sandbox/read/task transport, model/effort, billing consent, usage/cost
+provenance, cancellation, and the child runtime default are validated when
+present. `task_file = true` means the task stays off provider argv end to end,
+not merely that the Legion adapter accepts a file flag. DeepSeek, Cursor, Pi,
+and Hermes therefore declare argv transport today.
+
+Use the shared gate before a provider launch:
+
+```bash
+legion-preflight --json --executor codex --sandbox read-only \
+  --task-transport stdin --model "$(legion-route --model-ref codex_review)" --effort high
+```
+
+The result is `supported`, `untested`, `incompatible`, or `unavailable`.
+Unknown versions remain visibly `untested`; known-bad versions/configurations
+and undeclared capabilities are incompatible. Only `supported` admits a
+provider launch; every other state fails closed before spend. Cache identity includes the
+resolved executable path, its SHA-256 digest, and a fingerprint of only the
+registry-declared relevant environment/files. Binary or configuration changes
+therefore force a new local version probe. The cache and output retain hashes,
+not configuration values. Every registered adapter now applies this admission
+contract before launching its provider.
+
+## Child execution leases
+
+Every delegated child run has a hard, positive lease from the selected
+executor's `max_runtime_seconds` registry entry. Operators can shorten it, but
+cannot silently extend it:
+
+```bash
+legion-delegate run --executor codex --max-runtime-seconds 900 --task "..." --repo .
+```
+
+The same flag is supported by each direct adapter. Nested Pi/Hermes handoffs
+carry the parent cap through the authenticated broker and may lower it again.
+The deadline uses monotonic time. On expiry, the descendant-aware supervisor
+terminates the complete tracked tree with bounded TERM/KILL grace, including
+children that create a new session. The terminal result, span, run state,
+`legion.attempt.v1`, and `legion.failure.v1` all use `timed_out`; the failure is
+non-retryable and remains bound to the provider attempt. Timeout overrides
+`--keep`, and cleanup removes the child, nested broker, worktree, branch, and
+queued lifecycle before returning.
+
+This lease is deliberately child-only. It does not impose a wall-clock timeout
+on the primary session or its semantic-convergence lifecycle.
+
 ## DeepSeek Harness (`deepseek`, needs a profile you author)
 
 `legion-deepseek` delegates to DeepSeek Harness the way every `contract = "diff"`
@@ -120,16 +171,18 @@ Two capabilities are declared honestly rather than optimistically:
   out of `[review].order`. A reviewer that cannot emit a schema-valid verdict is
   indistinguishable from one that rejected the change, which is how a fallback
   turns a missing review into a blocked merge.
-- **Usage is not metered.** dsh at `0.1.1-rc.2` is a developer preview with no
+- **Usage is unavailable.** dsh at `0.1.1-rc.2` is a developer preview with no
   headless output contract -- no JSON envelope, and although a `dsh-token-meter`
-  package exists it exposes nothing through this path. The adapter reports zero
-  and means "not reported"; a plausible-looking number would flow into cost
-  totals and routing decisions that are supposed to be evidence-based.
+  package exists it exposes nothing through this path. The v1 registry declares
+  usage and cost reliability `unavailable`; new receipts preserve both as null.
+  The legacy span adapter still reports its historical zero until its separate
+  receipt migration, so it must not be read as a measured free call.
 
 `read-only` has no dsh equivalent either: there is no documented flag that
-withholds the write and bash tools. Rather than pass a flag that does not exist,
-a read-only run that changed any file is rejected after the fact. That backstop
-exists for other adapters too, but here it is the only line of defence.
+withholds the write and bash tools. The common preflight therefore classifies it
+as incompatible before resolving or invoking `dsh`. The legacy direct adapter's
+after-the-fact diff backstop remains until that boundary is migrated to the
+shared admission primitive.
 
 ## Agent Client Protocol bridge (staged, not yet wired)
 
@@ -286,6 +339,7 @@ or VM when the run completes.
 ```
 legion-router/
 ├── bin/legion-delegate          # PATH shim
+├── bin/legion-preflight         # shared no-spend admission check
 ├── scripts/
 │   ├── delegate.sh              # the delegation CLI
 │   ├── sandcastle-run.mjs       # optional Sandcastle bridge for docker/podman/vercel

@@ -5,6 +5,11 @@
 # legion-opencode adapter's stream parsing can be tested deterministically.
 
 set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'opencode 1.3.0\n'
+  exit 0
+fi
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'opencode %s\n' "$*" >> "$MOCK_CALL_LOG"
 [[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'opencode active=%s executor=%s depth=%s run=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
@@ -33,6 +38,7 @@ fi
 # process itself exits 0. The adapter must treat the event as authoritative.
 if [[ "${MOCK_OPENCODE_ERROR_EVENT:-0}" == "1" ]]; then
   jq -cn '{type:"error",sessionID:"mock-session",error:{name:"APIError",data:{message:"The requested model is not supported.",statusCode:400,isRetryable:false}}}'
+  [[ -z "${MOCK_OPENCODE_ERROR_DELAY:-}" ]] || sleep "$MOCK_OPENCODE_ERROR_DELAY"
   exit 0
 fi
 
@@ -69,9 +75,46 @@ if [[ "${MOCK_OPENCODE_CURRENT_STREAM:-0}" == "1" ]]; then
   exit 0
 fi
 
+if [[ "${MOCK_OPENCODE_HUGE_TOKENS:-0}" == "1" ]]; then
+  cat <<EOF
+{"type":"message.updated","properties":{"info":{"id":"a1","role":"assistant","providerID":"$provider","modelID":"$modelid","cost":0.002,"tokens":{"input":9007199254740993,"output":10,"reasoning":2,"cache":{"read":0,"write":0}}}}}
+{"type":"message.updated","properties":{"info":{"id":"a2","role":"assistant","providerID":"$provider","modelID":"$modelid","cost":0.001,"tokens":{"input":9,"output":4,"reasoning":1,"cache":{"read":0,"write":0}}}}}
+{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text","text":"OPENCODE_HUGE_TOKENS"}}}
+{"type":"session.idle","properties":{}}
+EOF
+  exit 0
+fi
+
 # Emit a stray non-JSON stdout line (e.g. a plugin console.log) to prove the
 # adapter's tolerant parse skips it instead of zeroing the whole run's metering.
 [[ "${MOCK_OPENCODE_STRAY_STDOUT:-0}" == "1" ]] && printf 'plugin: hello from console.log (not json)\n'
+
+if [[ "${MOCK_OPENCODE_NEGATIVE_METERING:-0}" == 1 ]]; then
+  cat <<EOF
+{"type":"message.updated","properties":{"info":{"id":"a1","role":"assistant","providerID":"$provider","modelID":"$modelid","cost":-0.002,"tokens":{"input":-1,"output":10,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text","text":"OPENCODE_NEGATIVE_METERING"}}}
+{"type":"session.idle","properties":{}}
+EOF
+  exit 0
+fi
+
+if [[ "${MOCK_OPENCODE_PARTIAL_TOKENS:-0}" == 1 ]]; then
+  cat <<EOF
+{"type":"message.updated","properties":{"info":{"id":"a1","role":"assistant","providerID":"$provider","modelID":"$modelid","tokens":{"input":1000}}}}
+{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text","text":"OPENCODE_PARTIAL_TOKENS"}}}
+{"type":"session.idle","properties":{}}
+EOF
+  exit 0
+fi
+
+if [[ "${MOCK_OPENCODE_NO_COST:-0}" == 1 || "${MOCK_OPENCODE_ZERO_COST:-0}" == 1 ]]; then
+  cost_field=''
+  [[ "${MOCK_OPENCODE_ZERO_COST:-0}" != 1 ]] || cost_field=',"cost":0'
+  printf '{"type":"message.updated","properties":{"info":{"id":"a1","role":"assistant","providerID":"%s","modelID":"%s"%s,"tokens":{"input":1000000,"output":100000,"reasoning":0,"cache":{"read":0,"write":0}}}}}\n' \
+    "$provider" "$modelid" "$cost_field"
+  printf '%s\n' '{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text","text":"OPENCODE_COST_PROVENANCE"}}}'
+  exit 0
+fi
 
 # Two streaming updates for one message id (take last state), plus a second
 # assistant message id (sum across ids), plus text parts and session.idle.

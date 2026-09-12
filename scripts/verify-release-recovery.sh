@@ -47,6 +47,13 @@ if [ "$tag_version" != "$package_version" ] || [ "$tag_version" != "$marketplace
     exit 2
 fi
 
+# Releases created after the licence-coherence policy landed carry their own
+# immutable policy file. Older tags remain recoverable under their historical
+# validation contract instead of being retroactively judged by today's policy.
+if [ -f "$RELEASE_DIR/.claude-plugin/license-policy.json" ]; then
+    python3 "$SCRIPT_DIR/check-license-metadata.py" --root "$RELEASE_DIR"
+fi
+
 {
     printf 'sha=%s\n' "$head_sha"
     printf 'package=%s\n' "$package_name"

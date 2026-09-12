@@ -69,6 +69,19 @@ def test_compute_empty_is_safe():
     assert c["total_runs"] == 0 and c["codex_share_runs"] == 0.0 and c["codex_share_tokens"] == 0.0
 
 
+def test_compute_excludes_non_billable_rollup_spans():
+    provider = _span("codex", "fixture-codex", 300)
+    rollup = _span("codex", "fixture-codex", 300)
+    rollup["artifacts"] = {"rollup_only": True}
+
+    c = ls.compute([provider, rollup, _span("opus", "fixture-claude", 300)])
+
+    assert c["total_runs"] == 2
+    assert c["codex_runs"] == 1
+    assert c["opus_runs"] == 1
+    assert c["codex_share_runs"] == 0.5
+
+
 def test_target_default_and_env(monkeypatch):
     monkeypatch.delenv("LEGION_TARGET_CODEX_SHARE", raising=False)
     # explicit wins

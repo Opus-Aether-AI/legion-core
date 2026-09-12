@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -19,6 +20,16 @@ TOKEN_FIELDS = (
     "output_tokens",
     "reasoning_output_tokens",
 )
+TERMINAL_PHASES = {
+    "blocked",
+    "containment_failed",
+    "error",
+    "failed",
+    "ok",
+    "over_budget",
+    "refused",
+    "timed_out",
+}
 TOOLLESS_ITEM_TYPES = {"agent_message", "reasoning"}
 FILE_ITEM_TYPES = {"file_change", "patch"}
 PATH_KEYS = {
@@ -49,9 +60,22 @@ DEFAULT_ROOT = legion_state.default_log_root()
 def _num(value: Any) -> float:
     if isinstance(value, bool):
         return 0.0
-    if isinstance(value, (int, float)) and value == value:
-        return float(value)
+    if isinstance(value, (int, float)):
+        try:
+            numeric = float(value)
+        except OverflowError:
+            return 0.0
+        if math.isfinite(numeric):
+            return numeric
     return 0.0
+
+
+def _positive_int(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -73,6 +97,8 @@ def _zero_usage() -> dict[str, int]:
 def _empty_activity() -> dict[str, Any]:
     return {
         "usage": _zero_usage(),
+        "_usage_observed": False,
+        "_usage_attempts": 0,
         "tools": [],
         "files": [],
         "items": 0,
@@ -83,21 +109,38 @@ def _empty_activity() -> dict[str, Any]:
 def _sum_usage(total: dict[str, int], usage: Any) -> None:
     data = _dict(usage)
     for field in TOKEN_FIELDS:
-        total[field] += int(max(0.0, _num(data.get(field))))
+        value = data.get(field, 0)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            total[field] += value
+
+
+def _valid_stream_usage(value: Any) -> bool:
+    """Accept only the canonical, exactly metered Codex token counters."""
+    return (
+        isinstance(value, dict)
+        and bool(value)
+        and set(value).issubset(TOKEN_FIELDS)
+        and all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 0
+            for item in value.values()
+        )
+    )
 
 
 def _normalize_costs(costs: Any) -> dict[str, Any]:
     default = _dict(_dict(costs).get("default"))
+    models = [
+        model for model in _dict(costs).get("models", []) if isinstance(model, dict)
+    ]
     return {
-        "models": [
-            model for model in _dict(costs).get("models", []) if isinstance(model, dict)
-        ],
+        "models": models,
         "default": {
             "input": _num(default.get("input")),
             "output": _num(default.get("output")),
             "cache_read": _num(default.get("cache_read")),
             "cache_write": _num(default.get("cache_write")),
         },
+        "_default_pricing_observed": _valid_rate_table(default),
     }
 
 
@@ -110,7 +153,41 @@ def _default_costs() -> dict[str, Any]:
             "cache_read": 0.0,
             "cache_write": 0.0,
         },
+        "_default_pricing_observed": False,
     }
+
+
+def _valid_rate_table(value: Any) -> bool:
+    table = _dict(value)
+    return all(
+        key in table
+        and _valid_pricing_number(table[key])
+        for key in ("input", "output", "cache_read", "cache_write")
+    )
+
+
+def _valid_pricing_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return False
+    return math.isfinite(numeric) and numeric >= 0
+
+
+def _valid_long_context(entry: dict[str, Any]) -> bool:
+    if "long_context" not in entry:
+        return True
+    long_context = entry.get("long_context")
+    if not isinstance(long_context, dict):
+        return False
+    if not _valid_pricing_number(long_context.get("threshold_input_tokens")):
+        return False
+    return all(
+        field not in long_context or _valid_pricing_number(long_context[field])
+        for field in ("input_multiplier", "output_multiplier")
+    )
 
 
 def load_costs(costs_path: str) -> dict[str, Any]:
@@ -125,12 +202,18 @@ def load_costs(costs_path: str) -> dict[str, Any]:
 
 
 def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
+    return _rates_for_with_evidence(model, costs)[0]
+
+
+def _rates_for_with_evidence(
+    model: Any, costs: dict[str, Any]
+) -> tuple[dict[str, float], bool]:
     model_name = _string(model).lower()
     for entry in costs.get("models", []):
         match = _string(entry.get("match")).lower()
         if match and match in model_name:
             long_context = _dict(entry.get("long_context"))
-            return {
+            return ({
                 "input": _num(entry.get("input")),
                 "output": _num(entry.get("output")),
                 "cache_read": _num(entry.get("cache_read")),
@@ -158,9 +241,9 @@ def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
                     if long_context.get("output_multiplier") is not None
                     else 1.0
                 ),
-            }
+            }, _valid_rate_table(entry) and _valid_long_context(entry))
     default = _dict(costs.get("default"))
-    return {
+    return ({
         "input": _num(default.get("input")),
         "output": _num(default.get("output")),
         "cache_read": _num(default.get("cache_read")),
@@ -168,16 +251,27 @@ def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
         "lc_threshold": -1.0,
         "lc_input_multiplier": 1.0,
         "lc_output_multiplier": 1.0,
-    }
+    }, costs.get("_default_pricing_observed") is True)
 
 
 def cost_for(model: Any, usage: Any, costs: dict[str, Any]) -> float:
     """Compute USD cost from token usage using the Legion shared price table."""
+    return _cost_for_with_evidence(model, usage, costs)[0]
+
+
+def _cost_for_with_evidence(
+    model: Any, usage: Any, costs: dict[str, Any]
+) -> tuple[float, bool]:
     data = _dict(usage)
-    input_tokens = int(max(0.0, _num(data.get("input_tokens"))))
-    cached_tokens = int(max(0.0, _num(data.get("cached_input_tokens"))))
-    output_tokens = int(max(0.0, _num(data.get("output_tokens"))))
-    reasoning_tokens = int(max(0.0, _num(data.get("reasoning_output_tokens"))))
+    counters = []
+    for field in TOKEN_FIELDS:
+        value = data.get(field, 0)
+        counters.append(
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            else 0
+        )
+    input_tokens, cached_tokens, output_tokens, reasoning_tokens = counters
     billed_in = max(0, input_tokens - cached_tokens)
     billed_out = output_tokens + reasoning_tokens
     rates = _rates_for(model, costs)
@@ -190,12 +284,15 @@ def cost_for(model: Any, usage: Any, costs: dict[str, Any]) -> float:
     over = threshold >= 0 and (billed_in + cached_tokens) > threshold
     in_mult = rates["lc_input_multiplier"] if over else 1.0
     out_mult = rates["lc_output_multiplier"] if over else 1.0
-    total = (
-        billed_in * rates["input"] * in_mult
-        + billed_out * rates["output"] * out_mult
-        + cached_tokens * rates["cache_read"] * in_mult
-    )
-    return total / 1_000_000.0
+    try:
+        total = (
+            billed_in * rates["input"] * in_mult
+            + billed_out * rates["output"] * out_mult
+            + cached_tokens * rates["cache_read"] * in_mult
+        ) / 1_000_000.0
+    except OverflowError:
+        return 0.0, False
+    return (total, True) if math.isfinite(total) and total >= 0 else (0.0, False)
 
 
 def _first_typed_dict(value: Any) -> dict[str, Any]:
@@ -329,8 +426,11 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
     tool_counts: Counter[str] = Counter()
     files: set[str] = set()
     items = 0
+    usage_observed = False
+    usage_attempts = 0
 
     for stream_path in stream_paths:
+        stream_has_usage = False
         try:
             with open(stream_path, encoding="utf-8") as handle:
                 for raw_line in handle:
@@ -349,7 +449,12 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
                         usage_payload = event.get("usage")
                         if not isinstance(usage_payload, dict):
                             usage_payload = _dict(_dict(event.get("payload")).get("usage"))
-                        _sum_usage(usage, usage_payload)
+                        if _valid_stream_usage(usage_payload):
+                            usage_observed = True
+                            if not stream_has_usage:
+                                usage_attempts += 1
+                                stream_has_usage = True
+                            _sum_usage(usage, usage_payload)
                         continue
 
                     if event_type != "item.completed":
@@ -372,6 +477,8 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
     file_list = sorted(files)
     return {
         "usage": usage,
+        "_usage_observed": usage_observed,
+        "_usage_attempts": usage_attempts,
         "tools": tools,
         "files": file_list,
         "items": items,
@@ -389,14 +496,94 @@ def run_cost(run_dir: str, model: Any, costs: dict[str, Any]) -> float:
     return cost_for(model, activity.get("usage"), costs)
 
 
-def load_span_costs(spans_dir: str) -> dict[str, float]:
-    """run_id -> total cost_usd from the DURABLE spans. The stream lives in the
+def _span_cost_status(span: dict[str, Any]) -> str:
+    value = span.get("cost_usd")
+    numeric = _valid_pricing_number(value)
+    status = span.get("cost_status")
+    if status == "known":
+        return "known" if numeric else "unknown"
+    if status == "partial":
+        lower = span.get("known_cost_usd")
+        count = span.get("known_cost_attempts")
+        return "partial" if (
+            _valid_pricing_number(lower) and _positive_int(count) is not None
+        ) else "unknown"
+    if status in {"unknown", "not_applicable"}:
+        return status
+    return "known" if numeric else "unknown"
+
+
+def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    known = partial = unknown = not_applicable = known_count = 0
+    subtotal = 0.0
+    overflow = False
+    for record in records:
+        status = _span_cost_status(record)
+        if status == "known":
+            known += 1
+            known_count += _positive_int(record.get("known_cost_attempts")) or 1
+            subtotal += _num(record.get("cost_usd"))
+            overflow = overflow or not math.isfinite(subtotal)
+        elif status == "partial":
+            partial += 1
+            known_count += _positive_int(record.get("known_cost_attempts")) or 0
+            subtotal += _num(record.get("known_cost_usd"))
+            overflow = overflow or not math.isfinite(subtotal)
+        elif status == "unknown":
+            unknown += 1
+        else:
+            not_applicable += 1
+    applicable = known + partial + unknown
+    status = (
+        "not_applicable" if not applicable else
+        "known" if known == applicable + not_applicable else
+        "unknown" if not known and not partial else
+        "partial"
+    )
+    if overflow:
+        status = "unknown"
+        known_count = 0
+        subtotal = 0.0
+    subtotal = round(subtotal, 6)
+    return {
+        "cost_usd": subtotal if status == "known" else None,
+        "cost_status": status,
+        "known_cost_usd": subtotal if known_count else None,
+        "known_cost_attempts": known_count,
+    }
+
+
+def _durable_attempt_count(records: list[dict[str, Any]]) -> int:
+    """Count durable billable attempts without counting rollup-only spans."""
+    count = 0
+    for record in records:
+        status = _span_cost_status(record)
+        if status == "not_applicable":
+            continue
+        explicit = _positive_int(record.get("known_cost_attempts")) or 0
+        if status == "known":
+            count += max(1, explicit)
+        elif status == "partial":
+            # Partial means at least one known and one unknown leaf attempt.
+            count += max(2, explicit + 1)
+        else:
+            count += 1
+    return count
+
+
+def _is_rollup_only(span: dict[str, Any]) -> bool:
+    artifacts = span.get("artifacts") or {}
+    return isinstance(artifacts, dict) and artifacts.get("rollup_only") is True
+
+
+def load_span_costs(spans_dir: str) -> dict[str, dict[str, Any]]:
+    """run_id -> provenance-aware cost summary from the DURABLE spans. The stream lives in the
     repo's ephemeral .legion/runs/ and gets cleaned; the span (in
     ~/.claude/logs/legion/spans/) persists. Used as the cost fallback so a run
     whose stream is gone still shows its real cost (sum across resume spans)."""
-    costs: dict[str, float] = {}
+    spans: dict[str, list[dict[str, Any]]] = {}
     if not spans_dir or not os.path.isdir(spans_dir):
-        return costs
+        return {}
     for name in sorted(os.listdir(spans_dir)):
         if not name.endswith(".jsonl"):
             continue
@@ -410,27 +597,74 @@ def load_span_costs(spans_dir: str) -> dict[str, float]:
                         span = json.loads(line)
                     except ValueError:
                         continue
+                    if (not isinstance(span, dict) or
+                            span.get("schema") != "legion.span.v1" or _is_rollup_only(span)):
+                        continue
                     rid = span.get("run_id")
                     if isinstance(rid, str):
-                        costs[rid] = round(costs.get(rid, 0.0) + _num(span.get("cost_usd")), 6)
+                        spans.setdefault(rid, []).append(span)
         except OSError:
             continue
-    return costs
+    summaries = {}
+    for run_id, records in spans.items():
+        summary = _cost_summary(records)
+        summary["attempt_count"] = _durable_attempt_count(records)
+        summaries[run_id] = summary
+    return summaries
 
 
 def enrich_run(
     record: dict[str, Any],
     run_dir: str,
     costs: dict[str, Any],
-    span_costs: dict[str, float] | None = None,
+    span_costs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Attach activity and cost to a registry record. Cost prefers the run's own
-    stream usage; when the stream is gone, falls back to the durable span cost."""
+    """Attach activity and provenance-aware cost to a registry record.
+
+    A live run uses its stream estimate. Once a run is terminal, its durable
+    per-attempt spans are the authoritative cost record, including one attempt.
+    """
     activity = _parse_streams(_stream_paths(run_dir)) if run_dir else _empty_activity()
     model = record.get("model") or record.get("resolved_model")
     run_id = record.get("run_id")
-    stream_cost = round(cost_for(model, activity.get("usage"), costs), 6)
-    cost = stream_cost if stream_cost > 0 else round(_num((span_costs or {}).get(run_id)), 6)
+    durable = (span_costs or {}).get(run_id)
+    durable_attempt_count = 0
+    durable_metering = None
+    if isinstance(durable, dict):
+        durable_metering = dict(durable)
+        durable_attempt_count = int(_num(durable_metering.pop("attempt_count", 0)))
+    phase = _string(_dict(record.get("lifecycle")).get("phase"))
+    prefer_durable = (
+        phase in TERMINAL_PHASES
+        and durable_metering is not None
+        and durable_attempt_count > 0
+    )
+    _, pricing_observed = _rates_for_with_evidence(model, costs)
+    if activity.get("_usage_observed") is True and pricing_observed and not prefer_durable:
+        stream_cost, cost_observed = _cost_for_with_evidence(
+            model, activity.get("usage"), costs
+        )
+        if cost_observed:
+            stream_cost = round(stream_cost, 6)
+            metering = {
+                "cost_usd": stream_cost,
+                "cost_status": "known",
+                "known_cost_usd": stream_cost,
+                "known_cost_attempts": activity.get("_usage_attempts", 0),
+            }
+        else:
+            metering = {"cost_usd": None, "cost_status": "unknown",
+                        "known_cost_usd": None, "known_cost_attempts": 0}
+    else:
+        if durable_metering is not None:
+            metering = durable_metering
+        elif _valid_pricing_number(durable):
+            durable_cost = round(_num(durable), 6)
+            metering = {"cost_usd": durable_cost, "cost_status": "known",
+                        "known_cost_usd": durable_cost, "known_cost_attempts": 1}
+        else:
+            metering = {"cost_usd": None, "cost_status": "unknown",
+                        "known_cost_usd": None, "known_cost_attempts": 0}
     return {
         "run_id": run_id,
         "model": model,
@@ -441,7 +675,7 @@ def enrich_run(
         "branch": record.get("branch"),
         "repo_root": record.get("repo_root"),
         "phase": _dict(record.get("lifecycle")).get("phase"),
-        "cost_usd": cost,
+        **metering,
         "activity": {
             "tools": activity.get("tools", []),
             "files": activity.get("files", []),
@@ -468,7 +702,7 @@ def group_by_session(enriched_runs: list[dict[str, Any]]) -> list[dict[str, Any]
                 "runs": [],
                 "worktrees": set(),
                 "run_count": 0,
-                "cost_usd": 0.0,
+                "_cost_records": [],
                 "statuses": {},
                 "_tool_counts": Counter(),
             },
@@ -480,7 +714,7 @@ def group_by_session(enriched_runs: list[dict[str, Any]]) -> list[dict[str, Any]
         if wt:
             group["worktrees"].add(wt)
         group["run_count"] += 1
-        group["cost_usd"] += _num(run.get("cost_usd"))
+        group["_cost_records"].append(run)
         phase = _string(run.get("phase")) or "unknown"
         group["statuses"][phase] = group["statuses"].get(phase, 0) + 1
         for tool in _dict(run.get("activity")).get("tools", []):
@@ -493,14 +727,14 @@ def group_by_session(enriched_runs: list[dict[str, Any]]) -> list[dict[str, Any]
         tool_counts = group.pop("_tool_counts")
         group["runs"] = sorted(run_id for run_id in group["runs"] if run_id)
         group["worktrees"] = sorted(group["worktrees"])
-        group["cost_usd"] = round(group["cost_usd"], 6)
+        group.update(_cost_summary(group.pop("_cost_records")))
         group["tools"] = [
             {"name": name, "count": count}
             for name, count in sorted(tool_counts.items(), key=lambda item: (-item[1], item[0]))
         ]
         results.append(group)
 
-    return sorted(results, key=lambda group: (-_num(group.get("cost_usd")), group.get("session") or ""))
+    return sorted(results, key=lambda group: (-_num(group.get("known_cost_usd")), group.get("session") or ""))
 
 
 def load_registry(directory: str) -> list[dict[str, Any]]:
@@ -554,23 +788,22 @@ def build_activity(
         enrich_run(record, _resolve_run_dir(record, runs_root), costs, span_costs)
         for record in load_registry(registry_dir)
     ]
-    runs.sort(key=lambda run: (-_num(run.get("cost_usd")), str(run.get("run_id") or "")))
+    runs.sort(key=lambda run: (-_num(run.get("known_cost_usd")), str(run.get("run_id") or "")))
 
-    total_cost = 0.0
     tool_totals: Counter[str] = Counter()
     for run in runs:
-        total_cost += _num(run.get("cost_usd"))
         for tool in _dict(run.get("activity")).get("tools", []):
             name = _string(_dict(tool).get("name"))
             if name:
                 tool_totals[name] += int(_num(_dict(tool).get("count")))
 
+    total_cost = _cost_summary(runs)
     return {
         "generated_at": _iso_utc(),
         "runs": runs,
         "sessions": group_by_session(runs),
         "totals": {
-            "cost_usd": round(total_cost, 6),
+            **total_cost,
             "runs": len(runs),
             "tools": _sorted_tool_totals(tool_totals),
         },
@@ -586,8 +819,12 @@ def _short(text: Any, width: int) -> str:
     return value[: width - 3] + "..."
 
 
-def _format_cost(value: Any) -> str:
-    return f"{_num(value):.6f}"
+def _format_cost(value: Any, status: Any = None, known: Any = None) -> str:
+    if status == "partial":
+        return f">={_num(known):.6f}" if _valid_pricing_number(known) else "unknown"
+    if status in {"unknown", "not_applicable"} or value is None:
+        return str(status or "unknown")
+    return f"{_num(value):.6f}" if _valid_pricing_number(value) else "unknown"
 
 
 def _render_rows(headers: list[str], rows: list[list[str]], generated_at: str) -> str:
@@ -614,7 +851,10 @@ def _render_runs(snapshot: dict[str, Any]) -> str:
                 _short(run.get("run_id"), 16),
                 _short(run.get("phase"), 12),
                 _short(run.get("model"), 16),
-                _format_cost(run.get("cost_usd")),
+                _format_cost(
+                    run.get("cost_usd"), run.get("cost_status"),
+                    run.get("known_cost_usd"),
+                ),
                 _short(_dict(run.get("activity")).get("summary"), 28),
                 _short(run.get("worktree_dir") or "(no worktree)", 28),
             ]
@@ -640,7 +880,10 @@ def _render_worktrees(snapshot: dict[str, Any]) -> str:
                 _short(group.get("session"), 24),
                 str(int(_num(group.get("run_count")))),
                 str(len(group.get("worktrees", []))),
-                _format_cost(group.get("cost_usd")),
+                _format_cost(
+                    group.get("cost_usd"), group.get("cost_status"),
+                    group.get("known_cost_usd"),
+                ),
                 _short(tools, 28),
                 _short(statuses, 22),
             ]

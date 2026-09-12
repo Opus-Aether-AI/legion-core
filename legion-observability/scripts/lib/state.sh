@@ -261,7 +261,7 @@ legion_write_adapter_run_state() {
           def terminal:
             . == "ok" or . == "completed" or . == "failed" or . == "error"
             or . == "over_budget" or . == "cancelled" or . == "blocked"
-            or . == "timed_out";
+            or . == "refused" or . == "timed_out" or . == "containment_failed";
           ($prior[0] // {}) as $old
           | ($old.lifecycle.phase // "") as $old_phase
           | if ($old_phase | terminal) then

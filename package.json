@@ -66,6 +66,7 @@
     "legion-otel-export": "legion-observability/bin/legion-otel-export",
     "legion-pi": "legion-router/bin/legion-pi",
     "legion-pi-setup": "legion-setup/bin/legion-pi-setup",
+    "legion-preflight": "legion-router/bin/legion-preflight",
     "legion-report": "legion-observability/bin/legion-report",
     "legion-route": "legion-router/bin/legion-route",
     "legion-router": "legion-router/bin/legion-router",

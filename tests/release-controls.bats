@@ -13,6 +13,34 @@ setup() {
     unset MOCK_PR_REMOVE_LABEL_FAIL
 }
 
+@test "validate workflow measures packaged license metadata path under the existing threshold" {
+    local workflow coverage_step threshold_step
+    workflow="$REPO_ROOT/.github/workflows/validate.yml"
+    coverage_step="$(sed -n \
+      '/- name: Run installer and release tests under kcov for coverage/,/- name: Report coverage summary/p' \
+      "$workflow")"
+    threshold_step="$(sed -n \
+      '/- name: Enforce coverage threshold/,/- name: Upload coverage report/p' \
+      "$workflow")"
+
+    [[ "$coverage_step" == *"--include-path=scripts"* ]]
+    [[ "$coverage_step" == *"tests/npm-runtime-surface.bats"* ]]
+    [[ "$threshold_step" == *'coverage-output/bats/coverage.json'* ]]
+    [[ "$threshold_step" == *"THRESHOLD=95"* ]]
+}
+
+@test "validate workflow exercises the packed npm runtime on Python 3.9 and 3.10" {
+    local workflow="$REPO_ROOT/.github/workflows/validate.yml"
+    local compat_job
+    compat_job="$(sed -n '/^  validate-python-runtime:/,/^  validate-marketplace:/p' "$workflow")"
+
+    [[ "$compat_job" == *"python-version: ['3.9', '3.10']"* ]]
+    [[ "$compat_job" == *'npm pack --json'* ]]
+    [[ "$compat_job" == *'python3 -S'* ]]
+    [[ "$compat_job" == *'legion_executor_registry.py'* ]]
+    [[ "$compat_job" == *'--family codex | grep -Fx codex'* ]]
+}
+
 make_pending_release_fixture() {
     local repo="$1"
     mkdir -p "$repo"
@@ -91,6 +119,21 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$output" == *"waiting for: validate(in_progress)"* ]]
     [[ "$output" == *"timed out waiting"* ]]
+}
+
+@test "required workflow gate observes a pending run before it turns green" {
+    export CHECK_TIMEOUT_SECONDS=30
+    # Keep the traced child alive for a real poll interval so kcov can attach
+    # and record the wait branch even on a busy runner.
+    export CHECK_POLL_INTERVAL_SECONDS=1
+    export MOCK_REQUIRED_WORKFLOW_ONCE_PENDING_FILE="$TEST_TMPDIR/first-poll-done"
+    export MOCK_REQUIRED_WORKFLOW_RUNS=$'validate\tcompleted\tsuccess'
+
+    run bash "$AWAIT_REQUIRED_WORKFLOWS" validate
+    [ "$status" -eq 0 ]
+    [ -f "$MOCK_REQUIRED_WORKFLOW_ONCE_PENDING_FILE" ]
+    [[ "$output" == *"waiting for: validate(in_progress)"* ]]
+    [[ "$output" == *"all required checks green"* ]]
 }
 
 @test "required workflow gate accepts green validate and legion-ci push runs" {
@@ -429,6 +472,233 @@ EOF
     # only contents+pull-requests, so requesting it made all consumers fail at
     # startup with no job at all. The grant belongs in the caller.
     ! grep -qE '^\s*packages:' "$consumer"
+}
+
+@test "consumer update workflow serializes one latest-wins draft candidate" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+
+    grep -q 'group: legion-core-consumer-update-${{ github.repository }}' "$consumer"
+    grep -q 'cancel-in-progress: false' "$consumer"
+    grep -q 'BASE_BRANCH: \${{ github.event.repository.default_branch }}' "$consumer"
+    grep -q 'UPDATE_BRANCH: chore/legion-core-latest' "$consumer"
+    ! grep -q 'chore/legion-core-v\$LEGION_CORE_VERSION' "$consumer"
+
+    # Queued dispatches must arbitrate from the current default branch rather
+    # than the caller SHA captured before the concurrency wait.
+    grep -q 'git fetch --no-tags origin' "$consumer"
+    grep -q 'refs/heads/\$BASE_BRANCH:refs/remotes/origin/\$BASE_BRANCH' "$consumer"
+    grep -q 'git checkout --detach "refs/remotes/origin/\$BASE_BRANCH"' "$consumer"
+    grep -q 'git reset --hard "refs/remotes/origin/\$BASE_BRANCH"' "$consumer"
+    refresh_line="$(grep -n -m1 'Refresh the queued run' "$consumer" | cut -d: -f1)"
+    arbitrate_line="$(grep -n -m1 'Arbitrate the latest release' "$consumer" | cut -d: -f1)"
+    [ "$refresh_line" -lt "$arbitrate_line" ]
+
+    # Both the checked-in pin and the remote stable candidate participate in
+    # semantic-version arbitration before package/update commands can run.
+    grep -q 'base_pin="$(read_pin HEAD checked-in)"' "$consumer"
+    grep -q 'candidate_pin="$(read_pin "$remote_sha" stable)"' "$consumer"
+    grep -q 'comparison="$(semver_cmp "$LEGION_CORE_VERSION" "$current_version")"' "$consumer"
+    grep -q 'disposition=superseded' "$consumer"
+    grep -q 'disposition=already_current' "$consumer"
+    grep -q 'status identity_conflict' "$consumer"
+    grep -q 'schema:"legion.core-consumer-update.v1"' "$consumer"
+    grep -q 'candidate_is_stale=true' "$consumer"
+    grep -q 'retire_candidate=true' "$consumer"
+    grep -q 'superseded|already_current)' "$consumer"
+
+    # A missing branch and an existing branch both use the same explicit lease;
+    # an empty expected value means "create only if still absent".
+    grep -q 'git push --force-with-lease="refs/heads/\$branch:\$EXPECTED_REMOTE_SHA"' "$consumer"
+    ! grep -qE '^\s+git push origin ' "$consumer"
+
+    grep -q -- '--draft' "$consumer"
+    grep -q 'gh pr ready "$existing" --undo' "$consumer"
+    grep -q '.isDraft == true and .headRefOid == $head and .baseRefName == $base' "$consumer"
+    grep -q 'gh pr list --state open --head "$branch" --base "$BASE_BRANCH"' "$consumer"
+    grep -q -- '--limit 2 --json number,isDraft,headRefOid,baseRefName' "$consumer"
+    grep -q 'git push --force-with-lease="refs/heads/$branch:$EXPECTED_REMOTE_SHA" origin' "$consumer"
+    grep -q '":refs/heads/$branch"' "$consumer"
+
+    # An empty validation_command must produce an explicit no-validation line,
+    # never the old unconditional completion claim.
+    grep -q 'if \[ -n "$VALIDATION_COMMAND" \]; then' "$consumer"
+    grep -q 'Repository-owned validation command: not configured' "$consumer"
+    ! grep -q '^            "Repository-owned validation completed before this PR was opened.\\n")"' "$consumer"
+}
+
+@test "consumer update enforces complete SemVer 2.0 syntax before arbitration" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+    local validator="$TEST_TMPDIR/consumer-semver-validator.sh"
+    local comparator="$TEST_TMPDIR/consumer-semver-comparator.sh"
+    local assignment
+    assignment="$(grep -m1 '^          semver=' "$consumer")"
+    {
+      printf '%s\n' 'set -euo pipefail' "${assignment#          }"
+      printf '%s\n' '[[ "$1" =~ $semver ]]'
+    } > "$validator"
+    {
+      printf '%s\n' 'set -euo pipefail'
+      awk '
+        /^          semver_cmp\(\)/ { in_function = 1 }
+        in_function {
+          source_line = $0
+          sub(/^          /, "")
+          print
+          if (source_line == "          }") exit
+        }
+      ' "$consumer"
+      printf '%s\n' 'semver_cmp "$1" "1.0.0" >/dev/null'
+    } > "$comparator"
+
+    local version
+    for version in \
+      1.0.0- 1.0.0-alpha..1 1.0.0-01 1.0.0-alpha.01 \
+      1.0.0+ 1.0.0+build..1; do
+      run bash "$validator" "$version"
+      [ "$status" -ne 0 ]
+      run bash "$comparator" "$version"
+      [ "$status" -ne 0 ]
+    done
+
+    for version in \
+      1.0.0 1.0.0-0 1.0.0-alpha.1 1.0.0-alpha-01 \
+      1.0.0+001 1.0.0-alpha+build.001; do
+      run bash "$validator" "$version"
+      [ "$status" -eq 0 ]
+      run bash "$comparator" "$version"
+      [ "$status" -eq 0 ]
+    done
+
+    # Incoming payload, comparator, and checked-in/candidate pin validation
+    # must all carry the complete prerelease grammar.
+    [ "$(grep -Fc '[0-9]*[A-Za-z-][0-9A-Za-z-]*' "$consumer")" -eq 3 ]
+}
+
+@test "consumer update retires only the exact stale draft candidate" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+    local step="$TEST_TMPDIR/retire-stale-candidate.sh"
+    local bin="$TEST_TMPDIR/retire-bin"
+    local calls="$TEST_TMPDIR/retire-calls"
+    local state_file="$TEST_TMPDIR/pr-state"
+    local stale_sha="1111111111111111111111111111111111111111"
+    mkdir -p "$bin"
+    : > "$calls"
+    printf '%s\n' OPEN > "$state_file"
+
+    awk '
+      /- name: Retire a stale stable candidate/ { in_step = 1; next }
+      in_step && /^        run: \|/ { in_run = 1; next }
+      in_run && /^      - name:/ { exit }
+      in_run { sub(/^          /, ""); print }
+    ' "$consumer" > "$step"
+
+    cat > "$bin/git" <<'SH'
+#!/usr/bin/env bash
+printf 'git %s\n' "$*" >> "$MOCK_CALLS"
+if [ "${1:-}" = ls-remote ]; then
+  printf '%s\n' "$MOCK_REMOTE_SHA"
+  exit 0
+fi
+if [ "${1:-}" = push ]; then
+  exit 0
+fi
+exit 2
+SH
+    cat > "$bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  "pr list") printf '%s\n' "$MOCK_PRS" ;;
+  "pr view") cat "$MOCK_STATE_FILE" ;;
+  "pr close") printf '%s\n' CLOSED > "$MOCK_STATE_FILE" ;;
+  *) exit 2 ;;
+esac
+SH
+    chmod +x "$bin/git" "$bin/gh"
+
+    run env PATH="$bin:$PATH" MOCK_CALLS="$calls" MOCK_REMOTE_SHA="$stale_sha" \
+      MOCK_PRS="[{\"number\":7,\"isDraft\":true,\"headRefOid\":\"$stale_sha\",\"baseRefName\":\"main\"}]" \
+      MOCK_STATE_FILE="$state_file" EXPECTED_REMOTE_SHA="$stale_sha" \
+      UPDATE_BRANCH=chore/legion-core-latest BASE_BRANCH=main bash "$step"
+    [ "$status" -eq 0 ]
+    grep -Fq "git push --force-with-lease=refs/heads/chore/legion-core-latest:$stale_sha origin :refs/heads/chore/legion-core-latest" "$calls"
+    grep -Fq 'gh pr close 7' "$calls"
+
+    : > "$calls"
+    printf '%s\n' OPEN > "$state_file"
+    run env PATH="$bin:$PATH" MOCK_CALLS="$calls" MOCK_REMOTE_SHA="$stale_sha" \
+      MOCK_PRS="[{\"number\":7,\"isDraft\":false,\"headRefOid\":\"$stale_sha\",\"baseRefName\":\"main\"}]" \
+      MOCK_STATE_FILE="$state_file" EXPECTED_REMOTE_SHA="$stale_sha" \
+      UPDATE_BRANCH=chore/legion-core-latest BASE_BRANCH=main bash "$step"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a draft at the exact stale candidate head and base"* ]]
+    ! grep -q '^git push ' "$calls"
+
+    : > "$calls"
+    run env PATH="$bin:$PATH" MOCK_CALLS="$calls" \
+      MOCK_REMOTE_SHA=2222222222222222222222222222222222222222 MOCK_PRS='[]' \
+      MOCK_STATE_FILE="$state_file" EXPECTED_REMOTE_SHA="$stale_sha" \
+      UPDATE_BRANCH=chore/legion-core-latest BASE_BRANCH=main bash "$step"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"moved before retirement"* ]]
+    ! grep -q '^gh ' "$calls"
+    ! grep -q '^git push ' "$calls"
+}
+
+@test "consumer update retires stale candidates for both terminal no-op dispositions" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+    local decision="$TEST_TMPDIR/retire-stale-decision.sh"
+
+    awk '
+      /^          retire_candidate=false$/ { in_block = 1 }
+      in_block && /^          receipt=/ { exit }
+      in_block { sub(/^          /, ""); print }
+    ' "$consumer" > "$decision"
+    printf '%s\n' 'printf "%s\n" "$retire_candidate"' >> "$decision"
+
+    for disposition in superseded already_current; do
+        run env disposition="$disposition" candidate_is_stale=true remote_sha=1111111 \
+          bash "$decision"
+        [ "$status" -eq 0 ]
+        [ "$output" = true ]
+    done
+
+    run env disposition=update_required candidate_is_stale=true remote_sha=1111111 \
+      bash "$decision"
+    [ "$status" -eq 0 ]
+    [ "$output" = false ]
+
+    run env disposition=already_current candidate_is_stale=false remote_sha=1111111 \
+      bash "$decision"
+    [ "$status" -eq 0 ]
+    [ "$output" = false ]
+
+    run env disposition=already_current candidate_is_stale=true remote_sha='' \
+      bash "$decision"
+    [ "$status" -eq 0 ]
+    [ "$output" = false ]
+}
+
+@test "consumer update treats an identical checked-in candidate as stale" {
+    local consumer="$REPO_ROOT/.github/workflows/legion-core-consumer-update.yml"
+    local decision="$TEST_TMPDIR/identical-candidate.sh"
+    {
+      printf '%s\n' 'set -euo pipefail' 'semver_cmp() { printf "0\n"; }'
+      awk '
+        /^          authoritative_kind=none$/ { in_block = 1 }
+        /^          mode=apply$/ { in_block = 0 }
+        in_block { sub(/^          /, ""); print }
+      ' "$consumer"
+      printf '%s\n' 'printf "%s|%s\n" "$authoritative_kind" "$candidate_is_stale"'
+    } > "$decision"
+
+    local pin='{"schema":"legion.core-pin.v1","package":"@opus-aether-ai/legion-core","version":"1.2.3","tag":"v1.2.3","source_sha":"1111111111111111111111111111111111111111"}'
+    run env base_pin="$pin" candidate_pin="$pin" LEGION_CORE_VERSION=1.2.3 \
+      GITHUB_OUTPUT="$TEST_TMPDIR/output" GITHUB_STEP_SUMMARY="$TEST_TMPDIR/summary" \
+      bash "$decision"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "checked_in|true" ]
 }
 
 @test "recovery verifies a v0.19.0-style legacy tag with current controls" {

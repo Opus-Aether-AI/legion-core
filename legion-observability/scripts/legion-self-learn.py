@@ -63,7 +63,10 @@ MAX_SPAN_IDENTIFIER_LENGTH = 512
 MAX_SPAN_COLLECTION_ITEMS = 128
 MAX_SPAN_NESTING = 8
 SPAN_IDENTITY_VERSION = 2
-SPAN_STATUSES = {"ok", "failed", "error", "over_budget", "blocked"}
+SPAN_STATUSES = {
+    "ok", "failed", "error", "over_budget", "blocked", "timed_out",
+    "containment_failed", "refused",
+}
 GLOBAL_HINT_RESERVE = 100
 PROJECT_HINT_CAP = (
     legion_learning_context.MAX_HINTS
@@ -768,6 +771,23 @@ def _bounded_span_value(value: Any, depth: int = 0) -> Any:
     return _INVALID_SPAN_VALUE
 
 
+def _valid_usage(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        for item in value.values()
+    )
+
+
+def _finite_nonnegative_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return False
+    return math.isfinite(numeric) and numeric >= 0
+
+
 def _validated_span(payload: Any) -> dict[str, Any] | None:
     """Validate and bound the in-repository ``legion.span.v1`` contract."""
     if not isinstance(payload, dict) or payload.get("schema") != SPAN_SCHEMA:
@@ -785,20 +805,76 @@ def _validated_span(payload: Any) -> dict[str, Any] | None:
             payload.get(field), str
         ):
             return None
-    for field in ("duration_ms", "cost_usd"):
+    if "attempt_id" in payload and payload.get("attempt_id") is not None and (
+        not isinstance(payload.get("attempt_id"), str) or not payload.get("attempt_id")
+    ):
+        return None
+    if "attempt_ordinal" in payload and payload.get("attempt_ordinal") is not None:
+        ordinal = payload.get("attempt_ordinal")
+        if (
+            isinstance(ordinal, bool)
+            or not isinstance(ordinal, (int, float))
+            or (isinstance(ordinal, float) and not math.isfinite(ordinal))
+            or ordinal < 1
+            or ordinal != math.floor(ordinal)
+        ):
+            return None
+    for field in ("duration_ms",):
         if field not in payload:
             continue
         value = payload.get(field)
+        if not _finite_nonnegative_number(value):
+            return None
+    for field in ("cost_usd", "known_cost_usd"):
+        if field not in payload or payload.get(field) is None:
+            continue
+        value = payload.get(field)
+        if not _finite_nonnegative_number(value):
+            return None
+    for field in ("tokens", "known_usage"):
         if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or value < 0
+            field in payload
+            and payload.get(field) is not None
+            and not _valid_usage(payload.get(field))
         ):
             return None
-    for field in ("tokens", "artifacts"):
-        if field in payload and not isinstance(payload.get(field), dict):
+    if "artifacts" in payload and not isinstance(payload.get("artifacts"), dict):
+        return None
+    for field in ("usage_status", "cost_status"):
+        if field in payload and payload.get(field) not in {
+            "known", "partial", "unknown", "not_applicable"
+        }:
             return None
+    for field in ("known_cost_attempts", "known_usage_attempts"):
+        if field in payload and (
+            isinstance(payload.get(field), bool)
+            or not isinstance(payload.get(field), int)
+            or payload.get(field) < 0
+        ):
+            return None
+    cost_status = payload.get("cost_status")
+    if cost_status == "known" and payload.get("cost_usd") is None:
+        return None
+    if cost_status in {"partial", "unknown", "not_applicable"} and payload.get("cost_usd") is not None:
+        return None
+    if cost_status == "partial" and (
+        payload.get("known_cost_usd") is None or payload.get("known_cost_attempts", 0) < 1
+    ):
+        return None
+    if cost_status in {"unknown", "not_applicable"} and payload.get("known_cost_usd") is not None:
+        return None
+    usage_status = payload.get("usage_status")
+    if usage_status == "known" and not isinstance(payload.get("tokens"), dict):
+        return None
+    if usage_status in {"partial", "unknown", "not_applicable"} and payload.get("tokens") is not None:
+        return None
+    if usage_status == "partial" and (
+        not isinstance(payload.get("known_usage"), dict)
+        or payload.get("known_usage_attempts", 0) < 1
+    ):
+        return None
+    if usage_status in {"unknown", "not_applicable"} and payload.get("known_usage") is not None:
+        return None
     bounded = _bounded_span_value(payload)
     if not isinstance(bounded, dict):
         return None
@@ -817,6 +893,11 @@ def _validated_span(payload: Any) -> dict[str, Any] | None:
         if isinstance(bounded.get(field), str):
             bounded[field] = bounded[field][:MAX_SPAN_IDENTIFIER_LENGTH]
     return bounded
+
+
+def _is_rollup_only(span: dict[str, Any]) -> bool:
+    artifacts = span.get("artifacts") or {}
+    return isinstance(artifacts, dict) and artifacts.get("rollup_only") is True
 
 
 def _normalized_span_timestamp(value: Any) -> str:
@@ -1471,6 +1552,8 @@ def target_for_span(span: dict[str, Any], catalog: dict[str, Any]) -> tuple[str,
 def span_outcomes(spans: list[dict[str, Any]], catalog: dict[str, Any]) -> list[dict[str, Any]]:
     outcomes: list[dict[str, Any]] = []
     for span in spans:
+        if _is_rollup_only(span):
+            continue
         outcomes.extend(_verdict_outcomes(span, catalog))
         status = _text(span.get("status"))
         if status in SUCCESS_STATUSES:
@@ -1481,7 +1564,7 @@ def span_outcomes(spans: list[dict[str, Any]], catalog: dict[str, Any]) -> list[
                 source="span-status",
                 target_type=etype,
                 target_name=name,
-                severity="high" if status in {"failed", "error"} else "medium",
+                severity="high" if status in {"failed", "error", "containment_failed"} else "medium",
                 summary=f"Legion run ended with status {status or 'unknown'}.",
                 evidence=_short(_text(span.get("task")), 1000),
                 run_id=_text(span.get("run_id")),
@@ -2217,6 +2300,8 @@ def trace_contrast(spans: list[dict[str, Any]], catalog: dict[str, Any]) -> dict
     """Summarize pass/fail patterns by entity for future proposal generation."""
     entities: dict[str, dict[str, Any]] = {}
     for span in spans:
+        if _is_rollup_only(span):
+            continue
         etype, name = target_for_span(span, catalog)
         key = f"{etype}:{name}"
         entry = entities.setdefault(
@@ -2332,6 +2417,7 @@ def build_report(
             diagnostics=span_source_report,
         )
         manual_outcomes = load_manual_outcomes(log_root, scan_day)
+    spans = [span for span in spans if not _is_rollup_only(span)]
     outcomes = dedupe_outcomes(
         span_outcomes(spans, catalog)
         + trigger_eval_outcomes(repo, catalog)

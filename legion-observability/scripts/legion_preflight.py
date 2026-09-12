@@ -37,6 +37,7 @@ PROCESS_SUPERVISOR = (
     / "scripts"
     / "legion-process-supervisor.py"
 )
+_UNSET = object()
 
 
 def _require(condition, message):
@@ -86,7 +87,10 @@ def _read_bounded_regular_json(path, limit=65536):
             os.close(descriptor)
 
 
-def validate_preflight_receipt(receipt, *, executor=None, model=None, sandbox=None):
+def validate_preflight_receipt(receipt, *, executor=None, model=_UNSET,
+                               sandbox=_UNSET, read_mode=_UNSET,
+                               task_transport=_UNSET, effort=_UNSET,
+                               explicit_consent=_UNSET):
     """Validate the full no-spend receipt contract and requested route binding."""
     _require(isinstance(receipt, dict), "preflight receipt must be an object")
     required = {"schema", "checked_at", "executor", "status", "reason",
@@ -107,7 +111,8 @@ def validate_preflight_receipt(receipt, *, executor=None, model=None, sandbox=No
     cache = receipt["cache"]
     _require(isinstance(cache, dict) and set(cache) == {"hit", "key"}
              and type(cache["hit"]) is bool
-             and (cache["key"] is None or isinstance(cache["key"], str)),
+             and (cache["key"] is None or isinstance(cache["key"], str)
+                  and cache["key"]),
              "invalid preflight cache evidence")
     identity = receipt["identity"]
     if identity is not None:
@@ -128,6 +133,22 @@ def validate_preflight_receipt(receipt, *, executor=None, model=None, sandbox=No
     expected_checks = {"sandbox", "read_mode", "task_transport", "effort",
                        "model", "configuration", "billing", "version"}
     _require(set(compatibility) <= expected_checks, "unknown compatibility evidence")
+    missing_executable = status_value == "unavailable" and not compatibility
+    if missing_executable:
+        _require(identity is None and cache == {"hit": False, "key": None}
+                 and receipt["reason"].startswith((
+                     "invalid executor registry:", "executor '",
+                     "invalid model catalog:", "executor binary not found:",
+                     "executor binary is unreadable:",
+                 )), "unavailable preflight lacks exact no-executable evidence")
+    elif status_value == "supported":
+        _require(set(compatibility) == expected_checks,
+                 "supported preflight compatibility is incomplete")
+    else:
+        # Discovery may stop at its first incompatible or unavailable check.
+        # Those receipts authorize no spend; require a matching causal check
+        # below, while a supported admission still needs the complete route.
+        _require(bool(compatibility), "preflight compatibility is incomplete")
     simple_states = {"supported", "untested", "incompatible", "unavailable", "not_requested"}
     for name in ("read_mode", "task_transport", "effort"):
         if name in compatibility:
@@ -135,18 +156,39 @@ def validate_preflight_receipt(receipt, *, executor=None, model=None, sandbox=No
             _require(isinstance(check, dict) and set(check) == {"requested", "status"}
                      and check["status"] in simple_states,
                      f"invalid {name} compatibility")
+            _require((check["requested"] is None) == (check["status"] == "not_requested")
+                     and (check["requested"] is None
+                          or isinstance(check["requested"], str) and check["requested"]),
+                     f"contradictory {name} compatibility")
     if "sandbox" in compatibility:
         check = compatibility["sandbox"]
         _require(isinstance(check, dict)
-                 and set(check) == {"requested", "status", "provider_sandbox", "wrapper"}
+                 and set(check) == ({"requested", "status", "provider_sandbox", "wrapper"}
+                                    if check.get("requested") is not None
+                                    else {"requested", "status"})
                  and check["status"] in simple_states,
                  "invalid sandbox compatibility")
+        _require((check["requested"] is None) == (check["status"] == "not_requested")
+                 and (check["requested"] is None or isinstance(check["requested"], str)
+                      and check["requested"]), "contradictory sandbox compatibility")
+        if check["requested"] is not None:
+            _require(isinstance(check["provider_sandbox"], str)
+                     and check["provider_sandbox"]
+                     and (check["wrapper"] is None or isinstance(check["wrapper"], str)
+                          and check["wrapper"]), "invalid sandbox wrapper evidence")
     if "model" in compatibility:
         check = compatibility["model"]
         _require(isinstance(check, dict)
                  and set(check) == {"requested", "policy_model", "model_ref", "status"}
                  and check["status"] in simple_states,
                  "invalid model compatibility")
+        _require((check["requested"] is None) == (check["status"] == "not_requested")
+                 and (check["requested"] is None or isinstance(check["requested"], str)
+                      and check["requested"]), "contradictory model compatibility")
+        _require((check["policy_model"] is None and check["requested"] is None
+                  or isinstance(check["policy_model"], str) and check["policy_model"])
+                 and (check["model_ref"] is None or isinstance(check["model_ref"], str)
+                      and check["model_ref"]), "invalid model policy evidence")
     if "configuration" in compatibility:
         check = compatibility["configuration"]
         _require(isinstance(check, dict) and set(check) == {"missing", "status"}
@@ -196,26 +238,71 @@ def validate_preflight_receipt(receipt, *, executor=None, model=None, sandbox=No
                 _require(type(lease["child_exit_code"]) is int
                          and 0 <= lease["child_exit_code"] <= 255,
                          "invalid version probe exit code")
+        probe_status = check["probe_status"]
+        if probe_status == "completed":
+            _require(lease is not None and lease["status"] == "completed"
+                     and set(lease) == base | {"child_exit_code"}
+                     and lease["reason"] == check["probe_reason"]
+                     and cache["hit"] is False,
+                     "completed version probe lacks matching lease")
+        elif probe_status == "cached":
+            _require(lease is None and check["probe_reason"] == "trusted version probe cache hit"
+                     and cache["hit"] is True,
+                     "cached version probe lacks cache evidence")
+        elif probe_status == "not_requested":
+            _require(lease is None and check["probe_reason"] is None
+                     and cache["hit"] is False,
+                     "unrequested version probe has unexpected evidence")
+        elif lease is not None:
+            _require(cache["hit"] is False and check["probe_reason"] is not None,
+                     "failed version probe has contradictory cache evidence")
+            _require(lease["status"] == probe_status
+                     or (probe_status == "timed_out" and lease["status"] == "launch_failed"
+                         and "deadline" in lease["reason"].lower())
+                     or (probe_status == "launch_failed" and lease["status"] == "completed"
+                         and check["probe_reason"] ==
+                         "executor binary disappeared or changed during version probe"),
+                     "version probe and lease status contradict")
+        else:
+            _require(cache["hit"] is False and check["probe_reason"] is not None,
+                     "failed version probe lacks reason")
+        _require((probe_status in {"completed", "cached", "not_requested"})
+                 == (check["status"] != "unavailable"),
+                 "version probe and compatibility status contradict")
     if status_value == "supported":
         _require(identity is not None, "supported preflight lacks identity")
         _require(isinstance(cache["key"], str) and cache["key"],
                  "supported preflight lacks cache identity")
-    if model is not None:
-        model_check = compatibility.get("model")
-        # A missing executable is authenticated by its executor identity and has
-        # no compatibility checks because no provider can launch. If a check is
-        # present, however, it must still bind to this exact requested route.
-        _require(status_value == "unavailable" and model_check is None
-                 or isinstance(model_check, dict)
-                 and model in {model_check.get("requested"), model_check.get("policy_model"),
-                               model_check.get("model_ref")},
-                 "preflight model binding mismatch")
-    if sandbox is not None:
-        sandbox_check = compatibility.get("sandbox")
-        _require(status_value == "unavailable" and sandbox_check is None
-                 or isinstance(sandbox_check, dict)
-                 and sandbox_check.get("requested") == sandbox,
-                 "preflight sandbox binding mismatch")
+    for name, requested in (("model", model), ("sandbox", sandbox),
+                            ("read_mode", read_mode), ("task_transport", task_transport),
+                            ("effort", effort)):
+        # Early no-spend failures can stop at version/configuration discovery,
+        # before later route checks exist. Every supplied check must match; a
+        # supported admission must supply the complete set (enforced below).
+        if requested is not _UNSET and not missing_executable and name in compatibility:
+            _require(compatibility[name]["requested"] == requested,
+                     f"preflight {name} binding mismatch")
+    if explicit_consent is not _UNSET and not missing_executable and "billing" in compatibility:
+        _require(type(explicit_consent) is bool, "invalid expected billing consent")
+        billing = compatibility["billing"]
+        _require(billing["status"] == ("supported" if explicit_consent or not billing["explicit_consent_required"]
+                                       else "incompatible"),
+                 "preflight billing consent mismatch")
+    statuses = {name: check["status"] for name, check in compatibility.items()}
+    if status_value == "unavailable" and not missing_executable:
+        _require(identity is None and cache["hit"] is False
+                 and (statuses.get("configuration") == "unavailable"
+                      or statuses.get("version") == "unavailable")
+                 and "incompatible" not in statuses.values(),
+                 "unavailable preflight lacks matching compatibility evidence")
+    elif status_value == "incompatible":
+        _require("incompatible" in statuses.values(),
+                 "incompatible preflight lacks matching compatibility evidence")
+    elif status_value == "untested":
+        _require(identity is not None and "untested" in statuses.values()
+                 and "incompatible" not in statuses.values()
+                 and "unavailable" not in statuses.values(),
+                 "untested preflight lacks matching compatibility evidence")
     if status_value == "supported":
         _require(set(compatibility) == expected_checks,
                  "supported preflight compatibility is incomplete")
@@ -233,6 +320,8 @@ def validate_preflight_receipt(receipt, *, executor=None, model=None, sandbox=No
                  "unsupported version evidence in supported receipt")
         _require(identity["version"] == version_check["discovered"],
                  "version identity mismatch")
+        _require(identity["version_raw"] is not None or version_check["probe_status"] == "not_requested",
+                 "supported version lacks raw probe evidence")
     return receipt
 
 

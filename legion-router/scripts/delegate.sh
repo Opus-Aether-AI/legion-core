@@ -1068,7 +1068,7 @@ emit_span() {
   # Recording it lets the routing optimizer score per-archetype executor outcomes.
   jq -cn \
     --arg schema "legion.span.v1" --arg ts "$(_now)" \
-    --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
+    --arg run_id "${LEGION_ADAPTER_SPAN_RUN_ID:-${RUN_ID:-}}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
     --arg executor "$executor" --arg model "$model" --arg archetype "${archetype:-}" \
     --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
     --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-null}" \
@@ -1081,7 +1081,7 @@ emit_span() {
      target_name:(if $target_name=="" then null else $target_name end),
      duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
      tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
-    >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
+    >> "$LEGION_TELEMETRY_DIR/$(legion_adapter_span_date).jsonl"
 }
 
 native_span_publication_begin() {
@@ -1485,7 +1485,7 @@ emit_provider_attempt_span() {
   local preflight_path="${4:-}" failure_path="${5:-}"
   [[ -n "$attempt_path" && -f "$attempt_path" ]] || return 0
   local executor provider model terminal span_status duration usage cost ingest_status
-  local usage_status cost_status artifacts
+  local usage_status cost_status artifacts pinned_date provider_run_id
   executor="$(jq -r '.executor' "$attempt_path")"
   provider="$(jq -r '.provider' "$attempt_path")"
   model="$(jq -r '.effective_model // .requested_model // "unknown"' "$attempt_path")"
@@ -1535,7 +1535,14 @@ emit_provider_attempt_span() {
     native_span_publication_end
     return 1
   fi
-  if ! emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
+  if ! pinned_date="$(legion_adapter_prepare_provider_span "$attempt_path")"; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
+  provider_run_id="$(jq -r '.run_id' "$attempt_path")"
+  if ! LEGION_ADAPTER_SPAN_RUN_ID="$provider_run_id" LEGION_ADAPTER_SPAN_DATE="$pinned_date" \
+      emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
       "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
     native_provider_span_release "$attempt_path"
     native_span_publication_end
@@ -2927,6 +2934,7 @@ emit_native_review_provider_span() {
   local attempt_path="$1" task_text="$2" lease_path="${3:-}" ingest_status
   [[ -n "$attempt_path" && -f "$attempt_path" ]] || return 0
   local executor model terminal span_status duration usage cost usage_status cost_status artifacts
+  local pinned_date provider_run_id
   executor="$(jq -r '.executor' "$attempt_path")"
   model="$(jq -r '.effective_model // .requested_model // "unknown"' "$attempt_path")"
   terminal="$(jq -r '.terminal_status' "$attempt_path")"
@@ -2969,7 +2977,14 @@ emit_native_review_provider_span() {
     native_span_publication_end
     return 1
   fi
-  if ! emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
+  if ! pinned_date="$(legion_adapter_prepare_provider_span "$attempt_path")"; then
+    native_provider_span_release "$attempt_path"
+    native_span_publication_end
+    return 1
+  fi
+  provider_run_id="$(jq -r '.run_id' "$attempt_path")"
+  if ! LEGION_ADAPTER_SPAN_RUN_ID="$provider_run_id" LEGION_ADAPTER_SPAN_DATE="$pinned_date" \
+      emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
       "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
     native_provider_span_release "$attempt_path"
     native_span_publication_end
@@ -3131,9 +3146,11 @@ expected_lease = {
     "succeeded": "completed", "failed": "completed",
     "cancelled": "cancelled", "timed_out": "timed_out",
 }[attempt["terminal_status"]]
-if attempt["terminal_status"] == "failed" and (attempt.get("failure") or {}).get("class") == "internal":
-    expected_lease = "cleanup_failed"
-require(lease_status == expected_lease, "attempt and lease terminal status contradict")
+require(lease_status == expected_lease or
+        (lease_status == "cleanup_failed" and attempt["terminal_status"] == "failed"
+         and attempt["failure"] is not None
+         and attempt["failure"]["class"] == "internal"),
+        "attempt and lease terminal status contradict")
 if attempt["terminal_status"] == "succeeded":
     require(lease["child_exit_code"] == 0, "successful attempt has nonzero child exit")
 if failure_path:
@@ -3583,6 +3600,7 @@ review_resolve_candidates() {
 # closed on it is the whole point of the surrounding logic.
 review_executor_unavailable() {
   local rc="$1" err_file="$2" out_file="${3:-}"
+  local expected_executor="${4:-}" expected_model="${5:-}" expected_sandbox="${6:-}"
   [[ "$rc" -ne 0 ]] || return 1
   # ONE vocabulary for "the provider could not serve this", shared by every
   # detector below. This list lived in three copies with three different sets of
@@ -3608,17 +3626,34 @@ review_executor_unavailable() {
   # as "refused" for every admission failure, so inspecting only that envelope
   # loses the security-relevant distinction between an unavailable provider
   # (safe to skip) and an incompatible/policy refusal (must stop the walk).
+  local admission_seen=0
   for f in "$out_file" "$err_file"; do
     [[ -n "$f" && -s "$f" ]] || continue
     local admission_receipt
     while IFS= read -r admission_receipt; do
-      [[ -n "$admission_receipt" && -f "$admission_receipt" ]] || continue
-      if jq -e '.schema == "legion.preflight.v1" and .status == "unavailable"' \
-          "$admission_receipt" >/dev/null 2>&1; then
-        return 0
+      [[ -n "$admission_receipt" ]] || continue
+      admission_seen=1
+      if [[ -f "$admission_receipt" && ! -L "$admission_receipt" ]] && \
+          PYTHONPATH="$_self_dir/../../legion-observability/scripts" \
+          python3 - "$admission_receipt" "$expected_executor" "$expected_model" \
+            "$expected_sandbox" 2>/dev/null <<'PY'
+import sys
+from legion_preflight import validate_preflight_receipt_file
+
+path, executor, model, sandbox = sys.argv[1:]
+receipt = validate_preflight_receipt_file(
+    path, executor=executor or None, model=model or None, sandbox=sandbox or None
+)
+if receipt["status"] != "unavailable":
+    raise ValueError("admission is not an authenticated unavailable receipt")
+PY
+      then
+        continue
       fi
+      return 1
     done < <(jq -r -s '.[]? | .preflight_receipt? // empty' "$f" 2>/dev/null || true)
   done
+  [[ "$admission_seen" -eq 0 ]] || return 0
   # Structured first, and safe on stdout: auth_error is a field the ADAPTER sets
   # about itself, never reviewer content. An adapter that reports auth_error has
   # told us plainly that it could not authenticate, and that is worth more than
@@ -4254,7 +4289,8 @@ cmd_review() {
     else
       reason="review-failed"
     fi
-    if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
+    if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream" \
+        "$review_executor" "$model" "$sandbox"; then
       record_native_review_attempt failed unavailable true "reviewer unavailable" || break
     else
       record_native_review_attempt failed provider false "$reason" || break
@@ -4276,7 +4312,8 @@ cmd_review() {
       reason="reviewer-unavailable"
       continue
     fi
-    if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
+    if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream" \
+        "$review_executor" "$model" "$sandbox"; then
       note "⚠ reviewer '$review_executor' is unavailable (exit $rc); trying the next candidate"
       reason="reviewer-unavailable"
       continue

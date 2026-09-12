@@ -170,6 +170,43 @@ def test_reconciliation_rejects_non_finite_known_cost_sum():
         )
 
 
+@pytest.mark.parametrize("field", ["usage", "cost"])
+def test_all_not_applicable_children_preserve_aggregate_provenance(field):
+    children = []
+    for ordinal in (1, 2):
+        fields = attempt_fields(
+            attempt_id=f"child-{ordinal}", parent_attempt_id="parent-1"
+        )
+        fields["ordinal"] = ordinal
+        fields[f"{field}_status"] = "not_applicable"
+        children.append(receipts.attempt_receipt(**fields))
+
+    reconciliation = receipts.reconcile_attempts(children)
+    assert reconciliation[f"{field}_status"] == "not_applicable"
+    assert reconciliation[f"{field}_source"] is None
+    assert reconciliation[f"known_{field}_attempts"] == 0
+
+    parent = receipts.aggregate_attempt_receipt(
+        child_attempts=children, **attempt_fields(attempt_id="parent-1")
+    )
+    assert parent[f"{field}_status"] == "not_applicable"
+    receipts.validate_aggregate_reconciliation(parent, children)
+    nested = receipts.reconcile_attempts([parent])
+    assert nested[f"{field}_status"] == "not_applicable"
+
+
+@pytest.mark.parametrize("field", ["usage", "cost"])
+def test_not_applicable_mixed_with_unknown_stays_unknown(field):
+    first = attempt_fields(attempt_id="child-1")
+    first[f"{field}_status"] = "not_applicable"
+    second = attempt_fields(attempt_id="child-2")
+    second["ordinal"] = 2
+    result = receipts.reconcile_attempts([
+        receipts.attempt_receipt(**first), receipts.attempt_receipt(**second)
+    ])
+    assert result[f"{field}_status"] == "unknown"
+
+
 def test_aggregate_constructor_rejects_parent_id_reused_by_child():
     child = receipts.attempt_receipt(
         **attempt_fields(attempt_id="shared-id", parent_attempt_id="shared-id")
@@ -255,6 +292,19 @@ def test_attempt_schema_draft_2020_12_rejects_contradictory_provenance():
 
     aggregate = partial_aggregate()
     validator.validate(aggregate)
+    na_children = []
+    for ordinal in (1, 2):
+        fields = attempt_fields(
+            attempt_id=f"na-child-{ordinal}", parent_attempt_id="na-parent"
+        )
+        fields.update(ordinal=ordinal, usage_status="not_applicable",
+                      cost_status="not_applicable")
+        na_children.append(receipts.attempt_receipt(**fields))
+    na_parent = receipts.aggregate_attempt_receipt(
+        child_attempts=na_children,
+        **attempt_fields(attempt_id="na-parent"),
+    )
+    validator.validate(na_parent)
     for field in ("usage_source", "cost_source"):
         contradictory = dict(aggregate)
         contradictory["reconciliation"] = dict(aggregate["reconciliation"])

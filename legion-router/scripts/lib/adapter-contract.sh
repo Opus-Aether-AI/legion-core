@@ -203,9 +203,9 @@ legion_adapter_prepare_supervisor_launch_gate() {
 
 # Record a signal during the shell-to-supervisor launch handshake. The normal
 # path and this trap write to one already-open FIFO using Bash builtins. Bash
-# serializes trap execution with builtin execution, and the arbiter publishes
-# only the first complete decision, so `go` is never briefly visible before a
-# pre-publication cancellation.
+# serializes trap execution with builtin execution. Keep the trap armed until
+# the arbiter has returned: after the writer closes, a signal must at least
+# terminate the supervisor instead of silently permitting a pending `go`.
 legion_adapter_record_launch_signal() {
   local pending_name="$1" signum="$2" normalized="$2"
   case "$normalized" in HUP) normalized=1 ;; INT) normalized=2 ;; TERM) normalized=15 ;; esac
@@ -219,9 +219,14 @@ legion_adapter_record_launch_signal() {
   # publication; later handlers still update the caller's pending signal.
   [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY" -eq 0 ]] || return 0
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=1
-  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN" -ne 1 ]] \
-      || ! printf 'cancel:%s\n' "$normalized" >&9; then
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN" -eq 1 ]]; then
+    printf 'cancel:%s\n' "$normalized" >&9 || LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
+    [[ "${LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SEALED:-0}" -ne 1 ]] \
+      || LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
+  else
     LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
+  fi
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED" -eq 1 ]]; then
     kill -TERM "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" 2>/dev/null || true
   fi
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=0
@@ -236,23 +241,35 @@ legion_adapter_close_launch_signal_window() {
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID=""
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN=0
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SEALED=0
 }
 
 legion_adapter_launch_gate_decision_arbiter() {
-  local gate="$1" fifo="$2" token="$3" supervisor_pid="$4"
-  python3 - "$gate" "$fifo" "$token" "$supervisor_pid" <<'PY'
+  local gate="$1" fifo="$2" listener="$3" token="$4" supervisor_pid="$5"
+  python3 - "$gate" "$fifo" "$listener" "$token" "$supervisor_pid" <<'PY'
 import json
 import os
+import select
 import stat
 import sys
 import tempfile
+import time
 
-gate, fifo, token, supervisor_pid_text = sys.argv[1:]
+gate, fifo, listener, token, supervisor_pid_text = sys.argv[1:]
 supervisor_pid = int(supervisor_pid_text)
 
 def fail(message):
     print(f"launch-gate decision arbiter: {message}", file=sys.stderr)
     raise SystemExit(70)
+
+fifo_flags = os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+fifo_descriptor = os.open(fifo, fifo_flags)
+fifo_info = os.fstat(fifo_descriptor)
+fifo_path_info = os.stat(fifo, follow_symlinks=False)
+if (not stat.S_ISFIFO(fifo_info.st_mode) or fifo_info.st_nlink != 1
+        or (fifo_info.st_dev, fifo_info.st_ino)
+        != (fifo_path_info.st_dev, fifo_path_info.st_ino)):
+    fail("unsafe decision FIFO")
 
 flags = os.O_RDONLY
 if hasattr(os, "O_NOFOLLOW"):
@@ -282,27 +299,42 @@ if (not isinstance(ready, dict)
                      "token": token, "supervisor_pid": supervisor_pid}):
     fail("unauthenticated ready receipt")
 
-with open(fifo, "rb", buffering=0) as source:
-    chunks = []
-    total = 0
-    while total <= 128:
-        chunk = source.read(129 - total)
+# On Darwin a FIFO opened read/write by the shell can lose bytes written
+# before the arbiter opens its own descriptor. Publish a one-use listener
+# acknowledgement only after opening and authenticating the ready receipt.
+listener_fd = os.open(listener, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                      getattr(os, "O_NOFOLLOW", 0), 0o600)
+os.close(listener_fd)
+
+with os.fdopen(fifo_descriptor, "rb", buffering=0) as source:
+    raw_decisions = bytearray()
+    # The shell opens the FIFO read/write so its open never waits for an
+    # arbiter that exited before this point. Such a self-reader prevents EOF;
+    # use an explicit bounded terminal record instead.
+    deadline = time.monotonic() + 10
+    while len(raw_decisions) <= 128:
+        if time.monotonic() >= deadline:
+            fail("decision stream timed out")
+        ready, _, _ = select.select([source], [], [], 0.1)
+        if not ready:
+            continue
+        chunk = os.read(source.fileno(), 1)
         if not chunk:
+            fail("decision FIFO closed unexpectedly")
+        raw_decisions.extend(chunk)
+        if raw_decisions.endswith(b"done\n"):
             break
-        chunks.append(chunk)
-        total += len(chunk)
-    raw_decisions = b"".join(chunks)
 if len(raw_decisions) > 128:
     fail("decision stream exceeded bound")
 lines = raw_decisions.decode("ascii", "strict").splitlines()
-if not lines:
+if len(lines) < 2 or lines[-1] != "done":
     fail("decision stream was empty")
+lines.pop()
 allowed = {"go", "cancel:1", "cancel:2", "cancel:15"}
 if any(line not in allowed for line in lines):
     fail("invalid decision")
-# The FIFO remains open for the whole shell-side signal window. Do not expose
-# `go` until EOF proves that window closed without a cancellation; a trap that
-# interrupts immediately after the provisional go write must still win.
+# Do not expose `go` until the explicit terminal record closes the shell-side
+# decision window; a trap after the provisional go write can still cancel.
 cancellations = [line for line in lines if line.startswith("cancel:")]
 if cancellations:
     cancelled = cancellations[0]
@@ -341,7 +373,7 @@ PY
 legion_adapter_complete_supervisor_launch_gate() {
   local supervisor_pid="$1" lease_path="$2" pending_name="$3"
   local gate="$LEGION_ADAPTER_LAUNCH_GATE_PATH" token="$LEGION_ADAPTER_LAUNCH_GATE_TOKEN"
-  local pending="" decision=go fifo="" arbiter_pid="" arbiter_rc=0 i sleep_bin=/bin/sleep
+  local pending="" decision=go fifo="" listener="" arbiter_pid="" arbiter_rc=0 i sleep_bin=/bin/sleep
   # Do not let stale publication state from an interrupted or reused shell
   # influence this handshake, including early polling failures below.
   legion_adapter_close_launch_signal_window
@@ -396,13 +428,28 @@ PY
     legion_adapter_close_launch_signal_window
     return 0
   }
+  listener="${fifo}.listener"
   legion_adapter_launch_gate_decision_arbiter \
-    "$gate" "$fifo" "$token" "$supervisor_pid" &
+    "$gate" "$fifo" "$listener" "$token" "$supervisor_pid" &
   arbiter_pid=$!
-  if ! exec 9>"$fifo"; then
+  for ((i = 0; i < 500; i++)); do
+    [[ ! -e "$listener" ]] || break
+    kill -0 "$arbiter_pid" 2>/dev/null || break
+    "$sleep_bin" 0.02
+  done
+  if [[ ! -f "$listener" ]]; then
     kill -TERM "$arbiter_pid" 2>/dev/null || true
     wait "$arbiter_pid" 2>/dev/null || true
-    rm -f "$fifo"
+    rm -f "$fifo" "$listener"
+    legion_adapter_close_launch_signal_window
+    return 0
+  fi
+  # O_RDWR opens a FIFO without waiting for an arbiter reader. If ready
+  # validation made the arbiter exit, this cannot suspend the shell forever.
+  if ! exec 9<>"$fifo"; then
+    kill -TERM "$arbiter_pid" 2>/dev/null || true
+    wait "$arbiter_pid" 2>/dev/null || true
+    rm -f "$fifo" "$listener"
     legion_adapter_close_launch_signal_window
     return 0
   fi
@@ -413,6 +460,7 @@ PY
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID="$supervisor_pid"
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN=1
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SEALED=0
   pending="${!pending_name:-}"
   case "$pending" in
     HUP) pending=1 ;;
@@ -425,11 +473,21 @@ PY
   else
     printf 'go\n' >&9 || LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
   fi
-  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE=0
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SEALED=1
+  printf 'done\n' >&9 || LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN=0
   exec 9>&-
   wait "$arbiter_pid" || arbiter_rc=$?
-  rm -f "$fifo"
+  if [[ "$arbiter_rc" -gt 128 ]]; then
+    # A trapped signal can interrupt Bash's wait without reaping the arbiter.
+    # Never leave a pending arbiter free to publish `go` after we return.
+    kill -TERM "$arbiter_pid" 2>/dev/null || true
+    wait "$arbiter_pid" 2>/dev/null || true
+  fi
+  # A signal delivered while `wait` was pending still belongs to this launch
+  # decision. Do not clear ACTIVE until the arbiter's publication is resolved.
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE=0
+  rm -f "$fifo" "$listener"
   if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED" -eq 1 || "$arbiter_rc" -ne 0 ]]; then
     kill -TERM "$supervisor_pid" 2>/dev/null || true
     legion_adapter_close_launch_signal_window
@@ -572,13 +630,16 @@ legion_adapter_preflight() {
     set -e
   fi
   if ! PYTHONPATH="$validation_root/legion-observability/scripts" python3 - \
-      "$tmp" "$executor" "$model" "$sandbox" 2>/dev/null <<'PY'
+      "$tmp" "$executor" "$model" "$sandbox" "$effort" "$transport" "$consent" \
+      2>/dev/null <<'PY'
 import sys
 from legion_preflight import validate_preflight_receipt_file
 
-path, executor, model, sandbox = sys.argv[1:]
+path, executor, model, sandbox, effort, transport, consent = sys.argv[1:]
 validate_preflight_receipt_file(
-    path, executor=executor, model=model or None, sandbox=sandbox or None
+    path, executor=executor, model=model or None, sandbox=sandbox or None,
+    read_mode="provider-tools", task_transport=transport or None,
+    effort=effort or None, explicit_consent=consent == "1",
 )
 PY
   then
@@ -734,6 +795,118 @@ legion_adapter_preflight_failure_disposition() {
   esac
 }
 
+legion_adapter_publish_attempt_receipts() {
+  local art="$1" attempt_tmp="$2" attempt_name="$3" failure_tmp="$4" failure_name="$5"
+  python3 - "$art" "$attempt_tmp" "$attempt_name" "$failure_tmp" "$failure_name" <<'PY'
+import os
+import secrets
+import stat
+import sys
+
+art, attempt_tmp, attempt_name, failure_tmp, failure_name = sys.argv[1:]
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+directory = os.open(art, flags)
+linked_failure = False
+linked_attempt = False
+
+def check_leaf(name, *, must_exist=False):
+    try:
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        if must_exist:
+            raise
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise OSError(f"unsafe receipt leaf: {name}")
+    return info
+
+def copy_alias(source, alias):
+    temporary = ".receipt-alias." + secrets.token_hex(16)
+    source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+    target_fd = None
+    try:
+        target_fd = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600, dir_fd=directory,
+        )
+        while True:
+            chunk = os.read(source_fd, 65536)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(target_fd, view):]
+        os.fsync(target_fd)
+        os.close(target_fd)
+        target_fd = None
+        # os.replace cannot follow a racing symlink, but refuse a link already
+        # present at this decision point rather than normalizing hostile state.
+        check_leaf(alias)
+        os.replace(temporary, alias, src_dir_fd=directory, dst_dir_fd=directory)
+    finally:
+        os.close(source_fd)
+        if target_fd is not None:
+            os.close(target_fd)
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+try:
+    root = os.fstat(directory)
+    current = os.stat(art, follow_symlinks=False)
+    if (not stat.S_ISDIR(current.st_mode) or
+            (root.st_dev, root.st_ino) != (current.st_dev, current.st_ino)):
+        raise OSError("receipt directory changed")
+    for name in (attempt_tmp, attempt_name, "attempt.json"):
+        if "/" in name or name in {"", ".", ".."}:
+            raise OSError("unsafe receipt name")
+    check_leaf(attempt_tmp, must_exist=True)
+    if check_leaf(attempt_name) is not None:
+        raise FileExistsError("numbered attempt is immutable")
+    check_leaf("attempt.json")
+    if failure_tmp:
+        for name in (failure_tmp, failure_name, "failure.json"):
+            if "/" in name or name in {"", ".", ".."}:
+                raise OSError("unsafe failure name")
+        check_leaf(failure_tmp, must_exist=True)
+        if check_leaf(failure_name) is not None:
+            raise FileExistsError("numbered failure is immutable")
+        check_leaf("failure.json")
+        os.link(failure_tmp, failure_name, src_dir_fd=directory, dst_dir_fd=directory,
+                follow_symlinks=False)
+        linked_failure = True
+    else:
+        check_leaf("failure.json")
+    os.link(attempt_tmp, attempt_name, src_dir_fd=directory, dst_dir_fd=directory,
+            follow_symlinks=False)
+    linked_attempt = True
+    # The exclusive temporary and numbered link now share an inode. Drop the
+    # temporary before aliases so indexed readers see a singly linked receipt.
+    os.unlink(attempt_tmp, dir_fd=directory)
+    if failure_tmp:
+        os.unlink(failure_tmp, dir_fd=directory)
+        copy_alias(failure_name, "failure.json")
+    else:
+        try:
+            os.unlink("failure.json", dir_fd=directory)
+        except FileNotFoundError:
+            pass
+    copy_alias(attempt_name, "attempt.json")
+    os.fsync(directory)
+except OSError as error:
+    if linked_failure and not linked_attempt:
+        try:
+            os.unlink(failure_name, dir_fd=directory)
+        except OSError:
+            pass
+    print(f"legion adapter receipt: {error}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    os.close(directory)
+PY
+}
+
 legion_adapter_write_attempt() {
   local art="$1" executor="$2" provider="$3" ordinal="$4"
   local requested_model="$5" effective_model="$6" requested_effort="$7" effective_effort="$8"
@@ -745,7 +918,9 @@ legion_adapter_write_attempt() {
   local attempt_id="${RUN_ID}-${executor}-attempt-${ordinal}"
   local failure_id="${RUN_ID}-${executor}-failure-${ordinal}"
   local attempt_path="$art/attempt-$ordinal.json" failure_path="$art/failure-$ordinal.json"
-  local tmp="$attempt_path.tmp.$$" failure_json=null usage_json=null cost_json=null
+  local tmp failure_tmp="" failure_json=null usage_json=null cost_json=null
+  [[ -d "$art" && ! -L "$art" ]] || return 1
+  tmp="$(mktemp "$art/.attempt-$ordinal.XXXXXX")" || return 1
 
   case "$usage_status" in
     known)
@@ -828,18 +1003,8 @@ legion_adapter_write_attempt() {
       {schema:"legion.failure.v1",failure_id:$id,run_id:$run,attempt_id:$attempt,ts:$ts,
        class:$class,provider_code:(if $code=="" then null else $code end),retryable:$retryable,
        output_started:$output_started,message:(if $message=="" then null else $message end)}')"
-    printf '%s\n' "$failure_json" > "$failure_path.tmp.$$"
-    chmod 600 "$failure_path.tmp.$$" 2>/dev/null || true
-    mv -f "$failure_path.tmp.$$" "$failure_path"
-    cp "$failure_path" "$art/failure.json"
-    LEGION_ADAPTER_FAILURE_PATH="$failure_path"
-  else
-    # failure.json is a mutable alias for the latest provider attempt. Preserve
-    # numbered failures as history, but never let a successful retry inherit a
-    # stale failure alias or shell-side pointer from the previous attempt.
-    rm -f "$art/failure.json"
-    # shellcheck disable=SC2034
-    LEGION_ADAPTER_FAILURE_PATH=""
+    failure_tmp="$(mktemp "$art/.failure-$ordinal.XXXXXX")" || { rm -f "$tmp"; return 1; }
+    printf '%s\n' "$failure_json" > "$failure_tmp" || { rm -f "$tmp" "$failure_tmp"; return 1; }
   fi
 
   jq -cn \
@@ -870,10 +1035,17 @@ legion_adapter_write_attempt() {
      cost_source:(if $cost_source=="" then null else $cost_source end),
      failure:$failure,output_started:$output_started,started_at:$started,ended_at:$ended,
      duration_ms:$duration,sandbox:$sandbox,terminal_status:$terminal,
-     child_attempt_ids:[],reconciliation:null}' > "$tmp"
-  chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$attempt_path"
-  cp "$attempt_path" "$art/attempt.json"
+     child_attempt_ids:[],reconciliation:null}' > "$tmp" || {
+      rm -f "$tmp" "$failure_tmp"
+      return 1
+    }
+  if ! legion_adapter_publish_attempt_receipts "$art" "${tmp##*/}" "${attempt_path##*/}" \
+      "${failure_tmp##*/}" "${failure_path##*/}"; then
+    rm -f "$tmp" "$failure_tmp"
+    return 1
+  fi
+  # shellcheck disable=SC2034
+  LEGION_ADAPTER_FAILURE_PATH="${failure_tmp:+$failure_path}"
   # shellcheck disable=SC2034
   LEGION_ADAPTER_ATTEMPT_PATH="$attempt_path"
   LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID="$attempt_id"
@@ -900,26 +1072,140 @@ legion_adapter_disarm_signal_receipt() {
   LEGION_ADAPTER_SIGNAL_ARMED=0
 }
 
+legion_adapter_span_date() {
+  if [[ -n "${LEGION_ADAPTER_SPAN_DATE:-}" ]]; then
+    [[ "$LEGION_ADAPTER_SPAN_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+    printf '%s\n' "$LEGION_ADAPTER_SPAN_DATE"
+  else
+    date -u +%F
+  fi
+}
+
+legion_adapter_prepare_provider_span() {
+  local attempt_path="$1"
+  [[ -n "$attempt_path" && -n "${LEGION_TELEMETRY_DIR:-}" ]] || return 1
+  mkdir -p -- "$LEGION_TELEMETRY_DIR" || return 1
+  python3 - "$attempt_path" "$LEGION_TELEMETRY_DIR" <<'PY'
+import datetime
+import json
+import os
+import re
+import stat
+import sys
+
+attempt_path, telemetry_dir = sys.argv[1:]
+intent_path = attempt_path + ".provider-span-intent"
+telemetry_dir = os.path.realpath(telemetry_dir)
+flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+
+def checked_file(path, open_flags):
+    fd = os.open(path, open_flags, 0o600)
+    info = os.fstat(fd)
+    path_info = os.stat(path, follow_symlinks=False)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+            (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino)):
+        os.close(fd)
+        raise OSError("unsafe telemetry/index file")
+    return fd, info
+
+def fsync_directory(path):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+try:
+    if os.path.lexists(intent_path):
+        fd, info = checked_file(intent_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if info.st_size > 4096:
+                raise ValueError("oversized append intent")
+            intent = json.loads(os.read(fd, 4097))
+        finally:
+            os.close(fd)
+        date = intent.get("date")
+        if (not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date)
+                or intent.get("schema") != "legion.provider-span-intent.v1"
+                or intent.get("attempt_receipt") != attempt_path
+                or intent.get("telemetry_path") != os.path.join(telemetry_dir, date + ".jsonl")
+                or type(intent.get("device")) is not int
+                or type(intent.get("inode")) is not int
+                or type(intent.get("offset")) is not int or intent["offset"] < 0):
+            raise ValueError("invalid append intent")
+        fd, info = checked_file(intent["telemetry_path"], flags)
+        try:
+            # An unchanged file proves a previous publisher never appended.
+            # If another record appeared, a partial/crashed append is ambiguous:
+            # never authorize a second paid-attempt span on that uncertainty.
+            if ((info.st_dev, info.st_ino) != (intent["device"], intent["inode"])
+                    or info.st_size != intent["offset"]):
+                raise ValueError("ambiguous prior provider-span append")
+            if info.st_size and os.pread(fd, 1, info.st_size - 1) != b"\n":
+                raise ValueError("telemetry ends in an incomplete line")
+        finally:
+            os.close(fd)
+    else:
+        date = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        telemetry_path = os.path.join(telemetry_dir, date + ".jsonl")
+        fd, info = checked_file(telemetry_path, flags)
+        try:
+            if info.st_size and os.pread(fd, 1, info.st_size - 1) != b"\n":
+                raise ValueError("telemetry ends in an incomplete line")
+            intent = {"schema": "legion.provider-span-intent.v1",
+                      "attempt_receipt": attempt_path, "date": date,
+                      "telemetry_path": telemetry_path, "device": info.st_dev,
+                      "inode": info.st_ino, "offset": info.st_size}
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fsync_directory(telemetry_dir)
+        fd = os.open(intent_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            encoded = (json.dumps(intent, separators=(",", ":")) + "\n").encode()
+            os.write(fd, encoded)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fsync_directory(os.path.dirname(intent_path) or ".")
+    print(date)
+except (OSError, ValueError, TypeError, KeyError):
+    raise SystemExit(1)
+PY
+}
+
 legion_adapter_provider_span_is_durable() {
   local attempt_path="$1"
   [[ -n "$attempt_path" && -d "${LEGION_TELEMETRY_DIR:-}" ]] || return 1
-  python3 - "$attempt_path" "$LEGION_TELEMETRY_DIR" <<'PY'
+  python3 - "$attempt_path" "$LEGION_TELEMETRY_DIR" "$(legion_adapter_contract_root)" <<'PY'
 import hashlib
+import importlib.util
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
 
-attempt_path, telemetry_dir = sys.argv[1:]
+attempt_path, telemetry_dir, root = sys.argv[1:]
+telemetry_dir = os.path.realpath(telemetry_dir)
 ack_path = attempt_path + ".provider-span-ack"
+intent_path = attempt_path + ".provider-span-intent"
 limit = 1024 * 1024
+broker_spec = importlib.util.spec_from_file_location(
+    "legion_provider_span_schema", os.path.join(root, "legion-router/scripts/legion-handoff-broker.py"))
+if broker_spec is None or broker_spec.loader is None:
+    raise SystemExit(1)
+broker = importlib.util.module_from_spec(broker_spec)
+broker_spec.loader.exec_module(broker)
+sys.path.insert(0, os.path.join(root, "legion-observability/scripts"))
+from legion_receipts import validate_attempt
 
 def open_regular(path, maximum):
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     info = os.fstat(descriptor)
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > maximum:
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or (maximum is not None and info.st_size > maximum):
         os.close(descriptor)
         raise OSError("unsafe bounded file")
     path_info = os.stat(path, follow_symlinks=False)
@@ -928,19 +1214,75 @@ def open_regular(path, maximum):
         raise OSError("file identity changed")
     return descriptor, info
 
+try:
+    attempt_descriptor, attempt_info = open_regular(attempt_path, 65536)
+    try:
+        attempt = validate_attempt(json.loads(os.read(attempt_descriptor, 65537)))
+        path_info = os.stat(attempt_path, follow_symlinks=False)
+        if ((os.fstat(attempt_descriptor).st_dev, os.fstat(attempt_descriptor).st_ino)
+                != (path_info.st_dev, path_info.st_ino)):
+            raise OSError("attempt receipt replaced during validation")
+    finally:
+        os.close(attempt_descriptor)
+    if attempt["attempt_kind"] != "provider":
+        raise ValueError("provider span cannot acknowledge an aggregate attempt")
+except (OSError, ValueError, TypeError, UnicodeDecodeError):
+    raise SystemExit(1)
+
 def matching_span(raw):
+    if not raw.endswith(b"\n") or raw.count(b"\n") != 1 or len(raw) > limit:
+        return False
     try:
         value = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+        broker._validate_json_schema(value, broker.SPAN_SCHEMA)
+    except (ValueError, UnicodeDecodeError, TypeError):
         return False
     if not isinstance(value, dict):
         return False
     artifacts = value.get("artifacts")
     return (value.get("schema") == "legion.span.v1"
+            and value.get("run_id") == attempt["run_id"]
+            and value.get("executor") == attempt["executor"]
+            and value.get("duration_ms") == attempt["duration_ms"]
+            and value.get("usage_status") == attempt["usage_status"]
+            and value.get("tokens") == attempt["usage"]
+            and value.get("cost_status") == attempt["cost_status"]
+            and value.get("cost_usd") == attempt["cost_usd"]
+            and (attempt["effective_model"] is None or
+                 value.get("model") == attempt["effective_model"])
+            and (value.get("attempt_id") is None or
+                 value["attempt_id"] == attempt["attempt_id"])
+            and (value.get("attempt_ordinal") is None or
+                 value["attempt_ordinal"] == attempt["ordinal"])
             and isinstance(artifacts, dict)
             and artifacts.get("provider_attempt") is True
             and artifacts.get("rollup_only") is not True
             and artifacts.get("attempt_receipt") == attempt_path)
+
+def read_intent():
+    if not os.path.lexists(intent_path):
+        return None
+    descriptor, info = open_regular(intent_path, 4096)
+    try:
+        value = json.loads(os.read(descriptor, 4097))
+    finally:
+        os.close(descriptor)
+    if not isinstance(value, dict):
+        raise ValueError("invalid append intent")
+    date = value.get("date")
+    if (value.get("schema") != "legion.provider-span-intent.v1"
+            or value.get("attempt_receipt") != attempt_path
+            or not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date)
+            or value.get("telemetry_path") != os.path.join(telemetry_dir, date + ".jsonl")
+            or type(value.get("device")) is not int or type(value.get("inode")) is not int
+            or type(value.get("offset")) is not int or value["offset"] < 0):
+        raise ValueError("invalid append intent")
+    return value
+
+try:
+    intent = read_intent()
+except (OSError, ValueError, TypeError, UnicodeDecodeError):
+    raise SystemExit(1)
 
 def validate_ack():
     descriptor, info = open_regular(ack_path, 4096)
@@ -957,15 +1299,24 @@ def validate_ack():
             type(value["device"]) is not int or type(value["inode"]) is not int or
             type(value["offset"]) is not int or value["offset"] < 0 or
             type(value["length"]) is not int or not 1 <= value["length"] <= limit or
-            not isinstance(value["span_sha256"], str)):
+            not isinstance(value["span_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value["span_sha256"])):
         return False
-    descriptor = os.open(value["telemetry_path"], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    telemetry_path = value.get("telemetry_path")
+    if (not isinstance(telemetry_path, str)
+            or os.path.dirname(telemetry_path) != telemetry_dir
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}\.jsonl", os.path.basename(telemetry_path))
+            or (intent is not None and telemetry_path != intent["telemetry_path"])):
+        return False
+    descriptor, current = open_regular(telemetry_path, None)
     try:
-        current = os.fstat(descriptor)
-        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or
-                (current.st_dev, current.st_ino) != (value["device"], value["inode"])):
+        if ((current.st_dev, current.st_ino) != (value["device"], value["inode"])):
             return False
         raw_span = os.pread(descriptor, value["length"], value["offset"])
+        path_info = os.stat(telemetry_path, follow_symlinks=False)
+        if ((os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino)
+                != (path_info.st_dev, path_info.st_ino)):
+            return False
     finally:
         os.close(descriptor)
     return (len(raw_span) == value["length"]
@@ -978,31 +1329,45 @@ try:
 except (OSError, ValueError, TypeError, UnicodeDecodeError):
     pass
 
-# Crash recovery is bounded to the tail of the one date-derived telemetry file;
-# historical files are never globally rescanned. Once recovered, all future
-# checks use the exact indexed byte range above.
+# New publications persist an attempt-specific append intent *before* emitting.
+# Recover from that byte offset, not the last MiB of a possibly much larger
+# file; an ambiguous unmatched append never authorizes a duplicate. Legacy
+# receipts without an intent retain the bounded date-derived tail fallback.
 try:
-    attempt_descriptor, attempt_info = open_regular(attempt_path, 65536)
-    try:
-        attempt = json.loads(os.read(attempt_descriptor, 65537))
-    finally:
-        os.close(attempt_descriptor)
     ended_at = attempt.get("ended_at")
     if not isinstance(ended_at, str) or len(ended_at) < 10:
         raise ValueError("attempt has no date")
-    telemetry_path = os.path.join(telemetry_dir, ended_at[:10] + ".jsonl")
+    telemetry_path = (intent["telemetry_path"] if intent is not None else
+                      os.path.join(telemetry_dir, ended_at[:10] + ".jsonl"))
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(telemetry_path, flags)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise OSError("unsafe telemetry file")
-        start = max(0, info.st_size - limit)
-        raw = os.pread(descriptor, info.st_size - start, start)
+        path_info = os.stat(telemetry_path, follow_symlinks=False)
+        if (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino):
+            raise OSError("telemetry file changed")
+        if intent is not None:
+            if ((info.st_dev, info.st_ino) != (intent["device"], intent["inode"]) or
+                    info.st_size < intent["offset"]):
+                raise OSError("append intent lost its telemetry file")
+            start = intent["offset"]
+        else:
+            start = max(0, info.st_size - limit)
+        raw = os.pread(descriptor, min(limit, info.st_size - start), start)
+        # A successful acknowledgement means the JSONL bytes, not merely the
+        # sidecar, survived a host crash. The acknowledgement directory follows.
+        os.fsync(descriptor)
+        path_info = os.stat(telemetry_path, follow_symlinks=False)
+        if (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino) != (path_info.st_dev, path_info.st_ino):
+            raise OSError("telemetry file replaced during recovery")
     finally:
         os.close(descriptor)
     cursor = start
-    if start:
+    # A fresh intent points at a known append boundary, unlike a legacy tail
+    # read that may start halfway through a line. Preserve its first record.
+    if start and intent is None:
         first_newline = raw.find(b"\n")
         if first_newline < 0:
             raise ValueError("no complete bounded telemetry record")
@@ -1036,6 +1401,14 @@ try:
             os.fsync(destination.fileno())
         os.chmod(temporary, 0o600)
         os.replace(temporary, ack_path)
+        directory_fd = os.open(directory or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        path_info = os.stat(telemetry_path, follow_symlinks=False)
+        if (path_info.st_dev, path_info.st_ino) != (info.st_dev, info.st_ino):
+            raise OSError("telemetry file replaced before acknowledgement")
     finally:
         try:
             os.unlink(temporary)
@@ -1448,7 +1821,7 @@ legion_adapter_acquire_provider_span_claim() {
 # path checks the durable JSONL record and takes over publication only when the
 # normal append did not complete.
 legion_adapter_emit_normal_provider_span() {
-  local attempt_path="$1"
+  local attempt_path="$1" pinned_date
   shift
   if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
       && "${LEGION_TEST_PROVIDER_SPAN_FAULT_STAGE:-}" == claim ]]; then
@@ -1470,7 +1843,11 @@ legion_adapter_emit_normal_provider_span() {
     legion_adapter_release_provider_span_claim "$attempt_path"
     return 1
   fi
-  emit_span "$@" || true
+  if ! pinned_date="$(legion_adapter_prepare_provider_span "$attempt_path")"; then
+    legion_adapter_release_provider_span_claim "$attempt_path"
+    return 1
+  fi
+  LEGION_ADAPTER_SPAN_DATE="$pinned_date" emit_span "$@" || true
   # Simulate losing the acknowledgement after the append. The durable span is
   # deliberately retained so a retry proves exact-once reconciliation.
   if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
@@ -1569,7 +1946,7 @@ legion_adapter_write_signal_receipt() {
 # pending outer signal and an adapter-local trap safe to retry without double
 # counting the same paid call.
 legion_adapter_emit_signal_span() {
-  local task_text="${1:-}" lease_path="${2:-}" attempt_path root trace_bin
+  local task_text="${1:-}" lease_path="${2:-}" attempt_path root trace_bin pinned_date
   local executor model terminal span_status duration usage cost usage_status cost_status artifacts
   [[ "$LEGION_ADAPTER_SIGNAL_TERMINALIZED" == 1 ]] || return 0
   attempt_path="$LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json"
@@ -1613,7 +1990,11 @@ legion_adapter_emit_signal_span() {
     legion_adapter_release_provider_span_claim "$attempt_path"
     return 1
   fi
-  if [[ ! -x "$trace_bin" ]] || ! "$trace_bin" emit \
+  if ! pinned_date="$(legion_adapter_prepare_provider_span "$attempt_path")"; then
+    legion_adapter_release_provider_span_claim "$attempt_path"
+    return 1
+  fi
+  if [[ ! -x "$trace_bin" ]] || ! LEGION_ADAPTER_SPAN_DATE="$pinned_date" "$trace_bin" emit \
       --executor "$executor" --model "$model" --status "$span_status" \
       --run-id "$RUN_ID" --trace-id "${LEGION_TRACE_ID:-$RUN_ID}" \
       --parent-id "${LEGION_PARENT_ID:-}" --archetype "${archetype:-${ARCHETYPE:-}}" \

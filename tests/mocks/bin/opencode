@@ -75,6 +75,16 @@ if [[ "${MOCK_OPENCODE_CURRENT_STREAM:-0}" == "1" ]]; then
   exit 0
 fi
 
+if [[ "${MOCK_OPENCODE_HUGE_TOKENS:-0}" == "1" ]]; then
+  cat <<EOF
+{"type":"message.updated","properties":{"info":{"id":"a1","role":"assistant","providerID":"$provider","modelID":"$modelid","cost":0.002,"tokens":{"input":9007199254740993,"output":10,"reasoning":2,"cache":{"read":0,"write":0}}}}}
+{"type":"message.updated","properties":{"info":{"id":"a2","role":"assistant","providerID":"$provider","modelID":"$modelid","cost":0.001,"tokens":{"input":9,"output":4,"reasoning":1,"cache":{"read":0,"write":0}}}}}
+{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text","text":"OPENCODE_HUGE_TOKENS"}}}
+{"type":"session.idle","properties":{}}
+EOF
+  exit 0
+fi
+
 # Emit a stray non-JSON stdout line (e.g. a plugin console.log) to prove the
 # adapter's tolerant parse skips it instead of zeroing the whole run's metering.
 [[ "${MOCK_OPENCODE_STRAY_STDOUT:-0}" == "1" ]] && printf 'plugin: hello from console.log (not json)\n'

@@ -1291,6 +1291,7 @@ def main() -> int:
     cleanup_ok = True
     cleanup_attempted = False
     timed_out = False
+    completed_before_cleanup = False
     supervisor_token = secrets.token_hex(24)
 
     def stop(signum: int, _frame: object) -> None:
@@ -1472,7 +1473,13 @@ def main() -> int:
         deadline = time.monotonic() + arguments.max_runtime_seconds
         if absolute_deadline_ns is not None:
             deadline = min(deadline, absolute_deadline_ns / 1_000_000_000)
-        while process.poll() is None:
+        while True:
+            if process.poll() is not None:
+                # A cancellation already received before this observation is
+                # still the cause of a signalled child exit. Only a signal
+                # arriving *after* observed completion is ignored.
+                completed_before_cleanup = not cancel_requested
+                break
             tracker.raise_if_error()
             now = time.monotonic()
             # The monotonic deadline wins a simultaneous timeout/cancel race.
@@ -1480,6 +1487,7 @@ def main() -> int:
             # finishes immediately below the lease boundary.
             if now >= deadline:
                 if process.poll() is not None:
+                    completed_before_cleanup = not cancel_requested
                     break
                 timed_out = True
                 break
@@ -1532,7 +1540,10 @@ def main() -> int:
         _write_status(arguments.status_file, "timed_out", reason, arguments.max_runtime_seconds)
         print(f"legion-process-supervisor: {reason}", file=sys.stderr)
         return 124
-    if interrupted:
+    # A handler may run while descendant cleanup and status publication are in
+    # progress. Once the loop observed the direct child exit, that late signal
+    # cannot retroactively turn the completed provider call into a cancellation.
+    if interrupted and not completed_before_cleanup:
         _write_status(
             arguments.status_file,
             "cancelled",

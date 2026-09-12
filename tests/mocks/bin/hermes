@@ -24,7 +24,9 @@ if [[ -n "${MOCK_PROVIDER_HANDOFF_EXECUTOR:-}" ]]; then
 fi
 printf 'mock-hermes-change %s\n' "$model" >> MOCK_HERMES_CHANGE.txt
 if [[ -n "$usage_file" && "${MOCK_HERMES_NO_USAGE:-0}" != 1 ]]; then
-  if [[ "${MOCK_HERMES_USAGE_FAILED:-0}" == 1 ]]; then
+  if [[ "${MOCK_HERMES_HUGE_TOKENS:-0}" == 1 ]]; then
+    printf '%s\n' '{"estimated_cost_usd":0.002,"cost_status":"estimated","cost_source":"official_docs_snapshot","input_tokens":0,"cache_read_tokens":1,"cache_write_tokens":0,"output_tokens":9007199254740993,"reasoning_tokens":9007199254740992,"total_tokens":9007199254740994,"api_calls":1,"model":"openai/fixture-hermes","provider":"openai","session_id":"mock-hermes","completed":true,"failed":false,"service_tier":null}' > "$usage_file"
+  elif [[ "${MOCK_HERMES_USAGE_FAILED:-0}" == 1 ]]; then
     printf '%s\n' '{"estimated_cost_usd":0.002,"cost_status":"estimated","cost_source":"official_docs_snapshot","input_tokens":256,"cache_read_tokens":24,"cache_write_tokens":0,"output_tokens":48,"reasoning_tokens":12,"total_tokens":328,"api_calls":2,"model":"openai/fixture-hermes","provider":"openai","session_id":"mock-hermes","completed":false,"failed":true,"service_tier":null}' > "$usage_file"
   elif [[ "${MOCK_HERMES_USAGE_MALFORMED:-0}" == 1 ]]; then
     printf '%s\n' '{"estimated_cost_usd":0.002,"input_tokens":256,"output_tokens":48,"completed":true,"failed":false}' > "$usage_file"

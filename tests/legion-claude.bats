@@ -165,7 +165,8 @@ if [[ "${1:-}" == */legion_preflight.py \
       jq -cn --arg executor "$executor" --arg checked "2026-09-12T00:00:00Z" \
         '{schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,status:"unavailable",
         reason:"fallback configuration unavailable",identity:null,
-        cache:{hit:false,key:null},compatibility:{}}'
+        cache:{hit:false,key:null},
+        compatibility:{configuration:{missing:["fixture-config"],status:"unavailable"}}}'
       ;;
     refused)
       jq -cn --arg executor "$executor" --arg checked "2026-09-12T00:00:00Z" \

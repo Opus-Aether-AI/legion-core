@@ -84,6 +84,11 @@ if [[ "${MOCK_PROVIDER_REPLACE_GIT:-0}" == 1 ]]; then
   printf '*.txt filter=escape\n' > .gitattributes
 fi
 if [[ "$tools" != "read,grep,find,ls" || "${MOCK_PI_WRITE_IN_READONLY:-0}" == 1 ]]; then printf 'mock-pi-change %s %s\n' "$model" "$thinking" >> MOCK_PI_CHANGE.txt; fi
+if [[ "${MOCK_PI_HUGE_TOKENS:-0}" == 1 ]]; then
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"PI_HUGE_TOKENS"}],"provider":"openai","model":"fixture-pi","usage":{"input":9007199254740993,"output":1,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":9007199254740994,"cost":{"input":0.001,"output":0.001,"cacheRead":0,"cacheWrite":0,"total":0.002}},"stopReason":"stop"}}'
+  printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"PI_HUGE_TOKENS"}],"provider":"openai","model":"fixture-pi","usage":{"input":9007199254740993,"output":1,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":9007199254740994,"cost":{"input":0.001,"output":0.001,"cacheRead":0,"cacheWrite":0,"total":0.002}},"stopReason":"stop"}],"willRetry":false}'
+  exit 0
+fi
 printf '%s\n' '{"type":"session","version":3,"id":"mock-pi"}'
 if [[ "${MOCK_PI_RETRY_COMPACTION:-0}" == 1 ]]; then
   printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"retrying"}],"provider":"openai","model":"fixture-pi-alias","usage":{"input":10,"output":4,"cacheRead":0,"cacheWrite":0,"reasoning":1,"totalTokens":14,"cost":{"input":0.0004,"output":0.0004,"cacheRead":0,"cacheWrite":0,"total":0.001}},"stopReason":"error"}}'

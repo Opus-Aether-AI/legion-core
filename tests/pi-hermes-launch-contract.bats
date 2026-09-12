@@ -591,6 +591,37 @@ SH
   ' "$attempt"
 }
 
+@test "Pi and Hermes provider token counters above 2^53 remain exact" {
+  local kind repo result attempt
+  for kind in pi hermes; do
+    repo="$(make_test_repo "$kind-huge-tokens")"
+    if [[ "$kind" == pi ]]; then
+      MOCK_PI_HUGE_TOKENS=1 PI_BIN=pi \
+        run "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+          --model openai/fixture-pi --repo "$repo" --quiet
+    else
+      MOCK_HERMES_HUGE_TOKENS=1 HERMES_BIN=hermes \
+        run "$REPO_ROOT/legion-router/bin/legion-hermes" run --task inspect \
+          --model openai/fixture-hermes --repo "$repo" --quiet
+    fi
+    [ "$status" -eq 0 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    attempt="$(jq -r '.attempt_receipt' <<<"$result")"
+    python3 - "$attempt" "$kind" <<'PY'
+import json
+from pathlib import Path
+import sys
+receipt = json.loads(Path(sys.argv[1]).read_text())
+assert receipt["usage_status"] == "known"
+if sys.argv[2] == "pi":
+    assert receipt["usage"]["input_tokens"] == 9007199254740993
+else:
+    assert receipt["usage"]["reasoning_output_tokens"] == 9007199254740992
+    assert receipt["usage"]["output_tokens"] == 1
+PY
+  done
+}
+
 @test "Pi malformed or negative provider cost remains unknown in canonical output" {
   local repo result attempt invalid_cost case_name
   for invalid_cost in -1 '"malformed"'; do

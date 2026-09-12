@@ -87,8 +87,10 @@ def _validate_reconciliation(value):
         count = value[f"known_{kind}_attempts"]
         if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= total:
             raise ValueError(f"aggregate known_{kind}_attempts is invalid")
-        expected_status = "known" if count == total else ("partial" if count else "unknown")
-        if value[f"{kind}_status"] != expected_status:
+        expected_statuses = {"known"} if count == total else (
+            {"partial"} if count else {"unknown", "not_applicable"}
+        )
+        if value[f"{kind}_status"] not in expected_statuses:
             raise ValueError(f"aggregate {kind}_status does not match its known count")
     known_usage = value["known_usage"]
     if value["known_usage_attempts"]:
@@ -261,8 +263,10 @@ def reconcile_attempts(attempts):
         raise ValueError("child attempt ordinals must be contiguous and ordered from one")
     known_usage = {}
     usage_known = 0
+    usage_not_applicable = 0
     known_cost_values = []
     cost_known = 0
+    cost_not_applicable = 0
     attempt_count = 0
     usage_sources = set()
     cost_sources = set()
@@ -274,6 +278,8 @@ def reconcile_attempts(attempts):
         usage_value_count = aggregate["known_usage_attempts"] if aggregate is not None else (
             1 if attempt["usage_status"] == "known" else 0
         )
+        if attempt["usage_status"] == "not_applicable":
+            usage_not_applicable += leaf_count
         if usage_value_count:
             usage_known += usage_value_count
             usage_sources.add(attempt["usage_source"])
@@ -283,6 +289,8 @@ def reconcile_attempts(attempts):
         cost_value_count = aggregate["known_cost_attempts"] if aggregate is not None else (
             1 if attempt["cost_status"] == "known" else 0
         )
+        if attempt["cost_status"] == "not_applicable":
+            cost_not_applicable += leaf_count
         if cost_value_count:
             cost_known += cost_value_count
             cost_sources.add(attempt["cost_source"])
@@ -290,8 +298,10 @@ def reconcile_attempts(attempts):
     known_cost = float(sum(known_cost_values, Decimal("0")))
     if cost_known:
         _validate_cost(known_cost)
-    usage_status = "known" if usage_known == attempt_count else ("partial" if usage_known else "unknown")
-    cost_status = "known" if cost_known == attempt_count else ("partial" if cost_known else "unknown")
+    usage_status = ("known" if usage_known == attempt_count else "partial" if usage_known
+                    else "not_applicable" if usage_not_applicable == attempt_count else "unknown")
+    cost_status = ("known" if cost_known == attempt_count else "partial" if cost_known
+                   else "not_applicable" if cost_not_applicable == attempt_count else "unknown")
     return {
         "usage": known_usage if usage_status == "known" else None,
         "usage_status": usage_status,

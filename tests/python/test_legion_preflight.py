@@ -1,4 +1,5 @@
 import importlib
+import copy
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 SCRIPTS = ROOT / "legion-observability" / "scripts"
+SCHEMA_PATH = ROOT / "legion-observability" / "schema" / "legion.preflight.v1.schema.json"
 sys.path.insert(0, str(SCRIPTS))
 preflight = importlib.import_module("legion_preflight")
 
@@ -145,6 +147,191 @@ def test_supported_preflight_requires_complete_identity_and_compatibility(tmp_pa
         preflight.validate_preflight_receipt(
             incomplete, executor="fixture", model="fixture", sandbox="read-only"
         )
+
+
+def supported_receipt(tmp_path: Path) -> dict:
+    binary = executable(tmp_path / "fixture")
+    config = registry(
+        tmp_path / "executors.toml", binary,
+        provider_sandboxes='["read-only", "workspace-write"]',
+    )
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + 'supported_read_modes = ["provider-tools"]\n'
+        + 'supported_task_transports = ["stdin"]\n'
+        + 'supported_efforts = ["high"]\n'
+        + 'supported_model_patterns = ["^fixture-model$"]\n',
+        encoding="utf-8",
+    )
+    result = preflight.preflight(
+        "fixture", registry_path=config, cache_dir=tmp_path / "cache",
+        env={"HOME": str(tmp_path / "home"), "PATH": os.environ["PATH"]},
+        model="fixture-model", sandbox="read-only", read_mode="provider-tools",
+        task_transport="stdin", effort="high", explicit_consent=False,
+    )
+    assert result["status"] == "supported"
+    return result
+
+
+@pytest.mark.parametrize("field", ["model", "sandbox", "read_mode", "task_transport", "effort"])
+def test_supported_receipt_binds_full_requested_route(tmp_path: Path, field: str) -> None:
+    receipt = supported_receipt(tmp_path)
+    expected = {
+        "executor": "fixture", "model": "fixture-model", "sandbox": "read-only",
+        "read_mode": "provider-tools", "task_transport": "stdin", "effort": "high",
+        "explicit_consent": False,
+    }
+    preflight.validate_preflight_receipt(receipt, **expected)
+    expected[field] = "different-route"
+    with pytest.raises(ValueError, match=f"{field} binding mismatch"):
+        preflight.validate_preflight_receipt(receipt, **expected)
+
+
+@pytest.mark.parametrize("probe_mutation", [
+    {"probe_status": "completed", "probe_lease": None},
+    {"probe_status": "completed", "probe_lease": {
+        "schema": "legion.child-execution-lease.v1", "status": "cleanup_failed",
+        "reason": "cleanup failed", "max_runtime_seconds": 5, "child_started": False,
+    }},
+    {"probe_status": "cached"},
+    {"probe_status": "not_requested"},
+    {"status": "unavailable"},
+])
+def test_supported_receipt_rejects_contradictory_version_probe(
+    tmp_path: Path, probe_mutation: dict
+) -> None:
+    receipt = supported_receipt(tmp_path)
+    receipt["compatibility"]["version"].update(probe_mutation)
+    with pytest.raises(ValueError, match="version probe"):
+        preflight.validate_preflight_receipt(receipt)
+
+
+def test_supported_receipt_rejects_false_cache_hit_for_completed_probe(tmp_path: Path) -> None:
+    receipt = supported_receipt(tmp_path)
+    receipt["cache"]["hit"] = True
+    with pytest.raises(ValueError, match="completed version probe"):
+        preflight.validate_preflight_receipt(receipt)
+
+
+def test_completed_probe_rejects_no_child_lease(tmp_path: Path) -> None:
+    receipt = supported_receipt(tmp_path)
+    receipt["compatibility"]["version"]["probe_lease"]["child_started"] = False
+    with pytest.raises(ValueError, match="completed version probe"):
+        preflight.validate_preflight_receipt(receipt)
+
+
+def test_cached_supported_receipt_requires_and_keeps_cache_hit(tmp_path: Path) -> None:
+    completed = supported_receipt(tmp_path)
+    cached = copy.deepcopy(completed)
+    cached["cache"]["hit"] = True
+    cached["compatibility"]["version"].update({
+        "probe_status": "cached", "probe_reason": "trusted version probe cache hit",
+        "probe_lease": None,
+    })
+    preflight.validate_preflight_receipt(cached)
+    cached["cache"]["hit"] = False
+    with pytest.raises(ValueError, match="cached version probe"):
+        preflight.validate_preflight_receipt(cached)
+
+
+def test_supported_receipt_rejects_invalid_model_policy_identity(tmp_path: Path) -> None:
+    receipt = supported_receipt(tmp_path)
+    receipt["compatibility"]["model"]["policy_model"] = []
+    with pytest.raises(ValueError, match="invalid model policy evidence"):
+        preflight.validate_preflight_receipt(receipt)
+
+
+def test_supported_receipt_binds_required_billing_consent(tmp_path: Path) -> None:
+    receipt = supported_receipt(tmp_path)
+    receipt["compatibility"]["billing"]["explicit_consent_required"] = True
+    receipt["compatibility"]["billing"]["class"] = "premium_credit"
+    with pytest.raises(ValueError, match="billing consent mismatch"):
+        preflight.validate_preflight_receipt(receipt, explicit_consent=False)
+    preflight.validate_preflight_receipt(receipt, explicit_consent=True)
+
+
+def test_unavailable_receipt_rejects_all_supported_compatibility(tmp_path: Path) -> None:
+    receipt = supported_receipt(tmp_path)
+    receipt["status"] = "unavailable"
+    receipt["identity"] = None
+    receipt["cache"]["hit"] = False
+    with pytest.raises(ValueError, match="unavailable preflight lacks matching"):
+        preflight.validate_preflight_receipt(receipt)
+
+
+def test_missing_binary_unavailable_receipt_requires_exact_no_identity_shape() -> None:
+    receipt = {
+        "schema": "legion.preflight.v1", "checked_at": "now", "executor": "fixture",
+        "status": "unavailable", "reason": "executor binary not found: fixture",
+        "identity": None, "cache": {"hit": False, "key": None}, "compatibility": {},
+    }
+    preflight.validate_preflight_receipt(receipt, executor="fixture", model="fixture")
+    forged = copy.deepcopy(receipt)
+    forged["reason"] = "arbitrary unavailable"
+    with pytest.raises(ValueError, match="exact no-executable evidence"):
+        preflight.validate_preflight_receipt(forged)
+
+
+def test_early_no_spend_version_failure_need_not_invent_later_route_checks() -> None:
+    receipt = {
+        "schema": "legion.preflight.v1", "checked_at": "2026-09-12T00:00:00Z",
+        "executor": "claude", "status": "unavailable",
+        "reason": "version probe deadline expired", "identity": None,
+        "cache": {"hit": False, "key": None},
+        "compatibility": {"version": {
+            "discovered": None, "status": "unavailable", "probe_status": "timed_out",
+            "probe_reason": "inherited child lease deadline expired during launch setup",
+            "probe_lease": {
+                "schema": "legion.child-execution-lease.v1", "status": "launch_failed",
+                "reason": "inherited child lease deadline expired during launch setup",
+                "max_runtime_seconds": 30,
+            },
+        }},
+    }
+    preflight.validate_preflight_receipt(
+        receipt, executor="claude", model="model-b", sandbox="workspace-write",
+        read_mode="provider-tools", task_transport="stdin", effort=None,
+        explicit_consent=False,
+    )
+    receipt["status"] = "supported"
+    with pytest.raises(ValueError, match="compatibility is incomplete"):
+        preflight.validate_preflight_receipt(receipt, executor="claude")
+
+
+def test_preflight_schema_defines_complete_compatibility_surface() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    compatibility = schema["properties"]["compatibility"]
+    assert compatibility["additionalProperties"] is False
+    assert set(compatibility["properties"]) == {
+        "sandbox", "read_mode", "task_transport", "effort", "model",
+        "configuration", "billing", "version",
+    }
+
+
+def test_draft202012_preflight_schema_rejects_unknown_and_invalid_checks(tmp_path: Path) -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(schema)
+    validator.check_schema(schema)
+    receipt = supported_receipt(tmp_path)
+    validator.validate(receipt)
+
+    mutations = [
+        lambda value: value["compatibility"].update({"foreign": {"status": "supported"}}),
+        lambda value: value["compatibility"].pop("read_mode"),
+        lambda value: value["compatibility"]["read_mode"].update({"requested": []}),
+        lambda value: value["compatibility"]["read_mode"].update({"status": "not_requested"}),
+        lambda value: value["compatibility"]["task_transport"].update({"extra": True}),
+        lambda value: value["compatibility"]["effort"].update({"status": "fabricated"}),
+        lambda value: value["compatibility"]["model"].update({"policy_model": []}),
+        lambda value: value["compatibility"]["billing"].update({"explicit_consent_required": 1}),
+        lambda value: value["compatibility"]["configuration"].update({"missing": [""]}),
+        lambda value: value["compatibility"]["sandbox"].update({"wrapper": []}),
+    ]
+    for mutate in mutations:
+        contradictory = copy.deepcopy(receipt)
+        mutate(contradictory)
+        assert list(validator.iter_errors(contradictory))
 
 
 def test_preflight_receipt_file_rejects_symlink(tmp_path: Path) -> None:

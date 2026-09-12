@@ -111,7 +111,11 @@ emit() {
   fi
 
   mkdir -p "$LEGION_TELEMETRY_DIR"
-  printf '%s\n' "$span" >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
+  if [[ -n "${LEGION_ADAPTER_SPAN_DATE:-}" && ! "$LEGION_ADAPTER_SPAN_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    echo "emit: invalid pinned telemetry date" >&2
+    return 2
+  fi
+  printf '%s\n' "$span" >> "$LEGION_TELEMETRY_DIR/${LEGION_ADAPTER_SPAN_DATE:-$(_today)}.jsonl"
   printf '%s\n' "$span"
 }
 

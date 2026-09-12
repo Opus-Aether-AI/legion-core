@@ -179,3 +179,42 @@ assert total["known_cost_usd"] == 0.25
 assert total["known_cost_attempts"] == 1
 PY
 }
+
+@test "receipt publication refuses a symlinked alias without touching its target" {
+  local victim="$TEST_TMPDIR/victim.json"
+  printf 'untouched\n' > "$victim"
+  ln -s "$victim" "$ART/attempt.json"
+
+  run write_attempt 1 '{}' unknown '' 0 unknown ''
+  [ "$status" -ne 0 ]
+  [ "$(cat "$victim")" = untouched ]
+  [ -L "$ART/attempt.json" ]
+  [ ! -e "$ART/attempt-1.json" ]
+}
+
+@test "numbered attempt publication is exclusive and preserves the first receipt" {
+  write_attempt 1 '{"input_tokens":2}' known provider_api 0.5 known provider_api
+  local original="$TEST_TMPDIR/original.json"
+  cp "$ART/attempt-1.json" "$original"
+
+  run write_attempt 1 '{"input_tokens":99}' known provider_api 99 known provider_api
+  [ "$status" -ne 0 ]
+  cmp -s "$original" "$ART/attempt-1.json"
+  cmp -s "$original" "$ART/attempt.json"
+}
+
+@test "receipt publication refuses symlinked failure leaves without touching target" {
+  local victim="$TEST_TMPDIR/victim-failure.json"
+  printf 'untouched\n' > "$victim"
+  ln -s "$victim" "$ART/failure.json"
+
+  run legion_adapter_write_attempt "$ART" fixture fixture 1 \
+    requested-model effective-model "" "" workspace-write failed \
+    2026-01-01T00:00:00Z 2026-01-01T00:00:01Z 1000 \
+    '{}' unknown '' 0 unknown '' provider_error false false 1 provider-error
+  [ "$status" -ne 0 ]
+  [ "$(cat "$victim")" = untouched ]
+  [ -L "$ART/failure.json" ]
+  [ ! -e "$ART/failure-1.json" ]
+  [ ! -e "$ART/attempt-1.json" ]
+}

@@ -31,11 +31,62 @@
     "cache": {
       "type": "object", "additionalProperties": false,
       "required": ["hit", "key"],
-      "properties": {"hit": {"type": "boolean"}, "key": {"type": ["string", "null"]}}
+      "properties": {"hit": {"type": "boolean"}, "key": {"type": ["string", "null"], "minLength": 1}}
     },
     "compatibility": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
+        "sandbox": {
+          "type": "object", "additionalProperties": false,
+          "required": ["requested", "status"],
+          "properties": {
+            "requested": {"type": ["string", "null"]},
+            "status": {"$ref": "#/$defs/simpleStatus"},
+            "provider_sandbox": {"type": "string", "minLength": 1},
+            "wrapper": {"type": ["string", "null"], "minLength": 1}
+          },
+          "allOf": [
+            {"if": {"properties": {"requested": {"type": "string"}}, "required": ["requested"]},
+             "then": {"required": ["provider_sandbox", "wrapper"]},
+             "else": {"properties": {"status": {"const": "not_requested"}}}}
+          ]
+        },
+        "read_mode": {"$ref": "#/$defs/simpleCheck"},
+        "task_transport": {"$ref": "#/$defs/simpleCheck"},
+        "effort": {"$ref": "#/$defs/simpleCheck"},
+        "model": {
+          "type": "object", "additionalProperties": false,
+          "required": ["requested", "policy_model", "model_ref", "status"],
+          "properties": {
+            "requested": {"type": ["string", "null"], "minLength": 1},
+            "policy_model": {"type": ["string", "null"], "minLength": 1},
+            "model_ref": {"type": ["string", "null"], "minLength": 1},
+            "status": {"$ref": "#/$defs/simpleStatus"}
+          },
+          "allOf": [
+            {"if": {"properties": {"requested": {"type": "null"}}, "required": ["requested"]},
+             "then": {"properties": {"status": {"const": "not_requested"}}},
+             "else": {"properties": {"status": {"not": {"const": "not_requested"}}}}}
+          ]
+        },
+        "configuration": {
+          "type": "object", "additionalProperties": false,
+          "required": ["missing", "status"],
+          "properties": {
+            "missing": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "status": {"enum": ["supported", "unavailable", "incompatible"]}
+          }
+        },
+        "billing": {
+          "type": "object", "additionalProperties": false,
+          "required": ["class", "explicit_consent_required", "status"],
+          "properties": {
+            "class": {"type": "string", "minLength": 1},
+            "explicit_consent_required": {"type": "boolean"},
+            "status": {"enum": ["supported", "incompatible"]}
+          }
+        },
         "version": {
           "type": "object",
           "additionalProperties": false,
@@ -75,6 +126,34 @@
           }
         }
       }
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "supported"}}, "required": ["status"]},
+     "then": {
+       "properties": {
+         "identity": {"type": "object"},
+         "compatibility": {
+           "required": ["sandbox", "read_mode", "task_transport", "effort", "model",
+                        "configuration", "billing", "version"]
+         }
+       }
+     }}
+  ],
+  "$defs": {
+    "simpleStatus": {"enum": ["supported", "untested", "incompatible", "unavailable", "not_requested"]},
+    "simpleCheck": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requested", "status"],
+      "properties": {
+        "requested": {"type": ["string", "null"]},
+        "status": {"$ref": "#/$defs/simpleStatus"}
+      },
+      "allOf": [
+        {"if": {"properties": {"requested": {"type": "null"}}, "required": ["requested"]},
+         "then": {"properties": {"status": {"const": "not_requested"}}},
+         "else": {"properties": {"status": {"not": {"const": "not_requested"}}}}}
+      ]
     }
   }
 }

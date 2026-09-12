@@ -361,18 +361,7 @@ emit_span() {
 pi_usage() {
   local file="$1"
   [[ -s "$file" ]] || { printf '{}'; return 0; }
-  jq -s -c '
-    ([.[] | select(.type == "message_end" and .message.role == "assistant") | .message]
-      + [.[] | select(.type == "compaction_end" and .aborted == false and .result.usage != null) | .result.usage]) as $receipts
-    | reduce $receipts[] as $receipt
-        ({input_tokens:0,cached_input_tokens:0,output_tokens:0,reasoning_output_tokens:0,cache_creation_input_tokens:0};
-         ($receipt.usage // $receipt) as $usage
-         | .input_tokens += $usage.input
-         | .cached_input_tokens += $usage.cacheRead
-         | .reasoning_output_tokens += ($usage.reasoning // 0)
-         | .output_tokens += ($usage.output - ($usage.reasoning // 0))
-         | .cache_creation_input_tokens += $usage.cacheWrite)' \
-    "$file" 2>/dev/null || printf '{}'
+  python3 "$_self_dir/lib/provider-usage.py" pi "$file"
 }
 pi_cost() {
   local file="$1"
@@ -419,7 +408,6 @@ pi_terminal_ok() {
       and ((.reasoning == null) or (.reasoning | nni))
       and ((.reasoning // 0) <= .output)
       and (.totalTokens | nni)
-      and .totalTokens == (.input + .output + .cacheRead + .cacheWrite)
       and (.cost | type == "object")
       and (.cost.input | nn)
       and (.cost.output | nn)
@@ -444,7 +432,8 @@ pi_terminal_ok() {
         and (.usage | valid_usage))
       and all($compactions[]; valid_usage)
       and ($final.stopReason == "stop" or $final.stopReason == "length")
-  ' "$1" >/dev/null 2>&1
+  ' "$1" >/dev/null 2>&1 || return 1
+  python3 "$_self_dir/lib/provider-usage.py" pi-total "$1"
 }
 pi_actual_model() {
   jq -s -r '
@@ -459,11 +448,7 @@ pi_actual_model() {
 hermes_usage() {
   local file="$1"
   [[ -s "$file" ]] || { printf '{}'; return 0; }
-  jq -c '{input_tokens:.input_tokens,
-          cached_input_tokens:.cache_read_tokens,
-          output_tokens:(.output_tokens - .reasoning_tokens),
-          reasoning_output_tokens:.reasoning_tokens,
-          cache_creation_input_tokens:.cache_write_tokens}' "$file" 2>/dev/null || printf '{}'
+  python3 "$_self_dir/lib/provider-usage.py" hermes "$file"
 }
 hermes_cost() {
   local file="$1"
@@ -505,7 +490,6 @@ hermes_terminal_ok() {
     and (.reasoning_tokens | nni)
     and .reasoning_tokens <= .output_tokens
     and (.total_tokens | nni)
-    and .total_tokens == (.input_tokens + .output_tokens + .cache_read_tokens + .cache_write_tokens)
     and (.api_calls | nni and . > 0)
     and (.estimated_cost_usd | nn)
     and (.cost_status | IN("actual", "estimated", "included", "unknown"))
@@ -515,7 +499,8 @@ hermes_terminal_ok() {
     and (.session_id | type == "string" and length > 0)
     and ((.service_tier == null) or (.service_tier | type == "string"))
     and (has("failure") | not)
-  ' "$usage_file" >/dev/null 2>&1
+  ' "$usage_file" >/dev/null 2>&1 || return 1
+  python3 "$_self_dir/lib/provider-usage.py" hermes-total "$usage_file"
 }
 hermes_actual_model() { jq -r '.model // empty' "$1" 2>/dev/null || true; }
 provider_ready() {

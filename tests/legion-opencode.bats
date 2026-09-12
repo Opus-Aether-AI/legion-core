@@ -126,6 +126,54 @@ make_test_repo() {
     [ "$status" -eq 0 ]
 }
 
+@test "legion-opencode: task-file above per-argument limit still publishes a span" {
+    local repo task_file attempt
+    repo="$(make_test_repo large-task-span)"
+    task_file="$TEST_TMPDIR/large-task.txt"
+    python3 - "$task_file" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text("review " + "x" * 200_000, encoding="utf-8")
+PY
+    run "$LEGION_OPENCODE" run --task-file "$task_file" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(printf '%s\n' "$output" | tail -n 1 | jq -r .attempt_receipt)"
+    [ -s "$attempt" ]
+    python3 - "$attempt" "$LEGION_TELEMETRY_DIR" "$task_file" <<'PY'
+import json
+from pathlib import Path
+import sys
+attempt = Path(sys.argv[1])
+spans = [json.loads(line) for path in Path(sys.argv[2]).glob("*.jsonl")
+         for line in path.read_text().splitlines()]
+assert len(spans) == 1
+task = spans[0]["task"]
+assert len(task) < 4096 and task.startswith("task artifact: ")
+assert Path(task.removeprefix("task artifact: ")).read_text() == Path(sys.argv[3]).read_text()
+assert spans[0]["artifacts"]["attempt_receipt"] == str(attempt)
+PY
+}
+
+@test "legion-opencode: provider token sums above 2^53 remain exact" {
+    local repo attempt
+    repo="$(make_test_repo huge-tokens)"
+    MOCK_OPENCODE_HUGE_TOKENS=1 run "$LEGION_OPENCODE" run --task inspect --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(printf '%s\n' "$output" | tail -n 1 | jq -r .attempt_receipt)"
+    python3 - "$attempt" "$LEGION_TELEMETRY_DIR" <<'PY'
+import json
+from pathlib import Path
+import sys
+receipt = json.loads(Path(sys.argv[1]).read_text())
+spans = [json.loads(line) for path in Path(sys.argv[2]).glob("*.jsonl")
+         for line in path.read_text().splitlines()]
+expected = 9007199254741002
+assert receipt["usage_status"] == "known"
+assert receipt["usage"]["input_tokens"] == expected
+assert spans[0]["tokens"]["input_tokens"] == expected
+PY
+}
+
 @test "legion-opencode: terminal metering follows canonical normalization" {
     local repo attempt result
     repo="$(make_test_repo negative-metering)"

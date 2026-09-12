@@ -1078,7 +1078,29 @@ def test_span_totals_preserve_integral_float_legacy_scalar_compatibility(tmp_pat
     assert bench._usage_value({"input_tokens": huge_map_total}) == {
         "total_tokens": huge_map_total
     }
-    assert bench._usage_value(huge_map_total) is None
+    assert bench._usage_value(huge_map_total) == {"total_tokens": huge_map_total}
+
+    huge_spans = tmp_path / "huge-scalar" / "spans"
+    huge_spans.mkdir(parents=True)
+    (huge_spans / "spans.jsonl").write_text(
+        json.dumps({"model": "legacy-huge", "cost_usd": 0,
+                    "cost_status": "known", "tokens": huge_map_total,
+                    "usage_status": "known"}) + "\n",
+        encoding="utf-8",
+    )
+    huge_totals = bench._span_totals(str(huge_spans.parent))
+    assert huge_totals["usage_status"] == "known"
+    assert huge_totals["tokens"] == huge_map_total
+    assert huge_totals["models"]["legacy-huge"]["tokens"] == huge_map_total
+    assert bench._usage_text(huge_totals) == str(huge_map_total)
+    comparison = bench.compare_summaries(
+        {"run_id": "base", "suite": "huge", "metrics": huge_totals},
+        {"run_id": "candidate", "suite": "huge", "metrics": {
+            **huge_totals, "tokens": huge_map_total + 7}},
+    )
+    assert comparison["metrics"]["tokens"]["baseline_status"] == "known"
+    assert comparison["metrics"]["tokens"]["candidate_status"] == "known"
+    assert comparison["metrics"]["tokens"]["delta"] == 7
 
 
 def test_bench_downgrades_huge_cost_and_duration_but_keeps_map_tokens_exact(tmp_path):

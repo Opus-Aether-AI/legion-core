@@ -171,7 +171,7 @@ emit_span() {
        target_name:(if $target_name=="" then null else $target_name end),
        duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
        tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
-      >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
+      >> "$LEGION_TELEMETRY_DIR/$(legion_adapter_span_date).jsonl"
   } 2>/dev/null || true
 }
 

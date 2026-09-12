@@ -430,7 +430,7 @@ assert_signal_receipt() {
       PENDING=""
       trap '\''
         if [[ "${LEGION_TEST_RACE_FIRED:-0}" == 0
-              && "$BASH_COMMAND" == "LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE=0" \
+              && "$BASH_COMMAND" == "LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SEALED=1" \
               && "${LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN:-0}" == 1 \
               && "${decision:-}" == go \
               && " ${FUNCNAME[*]:-} " == *" legion_adapter_complete_supervisor_launch_gate "* ]]; then
@@ -501,6 +501,34 @@ SH
   wait "$supervisor" 2>/dev/null || true
   [ "$status" -eq 0 ]
   jq -e '.status == "ready" and .extra == true' "$gate"
+}
+
+@test "launch gate does not block on a decision arbiter that exits before opening" {
+  local gate="$TEST_TMPDIR/arbiter-exit-gate.json" lease="$TEST_TMPDIR/arbiter-exit-lease.json"
+  local token="arbiter-exit-token" supervisor start elapsed
+  /bin/sleep 30 & supervisor=$!
+  jq -cn --arg token "$token" --argjson pid "$supervisor" '
+    {schema:"legion.child-launch-gate.v1",status:"ready",token:$token,supervisor_pid:$pid}
+  ' > "$gate"
+  start="$(date +%s)"
+  run env CONTRACT="$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" \
+    GATE="$gate" LEASE="$lease" TOKEN="$token" SUPERVISOR="$supervisor" \
+    bash -c '
+      set -euo pipefail
+      source "$CONTRACT"
+      legion_adapter_launch_gate_decision_arbiter() { return 70; }
+      LEGION_ADAPTER_LAUNCH_GATE_PATH="$GATE"
+      LEGION_ADAPTER_LAUNCH_GATE_TOKEN="$TOKEN"
+      PENDING=""
+      legion_adapter_complete_supervisor_launch_gate "$SUPERVISOR" "$LEASE" PENDING
+      [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" == containment_failed ]]
+    '
+  elapsed=$(( $(date +%s) - start ))
+  kill "$supervisor" 2>/dev/null || true
+  wait "$supervisor" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [ "$elapsed" -lt 5 ]
+  jq -e '.status == "ready"' "$gate"
 }
 
 @test "every foreground adapter aborts a signal pending at its final launch gate" {
@@ -771,14 +799,17 @@ SH
       "{}" unknown "" 0 unknown "" "" false true "" ""
     emit_span() {
       jq -cn --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
-        '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl"
+        '\''{schema:"legion.span.v1",ts:"2026-01-01T00:00:01Z",run_id:"shared-span-claim",
+          executor:"cursor",model:"fixture",status:"ok",duration_ms:1000,
+          cost_usd:null,cost_status:"unknown",tokens:null,usage_status:"unknown",
+          artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
+        >> "$LEGION_TELEMETRY_DIR/$LEGION_ADAPTER_SPAN_DATE.jsonl"
     }
     legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"
     legion_adapter_write_signal_receipt 15 127 ""
     legion_adapter_emit_signal_span delayed "" || true
     [[ -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
-    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl" | tr -d " ")" == 1 ]]
+    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/$(date -u +%F).jsonl" | tr -d " ")" == 1 ]]
   ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$art" "$spans"
   [ "$status" -eq 0 ]
 }
@@ -802,12 +833,15 @@ SH
     [[ ! -f "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted/owner.json" ]]
     emit_span() {
       jq -cn --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
-        '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl"
+        '\''{schema:"legion.span.v1",ts:"2026-01-01T00:00:01Z",run_id:"retry-span-claim",
+          executor:"cursor",model:"fixture",status:"ok",duration_ms:1000,
+          cost_usd:null,cost_status:"unknown",tokens:null,usage_status:"unknown",
+          artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
+        >> "$LEGION_TELEMETRY_DIR/$LEGION_ADAPTER_SPAN_DATE.jsonl"
     }
     legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"
     [[ -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
-    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl" | tr -d " ")" == 1 ]]
+    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/$(date -u +%F).jsonl" | tr -d " ")" == 1 ]]
   ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$art" "$spans"
   [ "$status" -eq 0 ]
 }

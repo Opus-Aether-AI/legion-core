@@ -9,9 +9,21 @@ setup() {
   mkdir -p "$LEGION_TELEMETRY_DIR"
   export CONTRACT="$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh"
   export ATTEMPT="$TEST_TMPDIR/attempt-1.json"
-  export ATTEMPT_DATE=2026-09-12
+  export ATTEMPT_DATE="$(date -u +%F)"
   export SPAN_FILE="$LEGION_TELEMETRY_DIR/$ATTEMPT_DATE.jsonl"
-  printf '%s\n' '{"ended_at":"2026-09-12T00:00:00Z"}' > "$ATTEMPT"
+  # Produce the same canonical provider receipt as the real adapters so the
+  # durability check can bind telemetry identity and metering, not just a path.
+  source "$CONTRACT"
+  export RUN_ID=fixture-run
+  legion_adapter_write_attempt "$TEST_TMPDIR" cursor cursor 1 fixture-model fixture-model \
+    "" "" read-only succeeded "$ATTEMPT_DATE"T00:00:00Z \
+    "$ATTEMPT_DATE"T00:00:01Z 1 '{}' unknown '' 0 unknown '' '' false false '' ''
+  SPAN_PAYLOAD="$(jq -cn --arg attempt "$ATTEMPT" --arg date "$ATTEMPT_DATE" \
+    '{schema:"legion.span.v1",ts:($date+"T00:00:01Z"),run_id:"fixture-run",
+      executor:"cursor",model:"fixture-model",status:"ok",duration_ms:1,
+      cost_usd:null,cost_status:"unknown",tokens:null,usage_status:"unknown",
+      artifacts:{provider_attempt:true,attempt_receipt:$attempt}}')"
+  export SPAN_PAYLOAD
 }
 
 teardown() {
@@ -34,9 +46,7 @@ teardown() {
       printf "publisher\n" >> "$calls"
       : > "$entered"
       while [[ ! -f "$release" ]]; do sleep 0.02; done
-      jq -cn --arg attempt "$attempt" \
-        '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/2026-09-12.jsonl"
+      printf "%s\n" "$SPAN_PAYLOAD" >> "$LEGION_TELEMETRY_DIR/${LEGION_ADAPTER_SPAN_DATE:-2026-09-12}.jsonl"
     }
     legion_adapter_emit_normal_provider_span "$attempt"
   ' _ "$CONTRACT" "$LEGION_TELEMETRY_DIR" "$ATTEMPT" "$calls" "$entered" "$release" &
@@ -81,9 +91,7 @@ teardown() {
     LEGION_TELEMETRY_DIR="$2"
     attempt="$3"
     emit_span() {
-      jq -cn --arg attempt "$attempt" \
-        '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/2026-09-12.jsonl"
+      printf "%s\n" "$SPAN_PAYLOAD" >> "$LEGION_TELEMETRY_DIR/${LEGION_ADAPTER_SPAN_DATE:-2026-09-12}.jsonl"
     }
     legion_adapter_emit_normal_provider_span "$attempt"
   ' _ "$CONTRACT" "$LEGION_TELEMETRY_DIR" "$ATTEMPT"
@@ -176,9 +184,7 @@ teardown() {
       emit_span() {
         printf "emit\n" >> "$calls"
         sleep 0.1
-        jq -cn --arg attempt "$attempt" \
-          '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-          >> "$LEGION_TELEMETRY_DIR/2026-09-12.jsonl"
+        printf "%s\n" "$SPAN_PAYLOAD" >> "$LEGION_TELEMETRY_DIR/${LEGION_ADAPTER_SPAN_DATE:-2026-09-12}.jsonl"
       }
       legion_adapter_emit_normal_provider_span "$attempt"
     ' _ "$CONTRACT" "$LEGION_TELEMETRY_DIR" "$ATTEMPT" "$calls" &
@@ -197,9 +203,7 @@ teardown() {
   # Historical telemetry is not part of this attempt's lookup. A global rescan
   # would block on this FIFO; the attempt-bound recovery reads only its date.
   mkfifo "$LEGION_TELEMETRY_DIR/1900-01-01.jsonl"
-  jq -cn --arg attempt "$ATTEMPT" \
-    '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
-    > "$SPAN_FILE"
+  printf '%s\n' "$SPAN_PAYLOAD" > "$SPAN_FILE"
   printf '%s\n' '{malformed trailing record' >> "$SPAN_FILE"
   printf '%s\n' '"structurally malformed record"' >> "$SPAN_FILE"
 
@@ -215,12 +219,130 @@ teardown() {
   [ "$status" -eq 0 ]
   [ ! -e "$calls" ]
   [ "$(wc -l < "$SPAN_FILE" | tr -d ' ')" -eq 3 ]
-  jq -e --arg attempt "$ATTEMPT" --arg telemetry "$SPAN_FILE" '
+  jq -e --arg attempt "$ATTEMPT" --arg telemetry "$(realpath "$SPAN_FILE")" '
     .schema == "legion.provider-span-ack.v1"
     and .attempt_receipt == $attempt and .telemetry_path == $telemetry
     and (.offset | type) == "number" and (.length | type) == "number"
     and (.span_sha256 | test("^[a-f0-9]{64}$"))
   ' "$ATTEMPT.provider-span-ack"
+}
+
+@test "a schema-invalid matching impostor cannot suppress the real provider span" {
+  jq -cn --arg attempt "$ATTEMPT" \
+    '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
+    > "$SPAN_FILE"
+  printf '%s\n' "$SPAN_PAYLOAD" >> "$SPAN_FILE"
+
+  run bash -c '
+    source "$1"
+    legion_adapter_provider_span_is_durable "$2"
+  ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ]
+  jq -e '.offset > 0' "$ATTEMPT.provider-span-ack"
+}
+
+@test "a canonical but foreign run span cannot acknowledge this provider attempt" {
+  jq -c '.run_id="another-paid-run"' <<<"$SPAN_PAYLOAD" > "$SPAN_FILE"
+  printf '%s\n' "$SPAN_PAYLOAD" >> "$SPAN_FILE"
+  run bash -c 'source "$1"; legion_adapter_provider_span_is_durable "$2"' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ]
+  jq -e '.offset > 0' "$ATTEMPT.provider-span-ack"
+}
+
+@test "malformed acknowledgement paths cannot block on a FIFO or read outside telemetry" {
+  printf '%s\n' "$SPAN_PAYLOAD" > "$SPAN_FILE"
+  run bash -c 'source "$1"; legion_adapter_provider_span_is_durable "$2"' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ]
+  local outside="$TEST_TMPDIR/outside.jsonl" fifo="$TEST_TMPDIR/blocked-fifo"
+  printf '%s\n' "$SPAN_PAYLOAD" > "$outside"
+  mkfifo "$fifo"
+  for target in "$outside" "$fifo"; do
+    jq --arg target "$target" '.telemetry_path=$target' "$ATTEMPT.provider-span-ack" \
+      > "$TEST_TMPDIR/replaced-ack"
+    mv "$TEST_TMPDIR/replaced-ack" "$ATTEMPT.provider-span-ack"
+    run python3 - "$CONTRACT" "$ATTEMPT" <<'PY'
+import subprocess
+import sys
+
+result = subprocess.run(
+    ["bash", "-c", 'source "$1"; legion_adapter_provider_span_is_durable "$2"',
+     "_", sys.argv[1], sys.argv[2]],
+    timeout=5,
+)
+raise SystemExit(result.returncode)
+PY
+    [ "$status" -eq 0 ]
+    jq -e --arg telemetry "$(realpath "$SPAN_FILE")" '.telemetry_path == $telemetry' \
+      "$ATTEMPT.provider-span-ack"
+  done
+}
+
+@test "a canonical telemetry leaf replaced with a FIFO fails promptly" {
+  printf '%s\n' "$SPAN_PAYLOAD" > "$SPAN_FILE"
+  run bash -c 'source "$1"; legion_adapter_provider_span_is_durable "$2"' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ]
+  mv "$SPAN_FILE" "$TEST_TMPDIR/old-telemetry"
+  mkfifo "$SPAN_FILE"
+  run python3 - "$CONTRACT" "$ATTEMPT" <<'PY'
+import subprocess
+import sys
+
+result = subprocess.run(
+    ["bash", "-c", 'source "$1"; legion_adapter_provider_span_is_durable "$2"',
+     "_", sys.argv[1], sys.argv[2]],
+    timeout=5,
+)
+raise SystemExit(result.returncode)
+PY
+  [ "$status" -eq 1 ]
+}
+
+@test "append intent recovers a span after more than one MiB of later telemetry" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    emit_span() { printf "%s\n" "$SPAN_PAYLOAD" >> "$LEGION_TELEMETRY_DIR/$LEGION_ADAPTER_SPAN_DATE.jsonl"; }
+    legion_adapter_emit_normal_provider_span "$2"
+    span_path="$(jq -r '\''.telemetry_path'\'' "$2.provider-span-intent")"
+    rm "$2.provider-span-ack"
+    dd if=/dev/zero bs=1024 count=1025 2>/dev/null \
+      >> "$span_path"
+    printf "\n" >> "$span_path"
+    legion_adapter_provider_span_is_durable "$2"
+    jq -e '\''.offset >= 0'\'' "$2.provider-span-ack"
+    [[ "$(head -n 1 "$span_path")" == "$SPAN_PAYLOAD" ]]
+  ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "a nonempty telemetry file preserves the first span at the append intent boundary" {
+  jq -c '.artifacts.attempt_receipt="unrelated-attempt"' <<<"$SPAN_PAYLOAD" > "$SPAN_FILE"
+  local old_size
+  old_size="$(wc -c < "$SPAN_FILE" | tr -d ' ')"
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    emit_span() { printf "%s\n" "$SPAN_PAYLOAD" >> "$LEGION_TELEMETRY_DIR/$LEGION_ADAPTER_SPAN_DATE.jsonl"; }
+    legion_adapter_emit_normal_provider_span "$2"
+  ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+  [ "$(wc -l < "$SPAN_FILE" | tr -d ' ')" -eq 2 ]
+  jq -e --argjson offset "$old_size" '.offset == $offset' "$ATTEMPT.provider-span-ack"
+}
+
+@test "the append intent binds the actual emission date across an attempt-midnight boundary" {
+  jq '.started_at="1999-12-31T23:59:58Z" | .ended_at="1999-12-31T23:59:59Z"' \
+    "$ATTEMPT" > "$TEST_TMPDIR/older-attempt"
+  mv "$TEST_TMPDIR/older-attempt" "$ATTEMPT"
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    emit_span() { printf "%s\n" "$SPAN_PAYLOAD" >> "$LEGION_TELEMETRY_DIR/$LEGION_ADAPTER_SPAN_DATE.jsonl"; }
+    legion_adapter_emit_normal_provider_span "$2"
+    jq -e --arg date "$(date -u +%F)" '\''
+      .telemetry_path | endswith("/" + $date + ".jsonl")'\'' "$2.provider-span-ack"
+  ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
 }
 
 @test "process incarnation reclaims a same-PID collision while legacy live owners remain conservative" {

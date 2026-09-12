@@ -726,6 +726,8 @@ def _positive_count(value: Any) -> int:
 
 
 def _valid_legacy_token_scalar(value: Any) -> bool:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value >= 0
     return _valid_nonnegative_number(value) and float(value).is_integer()
 
 
@@ -1599,18 +1601,24 @@ def _metering_metric_comparison(
     baseline_value = baseline_metrics.get(value_key) if baseline_status == "known" else None
     candidate_value = candidate_metrics.get(value_key) if candidate_status == "known" else None
     delta = None
-    if _valid_nonnegative_number(baseline_value) and _valid_nonnegative_number(candidate_value):
+    relative_change = None
+    if kind == "usage" and _valid_legacy_token_scalar(baseline_value) and _valid_legacy_token_scalar(candidate_value):
+        delta = int(candidate_value) - int(baseline_value)
+        if baseline_value > 0:
+            try:
+                relative_change = round((delta / int(baseline_value)) * 100, 3)
+            except OverflowError:
+                pass
+    elif kind == "cost" and _valid_nonnegative_number(baseline_value) and _valid_nonnegative_number(candidate_value):
         delta = round(float(candidate_value) - float(baseline_value), 6)
+        relative_change = _relative_delta_pct(float(baseline_value), float(candidate_value))
     payload: dict[str, Any] = {
         "baseline": baseline_value,
         "candidate": candidate_value,
         "delta": delta,
         "baseline_status": baseline_status,
         "candidate_status": candidate_status,
-        "relative_change_pct": (
-            _relative_delta_pct(float(baseline_value), float(candidate_value))
-            if delta is not None else None
-        ),
+        "relative_change_pct": relative_change,
     }
     if kind == "cost":
         for side, metrics in (("baseline", baseline_metrics), ("candidate", candidate_metrics)):

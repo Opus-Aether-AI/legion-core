@@ -461,6 +461,55 @@ def test_signal_pending_inside_atomic_launch_region_refuses_before_popen(
     }
 
 
+def test_signal_during_cleanup_cannot_rewrite_an_observed_child_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_file = tmp_path / "completed-before-late-signal.json"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_late_signal", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+
+    class FinishedTracker:
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def raise_if_error(self):
+            pass
+
+        def close(self):
+            return True
+
+    def signal_after_observed_exit(*_args):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return True
+
+    handlers = {
+        caught: signal.getsignal(caught)
+        for caught in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+    monkeypatch.setattr(supervisor.sys, "platform", "linux")
+    monkeypatch.setattr(supervisor, "DescendantTracker", FinishedTracker)
+    monkeypatch.setattr(supervisor, "_terminate_tree", signal_after_observed_exit)
+    monkeypatch.setattr(
+        supervisor.sys,
+        "argv",
+        [str(SUPERVISOR), "--cwd", str(tmp_path), "--max-runtime-seconds", "30",
+         "--status-file", str(status_file), "--", "/usr/bin/true"],
+    )
+    try:
+        assert supervisor.main() == 0
+    finally:
+        for caught, handler in handlers.items():
+            signal.signal(caught, handler)
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["status"] == "completed"
+    assert receipt["child_exit_code"] == 0
+
+
 def test_command_disappearing_before_popen_still_writes_lease_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

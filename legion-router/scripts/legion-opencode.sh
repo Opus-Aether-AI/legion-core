@@ -72,10 +72,10 @@ on_signal() {
         "$base" "$archetype" "" || true
       legion_disarm_adopted_run_guard
     fi
-    legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
+    legion_adapter_emit_signal_span "${span_task:-}" "$SIGNAL_LEASE_STATUS" || true
     exit 70
   fi
-  if ! legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS"; then
+  if ! legion_adapter_emit_signal_span "${span_task:-}" "$SIGNAL_LEASE_STATUS"; then
     keep=1
     containment_reason="provider attempt receipt is durable but its signal-path span publication is uncertain (evidence: $LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json; worktree retained: $SIGNAL_WORKTREE)"
     legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" opencode \
@@ -178,7 +178,7 @@ emit_span() {
        target_name:(if $target_name=="" then null else $target_name end),
        duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
        tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
-      >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
+      >> "$LEGION_TELEMETRY_DIR/$(legion_adapter_span_date).jsonl"
   } 2>/dev/null || true
 }
 
@@ -191,7 +191,8 @@ emit_span() {
 # distinct assistant messages/steps so a multi-turn run is never double-counted.
 # Tolerant of stray non-JSON stdout lines (e.g. a plugin's console.log poisoning
 # the stream): each line is parsed with `fromjson?`, so one bad line costs at most
-# that event, not the whole run's cost/result/token metering.
+# that event, not the whole run's cost/result. Token counters are parsed
+# separately with integer-exact Python, never jq arithmetic.
 parse_opencode_output() {
   local file="$1" out
   out="$(jq -s -R -c '
@@ -210,13 +211,6 @@ parse_opencode_output() {
         model: ($msgs | last
                  | if . == null or ((.providerID // "") == "") or ((.modelID // "") == "") then ""
                    else (.providerID + "/" + .modelID) end),
-        usage: {
-          input_tokens:                (([$msgs[].tokens.input]       | add // 0) + ([$steps[].tokens.input]       | add // 0)),
-          output_tokens:               (([$msgs[].tokens.output]      | add // 0) + ([$steps[].tokens.output]      | add // 0)),
-          reasoning_output_tokens:     (([$msgs[].tokens.reasoning]   | add // 0) + ([$steps[].tokens.reasoning]   | add // 0)),
-          cache_read_input_tokens:     (([$msgs[].tokens.cache.read]  | add // 0) + ([$steps[].tokens.cache.read]  | add // 0)),
-          cache_creation_input_tokens: (([$msgs[].tokens.cache.write] | add // 0) + ([$steps[].tokens.cache.write] | add // 0))
-        },
         result: ([$legacy_text[], $current_text[]] | map(select(. != null and . != "")) | join("\n")),
         event_count: ($events | length),
         recognized_event_count: ([ $events[] | select(.type == "message.updated"
@@ -234,7 +228,7 @@ parse_opencode_output() {
 
 cmd_run() {
   local default_model=""
-  local task="" model="${LEGION_OPENCODE_MODEL:-${OPENCODE_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
+  local task="" span_task="" model="${LEGION_OPENCODE_MODEL:-${OPENCODE_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 oc_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
   local max_runtime_seconds=""
@@ -292,6 +286,9 @@ cmd_run() {
   require_git_repo "$repo"
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
+  # Keep the complete task out of telemetry process argv. The artifact is
+  # written before provider launch and survives a retained containment run.
+  span_task="task artifact: $art/task.txt"
   legion_require_top_level_executor "opencode" || return $?
   legion_adapter_resolve_lease opencode "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
   validate_sandbox "$sandbox"
@@ -323,6 +320,14 @@ cmd_run() {
     return 1
   fi
   oc_bin="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+  printf '%s' "$task" | python3 -c '
+import os
+import shutil
+import sys
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+with os.fdopen(fd, "wb") as output:
+    shutil.copyfileobj(sys.stdin.buffer, output)
+' "$art/task.txt"
   legion_write_runtime_gitignore "$repo"
 
   note "-> opencode worktree $wt (branch $branch, base $base)"
@@ -398,7 +403,7 @@ cmd_run() {
 
   local parsed usage cost result actual_model observed_model opencode_error has_error recognized_events diff_rc=0 status="ok"
   parsed="$(parse_opencode_output "$out_file")"
-  usage="$(jq -c '.usage // {}' <<<"$parsed" 2>/dev/null || printf '{}')"
+  usage="$(python3 "$_self_dir/lib/provider-usage.py" opencode "$out_file")"
   cost="$(jq -r '.cost // 0' <<<"$parsed" 2>/dev/null || printf '0')"
   observed_model="$(jq -r '.model // ""' <<<"$parsed" 2>/dev/null || printf '')"
   [[ "$observed_model" != "/" ]] || observed_model=""
@@ -552,7 +557,7 @@ cmd_run() {
     span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
-        "opencode" "$actual_model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+        "opencode" "$actual_model" "$status" "$dur" "$span_cost" "$span_usage" "$span_task" "$artifacts" \
         "$span_usage_status" "$span_cost_status"; then
       status=containment_failed
       rc=70

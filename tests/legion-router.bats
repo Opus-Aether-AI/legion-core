@@ -27,6 +27,21 @@ setup() {
     MINIMAX_MATCH="$(jq -r '.models[] | select(.match == "minimax") | .match' "$LEGION_COSTS_FILE")"
 }
 
+write_native_span_fixture() {
+    local art="$1"
+    source "$LIB/adapter-contract.sh"
+    RUN_ID=native-fixture-run
+    legion_adapter_write_attempt "$art" codex openai 1 fixture-model fixture-model \
+      "" "" read-only succeeded 2026-01-01T00:00:00Z 2026-01-01T00:00:01Z 1 \
+      '{}' unknown '' 0 unknown '' '' false false '' ''
+    NATIVE_FIXTURE_SPAN="$(jq -cn --arg attempt "$art/attempt-1.json" \
+      '{schema:"legion.span.v1",ts:"2026-01-01T00:00:01Z",run_id:"native-fixture-run",
+        executor:"codex",model:"fixture-model",status:"ok",duration_ms:1,
+        cost_usd:null,cost_status:"unknown",tokens:null,usage_status:"unknown",
+        artifacts:{provider_attempt:true,attempt_receipt:$attempt}}')"
+    export NATIVE_FIXTURE_SPAN
+}
+
 @test "run ids stay unique across simultaneous fresh harness shells" {
     ids="$TEST_TMPDIR/run-ids"
     for _index in $(seq 1 32); do
@@ -2742,9 +2757,9 @@ SH
     helper="$TEST_TMPDIR/native-span-signal.sh"
     art="$TEST_TMPDIR/native-span-signal-art"
     signal_seen="$TEST_TMPDIR/native-span-signal.seen"
-    telemetry="$TEST_TMPDIR/2026-01-01.jsonl"
+    telemetry="$TEST_TMPDIR/$(date -u +%F).jsonl"
     mkdir -p "$art"
-    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null,"ended_at":"2026-01-01T00:00:01Z"}' > "$art/attempt-1.json"
+    write_native_span_fixture "$art"
     {
       printf 'source %q\n' "$LIB/adapter-contract.sh"
       sed -n '/^legion_adapter_record_launch_signal()/,/^}/p' \
@@ -2767,9 +2782,7 @@ on_terminating_signal() { printf 'term\n' > "$SIGNAL_SEEN"; exit 143; }
 ingest_usage() { :; }
 ATTEMPT_ROOT="$1"
 emit_span() {
-  jq -cn --arg attempt "$ATTEMPT_ROOT/attempt-1.json" \
-    '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
-    >> "$TELEMETRY"
+  printf '%s\n' "$NATIVE_FIXTURE_SPAN" >> "$TELEMETRY"
   kill -TERM "$$"
 }
 emit_provider_attempt_span "$ATTEMPT_ROOT/attempt-1.json" fixture ""
@@ -2788,9 +2801,9 @@ SH
     local helper art telemetry
     helper="$TEST_TMPDIR/native-span-reclaim.sh"
     art="$TEST_TMPDIR/native-span-reclaim-art"
-    telemetry="$TEST_TMPDIR/2026-01-01.jsonl"
+    telemetry="$TEST_TMPDIR/$(date -u +%F).jsonl"
     mkdir -p "$art/attempt-1.json.span-emitted"
-    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null,"ended_at":"2026-01-01T00:00:01Z"}' > "$art/attempt-1.json"
+    write_native_span_fixture "$art"
     printf '%s\n' 99999999 > "$art/attempt-1.json.span-emitted/owner"
     : > "$art/attempt-1.json.span-emitted/committed"
     printf '%s\n' 99999999 > "$art/attempt-1.json.span-publishing"
@@ -2813,9 +2826,7 @@ LEGION_TELEMETRY_DIR="$(dirname "$TELEMETRY")"
 on_terminating_signal() { exit 143; }
 emit_span() {
   sleep 0.1
-  jq -cn --arg attempt "$ATTEMPT_ROOT/attempt-1.json" \
-    '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
-    >> "$TELEMETRY"
+  printf '%s\n' "$NATIVE_FIXTURE_SPAN" >> "$TELEMETRY"
 }
 ingest_usage() { :; }
 for _retry in $(seq 1 100); do
@@ -2843,10 +2854,8 @@ SH
     art="$TEST_TMPDIR/native-span-malformed-tail-art"
     telemetry="$TEST_TMPDIR/2026-01-01.jsonl"
     mkdir -p "$art"
-    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null,"ended_at":"2026-01-01T00:00:01Z"}' > "$art/attempt-1.json"
-    jq -cn --arg attempt "$art/attempt-1.json" \
-      '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
-      > "$telemetry"
+    write_native_span_fixture "$art"
+    printf '%s\n' "$NATIVE_FIXTURE_SPAN" > "$telemetry"
     printf '%s\n' '{malformed trailing record' >> "$telemetry"
     printf '%s\n' '"structurally malformed record"' >> "$telemetry"
     {
@@ -3034,7 +3043,12 @@ SH
     art="$TEST_TMPDIR/native-review-ingest-art"
     ingest="$TEST_TMPDIR/native-review-ingest.args"
     mkdir -p "$art"
-    printf '%s\n' '{"executor":"codex-review","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"failed","duration_ms":1,"usage":{"input_tokens":1},"usage_status":"known","cost_usd":0.01,"cost_status":"known","failure":{"provider_code":17},"ended_at":"2026-01-01T00:00:01Z"}' > "$art/attempt-1.json"
+    source "$LIB/adapter-contract.sh"
+    RUN_ID=native-review-fixture-run
+    legion_adapter_write_attempt "$art" codex-review openai 1 fixture-model fixture-model \
+      "" "" read-only failed 2026-01-01T00:00:00Z 2026-01-01T00:00:01Z 1 \
+      '{"input_tokens":1}' known fixture 0.01 known fixture \
+      provider false false 17 'fixture failure'
     {
       printf 'source %q\n' "$LIB/adapter-contract.sh"
       sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
@@ -3055,8 +3069,12 @@ on_terminating_signal() { exit 143; }
 ATTEMPT_ROOT="$1"
 emit_span() {
   jq -cn --arg attempt "$ATTEMPT_ROOT/attempt-1.json" \
-    '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
-    >> "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl"
+    --arg run "$LEGION_ADAPTER_SPAN_RUN_ID" \
+    '{schema:"legion.span.v1",ts:"2026-01-01T00:00:01Z",run_id:$run,
+      executor:"codex-review",model:"fixture-model",status:"failed",duration_ms:1,
+      tokens:{input_tokens:1},usage_status:"known",cost_usd:0.01,cost_status:"known",
+      artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
+    >> "$LEGION_TELEMETRY_DIR/$LEGION_ADAPTER_SPAN_DATE.jsonl"
 }
 ingest_usage() { printf '%s\n' "$3" > "$INGEST"; }
 emit_native_review_provider_span "$1/attempt-1.json" fixture ""
@@ -4436,7 +4454,7 @@ PY
         "$DELEGATE" | sed '$d'
       cat <<SH
 _self_dir=$(printf %q "$REPO_ROOT/legion-router/scripts")
-validate_prompt_review_bundle "\$1" "\$2" "" "\$3" cursor cursor "\$4" "\$5" read-only
+validate_prompt_review_bundle "\$1" "\$2" "\${6:-}" "\$3" cursor cursor "\$4" "\$5" read-only
 SH
     } > "$helper"
 
@@ -4445,6 +4463,19 @@ SH
     jq '.child_exit_code=1' "$lease" > "$lease.tmp"; mv -f "$lease.tmp" "$lease"
     PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" fixture-model prompt-run
     [ "$status" -ne 0 ]
+
+    # Provider completion is authoritative even when adapter post-processing
+    # fails internally after the child exits; cleanup_failed is not required.
+    local failure="$TEST_TMPDIR/prompt-failure.json"
+    jq -cn '{schema:"legion.failure.v1",failure_id:"failure-1",run_id:"prompt-run",
+      attempt_id:"prompt-run-cursor-attempt-1",ts:"2026-01-01T00:00:01Z",
+      class:"internal",provider_code:null,retryable:false,output_started:true,
+      message:"post-processing failed"}' > "$failure"
+    jq --slurpfile failure "$failure" '.terminal_status="failed" | .failure=$failure[0]' \
+      "$attempt" > "$attempt.tmp"; mv -f "$attempt.tmp" "$attempt"
+    PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" \
+      fixture-model prompt-run "$failure"
+    [ "$status" -eq 0 ]
 }
 
 @test "delegate review: prompt launch_failed bundle is authenticated no-spend rather than containment failure" {
@@ -4910,18 +4941,39 @@ SH
     unavailable_receipt="$BATS_TEST_TMPDIR/unavailable-preflight.json"
     incompatible_receipt="$BATS_TEST_TMPDIR/incompatible-preflight.json"
     : > "$err"
-    printf '{"schema":"legion.preflight.v1","status":"unavailable"}\n' > "$unavailable_receipt"
+    jq -cn '{schema:"legion.preflight.v1",checked_at:"2026-01-01T00:00:00Z",
+      executor:"cursor",status:"unavailable",reason:"executor binary not found: agent",
+      identity:null,cache:{hit:false,key:null},compatibility:{}}' > "$unavailable_receipt"
     printf '{"schema":"legion.preflight.v1","status":"incompatible"}\n' > "$incompatible_receipt"
     {
+      printf '_self_dir=%q\n' "$REPO_ROOT/legion-router/scripts"
       sed -n '/^review_executor_unavailable()/,/^}/p' \
         "$REPO_ROOT/legion-router/scripts/delegate.sh"
-      printf 'review_executor_unavailable 1 "$1" "$2"\n'
+      printf 'review_executor_unavailable 1 "$1" "$2" cursor fixture-model read-only\n'
     } > "$helper"
 
     jq -cn --arg receipt "$unavailable_receipt" \
       '{status:"refused",reason:"binary missing",preflight_receipt:$receipt}' > "$out"
     run bash "$helper" "$err" "$out"
     [ "$status" -eq 0 ]
+
+    jq -cn '{schema:"legion.preflight.v1",status:"unavailable"}' > "$unavailable_receipt"
+    run bash "$helper" "$err" "$out"
+    [ "$status" -ne 0 ]
+
+    jq -cn --arg receipt "$unavailable_receipt" \
+      '{status:"refused",auth_error:"authentication required",preflight_receipt:$receipt}' > "$out"
+    run bash "$helper" "$err" "$out"
+    [ "$status" -ne 0 ]
+
+    jq -cn --arg receipt "$unavailable_receipt" \
+      '{status:"refused",reason:"binary missing",preflight_receipt:$receipt}' > "$out"
+
+    jq -cn '{schema:"legion.preflight.v1",checked_at:"2026-01-01T00:00:00Z",
+      executor:"claude",status:"unavailable",reason:"executor binary not found: agent",
+      identity:null,cache:{hit:false,key:null},compatibility:{}}' > "$unavailable_receipt"
+    run bash "$helper" "$err" "$out"
+    [ "$status" -ne 0 ]
 
     jq -cn --arg receipt "$incompatible_receipt" \
       '{status:"refused",reason:"policy refused",preflight_receipt:$receipt}' > "$out"

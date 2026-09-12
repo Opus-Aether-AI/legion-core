@@ -956,6 +956,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--darwin-sandbox-allow-canary", default="")
     parser.add_argument("--launch-gate-file", default="")
     parser.add_argument("--launch-gate-token", default="")
+    parser.add_argument("--admitted-binary-sha256", default="")
+    parser.add_argument("--admitted-binary-path", default="")
     parser.add_argument("--descendant-signal-ready-file", default="")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
@@ -1376,6 +1378,11 @@ def main() -> int:
                 time.sleep(POLL_SECONDS)
         environment = os.environ.copy()
         environment["LEGION_SUPERVISOR_TOKEN"] = supervisor_token
+        environment.pop("LEGION_EXEC_GATE_EXPECTED_SHA256", None)
+        environment.pop("LEGION_EXEC_GATE_ADMITTED_PATH", None)
+        if arguments.admitted_binary_sha256:
+            environment["LEGION_EXEC_GATE_EXPECTED_SHA256"] = arguments.admitted_binary_sha256
+            environment["LEGION_EXEC_GATE_ADMITTED_PATH"] = arguments.admitted_binary_path
         if sys.platform == "darwin" and deny_canary:
             environment["LEGION_ANCESTOR_SUPERVISOR_DENY_CANARY"] = deny_canary
             environment["LEGION_ANCESTOR_SUPERVISOR_ALLOW_CANARY"] = allow_canary
@@ -1489,7 +1496,9 @@ def main() -> int:
         # any cancellation pending before or during that Popen closes the
         # authorization writer. A successful one-byte write is the atomic
         # launch decision; the launcher cannot exec a provider before it.
-        if cancel_requested or authorization_fd < 0:
+        prelaunch_expired = (absolute_deadline_ns is not None and
+                             absolute_deadline_ns <= time.monotonic_ns())
+        if prelaunch_expired or cancel_requested or authorization_fd < 0:
             if authorization_fd >= 0:
                 os.close(authorization_fd)
                 authorization_fd = -1
@@ -1505,6 +1514,12 @@ def main() -> int:
                               "pre-launch cancellation could not reap the waiting launcher",
                               arguments.max_runtime_seconds, child_started=False)
                 return 70
+            cleanup_attempted = True
+            if prelaunch_expired:
+                reason = "inherited child lease deadline expired during launch setup"
+                _write_status(arguments.status_file, "launch_failed", reason,
+                              arguments.max_runtime_seconds)
+                return 124
             reason = f"cancelled by {signal.Signals(interrupted).name} before child launch"
             _write_status(arguments.status_file, "launch_failed", reason,
                           arguments.max_runtime_seconds)
@@ -1553,14 +1568,17 @@ def main() -> int:
             try:
                 detail = json.loads(launch_error)
                 launch_errno = int(detail["errno"])
-                reason = f"child launch failed: {detail['reason']}"
+                reason = ("inherited child lease deadline expired during launch setup"
+                          if launch_errno == errno.ETIMEDOUT else
+                          f"child launch failed: {detail['reason']}")
             except (ValueError, TypeError, KeyError):
                 launch_errno = 1
                 reason = "child launch failed with malformed exec evidence"
             process.wait(timeout=GRACE_SECONDS)
             _write_status(arguments.status_file, "launch_failed", reason,
                           arguments.max_runtime_seconds)
-            return 127 if launch_errno == errno.ENOENT else 126
+            return (124 if launch_errno == errno.ETIMEDOUT else
+                    (127 if launch_errno == errno.ENOENT else 126))
         if launch_gate_file:
             try:
                 _write_launch_gate(
@@ -1588,14 +1606,13 @@ def main() -> int:
             # Freeze that flag until the observed outcome is recorded.
             observed_mask = signal.pthread_sigmask(signal.SIG_BLOCK, launch_signals)
             try:
-                # A blocked signal has not run the Python handler yet. Count
-                # it as cancellation when already pending before this poll;
-                # a signal first delivered by poll() after observing exit is
-                # later and must not rewrite a completed child.
+                # Complete the observation with a pending-signal snapshot
+                # *after* poll. A signal arriving during poll precedes this
+                # observation even though its Python handler is still blocked.
+                completed = process.poll() is not None
                 cancellation_before_poll = cancel_requested or bool(
                     signal.sigpending() & launch_signals
                 )
-                completed = process.poll() is not None
                 if completed:
                     completed_before_cleanup = not cancellation_before_poll
                 return completed

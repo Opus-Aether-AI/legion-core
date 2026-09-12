@@ -781,6 +781,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def write_receipt(receipt: Path, payload: dict, token: str) -> None:
@@ -824,6 +825,16 @@ def main() -> int:
         "schema": "legion.provider-launch.v1",
         "executable_path": command[0],
     }
+    inherited_deadline = os.environ.get("LEGION_CHILD_LEASE_DEADLINE_NS", "")
+    try:
+        deadline_ns = int(inherited_deadline) if inherited_deadline else None
+        if deadline_ns is not None and deadline_ns <= 0:
+            raise ValueError("nonpositive inherited deadline")
+    except ValueError:
+        write_receipt(receipt, {**base, "status": "launch_failed",
+                                "reason": "invalid inherited child lease deadline",
+                                "errno": errno.EINVAL}, token)
+        return 126
     child = None
     started_durable = False
     pending_signal = None
@@ -909,6 +920,16 @@ def main() -> int:
                 authorization_fd = -1
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+        if authorization_fd >= 0:
+            os.close(authorization_fd)
+            authorization_fd = -1
+        os.close(error_read)
+        child.wait(timeout=2)
+        write_receipt(receipt, {**base, "status": "launch_failed",
+                                "reason": "inherited child lease deadline expired before provider authorization",
+                                "errno": errno.ETIMEDOUT}, token)
+        return 124
     if pending_signal is not None or authorization_fd < 0:
         if authorization_fd >= 0:
             os.close(authorization_fd)
@@ -1206,6 +1227,8 @@ run_provider() {
     "TMPDIR=$ART/tmp" "TMP=$ART/tmp" "TEMP=$ART/tmp" \
     "XDG_CACHE_HOME=$ART/cache" "PYTHONDONTWRITEBYTECODE=1" \
     "PATH=$SANITIZED_PROVIDER_PATH" \
+    "LEGION_EXEC_GATE_EXPECTED_SHA256=$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")" \
+    "LEGION_EXEC_GATE_ADMITTED_PATH=$PROVIDER_BIN" \
     "LEGION_HANDOFF_BROKER_SOCKET=$BROKER_SOCKET" "LEGION_HANDOFF_BROKER_TOKEN=$BROKER_TOKEN" \
     "HERMES_ENABLE_PROJECT_PLUGINS=0" "HERMES_ACCEPT_HOOKS=0")
   if [[ "$ADAPTER_KIND" == pi ]]; then
@@ -1397,6 +1420,10 @@ cmd_run() {
     case "$provider_launch_state" in
       launch_failed)
         launch_failed=1
+        if jq -e --argjson timeout "$(python3 -c 'import errno; print(errno.ETIMEDOUT)')" \
+            '.errno == $timeout' <<<"$provider_launch_evidence" >/dev/null 2>&1; then
+          launch_timed_out=1
+        fi
         lease_reason="$(provider_launch_reason "$provider_launch_evidence")"
         ;;
       started)

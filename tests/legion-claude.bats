@@ -1048,3 +1048,19 @@ PY
       '.model == $model and .duration_ms == $duration' <<<"$final_span"
     [ "$(jq -r .model <<<"$final_span")" = "anthropic/effective-answer" ]
 }
+
+@test "legion-claude: missing provider cost prices the effective model" {
+    local repo attempt effective expected_cost; repo="$(make_test_repo effective-price)"
+    effective="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref claude_frontier)"
+    expected_cost="$(bash -c 'source "$1"; cost_for_model "$2" 1000 50 0 0' _ \
+      "$REPO_ROOT/legion-router/scripts/lib/cost.sh" "$effective")"
+    MOCK_CLAUDE_OMIT_COST=1 MOCK_CLAUDE_EFFECTIVE_MODEL="$effective" \
+      run "$LEGION_CLAUDE" run --task x --model "$CLAUDE_DEFAULT" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e --arg requested "$CLAUDE_DEFAULT" --arg effective "$effective" \
+      --argjson expected "$expected_cost" '
+      .requested_model == $requested and .effective_model == $effective
+      and .cost_status == "known" and .cost_source == "legion-cost-table"
+      and .cost_usd == $expected' "$attempt"
+}

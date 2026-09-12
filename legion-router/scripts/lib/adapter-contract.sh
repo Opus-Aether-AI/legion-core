@@ -1113,6 +1113,14 @@ except (TypeError, ValueError):
       ;;
   esac
 
+  if [[ "$usage_status" != known && "$cost_source" == legion-cost-table ]]; then
+    # A table estimate is derived entirely from the validated counters. A
+    # malformed provider usage payload must not leave a known zero-price claim.
+    cost_status=unknown
+    cost_source=""
+    cost_json=null
+  fi
+
   case "$cost_status" in
     known)
       if [[ -n "$cost_source" ]] && cost_json="$(jq -cse '

@@ -862,6 +862,8 @@ cmd_run() {
       exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "${wt:-$repo}" \
         --max-runtime-seconds "$attempt_runtime" \
         --status-file "$lease_status" \
+        --admitted-binary-sha256 "$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")" \
+        --admitted-binary-path "$CLAUDE_BIN" \
         --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" \
         -- "${claude_cmd[@]}"
     ) < <(printf '%s' "$task") >"$out_file" 2>"$err_file" &
@@ -929,14 +931,15 @@ cmd_run() {
     attempt_is_error="$(jq -r 'if has("is_error") then .is_error else true end' "$out_file" 2>/dev/null || printf true)"
     attempt_result="$(jq -r '.result // empty' "$out_file" 2>/dev/null || true)"
     attempt_usage="$(usage_json "$out_file")"
-    attempt_cost="$(cost_from_usage "$attempt_model" "$attempt_usage" 2>/dev/null || printf 0)"
     attempt_effective="$(jq -r '.model // empty' "$out_file" 2>/dev/null || true)"
+    local pricing_model="${attempt_effective:-$attempt_model}"
+    attempt_cost="$(cost_from_usage "$pricing_model" "$attempt_usage" 2>/dev/null || printf 0)"
     if jq -e '.usage | type == "object"' "$out_file" >/dev/null 2>&1; then
       attempt_usage_status=known; attempt_usage_source=claude-result
       if jq -e '.total_cost_usd | numbers' "$out_file" >/dev/null 2>&1; then
         attempt_cost="$(jq -r '.total_cost_usd' "$out_file")"
         attempt_cost_status=known; attempt_cost_source=claude-result
-      elif cost_model_has_pricing "$attempt_model"; then
+      elif cost_model_has_pricing "$pricing_model"; then
         attempt_cost_status=known; attempt_cost_source=legion-cost-table
       fi
     fi

@@ -115,6 +115,14 @@ PY
   done
 }
 
+@test "invalid usage cannot retain a table-derived known cost" {
+  write_attempt 1 '{"input_tokens":-1}' known provider_api 0 known legion-cost-table
+  jq -e '.usage == null and .usage_status == "unknown"
+    and .cost_usd == null and .cost_status == "unknown" and .cost_source == null' \
+    "$ART/attempt-1.json"
+  validate_attempt "$ART/attempt-1.json"
+}
+
 @test "malformed known cost degrades to unknown without poisoning valid usage" {
   local ordinal=0 cost attempt
   local -a invalid_cost=(

@@ -385,6 +385,8 @@ cmd_run() {
   ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
       --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
       --status-file "$lease_status" \
+      --admitted-binary-sha256 "$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")" \
+      --admitted-binary-path "$agent_bin" \
       --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" \
       -- "${cmd[@]}" ) >"$out_file" 2>"$err_file" &
   CHILD_PID=$!

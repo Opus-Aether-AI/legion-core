@@ -759,6 +759,8 @@ run_codex() {
     || die 'unable to prepare trusted native supervisor launch gate'
   local -a supervisor=(python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt"
     --max-runtime-seconds "$attempt_runtime" --status-file "$lease_status"
+    --admitted-binary-sha256 "$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+    --admitted-binary-path "$CODEX_BIN"
     --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" --)
   set +e
   native_span_publication_begin
@@ -4121,6 +4123,8 @@ cmd_review() {
       ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
           --max-runtime-seconds "$attempt_runtime" \
           --status-file "$attempt_lease" \
+          --admitted-binary-sha256 "$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")" \
+          --admitted-binary-path "$CODEX_BIN" \
           --launch-gate-file "$attempt_launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" \
           -- "$CODEX_BIN" "${codex_review_args[@]}" ) \
         </dev/null >"$attempt_stream" 2>"$attempt_err" &
@@ -4597,6 +4601,8 @@ cmd_resume() {
     || die 'unable to prepare trusted native resume supervisor launch gate'
   local -a resume_supervisor=(python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt"
     --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" --status-file "$lease_status"
+    --admitted-binary-sha256 "$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+    --admitted-binary-path "$CODEX_BIN"
     --launch-gate-file "$resume_launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" --)
   NATIVE_ATTEMPT_ART="$resume_art"
   NATIVE_ATTEMPT_EXECUTOR="codex-resume"

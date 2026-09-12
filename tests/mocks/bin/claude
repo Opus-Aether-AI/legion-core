@@ -64,10 +64,12 @@ if [[ "${1:-}" == "-p" ]]; then
         printf 'error\n' >&2
         exit 1
     fi
-    jq -cn --arg model "${MOCK_CLAUDE_EFFECTIVE_MODEL:-}" '
+    jq -cn --arg model "${MOCK_CLAUDE_EFFECTIVE_MODEL:-}" \
+      --arg omit_cost "${MOCK_CLAUDE_OMIT_COST:-0}" '
       {type:"result",is_error:false,result:"CLAUDE_OK_OUTPUT",total_cost_usd:0.12,
        usage:{input_tokens:1000,output_tokens:50}}
       | if $model == "" then . else .model = $model end
+      | if $omit_cost == "1" then del(.total_cost_usd) else . end
     '
     exit 0
 fi

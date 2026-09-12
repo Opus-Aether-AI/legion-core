@@ -1,4 +1,5 @@
 import errno
+import hashlib
 import importlib.util
 import json
 import os
@@ -61,6 +62,41 @@ def test_vanished_proc_entries_do_not_interrupt_descendant_cleanup(
     tracker._capture_token_pids()
     assert handle.closed
     assert tracker._handles == {}
+
+
+@pytest.mark.parametrize("replaced", (False, True))
+def test_exec_gate_binds_admitted_binary_digest(
+    tmp_path: Path, replaced: bool
+) -> None:
+    provider = tmp_path / "provider.sh"
+    marker = tmp_path / "ran"
+    original = f"#!/bin/sh\nprintf ran > {marker}\n"
+    provider.write_text(original, encoding="utf-8")
+    provider.chmod(0o700)
+    expected = hashlib.sha256(original.encode()).hexdigest()
+    if replaced:
+        replacement = tmp_path / "replacement.sh"
+        replacement.write_text(f"#!/bin/sh\nprintf replaced > {marker}\n", encoding="utf-8")
+        replacement.chmod(0o700)
+        os.replace(replacement, provider)
+    status = tmp_path / "lease.json"
+    result = subprocess.run(
+        [sys.executable, str(SUPERVISOR), "--cwd", str(tmp_path),
+         "--max-runtime-seconds", "3", "--status-file", str(status),
+         "--admitted-binary-sha256", expected,
+         "--admitted-binary-path", str(provider), "--", str(provider)],
+        capture_output=True, timeout=8,
+    )
+    lease = json.loads(status.read_text(encoding="utf-8"))
+    if replaced:
+        assert result.returncode == 126
+        assert lease["status"] == "launch_failed"
+        assert "admitted executable changed" in lease["reason"]
+        assert not marker.exists()
+    else:
+        assert result.returncode == 0
+        assert lease["status"] == "completed"
+        assert marker.read_text(encoding="utf-8") == "ran"
 
 
 def run_supervised(tmp_path: Path, seconds: int, command: list[str], **kwargs):
@@ -605,7 +641,7 @@ def test_signal_during_cleanup_cannot_rewrite_an_observed_child_completion(
     assert receipt["child_exit_code"] == 0
 
 
-def test_signal_between_completed_poll_and_cancel_snapshot_keeps_completion(
+def test_signal_during_completed_poll_precedes_outcome_observation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     status_file = tmp_path / "completed-at-poll.json"
@@ -659,13 +695,12 @@ def test_signal_between_completed_poll_and_cancel_snapshot_keeps_completion(
          "--status-file", str(status_file), "--", "/usr/bin/true"],
     )
     try:
-        assert supervisor.main() == 0
+        assert supervisor.main() == 143
     finally:
         for caught, handler in handlers.items():
             signal.signal(caught, handler)
     receipt = json.loads(status_file.read_text(encoding="utf-8"))
-    assert receipt["status"] == "completed"
-    assert receipt["child_exit_code"] == 0
+    assert receipt["status"] == "cancelled"
 
 
 def test_signal_pending_before_completed_poll_remains_cancellation(
@@ -734,6 +769,45 @@ def test_signal_pending_before_completed_poll_remains_cancellation(
         for caught, handler in handlers.items():
             signal.signal(caught, handler)
     assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "cancelled"
+
+
+def test_inherited_lease_expiring_after_waiting_child_fork_never_execs_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_file = tmp_path / "expired-at-authorization.json"
+    marker = tmp_path / "provider-ran"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_post_fork_deadline", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    real_clock = time.monotonic_ns
+    expired = False
+
+    class ExpiringTracker:
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            nonlocal expired
+            expired = True
+
+        def close(self):
+            return True
+
+    monkeypatch.setenv("LEGION_CHILD_LEASE_DEADLINE_NS", str(real_clock() + 30_000_000_000))
+    monkeypatch.setattr(supervisor, "DescendantTracker", ExpiringTracker)
+    monkeypatch.setattr(supervisor.time, "monotonic_ns",
+                        lambda: real_clock() + (60_000_000_000 if expired else 0))
+    monkeypatch.setattr(supervisor.sys, "argv", [
+        str(SUPERVISOR), "--cwd", str(tmp_path), "--max-runtime-seconds", "30",
+        "--status-file", str(status_file), "--", sys.executable, "-c",
+        f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    ])
+    assert supervisor.main() == 124
+    assert not marker.exists()
+    receipt = json.loads(status_file.read_text(encoding="utf-8"))
+    assert receipt["status"] == "launch_failed"
+    assert "deadline expired during launch setup" in receipt["reason"]
 
 
 def test_command_disappearing_before_popen_still_writes_lease_receipt(

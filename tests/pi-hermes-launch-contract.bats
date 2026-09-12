@@ -945,6 +945,52 @@ PY
     and (has("provider_pid") | not)' "$receipt"
 }
 
+@test "Pi Hermes inner gate refuses a lease expiring after the waiting child starts" {
+  local repo art wrapper harness receipt token_file marker deadline rc=0
+  repo="$(make_test_repo exec-gate-expired)"
+  PI_BIN=pi run "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+    --repo "$repo" --run-id exec-gate-expired --keep --quiet
+  [ "$status" -eq 0 ]
+  art="$repo/.legion/runs/exec-gate-expired"
+  wrapper="$art/provider-launch-wrapper.py"
+  harness="$TEST_TMPDIR/exec-gate-expired-harness.py"
+  marker="$TEST_TMPDIR/provider-executed"
+  cat > "$harness" <<'PY'
+import importlib.util
+import subprocess
+import sys
+import time
+
+wrapper, *arguments = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("legion_pi_exec_gate_expired", wrapper)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+real_popen = subprocess.Popen
+
+def expire_after_waiting_child(*args, **kwargs):
+    child = real_popen(*args, **kwargs)
+    time.sleep(0.7)
+    return child
+
+module.subprocess.Popen = expire_after_waiting_child
+sys.argv = [wrapper, *arguments]
+raise SystemExit(module.main())
+PY
+  receipt="$TEST_TMPDIR/exec-gate-expired-receipt.json"
+  token_file="$TEST_TMPDIR/exec-gate-expired-token"
+  printf '%064d\n' 0 > "$token_file"
+  deadline="$(python3 -c 'import time; print(time.monotonic_ns()+500_000_000)')"
+  LEGION_CHILD_LEASE_DEADLINE_NS="$deadline" \
+    python3 "$harness" "$wrapper" "$receipt" "$token_file" \
+      "$art/child-exec-gate.py" -- python3 -c \
+      "from pathlib import Path; Path('$marker').touch()" || rc=$?
+  [ "$rc" -eq 124 ]
+  [ ! -e "$marker" ]
+  jq -e '.status == "launch_failed" and (.reason | contains("deadline expired"))
+    and (has("provider_pid") | not)' "$receipt"
+}
+
 @test "Pi production supervisor defers descendant shutdown until started receipt is durable" {
   local repo run_id art provider result_file error_file assigned release child_pid_file signal_file
   local adapter_pid child_pid rc=0 attempt

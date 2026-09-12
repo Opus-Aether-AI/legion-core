@@ -660,7 +660,9 @@ SH
     MOCK_PI_MISSING_USAGE=1 PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi --task "make a scoped edit" --repo "$3" --quiet' \
       _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"
     [ "$status" -ne 0 ]
-    echo "$output" | jq -e '.status == "error" and .provider_exit == 0'
+    [[ "$output" == *'invalid known usage; recording usage as unknown'* ]]
+    printf '%s\n' "$output" | tail -n 1 | jq -e \
+      '.status == "error" and .provider_exit == 0 and .usage_status == "unknown"'
 
     MOCK_PI_NO_AGENT_END=1 PI_BIN=pi run bash -c 'cd "$1" && "$2" run --model openai/fixture-pi --task "make a scoped edit" --repo "$3" --quiet' \
       _ "$TEST_TMPDIR" "$REPO_ROOT/legion-router/bin/legion-pi" "$repo"

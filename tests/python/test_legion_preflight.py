@@ -344,6 +344,46 @@ def test_preflight_receipt_file_rejects_symlink(tmp_path: Path) -> None:
         preflight.validate_preflight_receipt_file(linked)
 
 
+@pytest.mark.parametrize("lease_kind", ["symlink", "fifo", "oversized"])
+def test_supervised_version_probe_rejects_unsafe_lease_leaf_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lease_kind: str
+) -> None:
+    target = tmp_path / "untrusted-target.json"
+    target.write_text('{"status":"completed"}', encoding="utf-8")
+
+    class FinishedSupervisor:
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):
+            lease_path = Path(command[command.index("--status-file") + 1])
+            if lease_kind == "symlink":
+                lease_path.symlink_to(target)
+            elif lease_kind == "fifo":
+                os.mkfifo(lease_path)
+            else:
+                lease_path.write_bytes(b" " * 65537)
+            read_fd, write_fd = os.pipe()
+            os.close(write_fd)
+            self.stdout = os.fdopen(read_fd, "rb", buffering=0)
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(preflight.subprocess, "Popen", FinishedSupervisor)
+    started = time.monotonic()
+    version, probe = preflight._supervised_version_output(
+        "/usr/bin/true", ["--version"], {"PATH": os.environ["PATH"]}
+    )
+    assert time.monotonic() - started < 1
+    assert version is None
+    assert probe["status"] == "invalid"
+    assert probe["lease"] is None
+    assert target.read_text(encoding="utf-8") == '{"status":"completed"}'
+
+
 def test_malformed_matching_cache_reprobes_without_crashing(tmp_path: Path) -> None:
     binary = executable(tmp_path / "fixture")
     config = registry(

@@ -115,7 +115,15 @@ emit() {
     echo "emit: invalid pinned telemetry date" >&2
     return 2
   fi
-  printf '%s\n' "$span" >> "$LEGION_TELEMETRY_DIR/${LEGION_ADAPTER_SPAN_DATE:-$(_today)}.jsonl"
+  if [[ -n "${LEGION_ADAPTER_SPAN_ATTEMPT_PATH:-}" ]]; then
+    # The attempt-specific append intent pins the actual telemetry inode. A
+    # date-only shell redirect could follow a replacement leaf or symlink.
+    # shellcheck disable=SC1091
+    source "$_self/../../legion-router/scripts/lib/adapter-contract.sh"
+    printf '%s\n' "$span" | legion_adapter_append_span
+  else
+    printf '%s\n' "$span" >> "$LEGION_TELEMETRY_DIR/${LEGION_ADAPTER_SPAN_DATE:-$(_today)}.jsonl"
+  fi
   printf '%s\n' "$span"
 }
 

@@ -803,7 +803,7 @@ SH
           executor:"cursor",model:"fixture",status:"ok",duration_ms:1000,
           cost_usd:null,cost_status:"unknown",tokens:null,usage_status:"unknown",
           artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/$LEGION_ADAPTER_SPAN_DATE.jsonl"
+        | legion_adapter_append_span
     }
     legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"
     legion_adapter_write_signal_receipt 15 127 ""
@@ -837,7 +837,7 @@ SH
           executor:"cursor",model:"fixture",status:"ok",duration_ms:1000,
           cost_usd:null,cost_status:"unknown",tokens:null,usage_status:"unknown",
           artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/$LEGION_ADAPTER_SPAN_DATE.jsonl"
+        | legion_adapter_append_span
     }
     legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"
     [[ -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
@@ -997,8 +997,11 @@ SH
     lease="$(find "$art" -maxdepth 1 -name 'lease*.json' -print -quit)"
     [ -n "$lease" ]
     jq -e '.status == "cleanup_failed" and (.reason | contains("signal drain failed"))' "$lease"
-    jq -e '.terminal_status == "failed" and .failure.class == "internal"
-      and (.failure.message | contains("worktree retained"))' "$art/attempt-1.json"
+    jq -e '.terminal_status == "cancelled" and .failure.class == "cancelled"' \
+      "$art/attempt-1.json"
+    jq -e --slurpfile attempt "$art/attempt-1.json" \
+      '.class == "internal" and (.message | contains("worktree retained"))
+      and .attempt_id == $attempt[0].attempt_id' "$art/post-attempt-failure-1.json"
     [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' | wc -l | tr -d ' ')" -eq 1 ]
     [ "$(find "$art" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
     jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"

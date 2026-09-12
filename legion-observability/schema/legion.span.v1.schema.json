@@ -12,6 +12,7 @@
     "run_id": { "type": "string" },
     "attempt_id": { "type": ["string", "null"], "minLength": 1, "description": "Durable provider-attempt identity when this span represents one paid attempt." },
     "attempt_ordinal": { "type": ["integer", "null"], "minimum": 1, "description": "One-based provider-attempt ordinal within run_id." },
+    "attempt_terminal_status": { "enum": ["succeeded", "failed", "cancelled", "timed_out", "refused", null], "description": "Immutable provider receipt terminal outcome; distinct from an enclosing run's status." },
     "trace_id": { "type": ["string", "null"], "description": "groups spans of one multi-agent run; defaults to run_id" },
     "parent_id": { "type": ["string", "null"] },
     "executor": { "type": "string", "description": "codex | codex-review | claude | anthropic | minimax | ..." },

@@ -1081,7 +1081,7 @@ emit_span() {
      target_name:(if $target_name=="" then null else $target_name end),
      duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
      tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
-    >> "$LEGION_TELEMETRY_DIR/$(legion_adapter_span_date).jsonl"
+    | legion_adapter_append_span
 }
 
 native_span_publication_begin() {
@@ -1491,7 +1491,7 @@ emit_provider_attempt_span() {
   model="$(jq -r '.effective_model // .requested_model // "unknown"' "$attempt_path")"
   terminal="$(jq -r '.terminal_status' "$attempt_path")"
   duration="$(jq -r '.duration_ms' "$attempt_path")"
-  usage="$(jq -c '.usage' "$attempt_path")"
+  usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$attempt_path" usage)"
   cost="$(jq -c '.cost_usd' "$attempt_path")"
   usage_status="$(jq -r '.usage_status' "$attempt_path")"
   cost_status="$(jq -r '.cost_status' "$attempt_path")"
@@ -1542,6 +1542,7 @@ emit_provider_attempt_span() {
   fi
   provider_run_id="$(jq -r '.run_id' "$attempt_path")"
   if ! LEGION_ADAPTER_SPAN_RUN_ID="$provider_run_id" LEGION_ADAPTER_SPAN_DATE="$pinned_date" \
+      LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$attempt_path" \
       emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
       "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
     native_provider_span_release "$attempt_path"
@@ -2585,11 +2586,11 @@ cmd_run() {
     cost=null
   fi
   native_metering="$(native_run_canonical_metering "$art")"
-  usage="$(jq -c '.reconciliation.usage' <<<"$native_metering")"
+  usage="$(python3 "$_self_dir/lib/exact-metering.py" get - reconciliation.usage <<<"$native_metering")"
   cost="$(jq -c '.reconciliation.cost_usd' <<<"$native_metering")"
   usage_status="$(jq -r '.reconciliation.usage_status' <<<"$native_metering")"
   cost_status="$(jq -r '.reconciliation.cost_status' <<<"$native_metering")"
-  known_usage="$(jq -c '.reconciliation.known_usage' <<<"$native_metering")"
+  known_usage="$(python3 "$_self_dir/lib/exact-metering.py" get - reconciliation.known_usage <<<"$native_metering")"
   known_usage_attempts="$(jq -r '.reconciliation.known_usage_attempts' <<<"$native_metering")"
   known_cost="$(jq -c '.reconciliation.known_cost_usd' <<<"$native_metering")"
   known_cost_attempts="$(jq -r '.reconciliation.known_cost_attempts' <<<"$native_metering")"
@@ -2794,7 +2795,8 @@ cmd_run() {
      + (if $cost_status == "partial" then
           {known_cost_usd:$known_cost,known_cost_attempts:$known_cost_attempts}
         else {} end)
-     + (if $reason=="" then {} else {reason:$reason} end)'
+     + (if $reason=="" then {} else {reason:$reason} end)' |
+    python3 "$_self_dir/lib/exact-metering.py" patch-reconciliation 3<<<"$native_metering"
   # over_budget produced a usable diff (budget is advisory — codex can't be pre-empted),
   # so it exits 0; only a real failure/error is non-zero (M1: graceful degradation).
   case "$status" in
@@ -2939,7 +2941,7 @@ emit_native_review_provider_span() {
   model="$(jq -r '.effective_model // .requested_model // "unknown"' "$attempt_path")"
   terminal="$(jq -r '.terminal_status' "$attempt_path")"
   duration="$(jq -r '.duration_ms' "$attempt_path")"
-  usage="$(jq -c '.usage' "$attempt_path")"
+  usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$attempt_path" usage)"
   cost="$(jq -c '.cost_usd' "$attempt_path")"
   usage_status="$(jq -r '.usage_status' "$attempt_path")"
   cost_status="$(jq -r '.cost_status' "$attempt_path")"
@@ -2984,6 +2986,7 @@ emit_native_review_provider_span() {
   fi
   provider_run_id="$(jq -r '.run_id' "$attempt_path")"
   if ! LEGION_ADAPTER_SPAN_RUN_ID="$provider_run_id" LEGION_ADAPTER_SPAN_DATE="$pinned_date" \
+      LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$attempt_path" \
       emit_span "$executor" "$model" "$span_status" "$duration" "$cost" "$usage" \
       "$task_text" "$artifacts" "$usage_status" "$cost_status"; then
     native_provider_span_release "$attempt_path"
@@ -3094,18 +3097,21 @@ PY
 validate_prompt_review_bundle() {
   local attempt="$1" preflight="$2" failure="$3" lease="$4"
   local executor="$5" provider="$6" model="$7" run_id="$8" sandbox="$9"
+  local adapter_status="${10:-}" source_failure="${11:-}" expected_art="${12:-}"
   validate_prompt_review_attempt "$attempt" "$executor" "$provider" "$model" "$run_id" "$sandbox" \
     || return 1
   PYTHONPATH="$_self_dir/../../legion-observability/scripts" \
     python3 - "$attempt" "$preflight" "$failure" "$lease" "$executor" \
-      "$run_id" "$sandbox" 2>/dev/null <<'PY'
+      "$run_id" "$sandbox" "$adapter_status" "$source_failure" "$expected_art" 2>/dev/null <<'PY'
 import json
+import os
 import sys
 
 from legion_preflight import validate_preflight_receipt
 from legion_receipts import validate_failure
 
-attempt_path, preflight_path, failure_path, lease_path, executor, run_id, sandbox = sys.argv[1:]
+attempt_path, preflight_path, failure_path, lease_path, executor, run_id, sandbox, \
+    adapter_status, source_failure, expected_art = sys.argv[1:]
 with open(attempt_path, encoding="utf-8") as handle:
     attempt = json.load(handle)
 with open(preflight_path, encoding="utf-8") as handle:
@@ -3139,9 +3145,35 @@ if lease_status == "completed":
     require(type(lease.get("child_exit_code")) is int
             and 0 <= lease["child_exit_code"] <= 255, "invalid child exit code")
 else:
-    require(lease_status in {"cancelled", "timed_out", "cleanup_failed"},
+    require(lease_status in {"cancelled", "timed_out", "cleanup_failed", "containment_failed"},
             "invalid post-launch lease status")
     require(set(lease) == base_keys, "invalid terminal lease keys")
+failure = None
+if failure_path:
+    with open(failure_path, encoding="utf-8") as handle:
+        failure = json.load(handle)
+    validate_failure(failure)
+    require(failure["run_id"] == run_id and failure["attempt_id"] == attempt["attempt_id"],
+            "failure lineage does not match attempt")
+else:
+    require(attempt["failure"] is None, "missing failure receipt")
+post_attempt_failure = failure is not None and failure != attempt["failure"]
+if post_attempt_failure:
+    require(bool(source_failure) and bool(expected_art) and
+            os.path.realpath(source_failure) == os.path.realpath(os.path.join(
+                expected_art, f"post-attempt-failure-{attempt['ordinal']}.json")),
+        "post-attempt failure source is not the expected immutable leaf")
+    require(failure["failure_id"] ==
+            f"{run_id}-{executor}-postattempt-failure-{attempt['ordinal']}",
+            "post-attempt failure identity mismatch")
+    require(failure["class"] == "internal" and failure["retryable"] is False,
+            "post-attempt failure is not internal containment")
+    require(failure["ts"] == attempt["ended_at"] and
+            failure["output_started"] == attempt["output_started"],
+            "post-attempt failure timing or output identity mismatch")
+    require(adapter_status == "containment_failed" and
+            lease_status in {"cleanup_failed", "containment_failed"},
+            "post-attempt failure lacks authenticated containment evidence")
 expected_lease = {
     "succeeded": "completed", "failed": "completed",
     "cancelled": "cancelled", "timed_out": "timed_out",
@@ -3149,18 +3181,18 @@ expected_lease = {
 require(lease_status == expected_lease or
         (lease_status == "cleanup_failed" and attempt["terminal_status"] == "failed"
          and attempt["failure"] is not None
-         and attempt["failure"]["class"] == "internal"),
+         and attempt["failure"]["class"] == "internal") or
+        (post_attempt_failure and lease_status in {"cleanup_failed", "containment_failed"}),
         "attempt and lease terminal status contradict")
-if attempt["terminal_status"] == "succeeded":
+if attempt["terminal_status"] == "succeeded" and lease_status == "completed":
     require(lease["child_exit_code"] == 0, "successful attempt has nonzero child exit")
-if failure_path:
-    with open(failure_path, encoding="utf-8") as handle:
-        failure = json.load(handle)
-    validate_failure(failure)
+if lease_status == "completed" and attempt["failure"] is not None:
+    provider_code = attempt["failure"]["provider_code"]
+    if provider_code is not None:
+        require(provider_code == str(lease["child_exit_code"]),
+                "provider failure code contradicts completed lease child exit")
+if not post_attempt_failure:
     require(failure == attempt["failure"], "failure receipt does not match attempt")
-    require(failure["run_id"] == run_id, "failure run mismatch")
-else:
-    require(attempt["failure"] is None, "missing failure receipt")
 PY
 }
 
@@ -3373,7 +3405,8 @@ $(cat "$patch")
   PROMPT_CHILD_RC="$rc"
   PROMPT_CHILD_PID=""
   [[ "$errexit_was_set" -eq 0 ]] || set -e
-  local source_preflight source_attempt source_failure="" source_lease=""
+  local source_preflight source_attempt source_failure="" source_lease="" source_status=""
+  source_status="$(jq -r '.status // empty' "$stream" 2>/dev/null || true)"
   source_preflight="$(jq -r '.preflight_receipt // empty' "$stream" 2>/dev/null || true)"
   source_attempt="$(jq -r '.attempt_receipt // empty' "$stream" 2>/dev/null || true)"
   source_failure="$(jq -r '.failure_receipt // empty' "$stream" 2>/dev/null || true)"
@@ -3393,7 +3426,7 @@ $(cat "$patch")
         && -n "$review_lease_receipt" ]] && ! validate_prompt_review_bundle \
       "$review_attempt_receipt" "$review_preflight_receipt" "$review_failure_receipt" \
       "$review_lease_receipt" "$ex" "$PROMPT_EXPECTED_PROVIDER" "$model" "$prompt_run_id" \
-      "$review_sandbox"; then
+      "$review_sandbox" "$source_status" "$source_failure" "$prompt_art"; then
     review_attempt_receipt=""
   fi
   if jq -e '.status == "containment_failed"' "$stream" >/dev/null 2>&1; then
@@ -4330,12 +4363,12 @@ cmd_review() {
   local review_metering='{}' span_usage span_cost span_usage_status span_cost_status
   review_metering="$(review_canonical_metering \
     ${review_attempt_receipts[@]+"${review_attempt_receipts[@]}"})"
-  usage="$(jq -c '.reconciliation.usage' <<<"$review_metering")"
+  usage="$(python3 "$_self_dir/lib/exact-metering.py" get - reconciliation.usage <<<"$review_metering")"
   cost="$(jq -c '.reconciliation.cost_usd' <<<"$review_metering")"
   usage_status="$(jq -r '.reconciliation.usage_status' <<<"$review_metering")"
   cost_status="$(jq -r '.reconciliation.cost_status' <<<"$review_metering")"
   local known_usage known_usage_attempts known_cost known_cost_attempts
-  known_usage="$(jq -c '.reconciliation.known_usage' <<<"$review_metering")"
+  known_usage="$(python3 "$_self_dir/lib/exact-metering.py" get - reconciliation.known_usage <<<"$review_metering")"
   known_usage_attempts="$(jq -r '.reconciliation.known_usage_attempts' <<<"$review_metering")"
   known_cost="$(jq -c '.reconciliation.known_cost_usd' <<<"$review_metering")"
   known_cost_attempts="$(jq -r '.reconciliation.known_cost_attempts' <<<"$review_metering")"
@@ -4428,7 +4461,8 @@ cmd_review() {
         else {} end)
      + (if $cost_status == "partial" then
           {known_cost_usd:$known_cost,known_cost_attempts:$known_cost_attempts}
-        else {} end)'
+        else {} end)' |
+    python3 "$_self_dir/lib/exact-metering.py" patch-reconciliation 3<<<"$review_metering"
   if [[ "$status" != "ok" ]]; then
     # A missing or invalid post-launch receipt is a containment/provenance
     # failure, not an ordinary reviewer rejection. Preserve the supervisor's
@@ -4710,7 +4744,7 @@ cmd_resume() {
       "$([[ "$usage_status" == known ]] && printf codex-jsonl)" "$cost" "$cost_status" \
       "$([[ "$cost_status" == known ]] && printf legion-cost-table)" "$failure_class" false \
       "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$reason"
-    terminal_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
     terminal_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     terminal_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     terminal_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
@@ -4766,7 +4800,13 @@ cmd_resume() {
      preflight_receipt:$preflight,
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
-     + (if $reason=="" then {} else {reason:$reason} end)'
+     + (if $reason=="" then {} else {reason:$reason} end)' | {
+       if [[ -n "$LEGION_ADAPTER_ATTEMPT_PATH" ]]; then
+         python3 "$_self_dir/lib/exact-metering.py" patch-attempt "$LEGION_ADAPTER_ATTEMPT_PATH"
+       else
+         cat
+       fi
+     }
   [[ "$status" == "ok" ]] || exit 1
 }
 

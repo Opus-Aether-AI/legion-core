@@ -1473,12 +1473,27 @@ def main() -> int:
         deadline = time.monotonic() + arguments.max_runtime_seconds
         if absolute_deadline_ns is not None:
             deadline = min(deadline, absolute_deadline_ns / 1_000_000_000)
+
+        def child_completed_before_cancel() -> bool:
+            nonlocal completed_before_cleanup
+            # Python may dispatch a signal handler between poll() returning a
+            # completed child and the next bytecode reading cancel_requested.
+            # Freeze that flag until the observed outcome is recorded.
+            observed_mask = signal.pthread_sigmask(signal.SIG_BLOCK, launch_signals)
+            try:
+                cancellation_before_poll = cancel_requested
+                completed = process.poll() is not None
+                if completed:
+                    completed_before_cleanup = not cancellation_before_poll
+                return completed
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, observed_mask)
+
         while True:
-            if process.poll() is not None:
+            if child_completed_before_cancel():
                 # A cancellation already received before this observation is
                 # still the cause of a signalled child exit. Only a signal
                 # arriving *after* observed completion is ignored.
-                completed_before_cleanup = not cancel_requested
                 break
             tracker.raise_if_error()
             now = time.monotonic()
@@ -1486,8 +1501,7 @@ def main() -> int:
             # A child already observed complete wins instead, including one that
             # finishes immediately below the lease boundary.
             if now >= deadline:
-                if process.poll() is not None:
-                    completed_before_cleanup = not cancel_requested
+                if child_completed_before_cancel():
                     break
                 timed_out = True
                 break

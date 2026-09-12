@@ -46,7 +46,7 @@ if [[ -n "$usage_file" && "${MOCK_HERMES_NO_USAGE:-0}" != 1 ]]; then
       '  "reasoning_tokens": 12,' \
       '  "total_tokens": 328,' \
       '  "api_calls": 2,' \
-      '  "model": "openai/fixture-hermes",' \
+      "  \"model\": \"${MOCK_HERMES_USAGE_MODEL:-openai/fixture-hermes}\"," \
       '  "provider": "openai",' \
       '  "session_id": "mock-hermes",' \
       '  "completed": true,' \

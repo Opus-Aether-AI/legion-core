@@ -542,8 +542,8 @@ def _supervised_version_output(executable, args, env):
         finally:
             process.stdout.close()
         try:
-            lease = json.loads(lease_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            lease = _read_bounded_regular_json(lease_path)
+        except (OSError, ValueError, UnicodeDecodeError):
             return None, {
                 "status": "invalid",
                 "reason": "version probe supervisor did not publish a valid lease receipt",

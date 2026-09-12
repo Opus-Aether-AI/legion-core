@@ -39,6 +39,34 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 PY
 }
 
+install_receipt_fsync_fault() {
+  local shim_dir="$TEST_TMPDIR/fsync-fault"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/sitecustomize.py" <<'PY'
+import os
+import stat
+
+original_fsync = os.fsync
+
+def faulting_fsync(fd):
+    directory = os.environ.get("LEGION_TEST_FSYNC_DIR")
+    prefix = os.environ.get("LEGION_TEST_FSYNC_PREFIX")
+    if directory and prefix:
+        info = os.fstat(fd)
+        if stat.S_ISREG(info.st_mode):
+            for entry in os.scandir(directory):
+                if entry.name.startswith(prefix):
+                    candidate = entry.stat(follow_symlinks=False)
+                    if (candidate.st_dev, candidate.st_ino) == (info.st_dev, info.st_ino):
+                        raise OSError("injected receipt inode fsync failure")
+    return original_fsync(fd)
+
+os.fsync = faulting_fsync
+PY
+  export PYTHONPATH="$shim_dir:${PYTHONPATH:-}"
+  export LEGION_TEST_FSYNC_DIR="$ART"
+}
+
 @test "valid known provider metering is canonicalized and remains known" {
   write_attempt 1 '{"output_tokens":2,"input_tokens":1}' known provider_api \
     1.2300 known provider_api
@@ -217,4 +245,106 @@ PY
   [ -L "$ART/failure.json" ]
   [ ! -e "$ART/failure-1.json" ]
   [ ! -e "$ART/attempt-1.json" ]
+}
+
+@test "post-attempt containment is a separate receipt and cannot reclassify a numbered attempt" {
+  local original="$TEST_TMPDIR/original-attempt.json"
+  write_attempt 1 '{"input_tokens":2}' known provider_api 0.5 known provider_api
+  cp "$ART/attempt-1.json" "$original"
+
+  legion_adapter_fail_recorded_attempt "$ART" fixture 1 internal 70 'post-attempt cleanup failed'
+  cmp -s "$original" "$ART/attempt-1.json"
+  cmp -s "$original" "$ART/attempt.json"
+  jq -e --arg attempt "$(jq -r .attempt_id "$original")" '
+    .schema == "legion.failure.v1" and .attempt_id == $attempt
+    and .class == "internal" and .message == "post-attempt cleanup failed"
+  ' "$ART/post-attempt-failure-1.json"
+  cmp -s "$ART/post-attempt-failure-1.json" "$ART/failure.json"
+  [ "$LEGION_ADAPTER_FAILURE_PATH" = "$ART/post-attempt-failure-1.json" ]
+}
+
+@test "post-attempt failure refuses symlinked leaves and leaves targets untouched" {
+  local victim="$TEST_TMPDIR/post-attempt-victim" original="$TEST_TMPDIR/original-attempt.json"
+  write_attempt 1 '{}' unknown '' 0 unknown ''
+  cp "$ART/attempt-1.json" "$original"
+  printf 'untouched\n' > "$victim"
+  ln -s "$victim" "$ART/post-attempt-failure-1.json"
+
+  run legion_adapter_fail_recorded_attempt "$ART" fixture 1 internal 70 cleanup-failed
+  [ "$status" -ne 0 ]
+  [ "$(cat "$victim")" = untouched ]
+  cmp -s "$original" "$ART/attempt-1.json"
+  [ ! -e "$ART/failure.json" ]
+}
+
+@test "post-attempt publication ignores predictable legacy temp symlinks" {
+  local victim="$TEST_TMPDIR/legacy-temp-victim"
+  write_attempt 1 '{}' unknown '' 0 unknown ''
+  printf 'untouched\n' > "$victim"
+  ln -s "$victim" "$ART/attempt-1.json.tmp.$$"
+  ln -s "$victim" "$ART/failure-1.json.tmp.$$"
+
+  legion_adapter_fail_recorded_attempt "$ART" fixture 1 internal 70 cleanup-failed
+  [ "$(cat "$victim")" = untouched ]
+  jq -e '.class == "internal"' "$ART/post-attempt-failure-1.json"
+}
+
+@test "post-attempt publication refuses a symlinked failure alias" {
+  local victim="$TEST_TMPDIR/alias-victim"
+  write_attempt 1 '{}' unknown '' 0 unknown ''
+  printf 'untouched\n' > "$victim"
+  ln -s "$victim" "$ART/failure.json"
+
+  run legion_adapter_fail_recorded_attempt "$ART" fixture 1 internal 70 cleanup-failed
+  [ "$status" -ne 0 ]
+  [ "$(cat "$victim")" = untouched ]
+  [ ! -e "$ART/post-attempt-failure-1.json" ]
+}
+
+@test "numbered attempt is not published when its inode cannot be fsynced" {
+  install_receipt_fsync_fault
+  export LEGION_TEST_FSYNC_PREFIX='.attempt-1.'
+  run write_attempt 1 '{}' unknown '' 0 unknown ''
+  [ "$status" -ne 0 ]
+  [ ! -e "$ART/attempt-1.json" ]
+  [ ! -e "$ART/attempt.json" ]
+}
+
+@test "numbered failure and attempt stay unpublished when failure inode fsync fails" {
+  install_receipt_fsync_fault
+  export LEGION_TEST_FSYNC_PREFIX='.failure-1.'
+  run legion_adapter_write_attempt "$ART" fixture fixture 1 \
+    requested-model effective-model "" "" workspace-write failed \
+    2026-01-01T00:00:00Z 2026-01-01T00:00:01Z 1000 \
+    '{}' unknown '' 0 unknown '' provider_error false false 1 provider-error
+  [ "$status" -ne 0 ]
+  [ ! -e "$ART/failure-1.json" ]
+  [ ! -e "$ART/attempt-1.json" ]
+}
+
+@test "final-gate no-launch evidence is not published when fsync fails" {
+  install_receipt_fsync_fault
+  export LEGION_TEST_FSYNC_PREFIX='.final-gate-lease.'
+  local lease="$ART/lease.json"
+  run legion_adapter_write_final_gate_no_launch "$lease" 30 15
+  [ "$status" -ne 0 ]
+  [ ! -e "$lease" ]
+}
+
+@test "preflight alias is not published when its temporary inode cannot be fsynced" {
+  install_receipt_fsync_fault
+  export LEGION_TEST_FSYNC_PREFIX='.pi-preflight.'
+  run legion_adapter_preflight pi "$ART" workspace-write argv '' '' 0 pi
+  [ "$status" -ne 0 ]
+  [ ! -e "$ART/pi-preflight.json" ]
+  [ ! -e "$ART/preflight.json" ]
+}
+
+@test "preflight receipt is not replaced when alias temporary fsync fails" {
+  install_receipt_fsync_fault
+  export LEGION_TEST_FSYNC_PREFIX='.preflight-alias.'
+  run legion_adapter_preflight pi "$ART" workspace-write argv '' '' 0 pi
+  [ "$status" -ne 0 ]
+  [ ! -e "$ART/pi-preflight.json" ]
+  [ ! -e "$ART/preflight.json" ]
 }

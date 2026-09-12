@@ -171,7 +171,7 @@ emit_span() {
        target_name:(if $target_name=="" then null else $target_name end),
        duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
        tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
-      >> "$LEGION_TELEMETRY_DIR/$(legion_adapter_span_date).jsonl"
+      | legion_adapter_append_span
   } 2>/dev/null || true
 }
 
@@ -501,7 +501,7 @@ cmd_run() {
       "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
       "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
       "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
-    terminal_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
     terminal_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     terminal_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     terminal_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
@@ -514,7 +514,7 @@ cmd_run() {
         preflight_receipt:$preflight,attempt_receipt:$attempt,
         failure_receipt:(if $failure=="" then null else $failure end)}')"
     local span_usage span_cost span_usage_status span_cost_status
-    span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
     span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
@@ -585,7 +585,13 @@ cmd_run() {
      attempt_receipt:(if $attempt=="" then null else $attempt end),
      failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
     + (if $reason=="" then {} else {reason:$reason} end)
-    + (if $auth_note == "" then {} else {auth_error:$auth_note} end)'
+    + (if $auth_note == "" then {} else {auth_error:$auth_note} end)' | {
+      if [[ -n "$LEGION_ADAPTER_ATTEMPT_PATH" ]]; then
+        python3 "$_self_dir/lib/exact-metering.py" patch-attempt "$LEGION_ADAPTER_ATTEMPT_PATH"
+      else
+        cat
+      fi
+    }
   [[ "$status" == "ok" ]] || exit 1
 }
 

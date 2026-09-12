@@ -247,9 +247,11 @@ assert_retained_publication_containment() {
     rc=0
     wait "$pid" || rc=$?
     [ "$rc" -eq 70 ]
-    jq -e '.terminal_status == "failed" and .failure.class == "internal"
-      and (.failure.message | contains("span publication is uncertain"))' \
+    jq -e '.terminal_status == "cancelled" and .failure.class == "cancelled"' \
       "$art/attempt-1.json"
+    jq -e --slurpfile attempt "$art/attempt-1.json" \
+      '.class == "internal" and (.message | contains("span publication is uncertain"))
+      and .attempt_id == $attempt[0].attempt_id' "$art/post-attempt-failure-1.json"
     [ -d "$repo/.legion/worktrees/$run_id" ]
     jq -e '.lifecycle.phase == "containment_failed"' \
       "$LEGION_REGISTRY_DIR/$run_id.json"

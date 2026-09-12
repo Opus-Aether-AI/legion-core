@@ -163,6 +163,60 @@ legion_adapter_supervisor_timed_out_before_launch() {
 # foreground adapter receives a signal at its final shell gate, before Popen
 # and before provider-attempt accounting are armed. The caller remains
 # responsible for retaining containment if this trusted write fails.
+legion_adapter_durable_exclusive_link() {
+  local source="$1" destination="$2"
+  python3 - "$source" "$destination" <<'PY'
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:]
+directory_path = os.path.dirname(source)
+if directory_path != os.path.dirname(destination):
+    raise SystemExit("durable receipt must stay in one directory")
+source_name = os.path.basename(source)
+destination_name = os.path.basename(destination)
+if source_name in {"", ".", ".."} or destination_name in {"", ".", ".."}:
+    raise SystemExit("invalid durable receipt leaf")
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+directory = os.open(directory_path, flags)
+source_fd = None
+linked = False
+try:
+    source_fd = os.open(source_name, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) |
+                        getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+    original = os.fstat(source_fd)
+    pathname = os.stat(source_name, dir_fd=directory, follow_symlinks=False)
+    if (not stat.S_ISREG(original.st_mode) or original.st_nlink != 1 or
+            (original.st_dev, original.st_ino) != (pathname.st_dev, pathname.st_ino)):
+        raise OSError("unsafe durable receipt source")
+    os.fsync(source_fd)
+    os.link(source_name, destination_name, src_dir_fd=directory,
+            dst_dir_fd=directory, follow_symlinks=False)
+    linked = True
+    published = os.stat(destination_name, dir_fd=directory, follow_symlinks=False)
+    if (not stat.S_ISREG(published.st_mode) or
+            (original.st_dev, original.st_ino) != (published.st_dev, published.st_ino)):
+        raise OSError("durable receipt source changed before publication")
+    os.fsync(directory)
+    os.unlink(source_name, dir_fd=directory)
+    os.fsync(directory)
+except OSError as error:
+    if linked:
+        try:
+            os.unlink(destination_name, dir_fd=directory)
+            os.fsync(directory)
+        except OSError:
+            pass
+    print(f"legion adapter durable receipt: {error}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    if source_fd is not None:
+        os.close(source_fd)
+    os.close(directory)
+PY
+}
+
 legion_adapter_write_final_gate_no_launch() {
   local status_file="$1" max_runtime="$2" signum="$3" directory temp
   [[ -n "$status_file" && "$max_runtime" =~ ^[1-9][0-9]*$ \
@@ -181,13 +235,12 @@ legion_adapter_write_final_gate_no_launch() {
     return 1
   fi
   chmod 600 "$temp" || { rm -f "$temp"; return 1; }
-  # Publish without replacing a raced or pre-existing claimant. A hard link in
-  # the same trusted directory is atomic and portable across Darwin/Linux.
-  if ! ln "$temp" "$status_file"; then
+  # The source inode and namespace must both be durable before callers trust
+  # this as authenticated evidence that no provider was launched.
+  if ! legion_adapter_durable_exclusive_link "$temp" "$status_file"; then
     rm -f "$temp"
     return 1
   fi
-  rm -f "$temp"
   legion_adapter_supervisor_launch_failed "$status_file"
 }
 
@@ -666,9 +719,22 @@ PY
       || ! python3 - "$tmp" "$LEGION_ADAPTER_PREFLIGHT_PATH" \
           "$alias_tmp" "$art/preflight.json" <<'PY'
 import os
+import stat
 import sys
 
 source, destination, alias_source, alias_destination = sys.argv[1:]
+for path in (source, alias_source):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) |
+                         getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(descriptor)
+        path_info = os.stat(path, follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino)):
+            raise OSError("unsafe preflight temporary")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 os.replace(source, destination)
 os.replace(alias_source, alias_destination)
 directory = os.open(os.path.dirname(destination), os.O_RDONLY)
@@ -808,6 +874,9 @@ flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 
 directory = os.open(art, flags)
 linked_failure = False
 linked_attempt = False
+aliases_started = False
+attempt_fd = None
+failure_fd = None
 
 def check_leaf(name, *, must_exist=False):
     try:
@@ -819,6 +888,28 @@ def check_leaf(name, *, must_exist=False):
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise OSError(f"unsafe receipt leaf: {name}")
     return info
+
+def sync_source(name):
+    descriptor = os.open(name, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) |
+                         getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+    try:
+        info = os.fstat(descriptor)
+        path_info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino)):
+            raise OSError(f"unsafe receipt source: {name}")
+        os.fsync(descriptor)
+        return descriptor, info
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+def verify_link(name, source_info):
+    linked = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (not stat.S_ISREG(linked.st_mode) or linked.st_nlink != 2 or
+            (linked.st_dev, linked.st_ino) != (source_info.st_dev, source_info.st_ino) or
+            linked.st_mtime_ns != source_info.st_mtime_ns):
+        raise OSError(f"receipt source changed before publication: {name}")
 
 def copy_alias(source, alias):
     temporary = ".receipt-alias." + secrets.token_hex(16)
@@ -861,7 +952,7 @@ try:
     for name in (attempt_tmp, attempt_name, "attempt.json"):
         if "/" in name or name in {"", ".", ".."}:
             raise OSError("unsafe receipt name")
-    check_leaf(attempt_tmp, must_exist=True)
+    attempt_fd, attempt_info = sync_source(attempt_tmp)
     if check_leaf(attempt_name) is not None:
         raise FileExistsError("numbered attempt is immutable")
     check_leaf("attempt.json")
@@ -869,25 +960,29 @@ try:
         for name in (failure_tmp, failure_name, "failure.json"):
             if "/" in name or name in {"", ".", ".."}:
                 raise OSError("unsafe failure name")
-        check_leaf(failure_tmp, must_exist=True)
+        failure_fd, failure_info = sync_source(failure_tmp)
         if check_leaf(failure_name) is not None:
             raise FileExistsError("numbered failure is immutable")
         check_leaf("failure.json")
         os.link(failure_tmp, failure_name, src_dir_fd=directory, dst_dir_fd=directory,
                 follow_symlinks=False)
         linked_failure = True
+        verify_link(failure_name, failure_info)
     else:
         check_leaf("failure.json")
     os.link(attempt_tmp, attempt_name, src_dir_fd=directory, dst_dir_fd=directory,
             follow_symlinks=False)
     linked_attempt = True
+    verify_link(attempt_name, attempt_info)
     # The exclusive temporary and numbered link now share an inode. Drop the
     # temporary before aliases so indexed readers see a singly linked receipt.
     os.unlink(attempt_tmp, dir_fd=directory)
     if failure_tmp:
         os.unlink(failure_tmp, dir_fd=directory)
+        aliases_started = True
         copy_alias(failure_name, "failure.json")
     else:
+        aliases_started = True
         try:
             os.unlink("failure.json", dir_fd=directory)
         except FileNotFoundError:
@@ -895,14 +990,21 @@ try:
     copy_alias(attempt_name, "attempt.json")
     os.fsync(directory)
 except OSError as error:
-    if linked_failure and not linked_attempt:
-        try:
-            os.unlink(failure_name, dir_fd=directory)
-        except OSError:
-            pass
+    if not aliases_started:
+        for name, linked in ((attempt_name, linked_attempt),
+                             (failure_name, linked_failure)):
+            if linked:
+                try:
+                    os.unlink(name, dir_fd=directory)
+                except OSError:
+                    pass
     print(f"legion adapter receipt: {error}", file=sys.stderr)
     raise SystemExit(1)
 finally:
+    if attempt_fd is not None:
+        os.close(attempt_fd)
+    if failure_fd is not None:
+        os.close(failure_fd)
     os.close(directory)
 PY
 }
@@ -924,20 +1026,21 @@ legion_adapter_write_attempt() {
 
   case "$usage_status" in
     known)
-      if [[ -n "$usage_source" ]] && usage_json="$(jq -cSse '
-        if length == 1
-           and (.[0] | type == "object"
-                and all(keys[]; length > 0)
-                and all(.[]; type == "number"
-                            and (isnan | not)
-                            and (isinfinite | not)
-                            and . >= 0
-                            and . == floor
-                            and (tostring | test("^(0|[1-9][0-9]*)$"))))
-        then .[0]
-        else error("invalid provider usage")
-        end
-      ' <<<"$usage" 2>/dev/null)"; then
+      if [[ -n "$usage_source" ]] && usage_json="$(python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin)
+    if not isinstance(value, dict) or any(
+        not key or type(counter) is not int or counter < 0
+        for key, counter in value.items()
+    ):
+        raise ValueError("invalid provider usage")
+    json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
+except (TypeError, ValueError):
+    raise SystemExit(1)
+' <<<"$usage" 2>/dev/null)"; then
         :
       else
         printf '%s\n' \
@@ -1015,7 +1118,7 @@ legion_adapter_write_attempt() {
     --arg requested_effort "$requested_effort" --arg effective_effort "$effective_effort" \
     --arg cache_key "$LEGION_ADAPTER_PREFLIGHT_CACHE_KEY" \
     --arg previous "$LEGION_ADAPTER_PREVIOUS_ATTEMPT_ID" \
-    --argjson usage "$usage_json" --arg usage_status "$usage_status" --arg usage_source "$usage_source" \
+    --arg usage_status "$usage_status" --arg usage_source "$usage_source" \
     --argjson cost "$cost_json" --arg cost_status "$cost_status" --arg cost_source "$cost_source" \
     --argjson failure "$failure_json" --argjson output_started "$output_started" \
     --arg started "$started_at" --arg ended "$ended_at" --argjson duration "$duration_ms" \
@@ -1029,13 +1132,23 @@ legion_adapter_write_attempt() {
      effective_effort:(if $effective_effort=="" then null else $effective_effort end),
      cache_lineage:{preflight_cache_key:(if $cache_key=="" then null else $cache_key end),
                     previous_attempt_id:(if $previous=="" then null else $previous end)},
-     usage:$usage,usage_status:$usage_status,
+     usage:null,usage_status:$usage_status,
      usage_source:(if $usage_source=="" then null else $usage_source end),
      cost_usd:$cost,cost_status:$cost_status,
      cost_source:(if $cost_source=="" then null else $cost_source end),
      failure:$failure,output_started:$output_started,started_at:$started,ended_at:$ended,
      duration_ms:$duration,sandbox:$sandbox,terminal_status:$terminal,
-     child_attempt_ids:[],reconciliation:null}' > "$tmp" || {
+     child_attempt_ids:[],reconciliation:null}' | python3 -c '
+import json
+import os
+import sys
+
+receipt = json.load(sys.stdin)
+with os.fdopen(3, "r", encoding="utf-8") as usage_input:
+    receipt["usage"] = json.load(usage_input)
+json.dump(receipt, sys.stdout, separators=(",", ":"))
+sys.stdout.write("\n")
+' 3<<<"$usage_json" > "$tmp" || {
       rm -f "$tmp" "$failure_tmp"
       return 1
     }
@@ -1078,6 +1191,20 @@ legion_adapter_span_date() {
     printf '%s\n' "$LEGION_ADAPTER_SPAN_DATE"
   else
     date -u +%F
+  fi
+}
+
+# Provider spans never reopen the date-derived telemetry leaf with a shell
+# redirection. The append helper verifies the intent's inode at the actual
+# write, then writes through its no-follow descriptor. Other rollup spans keep
+# their ordinary append path.
+legion_adapter_append_span() {
+  if [[ -n "${LEGION_ADAPTER_SPAN_ATTEMPT_PATH:-}" ]]; then
+    [[ -n "${LEGION_ADAPTER_SPAN_DATE:-}" && -n "${LEGION_TELEMETRY_DIR:-}" ]] || return 1
+    python3 "$(legion_adapter_contract_root)/legion-router/scripts/lib/provider-span-append.py" \
+      "$LEGION_ADAPTER_SPAN_ATTEMPT_PATH" "$LEGION_TELEMETRY_DIR" "$LEGION_ADAPTER_SPAN_DATE"
+  else
+    cat >> "$LEGION_TELEMETRY_DIR/$(legion_adapter_span_date).jsonl"
   fi
 }
 
@@ -1240,20 +1367,27 @@ def matching_span(raw):
     if not isinstance(value, dict):
         return False
     artifacts = value.get("artifacts")
+    expected_status = {
+        "succeeded": "ok", "failed": "failed", "cancelled": "failed",
+        "timed_out": "timed_out", "refused": "refused",
+    }[attempt["terminal_status"]]
+    if attempt["terminal_status"] == "failed" and isinstance(attempt.get("failure"), dict):
+        if attempt["failure"].get("class") == "quota":
+            expected_status = "blocked"
+    expected_model = attempt.get("effective_model") or attempt.get("requested_model") or "unknown"
     return (value.get("schema") == "legion.span.v1"
             and value.get("run_id") == attempt["run_id"]
+            and value.get("attempt_id") == attempt["attempt_id"]
+            and value.get("attempt_ordinal") == attempt["ordinal"]
+            and value.get("attempt_terminal_status") == attempt["terminal_status"]
             and value.get("executor") == attempt["executor"]
+            and value.get("model") == expected_model
+            and value.get("status") == expected_status
             and value.get("duration_ms") == attempt["duration_ms"]
             and value.get("usage_status") == attempt["usage_status"]
             and value.get("tokens") == attempt["usage"]
             and value.get("cost_status") == attempt["cost_status"]
             and value.get("cost_usd") == attempt["cost_usd"]
-            and (attempt["effective_model"] is None or
-                 value.get("model") == attempt["effective_model"])
-            and (value.get("attempt_id") is None or
-                 value["attempt_id"] == attempt["attempt_id"])
-            and (value.get("attempt_ordinal") is None or
-                 value["attempt_ordinal"] == attempt["ordinal"])
             and isinstance(artifacts, dict)
             and artifacts.get("provider_attempt") is True
             and artifacts.get("rollup_only") is not True
@@ -1355,32 +1489,56 @@ try:
             start = intent["offset"]
         else:
             start = max(0, info.st_size - limit)
-        raw = os.pread(descriptor, min(limit, info.st_size - start), start)
+        # Iterate the entire post-intent range with bounded memory. A span can
+        # be more than one MiB after the pinned offset when unrelated writers
+        # append concurrently. Never infer absence from one truncated read.
+        cursor = start
+        record_start = start
+        partial = bytearray()
+        skip_record = bool(start and intent is None)
+        found = None
+        while cursor < info.st_size:
+            chunk = os.pread(descriptor, min(65536, info.st_size - cursor), cursor)
+            if not chunk:
+                raise OSError("telemetry shrank during recovery")
+            position = 0
+            while position < len(chunk):
+                newline = chunk.find(b"\n", position)
+                if newline < 0:
+                    segment = chunk[position:]
+                    if not skip_record and len(partial) + len(segment) <= limit:
+                        partial.extend(segment)
+                    else:
+                        skip_record = True
+                        partial.clear()
+                    cursor += len(segment)
+                    break
+                segment = chunk[position:newline + 1]
+                if not skip_record and len(partial) + len(segment) <= limit:
+                    partial.extend(segment)
+                    record = bytes(partial)
+                    if matching_span(record):
+                        found = (record_start, record)
+                cursor += len(segment)
+                record_start = cursor
+                partial.clear()
+                skip_record = False
+                position = newline + 1
+        if found is None:
+            raise ValueError("provider span not found after append intent")
+        offset, line = found
+        if os.pread(descriptor, len(line), offset) != line:
+            raise OSError("matched telemetry span changed during recovery")
         # A successful acknowledgement means the JSONL bytes, not merely the
         # sidecar, survived a host crash. The acknowledgement directory follows.
         os.fsync(descriptor)
         path_info = os.stat(telemetry_path, follow_symlinks=False)
-        if (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino) != (path_info.st_dev, path_info.st_ino):
+        current = os.fstat(descriptor)
+        if ((current.st_dev, current.st_ino) != (path_info.st_dev, path_info.st_ino)
+                or current.st_size < info.st_size):
             raise OSError("telemetry file replaced during recovery")
     finally:
         os.close(descriptor)
-    cursor = start
-    # A fresh intent points at a known append boundary, unlike a legacy tail
-    # read that may start halfway through a line. Preserve its first record.
-    if start and intent is None:
-        first_newline = raw.find(b"\n")
-        if first_newline < 0:
-            raise ValueError("no complete bounded telemetry record")
-        cursor += first_newline + 1
-        raw = raw[first_newline + 1:]
-    found = None
-    for line in raw.splitlines(keepends=True):
-        if matching_span(line):
-            found = (cursor, line)
-        cursor += len(line)
-    if found is None:
-        raise ValueError("provider span not found in bounded tail")
-    offset, line = found
     payload = {
         "schema": "legion.provider-span-ack.v1",
         "attempt_receipt": attempt_path,
@@ -1847,7 +2005,8 @@ legion_adapter_emit_normal_provider_span() {
     legion_adapter_release_provider_span_claim "$attempt_path"
     return 1
   fi
-  LEGION_ADAPTER_SPAN_DATE="$pinned_date" emit_span "$@" || true
+  LEGION_ADAPTER_SPAN_DATE="$pinned_date" LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$attempt_path" \
+    emit_span "$@" || true
   # Simulate losing the acknowledgement after the append. The durable span is
   # deliberately retained so a retry proves exact-once reconciliation.
   if [[ "${LEGION_TEST_PROVIDER_SPAN_FAULTS:-0}" == 1 \
@@ -1971,7 +2130,7 @@ legion_adapter_emit_signal_span() {
   model="$(jq -r '.effective_model // .requested_model // "unknown"' "$attempt_path")"
   terminal="$(jq -r '.terminal_status' "$attempt_path")"
   duration="$(jq -r '.duration_ms' "$attempt_path")"
-  usage="$(jq -c '.usage' "$attempt_path")"
+  usage="$(python3 "${BASH_SOURCE[0]%/*}/exact-metering.py" get "$attempt_path" usage)"
   cost="$(jq -c '.cost_usd' "$attempt_path")"
   usage_status="$(jq -r '.usage_status' "$attempt_path")"
   cost_status="$(jq -r '.cost_status' "$attempt_path")"
@@ -1994,7 +2153,8 @@ legion_adapter_emit_signal_span() {
     legion_adapter_release_provider_span_claim "$attempt_path"
     return 1
   fi
-  if [[ ! -x "$trace_bin" ]] || ! LEGION_ADAPTER_SPAN_DATE="$pinned_date" "$trace_bin" emit \
+  if [[ ! -x "$trace_bin" ]] || ! LEGION_ADAPTER_SPAN_DATE="$pinned_date" \
+      LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$attempt_path" "$trace_bin" emit \
       --executor "$executor" --model "$model" --status "$span_status" \
       --run-id "$RUN_ID" --trace-id "${LEGION_TRACE_ID:-$RUN_ID}" \
       --parent-id "${LEGION_PARENT_ID:-}" --archetype "${archetype:-${ARCHETYPE:-}}" \
@@ -2014,37 +2174,137 @@ legion_adapter_emit_signal_span() {
   return 1
 }
 
-# Reclassify an already-recorded provider call when an adapter-level invariant
-# (for example a read-only write backstop) fails after output parsing. This
-# preserves the original timing, model, cost, and lineage rather than fabricating
-# a second provider attempt.
+# Record an adapter-level failure discovered after the provider attempt was
+# published. The numbered provider receipt is immutable: its status and
+# metering remain the facts that provider spans and existing readers saw.
+# A separate failure receipt binds the subsequent containment/policy finding
+# to that attempt without rewriting its provenance.
 legion_adapter_fail_recorded_attempt() {
   local art="$1" executor="$2" ordinal="$3" failure_class="$4"
   local provider_code="${5:-}" message="${6:-}"
-  local attempt_path="$art/attempt-$ordinal.json" failure_path="$art/failure-$ordinal.json"
-  local attempt_id ended_at output_started failure_json tmp
-  [[ -f "$attempt_path" ]] || return 1
-  attempt_id="$(jq -r '.attempt_id' "$attempt_path")"
-  ended_at="$(jq -r '.ended_at' "$attempt_path")"
-  output_started="$(jq -r '.output_started' "$attempt_path")"
-  failure_json="$(jq -cn \
-    --arg id "${RUN_ID}-${executor}-failure-${ordinal}" --arg run "$RUN_ID" \
-    --arg attempt "$attempt_id" --arg ts "$ended_at" --arg class "$failure_class" \
-    --arg code "$provider_code" --arg message "$message" \
-    --argjson output_started "$output_started" '
-    {schema:"legion.failure.v1",failure_id:$id,run_id:$run,attempt_id:$attempt,ts:$ts,
-     class:$class,provider_code:(if $code=="" then null else $code end),retryable:false,
-     output_started:$output_started,message:(if $message=="" then null else $message end)}')"
-  printf '%s\n' "$failure_json" > "$failure_path.tmp.$$"
-  chmod 600 "$failure_path.tmp.$$" 2>/dev/null || true
-  mv -f "$failure_path.tmp.$$" "$failure_path"
-  cp "$failure_path" "$art/failure.json"
-  tmp="$attempt_path.tmp.$$"
-  jq --argjson failure "$failure_json" \
-    '.terminal_status="failed" | .failure=$failure' "$attempt_path" > "$tmp"
-  chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$attempt_path"
-  cp "$attempt_path" "$art/attempt.json"
+  local attempt_path="$art/attempt-$ordinal.json"
+  local failure_path="$art/post-attempt-failure-$ordinal.json" validation_root
+  [[ -d "$art" && ! -L "$art" && -f "$attempt_path" && ! -L "$attempt_path" ]] || return 1
+  validation_root="$(legion_adapter_contract_root)/legion-observability/scripts"
+  if ! python3 - "$art" "$attempt_path" "$failure_path" "$RUN_ID" \
+      "$executor" "$ordinal" "$failure_class" "$provider_code" "$message" \
+      "$validation_root" <<'PY'
+import json
+import os
+import stat
+import sys
+import tempfile
+
+(art, attempt_path, failure_path, run_id, executor, ordinal_text,
+ failure_class, provider_code, message, validation_root) = sys.argv[1:]
+sys.path.insert(0, validation_root)
+from legion_receipts import failure_receipt, validate_attempt
+
+directory = os.open(art, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                    getattr(os, "O_NOFOLLOW", 0))
+attempt_fd = None
+temporary = None
+alias_temporary = None
+linked_failure = False
+alias_published = False
+try:
+    attempt_name = os.path.basename(attempt_path)
+    failure_name = os.path.basename(failure_path)
+    attempt_fd = os.open(attempt_name, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) |
+                         getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+    before = os.fstat(attempt_fd)
+    path_info = os.stat(attempt_name, dir_fd=directory, follow_symlinks=False)
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+            before.st_size > 1048576 or
+            (before.st_dev, before.st_ino) != (path_info.st_dev, path_info.st_ino)):
+        raise OSError("unsafe recorded attempt")
+    raw = os.read(attempt_fd, 1048577)
+    after = os.fstat(attempt_fd)
+    path_after = os.stat(attempt_name, dir_fd=directory, follow_symlinks=False)
+    if (len(raw) > 1048576 or
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+             before.st_ctime_ns) !=
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+             after.st_ctime_ns) or
+            (after.st_dev, after.st_ino) != (path_after.st_dev, path_after.st_ino)):
+        raise OSError("recorded attempt changed while reading")
+    attempt = json.loads(raw)
+    validate_attempt(attempt)
+    if (attempt["run_id"] != run_id or attempt["executor"] != executor or
+            attempt["ordinal"] != int(ordinal_text) or
+            attempt["attempt_kind"] != "provider"):
+        raise OSError("recorded attempt identity mismatch")
+    for name in (failure_name, "failure.json"):
+        try:
+            existing = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if name == failure_name or not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
+            raise OSError(f"unsafe or pre-existing post-attempt failure leaf: {name}")
+
+    failure = failure_receipt(
+        run_id=run_id, attempt_id=attempt["attempt_id"],
+        failure_class=failure_class, retryable=False,
+        output_started=attempt["output_started"],
+        provider_code=provider_code or None, message=message or None,
+        failure_id=f"{run_id}-{executor}-postattempt-failure-{ordinal_text}",
+        ts=attempt["ended_at"],
+    )
+    payload = (json.dumps(failure, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    fd, temporary = tempfile.mkstemp(prefix=".post-attempt-failure.", dir=art)
+    try:
+        with os.fdopen(os.dup(fd), "wb") as target:
+            target.write(payload)
+            target.flush()
+        os.fsync(fd)
+        source_info = os.fstat(fd)
+        os.link(os.path.basename(temporary), failure_name, src_dir_fd=directory,
+                dst_dir_fd=directory, follow_symlinks=False)
+        linked_failure = True
+        published = os.stat(failure_name, dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(published.st_mode) or published.st_nlink != 2 or
+                (published.st_dev, published.st_ino) != (source_info.st_dev, source_info.st_ino) or
+                os.fstat(fd).st_mtime_ns != source_info.st_mtime_ns):
+            raise OSError("post-attempt failure source changed during publication")
+    finally:
+        os.close(fd)
+    os.fsync(directory)
+    os.unlink(os.path.basename(temporary), dir_fd=directory)
+    temporary = None
+
+    alias_fd, alias_temporary = tempfile.mkstemp(prefix=".post-attempt-alias.", dir=art)
+    with os.fdopen(alias_fd, "wb") as target:
+        target.write(payload)
+        target.flush()
+        os.fsync(target.fileno())
+    os.replace(os.path.basename(alias_temporary), "failure.json",
+               src_dir_fd=directory, dst_dir_fd=directory)
+    alias_published = True
+    alias_temporary = None
+    os.fsync(directory)
+except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+    if linked_failure and not alias_published:
+        try:
+            os.unlink(failure_name, dir_fd=directory)
+            os.fsync(directory)
+        except OSError:
+            pass
+    print(f"legion adapter post-attempt failure: {error}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    if attempt_fd is not None:
+        os.close(attempt_fd)
+    for path in (temporary, alias_temporary):
+        if path is not None:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+    os.close(directory)
+PY
+  then
+    return 1
+  fi
   LEGION_ADAPTER_ATTEMPT_PATH="$attempt_path"
   LEGION_ADAPTER_FAILURE_PATH="$failure_path"
 }

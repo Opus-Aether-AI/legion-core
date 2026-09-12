@@ -154,13 +154,78 @@ assert spans[0]["artifacts"]["attempt_receipt"] == str(attempt)
 PY
 }
 
+@test "legion-opencode: oversized task stages no bytes and records authenticated no-launch" {
+    local repo task_file terminal lease art
+    repo="$(make_test_repo oversized-task)"
+    task_file="$TEST_TMPDIR/oversized-task.txt"
+    python3 - "$task_file" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(b"x" * (1048576 + 1))
+PY
+    run "$LEGION_OPENCODE" run --task-file "$task_file" \
+      --sandbox read-only --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    terminal="$(printf '%s\n' "$output" | tail -n 1)"
+    jq -e '.status == "refused" and .attempt_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"
+      and (.lease_receipt | type) == "string"' <<<"$terminal"
+    lease="$(jq -r .lease_receipt <<<"$terminal")"
+    art="${lease%/*}"
+    jq -e '.schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed" and .max_runtime_seconds > 0
+      and (.reason | contains("1 MiB artifact limit"))' "$lease"
+    [ ! -e "$art/task.txt" ]
+    [ ! -e "$art/attempt-1.json" ]
+    [ ! -e "$repo/.legion/worktrees"/"$(basename "$art")" ]
+    if compgen -G "$LEGION_TELEMETRY_DIR/*.jsonl" >/dev/null; then
+      run jq -se 'length == 0' "$LEGION_TELEMETRY_DIR"/*.jsonl
+      [ "$status" -eq 0 ]
+    fi
+    ! grep -q '^opencode run ' "$MOCK_CALL_LOG"
+}
+
+@test "legion-opencode: oversized task with blocked no-launch receipt retains containment" {
+    local repo run_id art task_file sentinel terminal
+    repo="$(make_test_repo blocked-staging-lease)"
+    run_id="queued-opencode-blocked-staging-lease"
+    art="$repo/.legion/runs/$run_id"
+    mkdir -p "$art" "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:$run,
+       parent_id:null,kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-09-12T00:00:00Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+    sentinel="$TEST_TMPDIR/sentinel"
+    printf 'unchanged\n' > "$sentinel"
+    ln -s "$sentinel" "$art/task-staging-lease.json"
+    task_file="$TEST_TMPDIR/blocked-oversized-task.txt"
+    python3 - "$task_file" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(b"x" * (1048576 + 1))
+PY
+    run "$LEGION_OPENCODE" run --task-file "$task_file" --run-id "$run_id" \
+      --sandbox read-only --repo "$repo" --quiet
+    [ "$status" -eq 70 ]
+    terminal="$(printf '%s\n' "$output" | tail -n 1)"
+    jq -e '.status == "containment_failed" and .lease_receipt == null
+      and .attempt_receipt == null and .usage_status == "unknown"
+      and .cost_status == "unknown"' <<<"$terminal"
+    [ "$(cat "$sentinel")" = unchanged ]
+    [ -L "$art/task-staging-lease.json" ]
+    [ ! -e "$art/task.txt" ]
+    jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
+}
+
 @test "legion-opencode: provider token sums above 2^53 remain exact" {
     local repo attempt
     repo="$(make_test_repo huge-tokens)"
     MOCK_OPENCODE_HUGE_TOKENS=1 run "$LEGION_OPENCODE" run --task inspect --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     attempt="$(printf '%s\n' "$output" | tail -n 1 | jq -r .attempt_receipt)"
-    python3 - "$attempt" "$LEGION_TELEMETRY_DIR" <<'PY'
+    python3 - "$attempt" "$LEGION_TELEMETRY_DIR" "$(printf '%s\n' "$output" | tail -n 1)" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -171,6 +236,7 @@ expected = 9007199254741002
 assert receipt["usage_status"] == "known"
 assert receipt["usage"]["input_tokens"] == expected
 assert spans[0]["tokens"]["input_tokens"] == expected
+assert json.loads(sys.argv[3])["usage"]["input_tokens"] == expected
 PY
 }
 

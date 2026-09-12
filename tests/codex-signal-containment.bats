@@ -75,13 +75,21 @@ wait_for_supervisor() {
 }
 
 assert_internal_attempt() {
-  local attempt="$1"
-  jq -e '.terminal_status == "failed" and .failure.class == "internal"
-    and (.failure.message | contains("codex signal cleanup failed"))' "$attempt"
+  local attempt="$1" sidecar="$(dirname "$1")/post-attempt-failure-1.json"
+  # The paid signal attempt is immutable once published. Cleanup failure is a
+  # separate, bound containment receipt rather than a rewrite of its outcome.
+  jq -e '.terminal_status == "cancelled" and .failure.class == "cancelled"' "$attempt"
+  jq -e --arg attempt_id "$(jq -r '.attempt_id' "$attempt")" \
+    '.schema == "legion.failure.v1" and .attempt_id == $attempt_id
+      and .class == "internal"
+      and (.message | contains("codex signal cleanup failed"))' "$sidecar"
+  jq -e --arg failure_id "$(jq -r '.failure_id' "$sidecar")" \
+    '.failure_id == $failure_id' "$(dirname "$attempt")/failure.json"
   [ "$(find "$(dirname "$attempt")" -maxdepth 1 -name 'attempt-*.json' \
     ! -name '*.lease.json' ! -name '*.launch-gate.json' ! -name '*.verdict.json' \
     | wc -l | tr -d ' ')" -eq 1 ]
   [ "$(find "$(dirname "$attempt")" -maxdepth 1 -name 'failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(find "$(dirname "$attempt")" -maxdepth 1 -name 'post-attempt-failure-*.json' | wc -l | tr -d ' ')" -eq 1 ]
 }
 
 install_mock_sandcastle_node() {

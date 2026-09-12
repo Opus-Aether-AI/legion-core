@@ -224,6 +224,10 @@ install_deadline_expiring_git() {
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ " $* " == *" worktree add "* ]] && mkdir "$MOCK_GIT_DELAY_MARKER" 2>/dev/null; then
+  if [[ -n "${MOCK_PREPROVIDER_COLLISION_LEASE:-}" ]]; then
+    mkdir -p "${MOCK_PREPROVIDER_COLLISION_LEASE%/*}"
+    printf 'collision marker\n' > "$MOCK_PREPROVIDER_COLLISION_LEASE"
+  fi
   "$MOCK_REAL_PYTHON" - "$LEGION_CHILD_LEASE_DEADLINE_NS" <<'PY'
 import sys
 import time
@@ -299,6 +303,63 @@ assert_typed_pre_provider_timeout() {
     assert_typed_pre_provider_timeout \
       "$result_file" "expired before handoff broker launch" "$repo" "$adapter"
   done
+}
+
+@test "Pi pre-provider timeout refuses a colliding lease and retains containment" {
+  local repo deadline result_file rc=0 lease
+  repo="$(make_test_repo broker-expired-colliding-pi)"
+  install_deadline_expiring_git colliding-pi
+  lease="$repo/.legion/runs/broker-expired-colliding-pi/lease.json"
+  export MOCK_PREPROVIDER_COLLISION_LEASE="$lease"
+  deadline="$(python3 -c 'import time; print(time.monotonic_ns() + 4_000_000_000)')"
+  result_file="$TEST_TMPDIR/pi-broker-expired-colliding.json"
+  LEGION_CHILD_LEASE_DEADLINE_NS="$deadline" PI_BIN=pi \
+    "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+      --model openai/fixture-model --repo "$repo" --run-id broker-expired-colliding-pi \
+      --quiet > "$result_file" 2>/dev/null || rc=$?
+  [ "$rc" -eq 70 ]
+  jq -e '.status == "containment_failed" and .attempt_receipt == null' "$result_file"
+  [ "$(cat "$lease")" = 'collision marker' ]
+  [ -d "$repo/.legion/worktrees/broker-expired-colliding-pi" ]
+}
+
+@test "Pi pre-provider timeout retains containment when lease inode fsync fails" {
+  local repo deadline result_file rc=0 lease shim_dir
+  repo="$(make_test_repo broker-expired-fsync-pi)"
+  install_deadline_expiring_git fsync-pi
+  lease="$repo/.legion/runs/broker-expired-fsync-pi/lease.json"
+  shim_dir="$TEST_TMPDIR/lease-fsync-fault"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/sitecustomize.py" <<'PY'
+import os
+import stat
+
+original_fsync = os.fsync
+
+def faulting_fsync(fd):
+    directory = os.environ.get("LEGION_TEST_LEASE_FSYNC_DIR")
+    info = os.fstat(fd)
+    if directory and stat.S_ISREG(info.st_mode) and os.path.isdir(directory):
+        for entry in os.scandir(directory):
+            if entry.name.startswith(".lease.json.tmp."):
+                candidate = entry.stat(follow_symlinks=False)
+                if (candidate.st_dev, candidate.st_ino) == (info.st_dev, info.st_ino):
+                    raise OSError("injected lease inode fsync failure")
+    return original_fsync(fd)
+
+os.fsync = faulting_fsync
+PY
+  deadline="$(python3 -c 'import time; print(time.monotonic_ns() + 4_000_000_000)')"
+  result_file="$TEST_TMPDIR/pi-broker-expired-fsync.json"
+  PYTHONPATH="$shim_dir:${PYTHONPATH:-}" LEGION_TEST_LEASE_FSYNC_DIR="${lease%/*}" \
+    LEGION_CHILD_LEASE_DEADLINE_NS="$deadline" PI_BIN=pi \
+    "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+      --model openai/fixture-model --repo "$repo" --run-id broker-expired-fsync-pi \
+      --quiet > "$result_file" 2>/dev/null || rc=$?
+  [ "$rc" -eq 70 ]
+  jq -e '.status == "containment_failed" and .attempt_receipt == null' "$result_file"
+  [ ! -e "$lease" ]
+  [ -d "$repo/.legion/worktrees/broker-expired-fsync-pi" ]
 }
 
 @test "Pi lease expiring during provider setup is a typed zero-attempt timeout" {
@@ -591,6 +652,32 @@ SH
   ' "$attempt"
 }
 
+@test "Pi and Hermes provider spans use the observed model from their attempt receipts" {
+  local kind repo result attempt
+  for kind in pi hermes; do
+    repo="$(make_test_repo "$kind-observed-model")"
+    if [[ "$kind" == pi ]]; then
+      MOCK_PI_RESPONSE_MODEL=fixture-pi-observed PI_BIN=pi \
+        run "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+          --model openai/fixture-pi --repo "$repo" --quiet
+    else
+      MOCK_HERMES_USAGE_MODEL=openai/fixture-hermes-observed HERMES_BIN=hermes \
+        run "$REPO_ROOT/legion-router/bin/legion-hermes" run --task inspect \
+          --model openai/fixture-hermes --repo "$repo" --quiet
+    fi
+    [ "$status" -eq 0 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    attempt="$(jq -r '.attempt_receipt' <<<"$result")"
+    jq -e '.effective_model != .requested_model' "$attempt"
+    jq -s -e --arg attempt "$attempt" --slurpfile receipt "$attempt" '
+      [.[] | select(.artifacts.provider_attempt == true
+        and .artifacts.attempt_receipt == $attempt)] as $spans
+      | ($spans | length) == 1
+        and $spans[0].model == $receipt[0].effective_model
+    ' "$LEGION_TELEMETRY_DIR"/*.jsonl
+  done
+}
+
 @test "Pi and Hermes provider token counters above 2^53 remain exact" {
   local kind repo result attempt
   for kind in pi hermes; do
@@ -607,17 +694,21 @@ SH
     [ "$status" -eq 0 ]
     result="$(printf '%s\n' "$output" | tail -n 1)"
     attempt="$(jq -r '.attempt_receipt' <<<"$result")"
-    python3 - "$attempt" "$kind" <<'PY'
+    python3 - "$attempt" "$kind" "$result" <<'PY'
 import json
 from pathlib import Path
 import sys
 receipt = json.loads(Path(sys.argv[1]).read_text())
+terminal = json.loads(sys.argv[3])
 assert receipt["usage_status"] == "known"
 if sys.argv[2] == "pi":
     assert receipt["usage"]["input_tokens"] == 9007199254740993
+    assert terminal["usage"]["input_tokens"] == 9007199254740993
+    assert terminal["tokens"]["input_tokens"] == 9007199254740993
 else:
     assert receipt["usage"]["reasoning_output_tokens"] == 9007199254740992
     assert receipt["usage"]["output_tokens"] == 1
+    assert terminal["usage"]["reasoning_output_tokens"] == 9007199254740992
 PY
   done
 }

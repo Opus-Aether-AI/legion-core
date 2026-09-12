@@ -455,8 +455,12 @@ SH
     [ "$status" -eq 1 ]
     echo "$output" | jq -e \
         '.status == "failed" and .reason == "read_only_violation" and .fell_back == false'
-    jq -e '.terminal_status == "failed" and .failure.class == "policy_refused"' \
+    jq -e '.terminal_status == "succeeded" and .failure == null' \
       "$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e --slurpfile attempt "$(echo "$output" | jq -r .attempt_receipt)" '
+      .class == "policy_refused" and (.message | contains("read-only"))
+      and .attempt_id == $attempt[0].attempt_id
+    ' "$(echo "$output" | jq -r .failure_receipt)"
     [ ! -e "$repo/claude-unexpected.txt" ]
     assert_mock_not_called legion-delegate
 }
@@ -935,14 +939,14 @@ PY
     local script receipt_line span_line disarm_line
     for script in legion-cursor.sh legion-opencode.sh legion-deepseek.sh legion-pi-hermes.sh; do
       receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
-      span_line="$(grep -En '^[[:space:]]*(if ! )?legion_adapter_emit_normal_provider_span ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
+      span_line="$(grep -n 'legion_adapter_emit_normal_provider_span ' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
       disarm_line="$(grep -n '^[[:space:]]*legion_adapter_disarm_signal_receipt$' "$REPO_ROOT/legion-router/scripts/$script" | tail -1 | cut -d: -f1)"
       [ "$receipt_line" -lt "$span_line" ]
       [ "$span_line" -lt "$disarm_line" ]
     done
     local claude_script="$REPO_ROOT/legion-router/scripts/legion-claude.sh"
     receipt_line="$(grep -n 'legion_adapter_write_attempt ' "$claude_script" | tail -1 | cut -d: -f1)"
-    span_line="$(grep -En '^[[:space:]]*(if ! )?legion_adapter_emit_normal_provider_span ' "$claude_script" | tail -1 | cut -d: -f1)"
+    span_line="$(grep -n 'legion_adapter_emit_normal_provider_span ' "$claude_script" | tail -1 | cut -d: -f1)"
     disarm_line="$(grep -n '^[[:space:]]*finish_claude_signal_accounting$' "$claude_script" | tail -1 | cut -d: -f1)"
     [ "$receipt_line" -lt "$span_line" ]
     [ "$span_line" -lt "$disarm_line" ]

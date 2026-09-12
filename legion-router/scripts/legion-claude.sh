@@ -31,6 +31,8 @@ CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 LEGION_CLAUDE_TMPDIR=""
 LEGION_CLAUDE_LEASE_DEADLINE_NS=""
 LEGION_CLAUDE_LEASE_RECEIPT=""
+# Only locally reconciled receipt evidence may patch terminal JSON.
+CLAUDE_TERMINAL_EXACT_JSON=""
 CHILD_PID=""
 SIGNAL_LEASE_STATUS=""
 SIGNAL_WORKTREE=""
@@ -161,7 +163,7 @@ emit_span() {
        target_name:(if $target_name=="" then null else $target_name end),
        duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
        tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
-      >> "$LEGION_TELEMETRY_DIR/$(legion_adapter_span_date).jsonl"
+      | legion_adapter_append_span
   } 2>/dev/null || true
 }
 
@@ -373,7 +375,13 @@ emit_terminal_json() {
        else {} end)
     + (if $reason == "" then {} else {fell_back_reason:$reason, reason:$reason} end)
     + (if $wt == "" then {} else {worktree:$wt} end)
-    + (if $diff == "" then {} else {diff_path:$diff} end)'
+    + (if $diff == "" then {} else {diff_path:$diff} end)' | {
+      if [[ -n "${CLAUDE_TERMINAL_EXACT_JSON:-}" ]]; then
+        python3 "$_self_dir/lib/exact-metering.py" patch-reconciliation 3<<<"$CLAUDE_TERMINAL_EXACT_JSON"
+      else
+        cat
+      fi
+    }
 }
 
 claude_attempt_metering() {
@@ -425,12 +433,13 @@ emit_fallback_no_launch() {
   local executor="$1" model="$2" status="$3" result="$4" fell_back="$5" reason="$6" art="$7"
   local metering
   metering="$(claude_attempt_metering "$art")"
+  local CLAUDE_TERMINAL_EXACT_JSON="$metering"
   emit_terminal_json "$executor" "$model" "$status" "$result" \
-    "$(jq -c '.usage' <<<"$metering")" "$(jq -c '.cost_usd' <<<"$metering")" \
+    "$(python3 "$_self_dir/lib/exact-metering.py" get - usage <<<"$metering")" "$(jq -c '.cost_usd' <<<"$metering")" \
     "$fell_back" "$reason" \
     "$(jq -r '.usage_status' <<<"$metering")" "$(jq -r '.cost_status' <<<"$metering")" \
     "$(jq -c '.known_cost_usd' <<<"$metering")" "$(jq -r '.known_cost_attempts' <<<"$metering")" \
-    "$(jq -c '.known_usage' <<<"$metering")" "$(jq -r '.known_usage_attempts' <<<"$metering")"
+    "$(python3 "$_self_dir/lib/exact-metering.py" get - known_usage <<<"$metering")" "$(jq -r '.known_usage_attempts' <<<"$metering")"
 }
 
 run_fallback() {
@@ -536,7 +545,7 @@ run_fallback() {
           .known_cost_usd=$metering.known_cost_usd
           | .known_cost_attempts=$metering.known_cost_attempts
         else . end
-    ' <<<"$out"
+    ' <<<"$out" | python3 "$_self_dir/lib/exact-metering.py" patch-reconciliation 3<<<"$fallback_metering"
   else
     emit_fallback_no_launch "codex" "$fallback_model" "failed" "" true "$reason" "$fallback_art"
     rc=1
@@ -992,7 +1001,7 @@ cmd_run() {
       lease_status="$LEGION_CLAUDE_LEASE_RECEIPT"
       local prior_attempt="$LEGION_ADAPTER_ATTEMPT_PATH"
       local prior_usage prior_cost prior_usage_status prior_cost_status prior_artifacts
-      prior_usage="$(jq -c '.usage' "$prior_attempt")"
+      prior_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$prior_attempt" usage)"
       prior_cost="$(jq -c '.cost_usd' "$prior_attempt")"
       prior_usage_status="$(jq -r '.usage_status' "$prior_attempt")"
       prior_cost_status="$(jq -r '.cost_status' "$prior_attempt")"
@@ -1097,11 +1106,12 @@ cmd_run() {
   # aliases: doing so loses retries and can turn partial evidence into a false
   # exact zero.
   terminal_metering="$(claude_attempt_metering "$contract_art")"
-  usage="$(jq -c '.usage' <<<"$terminal_metering")"
+  local CLAUDE_TERMINAL_EXACT_JSON="$terminal_metering"
+  usage="$(python3 "$_self_dir/lib/exact-metering.py" get - usage <<<"$terminal_metering")"
   cost="$(jq -c '.cost_usd' <<<"$terminal_metering")"
   terminal_usage_status="$(jq -r '.usage_status' <<<"$terminal_metering")"
   terminal_cost_status="$(jq -r '.cost_status' <<<"$terminal_metering")"
-  terminal_known_usage="$(jq -c '.known_usage' <<<"$terminal_metering")"
+  terminal_known_usage="$(python3 "$_self_dir/lib/exact-metering.py" get - known_usage <<<"$terminal_metering")"
   terminal_known_usage_attempts="$(jq -r '.known_usage_attempts' <<<"$terminal_metering")"
   terminal_known_cost="$(jq -c '.known_cost_usd' <<<"$terminal_metering")"
   terminal_known_cost_attempts="$(jq -r '.known_cost_attempts' <<<"$terminal_metering")"
@@ -1117,7 +1127,7 @@ cmd_run() {
   local span_usage=null span_cost=null span_usage_status=not_applicable span_cost_status=not_applicable
   local span_model="$model" span_duration="$dur"
   if [[ -n "${LEGION_ADAPTER_ATTEMPT_PATH:-}" && -f "$LEGION_ADAPTER_ATTEMPT_PATH" ]]; then
-    span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
     span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"

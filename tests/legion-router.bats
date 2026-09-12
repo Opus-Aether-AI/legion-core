@@ -36,6 +36,8 @@ write_native_span_fixture() {
       '{}' unknown '' 0 unknown '' '' false false '' ''
     NATIVE_FIXTURE_SPAN="$(jq -cn --arg attempt "$art/attempt-1.json" \
       '{schema:"legion.span.v1",ts:"2026-01-01T00:00:01Z",run_id:"native-fixture-run",
+        attempt_id:"native-fixture-run-codex-attempt-1",attempt_ordinal:1,
+        attempt_terminal_status:"succeeded",
         executor:"codex",model:"fixture-model",status:"ok",duration_ms:1,
         cost_usd:null,cost_status:"unknown",tokens:null,usage_status:"unknown",
         artifacts:{provider_attempt:true,attempt_receipt:$attempt}}')"
@@ -3073,6 +3075,8 @@ emit_span() {
   jq -cn --arg attempt "$ATTEMPT_ROOT/attempt-1.json" \
     --arg run "$LEGION_ADAPTER_SPAN_RUN_ID" \
     '{schema:"legion.span.v1",ts:"2026-01-01T00:00:01Z",run_id:$run,
+      attempt_id:($run+"-codex-review-attempt-1"),attempt_ordinal:1,
+      attempt_terminal_status:"failed",
       executor:"codex-review",model:"fixture-model",status:"failed",duration_ms:1,
       tokens:{input_tokens:1},usage_status:"known",cost_usd:0.01,cost_status:"known",
       artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
@@ -4456,7 +4460,7 @@ PY
         "$DELEGATE" | sed '$d'
       cat <<SH
 _self_dir=$(printf %q "$REPO_ROOT/legion-router/scripts")
-validate_prompt_review_bundle "\$1" "\$2" "\${6:-}" "\$3" cursor cursor "\$4" "\$5" read-only
+validate_prompt_review_bundle "\$1" "\$2" "\${6:-}" "\$3" cursor cursor "\$4" "\$5" read-only "\${7:-}" "\${8:-}" "\${9:-}"
 SH
     } > "$helper"
 
@@ -4478,6 +4482,46 @@ SH
     PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" \
       fixture-model prompt-run "$failure"
     [ "$status" -eq 0 ]
+
+    # A completed child exit must agree with any provider code attached to the
+    # failed attempt; a locally invented code cannot authenticate that lease.
+    jq '.class="provider" | .provider_code="42"' "$failure" > "$failure.tmp"
+    mv -f "$failure.tmp" "$failure"
+    jq --slurpfile failure "$failure" '.failure=$failure[0]' "$attempt" \
+      > "$attempt.tmp"
+    mv -f "$attempt.tmp" "$attempt"
+    PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" \
+      fixture-model prompt-run "$failure"
+    [ "$status" -ne 0 ]
+    jq '.child_exit_code=42' "$lease" > "$lease.tmp"
+    mv -f "$lease.tmp" "$lease"
+    PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" \
+      fixture-model prompt-run "$failure"
+    [ "$status" -eq 0 ]
+
+    # A separate post-attempt containment sidecar may supplement, but never
+    # replace, the immutable provider receipt when cleanup failed afterward.
+    local post_failure="$TEST_TMPDIR/post-attempt-failure-1.json"
+    jq '.terminal_status="succeeded" | .failure=null' "$attempt" > "$attempt.tmp"
+    mv -f "$attempt.tmp" "$attempt"
+    jq -cn '{schema:"legion.failure.v1",
+      failure_id:"prompt-run-cursor-postattempt-failure-1",run_id:"prompt-run",
+      attempt_id:"prompt-run-cursor-attempt-1",ts:"2026-01-01T00:00:01Z",
+      class:"internal",provider_code:"70",retryable:false,output_started:true,
+      message:"cleanup failed after provider completion"}' > "$post_failure"
+    jq -cn '{schema:"legion.child-execution-lease.v1",status:"cleanup_failed",
+      reason:"descendant cleanup was incomplete",max_runtime_seconds:30}' > "$lease"
+    PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" \
+      fixture-model prompt-run "$post_failure" containment_failed "$post_failure" "$TEST_TMPDIR"
+    [ "$status" -eq 0 ]
+    PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" \
+      fixture-model prompt-run "$post_failure" failed "$post_failure" "$TEST_TMPDIR"
+    [ "$status" -ne 0 ]
+    jq '.failure_id="other-failure"' "$post_failure" > "$post_failure.tmp"
+    mv -f "$post_failure.tmp" "$post_failure"
+    PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" \
+      fixture-model prompt-run "$post_failure" containment_failed "$post_failure" "$TEST_TMPDIR"
+    [ "$status" -ne 0 ]
 }
 
 @test "delegate review: prompt launch_failed bundle is authenticated no-spend rather than containment failure" {

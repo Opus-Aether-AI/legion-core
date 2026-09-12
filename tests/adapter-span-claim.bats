@@ -20,6 +20,8 @@ setup() {
     "$ATTEMPT_DATE"T00:00:01Z 1 '{}' unknown '' 0 unknown '' '' false false '' ''
   SPAN_PAYLOAD="$(jq -cn --arg attempt "$ATTEMPT" --arg date "$ATTEMPT_DATE" \
     '{schema:"legion.span.v1",ts:($date+"T00:00:01Z"),run_id:"fixture-run",
+      attempt_id:"fixture-run-cursor-attempt-1",attempt_ordinal:1,
+      attempt_terminal_status:"succeeded",
       executor:"cursor",model:"fixture-model",status:"ok",duration_ms:1,
       cost_usd:null,cost_status:"unknown",tokens:null,usage_status:"unknown",
       artifacts:{provider_attempt:true,attempt_receipt:$attempt}}')"
@@ -312,6 +314,103 @@ PY
     jq -e '\''.offset >= 0'\'' "$2.provider-span-ack"
     [[ "$(head -n 1 "$span_path")" == "$SPAN_PAYLOAD" ]]
   ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "append intent scans beyond one MiB of earlier concurrent telemetry" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    pinned="$(legion_adapter_prepare_provider_span "$2")"
+    telemetry="$LEGION_TELEMETRY_DIR/$pinned.jsonl"
+    dd if=/dev/zero bs=1024 count=1025 2>/dev/null >> "$telemetry"
+    printf "\n" >> "$telemetry"
+    LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$2" LEGION_ADAPTER_SPAN_DATE="$pinned" \
+      legion_adapter_append_span <<<"$SPAN_PAYLOAD"
+    legion_adapter_provider_span_is_durable "$2"
+    jq -e '\''.offset > 1048576'\'' "$2.provider-span-ack"
+  ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "pinned append refuses a replaced telemetry symlink without touching its target" {
+  local target="$TEST_TMPDIR/untouched-target"
+  printf 'untouched\n' > "$target"
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    pinned="$(legion_adapter_prepare_provider_span "$2")"
+    telemetry="$LEGION_TELEMETRY_DIR/$pinned.jsonl"
+    mv "$telemetry" "$telemetry.rotated"
+    ln -s "$3" "$telemetry"
+    ! LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$2" LEGION_ADAPTER_SPAN_DATE="$pinned" \
+      legion_adapter_append_span <<<"$SPAN_PAYLOAD"
+    ! legion_adapter_provider_span_is_durable "$2"
+  ' _ "$CONTRACT" "$ATTEMPT" "$target"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+  [ "$(cat "$target")" = untouched ]
+}
+
+@test "pinned append refuses a replaced regular telemetry inode" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    pinned="$(legion_adapter_prepare_provider_span "$2")"
+    telemetry="$LEGION_TELEMETRY_DIR/$pinned.jsonl"
+    mv "$telemetry" "$telemetry.rotated"
+    printf "replacement\n" > "$telemetry"
+    ! LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$2" LEGION_ADAPTER_SPAN_DATE="$pinned" \
+      legion_adapter_append_span <<<"$SPAN_PAYLOAD"
+    [[ "$(cat "$telemetry")" == replacement ]]
+    ! legion_adapter_provider_span_is_durable "$2"
+  ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "matching acknowledgement requires exact terminal model and attempt identity" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    pinned="$(legion_adapter_prepare_provider_span "$2")"
+    telemetry="$LEGION_TELEMETRY_DIR/$pinned.jsonl"
+    for change in '\''.status="failed"'\'' '\''.model="foreign-model"'\'' \
+        '\''.attempt_id="foreign-attempt"'\'' '\''.attempt_ordinal=2'\'' \
+        '\''.attempt_terminal_status="failed"'\'' '\''del(.attempt_id)'\''; do
+      jq -c "$change" <<<"$SPAN_PAYLOAD" >> "$telemetry"
+    done
+    ! legion_adapter_provider_span_is_durable "$2"
+    LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$2" LEGION_ADAPTER_SPAN_DATE="$pinned" \
+      legion_adapter_append_span <<<"$SPAN_PAYLOAD"
+    legion_adapter_provider_span_is_durable "$2"
+    jq -e '\''.offset > 0'\'' "$2.provider-span-ack"
+  ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
+@test "pinned append takes exact large token counts from the canonical receipt" {
+  local art="$TEST_TMPDIR/huge-token-span"
+  mkdir -p "$art"
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    RUN_ID=huge-token-span
+    legion_adapter_write_attempt "$2" cursor cursor 1 fixture fixture \
+      "" "" read-only succeeded 2026-01-01T00:00:00Z 2026-01-01T00:00:01Z 1 \
+      '\''{"input_tokens":9007199254740993}'\'' known fixture 0 unknown "" \
+      "" false false "" ""
+    attempt="$2/attempt-1.json"
+    pinned="$(legion_adapter_prepare_provider_span "$attempt")"
+    jq -cn --arg attempt "$attempt" \
+      '\''{schema:"legion.span.v1",ts:"2026-01-01T00:00:01Z",run_id:"huge-token-span",
+        executor:"cursor",model:"fixture",status:"ok",duration_ms:1,
+        tokens:{input_tokens:9007199254740992},usage_status:"known",
+        cost_usd:null,cost_status:"unknown",
+        artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
+      | LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$attempt" LEGION_ADAPTER_SPAN_DATE="$pinned" \
+        legion_adapter_append_span
+    legion_adapter_provider_span_is_durable "$attempt"
+    rg -q '\''"input_tokens":9007199254740993'\'' "$LEGION_TELEMETRY_DIR/$pinned.jsonl"
+  ' _ "$CONTRACT" "$art"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
 }
 

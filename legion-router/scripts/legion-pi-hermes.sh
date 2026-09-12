@@ -257,7 +257,10 @@ write_pre_provider_no_launch_lease() {
      reason:$reason,max_runtime_seconds:$runtime}
   ' > "$temp" || { rm -f "$temp"; return 1; }
   chmod 600 "$temp" || { rm -f "$temp"; return 1; }
-  mv -f "$temp" "$lease"
+  if ! legion_adapter_durable_exclusive_link "$temp" "$lease"; then
+    rm -f "$temp"
+    return 1
+  fi
 }
 
 terminalize_pre_provider_timeout() {
@@ -348,7 +351,7 @@ emit_span() {
     return 0
   fi
   if ! (cd "$REPO" && "$trace_bin" emit \
-      --executor "$ADAPTER_KIND" --model "$MODEL" --status "$status" \
+      --executor "$ADAPTER_KIND" --model "${SPAN_PROVIDER_MODEL:-$MODEL}" --status "$status" \
       --run-id "$RUN_ID" --trace-id "${LEGION_TRACE_ID:-$RUN_ID}" \
       --parent-id "${LEGION_PARENT_ID:-}" --archetype "$ARCHETYPE" \
       --duration-ms "$duration" --cost "$cost" --cost-status "$cost_status" --task "$task" \
@@ -1473,7 +1476,7 @@ cmd_run() {
     terminal_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     terminal_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     if [[ "$terminal_usage_status" == known ]]; then
-      terminal_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+      terminal_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
     fi
     if [[ "$terminal_cost_status" == known ]]; then
       terminal_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
@@ -1485,12 +1488,13 @@ cmd_run() {
         preflight_receipt:$preflight,attempt_receipt:$attempt,failure_receipt:(if $failure=="" then null else $failure end),
         lease_receipt:$lease} + $cost_provenance
         + (if $reason=="" then {} else {lease_reason:$reason} end)')"
-    local span_usage span_cost span_usage_status span_cost_status
-    span_usage="$(jq -c '.usage' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    local span_model span_usage span_cost span_usage_status span_cost_status
+    span_model="$(jq -r '.effective_model // .requested_model // "unknown"' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
     span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
     span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
-    if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    if ! SPAN_PROVIDER_MODEL="$span_model" legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
         "$status" "$duration" "$span_cost" "$span_usage" "$task" "$artifacts" \
         "$span_usage_status" "$span_cost_status"; then
       status=containment_failed
@@ -1518,7 +1522,13 @@ cmd_run() {
       tokens:$usage,usage_status:$usage_status,cost_status:$cost_status,
       preflight_receipt:$preflight,attempt_receipt:(if $attempt=="" then null else $attempt end),failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease,
       provider_launch_receipt:(if $provider_launch=="" then null else $provider_launch end)}
-      + (if $reason=="" then {} else {reason:$reason} end)'
+      + (if $reason=="" then {} else {reason:$reason} end)' | {
+        if [[ -n "$LEGION_ADAPTER_ATTEMPT_PATH" ]]; then
+          python3 "$_self_dir/lib/exact-metering.py" patch-attempt "$LEGION_ADAPTER_ATTEMPT_PATH"
+        else
+          cat
+        fi
+      }
   [[ "$status" == ok ]] || exit 1
 }
 

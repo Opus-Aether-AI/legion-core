@@ -38,6 +38,7 @@ WT_GIT_FILE_ID="" BASE_SHA="" SAFE_GIT_DIR="" COMMON_GIT_OBJECTS=""
 PROVIDER_OUT="" PROVIDER_ERR="" PROVIDER_USAGE=""
 PROVIDER_OUT_ID="" PROVIDER_ERR_ID="" PROVIDER_USAGE_ID=""
 PROVIDER_LAUNCH_WRAPPER="" PROVIDER_LAUNCH_WRAPPER_ID="" PROVIDER_LAUNCH_TOKEN_FILE=""
+PROVIDER_EXEC_GATE="" PROVIDER_EXEC_GATE_ID=""
 PROVIDER_LAUNCH_RECEIPT="" PROVIDER_LAUNCH_TOKEN=""
 FS_SANDBOX_BIN="" FS_SANDBOX_KIND=""
 MAX_RUNTIME_SECONDS=""
@@ -755,6 +756,7 @@ prepare_provider_files() {
   PROVIDER_ERR="$ART/$ADAPTER_KIND.err"
   PROVIDER_USAGE="$ART/$ADAPTER_KIND.usage.json"
   PROVIDER_LAUNCH_WRAPPER="$ART/provider-launch-wrapper.py"
+  PROVIDER_EXEC_GATE="$ART/child-exec-gate.py"
   PROVIDER_LAUNCH_RECEIPT="$ART/tmp/provider-launch.json"
   PROVIDER_LAUNCH_TOKEN_FILE="$ART/tmp/provider-launch.token"
   rm -f "$PROVIDER_LAUNCH_RECEIPT" "$PROVIDER_LAUNCH_TOKEN_FILE"
@@ -762,6 +764,8 @@ prepare_provider_files() {
   : > "$PROVIDER_ERR"
   : > "$PROVIDER_USAGE"
   : > "$ART/telemetry.err"
+  cp "$_self_dir/lib/child-exec-gate.py" "$PROVIDER_EXEC_GATE"
+  chmod 500 "$PROVIDER_EXEC_GATE"
   cat > "$PROVIDER_LAUNCH_WRAPPER" <<'PY'
 #!/usr/bin/env python3
 """Supervise the admitted provider and attest its exact launch boundary."""
@@ -772,6 +776,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import subprocess
 import sys
@@ -807,7 +812,8 @@ def write_receipt(receipt: Path, payload: dict, token: str) -> None:
 def main() -> int:
     receipt = Path(sys.argv[1])
     token_path = Path(sys.argv[2])
-    command = sys.argv[4:]
+    exec_gate = Path(sys.argv[3])
+    command = sys.argv[5:]
     if token_path.is_symlink() or not token_path.is_file():
         return 126
     token = token_path.read_text(encoding="ascii").strip()
@@ -821,9 +827,10 @@ def main() -> int:
     child = None
     started_durable = False
     pending_signal = None
+    authorization_fd = -1
 
     def forward(signum: int, _frame: object) -> None:
-        nonlocal pending_signal
+        nonlocal pending_signal, authorization_fd
         if child is not None and started_durable:
             try:
                 child.send_signal(signum)
@@ -831,6 +838,12 @@ def main() -> int:
                 pass
         else:
             pending_signal = signum
+            if authorization_fd >= 0:
+                try:
+                    os.close(authorization_fd)
+                except OSError:
+                    pass
+                authorization_fd = -1
 
     # Install handlers before publishing pending. A signal before Popen then
     # becomes authenticated no-launch; a signal during Popen is remembered and
@@ -839,6 +852,7 @@ def main() -> int:
         signal.signal(caught, forward)
     write_receipt(receipt, {**base, "status": "pending"}, token)
     launch_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    gate_read = error_read = error_write = -1
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, launch_signals)
     try:
         if pending_signal is not None:
@@ -862,9 +876,12 @@ def main() -> int:
             }, token)
             return 128 + signum
         try:
+            gate_read, authorization_fd = os.pipe()
+            error_read, error_write = os.pipe()
             child = subprocess.Popen(
-                command,
+                [sys.executable, str(exec_gate), str(gate_read), str(error_write), *command],
                 env=os.environ,
+                pass_fds=(gate_read, error_write),
                 # Keep the parent's launch decision atomic without leaking its
                 # temporary blocked-signal mask into the provider after exec.
                 preexec_fn=lambda: signal.pthread_sigmask(
@@ -881,8 +898,56 @@ def main() -> int:
             }, token)
             print(f"legion provider launcher: {reason}", file=sys.stderr)
             return 127 if error.errno == 2 else 126
+        finally:
+            for descriptor in (gate_read, error_write):
+                if descriptor >= 0:
+                    os.close(descriptor)
+            if child is None:
+                for descriptor in (authorization_fd, error_read):
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                authorization_fd = -1
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    if pending_signal is not None or authorization_fd < 0:
+        if authorization_fd >= 0:
+            os.close(authorization_fd)
+            authorization_fd = -1
+        os.close(error_read)
+        child.wait(timeout=2)
+        if pending_signal is None:
+            raise RuntimeError("provider authorization gate closed without a signal")
+        reason = "provider launch cancelled before process creation"
+        write_receipt(receipt, {**base, "status": "launch_failed",
+                                "reason": reason, "errno": errno.ECANCELED}, token)
+        return 128 + pending_signal
+    try:
+        os.write(authorization_fd, b"G")
+    except OSError:
+        os.close(error_read)
+        child.wait(timeout=2)
+        if pending_signal is None:
+            raise RuntimeError("provider authorization gate failed without a signal")
+        reason = "provider launch cancelled before process creation"
+        write_receipt(receipt, {**base, "status": "launch_failed",
+                                "reason": reason, "errno": errno.ECANCELED}, token)
+        return 128 + pending_signal
+    finally:
+        if authorization_fd >= 0:
+            os.close(authorization_fd)
+            authorization_fd = -1
+    try:
+        if not select.select([error_read], [], [], 2)[0]:
+            raise RuntimeError("provider exec gate did not confirm launch")
+        launch_error = os.read(error_read, 4097)
+    finally:
+        os.close(error_read)
+    if launch_error:
+        detail = json.loads(launch_error)
+        reason = f"provider launch failed before process creation: {detail['reason']}"
+        write_receipt(receipt, {**base, "status": "launch_failed",
+                                "reason": reason, "errno": detail["errno"]}, token)
+        return 127 if detail["errno"] == errno.ENOENT else 126
     write_receipt(receipt, {**base, "status": "started", "provider_pid": child.pid}, token)
     started_durable = True
     if pending_signal is not None:
@@ -903,6 +968,7 @@ PY
   PROVIDER_ERR_ID="$(file_identity "$PROVIDER_ERR")"
   PROVIDER_USAGE_ID="$(file_identity "$PROVIDER_USAGE")"
   PROVIDER_LAUNCH_WRAPPER_ID="$(file_identity "$PROVIDER_LAUNCH_WRAPPER")"
+  PROVIDER_EXEC_GATE_ID="$(file_identity "$PROVIDER_EXEC_GATE")"
 }
 
 copy_private_runtime_file() {
@@ -1132,6 +1198,9 @@ run_provider() {
   [[ -f "$PROVIDER_LAUNCH_WRAPPER" && ! -L "$PROVIDER_LAUNCH_WRAPPER" \
       && "$(file_identity "$PROVIDER_LAUNCH_WRAPPER" 2>/dev/null || true)" == "$PROVIDER_LAUNCH_WRAPPER_ID" ]] \
     || die 'provider launch attestation wrapper was modified before execution'
+  [[ -f "$PROVIDER_EXEC_GATE" && ! -L "$PROVIDER_EXEC_GATE" \
+      && "$(file_identity "$PROVIDER_EXEC_GATE" 2>/dev/null || true)" == "$PROVIDER_EXEC_GATE_ID" ]] \
+    || die 'provider exec gate was modified before execution'
   local -a invocation=(env \
     -u DOCKER_HOST -u CONTAINER_HOST -u BUILDKIT_HOST -u SSH_AUTH_SOCK -u KUBECONFIG -u CONTAINERD_ADDRESS \
     "TMPDIR=$ART/tmp" "TMP=$ART/tmp" "TEMP=$ART/tmp" \
@@ -1145,7 +1214,7 @@ run_provider() {
     invocation+=("HERMES_HOME=$HERMES_PRIVATE_HOME")
   fi
   invocation+=("${FS_SANDBOX_COMMAND[@]}" "$launch_python" "$PROVIDER_LAUNCH_WRAPPER" \
-    "$PROVIDER_LAUNCH_RECEIPT" "$PROVIDER_LAUNCH_TOKEN_FILE" -- "$@")
+    "$PROVIDER_LAUNCH_RECEIPT" "$PROVIDER_LAUNCH_TOKEN_FILE" "$PROVIDER_EXEC_GATE" -- "$@")
   local provider_runtime
   provider_runtime="$(remaining_child_lease_seconds)"
   [[ "$provider_runtime" -ge 1 ]] \

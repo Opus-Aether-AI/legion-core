@@ -647,6 +647,26 @@ PY
     [ ! -e "$repo/.legion/runs/$run_id/attempt.json" ]
 }
 
+@test "legion-claude: colliding no-launch lease is preserved as containment failure" {
+    local repo run_id art result
+    repo="$(make_test_repo colliding-no-launch-lease)"
+    run_id=colliding-no-launch-lease
+    art="$repo/.legion/runs/$run_id"
+    mkdir -p "$art"
+    printf 'existing claimant\n' > "$art/lease-1.json"
+    install_claude_remaining_seconds_python_shim
+
+    run "$LEGION_CLAUDE" run --task x --repo "$repo" --run-id "$run_id" \
+      --max-runtime-seconds 30 --no-fallback --quiet
+
+    [ "$status" -ne 0 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.status == "containment_failed"
+      and .attempt_receipt == null and .usage_status == "not_applicable"'
+    [ "$(cat "$art/lease-1.json")" = 'existing claimant' ]
+    [ "$(grep -Ec '^claude -p ' "$MOCK_CALL_LOG" || true)" -eq 0 ]
+}
+
 @test "legion-claude: same-vendor retry expiry preserves prior paid reconciliation only" {
     local repo result lease art
     repo="$(make_test_repo retry-prelaunch-expiry)"

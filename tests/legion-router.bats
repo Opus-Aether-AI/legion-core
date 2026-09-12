@@ -697,7 +697,7 @@ SH
 }
 
 @test "Pi and Hermes adapters broker one real cross-harness handoff outside the provider sandbox" {
-    local source repo context run_id
+    local source repo context run_id terminal
     context="$TEST_TMPDIR/handoff-context.log"
     for source in pi hermes; do
       repo="$(make_test_repo "broker-$source")"
@@ -707,8 +707,9 @@ SH
           run --model openai/fixture-model --task "make a scoped edit" --repo "$repo" --quiet
 
       [ "$status" -eq 0 ]
-      echo "$output" | jq -e --arg source "$source" '.status == "ok" and .executor == $source'
-      run_id="$(echo "$output" | jq -r .run_id)"
+      terminal="$(printf '%s\n' "$output" | tail -n 1)"
+      jq -e --arg source "$source" '.status == "ok" and .executor == $source' <<<"$terminal"
+      run_id="$(jq -r .run_id <<<"$terminal")"
       grep -Eq '^agent active=1 executor=1 depth=2 run=.+ name=cursor$' "$context"
       jq -e --arg parent "$run_id" 'select(.executor == "cursor") | .parent_id == $parent' "$LEGION_TELEMETRY_DIR"/*.jsonl
       ! git -C "$repo" worktree list --porcelain | grep -Fq '/broker/repo'

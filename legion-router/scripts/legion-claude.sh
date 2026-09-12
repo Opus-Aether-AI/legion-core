@@ -274,13 +274,17 @@ PY
 }
 
 claude_write_strict_no_launch_lease() {
-  local path="$1" reason="$2" tmp="$1.tmp.$$"
+  local path="$1" reason="$2" tmp
+  tmp="$(mktemp "${path}.tmp.XXXXXX")" || return 1
   jq -cn --arg reason "$reason" --argjson runtime "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" '
     {schema:"legion.child-execution-lease.v1",status:"launch_failed",
      reason:$reason,max_runtime_seconds:$runtime}
-  ' > "$tmp" || return 1
+  ' > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$path"
+  if ! legion_adapter_durable_exclusive_link "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 archive_claude_fallback_receipts() {

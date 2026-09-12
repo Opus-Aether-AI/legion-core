@@ -333,6 +333,22 @@ PY
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
 }
 
+@test "a retry after unrelated concurrent telemetry appends the missing span exactly once" {
+  run bash -c '
+    set -euo pipefail
+    source "$1"
+    pinned="$(legion_adapter_prepare_provider_span "$2")"
+    telemetry="$LEGION_TELEMETRY_DIR/$pinned.jsonl"
+    printf "%s\n" "$(jq -c '\''.run_id="other-run" | .artifacts.attempt_receipt="other-attempt"'\'' <<<"$SPAN_PAYLOAD")" >> "$telemetry"
+    emit_span() { printf "%s\n" "$SPAN_PAYLOAD" | legion_adapter_append_span; }
+    legion_adapter_emit_normal_provider_span "$2"
+    legion_adapter_emit_normal_provider_span "$2"
+    [[ "$(wc -l < "$telemetry" | tr -d " ")" -eq 2 ]]
+    jq -e '\''.offset > 0'\'' "$2.provider-span-ack"
+  ' _ "$CONTRACT" "$ATTEMPT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+}
+
 @test "pinned append refuses a replaced telemetry symlink without touching its target" {
   local target="$TEST_TMPDIR/untouched-target"
   printf 'untouched\n' > "$target"
@@ -409,7 +425,7 @@ PY
       | LEGION_ADAPTER_SPAN_ATTEMPT_PATH="$attempt" LEGION_ADAPTER_SPAN_DATE="$pinned" \
         legion_adapter_append_span
     legion_adapter_provider_span_is_durable "$attempt"
-    rg -q '\''"input_tokens":9007199254740993'\'' "$LEGION_TELEMETRY_DIR/$pinned.jsonl"
+    grep -q '\''"input_tokens":9007199254740993'\'' "$LEGION_TELEMETRY_DIR/$pinned.jsonl"
   ' _ "$CONTRACT" "$art"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
 }

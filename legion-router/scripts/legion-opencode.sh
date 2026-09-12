@@ -242,6 +242,9 @@ parse_opencode_output() {
     | ([ $events[] | select(.type=="error") ] | last) as $error
     | {
         cost:  (([$msgs[].cost] | add // 0) + ([$steps[].cost] | add // 0)),
+        provider_cost_complete: (($msgs + $steps) as $priced
+          | ($priced | length) > 0
+            and all($priced[]; (.cost | type) == "number")),
         model: ($msgs | last
                  | if . == null or ((.providerID // "") == "") or ((.modelID // "") == "") then ""
                    else (.providerID + "/" + .modelID) end),
@@ -257,7 +260,7 @@ parse_opencode_output() {
           status_code: ($error.error.data.statusCode // $error.error.statusCode // null)
         } end)
       }' "$file" 2>/dev/null)" || out=""
-  [[ -n "$out" ]] && printf '%s' "$out" || printf '{"cost":0,"model":"","usage":{},"result":"","event_count":0,"recognized_event_count":0,"has_error":false,"error":null}'
+  [[ -n "$out" ]] && printf '%s' "$out" || printf '{"cost":0,"provider_cost_complete":false,"model":"","usage":{},"result":"","event_count":0,"recognized_event_count":0,"has_error":false,"error":null}'
 }
 
 cmd_run() {
@@ -487,6 +490,7 @@ except OSError:
   end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
   local parsed usage cost result actual_model observed_model opencode_error has_error recognized_events diff_rc=0 status="ok"
+  local cost_status=unknown cost_source="" usage_status=unknown usage_source=""
   parsed="$(parse_opencode_output "$out_file")"
   usage="$(python3 "$_self_dir/lib/provider-usage.py" opencode "$out_file")"
   cost="$(jq -r '.cost // 0' <<<"$parsed" 2>/dev/null || printf '0')"
@@ -498,17 +502,27 @@ except OSError:
   opencode_error="$(jq -r '.error.message // ""' <<<"$parsed" 2>/dev/null || printf '')"
   recognized_events="$(jq -r '.recognized_event_count // 0' <<<"$parsed" 2>/dev/null || printf '0')"
 
-  # opencode omits `cost` for models it can't price (custom / some local providers).
-  # When the precomputed cost is 0 but tokens were used, fall back to Legion's own
-  # cost table so the span isn't metered at $0 (mirrors legion-cursor.sh).
-  if awk -v c="$cost" 'BEGIN{exit !((c+0)==0)}'; then
+  if jq -R -s -e '[splits("\n") | fromjson? | select(
+      (.type=="message.updated" and (.properties.info.role? == "assistant") and (.properties.info.tokens? | type)=="object")
+      or (.type=="step_finish" and (.part.tokens? | type)=="object"))] | length > 0' \
+      "$out_file" >/dev/null 2>&1; then
+    usage_status=known; usage_source=opencode-jsonl
+  fi
+
+  # A provider-reported zero is known and must not be replaced with a table
+  # estimate. If any final message/step omits cost, price the complete token
+  # usage only when Legion has an explicit model row; otherwise remain unknown.
+  if [[ "$(jq -r '.provider_cost_complete // false' <<<"$parsed")" == true ]]; then
+    cost_status=known; cost_source=opencode-jsonl
+  elif [[ "$usage_status" == known ]] && cost_model_has_pricing "$actual_model"; then
     local _in _out _cr _cw
     _in="$(jq -r '.input_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
     _out="$(jq -r '.output_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
     _cr="$(jq -r '.cache_read_input_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
     _cw="$(jq -r '.cache_creation_input_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
-    if [[ "$_in" != "0" || "$_out" != "0" ]]; then
-      cost="$(cost_for_model "$actual_model" "$_in" "$_out" "$_cr" "$_cw" 2>/dev/null || echo 0)"
+    cost="$(cost_for_model "$actual_model" "$_in" "$_out" "$_cr" "$_cw" 2>/dev/null || printf '')"
+    if [[ -n "$cost" ]]; then
+      cost_status=known; cost_source=legion-cost-table
     fi
   fi
 
@@ -580,19 +594,6 @@ except OSError:
       or (.type=="text" and .part.type? == "text" and ((.part.text // "") | length > 0)))] | length > 0' \
       "$out_file" >/dev/null 2>&1; then
     output_started=true
-  fi
-  local usage_status=unknown usage_source="" cost_status=unknown cost_source=""
-  if jq -R -s -e '[splits("\n") | fromjson? | select(
-      (.type=="message.updated" and (.properties.info.role? == "assistant") and (.properties.info.tokens? | type)=="object")
-      or (.type=="step_finish" and (.part.tokens? | type)=="object"))] | length > 0' \
-      "$out_file" >/dev/null 2>&1; then
-    usage_status=known; usage_source=opencode-jsonl
-  fi
-  if jq -R -s -e '[splits("\n") | fromjson? | select(
-      (.type=="message.updated" and (.properties.info.cost? | numbers))
-      or (.type=="step_finish" and (.part.cost? | numbers)))] | length > 0' \
-      "$out_file" >/dev/null 2>&1; then
-    cost_status=known; cost_source=opencode-jsonl
   fi
   local terminal_status=succeeded failure_class=""
   if [[ "$status" != ok ]]; then

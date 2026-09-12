@@ -126,6 +126,41 @@ make_test_repo() {
     [ "$status" -eq 0 ]
 }
 
+@test "legion-opencode: missing provider cost uses an explicit model price with honest provenance" {
+    local repo attempt
+    repo="$(make_test_repo fallback-cost)"
+    MOCK_OPENCODE_NO_COST=1 run "$LEGION_OPENCODE" run --task "edit" \
+      --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.cost_status == "known" and .cost_source == "legion-cost-table"
+      and .cost_usd > 0' "$attempt"
+    echo "$output" | jq -e --argjson receipt "$(cat "$attempt")" \
+      '.cost_status == $receipt.cost_status and .cost_usd == $receipt.cost_usd'
+}
+
+@test "legion-opencode: an explicit zero provider cost is not repriced" {
+    local repo attempt
+    repo="$(make_test_repo zero-cost)"
+    MOCK_OPENCODE_ZERO_COST=1 run "$LEGION_OPENCODE" run --task "edit" \
+      --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.cost_status == "known" and .cost_source == "opencode-jsonl"
+      and .cost_usd == 0' "$attempt"
+}
+
+@test "legion-opencode: missing cost without a priced model remains unknown" {
+    local repo attempt
+    repo="$(make_test_repo unpriced-cost)"
+    LEGION_COSTS_FILE="$TEST_TMPDIR/no-price-table.json" MOCK_OPENCODE_NO_COST=1 \
+      run "$LEGION_OPENCODE" run --task "edit" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.cost_status == "unknown" and .cost_source == null
+      and .cost_usd == null' "$attempt"
+}
+
 @test "legion-opencode: task-file above per-argument limit still publishes a span" {
     local repo task_file attempt
     repo="$(make_test_repo large-task-span)"

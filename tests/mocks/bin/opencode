@@ -98,6 +98,15 @@ EOF
   exit 0
 fi
 
+if [[ "${MOCK_OPENCODE_NO_COST:-0}" == 1 || "${MOCK_OPENCODE_ZERO_COST:-0}" == 1 ]]; then
+  cost_field=''
+  [[ "${MOCK_OPENCODE_ZERO_COST:-0}" != 1 ]] || cost_field=',"cost":0'
+  printf '{"type":"message.updated","properties":{"info":{"id":"a1","role":"assistant","providerID":"%s","modelID":"%s"%s,"tokens":{"input":1000000,"output":100000,"cache":{"read":0,"write":0}}}}}\n' \
+    "$provider" "$modelid" "$cost_field"
+  printf '%s\n' '{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text","text":"OPENCODE_COST_PROVENANCE"}}}'
+  exit 0
+fi
+
 # Two streaming updates for one message id (take last state), plus a second
 # assistant message id (sum across ids), plus text parts and session.idle.
 cat <<EOF

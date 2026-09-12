@@ -204,7 +204,9 @@ make_test_repo() {
     echo "$output" | jq -e '.status == "error"'
     [ ! -f "$repo/MOCK_CURSOR_CHANGE.txt" ]
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .status"
-    [ "$output" = "error" ]
+    # The terminal envelope uses `error`, while the receipt-bound provider
+    # span uses the canonical failed attempt outcome.
+    [ "$output" = "failed" ]
 }
 
 @test "legion-cursor: --apply applies the captured diff to the repo" {

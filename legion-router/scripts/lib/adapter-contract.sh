@@ -979,6 +979,10 @@ try:
     os.unlink(attempt_tmp, dir_fd=directory)
     if failure_tmp:
         os.unlink(failure_tmp, dir_fd=directory)
+    # The numbered namespace is independently durable before aliases can
+    # fail. A later alias failure must not leave an unsynced numbered receipt.
+    os.fsync(directory)
+    if failure_tmp:
         aliases_started = True
         copy_alias(failure_name, "failure.json")
     else:
@@ -1262,11 +1266,12 @@ try:
             raise ValueError("invalid append intent")
         fd, info = checked_file(intent["telemetry_path"], flags)
         try:
-            # An unchanged file proves a previous publisher never appended.
-            # If another record appeared, a partial/crashed append is ambiguous:
-            # never authorize a second paid-attempt span on that uncertainty.
+            # The serialized publisher already scanned the complete post-intent
+            # range for this exact receipt before retrying. Complete unrelated
+            # records from concurrent runs do not make this attempt ambiguous.
+            # A replaced inode, truncation, or incomplete tail still does.
             if ((info.st_dev, info.st_ino) != (intent["device"], intent["inode"])
-                    or info.st_size != intent["offset"]):
+                    or info.st_size < intent["offset"]):
                 raise ValueError("ambiguous prior provider-span append")
             if info.st_size and os.pread(fd, 1, info.st_size - 1) != b"\n":
                 raise ValueError("telemetry ends in an incomplete line")

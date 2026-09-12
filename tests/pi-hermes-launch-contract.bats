@@ -67,7 +67,7 @@ set -euo pipefail
 [[ "${1:-}" == -f && -f "${2:-}" ]]
 shift 2
 receipt="$3"
-provider="$6"
+provider="$7"
 jq -cn --arg executable "$provider" '
   {schema:"legion.provider-launch.v1",status:"launch_failed",token:"untrusted",
    executable_path:$executable,reason:"malformed fixture",errno:2,extra:true}
@@ -111,7 +111,7 @@ set -euo pipefail
 shift 2
 receipt="$3"
 token_file="$4"
-provider="$6"
+provider="$7"
 python3 - "$receipt" "$provider" "$token_file" <<'PY'
 import hashlib
 import hmac
@@ -819,7 +819,7 @@ PY
   MOCK_DELAYED_CHILD_PID_FILE="$child_pid_file" \
     MOCK_DELAYED_CHILD_SIGNAL_FILE="$signal_file" \
     python3 "$harness" "$wrapper" "$assigned" "$release" \
-      "$receipt" "$token_file" -- "$provider" &
+      "$receipt" "$token_file" "$art/child-exec-gate.py" -- "$provider" &
   wrapper_pid=$!
   for _ in $(seq 1 200); do
     [[ -f "$assigned" && -f "$child_pid_file" ]] && break
@@ -887,7 +887,8 @@ PY
   receipt="$TEST_TMPDIR/atomic-provider-signal.json"
   token_file="$TEST_TMPDIR/atomic-provider-signal.token"
   printf '%064d\n' 0 > "$token_file"
-  python3 "$harness" "$wrapper" "$receipt" "$token_file" -- /fixture/provider || rc=$?
+  python3 "$harness" "$wrapper" "$receipt" "$token_file" \
+    "$art/child-exec-gate.py" -- /fixture/provider || rc=$?
   [ "$rc" -eq 143 ]
   jq -e --argjson cancelled_errno "$(python3 -c 'import errno; print(errno.ECANCELED)')" '
     .schema == "legion.provider-launch.v1" and .status == "launch_failed"
@@ -896,6 +897,52 @@ PY
     and (.auth | type == "string" and length == 64)
     and (has("provider_pid") | not) and (has("token") | not)
   ' "$receipt"
+}
+
+@test "Pi Hermes exec gate refuses cancellation after the waiting child starts" {
+  local repo art wrapper harness receipt token_file marker rc=0
+  repo="$(make_test_repo exec-gate-signal)"
+  PI_BIN=pi run "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+    --repo "$repo" --run-id exec-gate-signal --keep --quiet
+  [ "$status" -eq 0 ]
+  art="$repo/.legion/runs/exec-gate-signal"
+  wrapper="$art/provider-launch-wrapper.py"
+  harness="$TEST_TMPDIR/exec-gate-signal-harness.py"
+  marker="$TEST_TMPDIR/provider-executed"
+  cat > "$harness" <<'PY'
+import importlib.util
+import os
+import signal
+import subprocess
+import sys
+
+wrapper, *arguments = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("legion_pi_exec_gate_signal", wrapper)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+real_popen = subprocess.Popen
+
+def signal_after_waiting_child(*args, **kwargs):
+    child = real_popen(*args, **kwargs)
+    os.kill(os.getpid(), signal.SIGTERM)
+    return child
+
+module.subprocess.Popen = signal_after_waiting_child
+sys.argv = [wrapper, *arguments]
+raise SystemExit(module.main())
+PY
+  receipt="$TEST_TMPDIR/exec-gate-receipt.json"
+  token_file="$TEST_TMPDIR/exec-gate-token"
+  printf '%064d\n' 0 > "$token_file"
+  python3 "$harness" "$wrapper" "$receipt" "$token_file" \
+    "$art/child-exec-gate.py" -- python3 -c \
+    "from pathlib import Path; Path('$marker').touch()" || rc=$?
+  [ "$rc" -eq 143 ]
+  [ ! -e "$marker" ]
+  jq -e '.status == "launch_failed" and .errno > 0
+    and (.auth | type == "string" and length == 64)
+    and (has("provider_pid") | not)' "$receipt"
 }
 
 @test "Pi production supervisor defers descendant shutdown until started receipt is durable" {

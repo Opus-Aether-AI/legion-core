@@ -219,7 +219,10 @@ write_strict_no_launch_lease() {
      reason:$reason,max_runtime_seconds:$runtime}
   ' > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$path"
+  if ! legion_adapter_durable_exclusive_link "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 write_strict_containment_lease() {
   local path="$1" reason="$2" runtime="$3" tmp=""
@@ -229,7 +232,10 @@ write_strict_containment_lease() {
      reason:$reason,max_runtime_seconds:$runtime}
   ' > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$path"
+  if ! legion_adapter_durable_exclusive_link "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 kill_codex_child() {
   local pid="${CODEX_CHILD_PID:-}"

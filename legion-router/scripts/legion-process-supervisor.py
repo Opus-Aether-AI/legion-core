@@ -22,6 +22,7 @@ import fcntl
 import json
 import os
 import pwd
+import select
 import secrets
 import shutil
 import signal
@@ -1000,6 +1001,11 @@ def _write_status(
             os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
         os.replace(temporary, destination)
+        directory = os.open(destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         try:
             os.unlink(temporary)
@@ -1293,9 +1299,10 @@ def main() -> int:
     timed_out = False
     completed_before_cleanup = False
     supervisor_token = secrets.token_hex(24)
+    authorization_fd = -1
 
     def stop(signum: int, _frame: object) -> None:
-        nonlocal cancel_requested, interrupted
+        nonlocal cancel_requested, interrupted, authorization_fd
         interrupted = signum
         # Python handlers can be re-entered by repeated delivery of the same
         # signal. threading.Event.set() takes a non-reentrant condition lock,
@@ -1303,6 +1310,15 @@ def main() -> int:
         # supervisor forever. A plain assignment is re-entrant; the main loop
         # observes it within POLL_SECONDS.
         cancel_requested = True
+        # The exec-side gate is still holding the provider before process
+        # creation. Closing the authorization writer is the cancellation
+        # decision; a later write cannot accidentally launch it.
+        if authorization_fd >= 0:
+            try:
+                os.close(authorization_fd)
+            except OSError:
+                pass
+            authorization_fd = -1
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
@@ -1373,6 +1389,7 @@ def main() -> int:
         # that setup, so recheck at the last possible point before any child can
         # launch. The surrounding finally block releases all setup resources.
         launch_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+        gate_read = error_read = error_write = -1
         previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, launch_signals)
         try:
             # Blocking the handled signals makes the final cancellation check
@@ -1403,14 +1420,18 @@ def main() -> int:
                 )
                 return 128 + interrupted
             try:
+                gate_read, authorization_fd = os.pipe()
+                error_read, error_write = os.pipe()
                 process = subprocess.Popen(
-                    command,
+                    [sys.executable, str(Path(__file__).parent / "lib/child-exec-gate.py"),
+                     str(gate_read), str(error_write), *command],
                     cwd=arguments.cwd,
                     stdin=None,
                     stdout=None,
                     stderr=None,
                     env=environment,
                     start_new_session=True,
+                    pass_fds=(gate_read, error_write),
                     # The parent keeps termination signals blocked across its
                     # last cancellation check and process creation. Restore the
                     # caller's mask in the forked child before exec so the new
@@ -1438,6 +1459,16 @@ def main() -> int:
                 )
                 print(f"legion-process-supervisor: {reason}", file=sys.stderr)
                 return exit_code
+            finally:
+                for descriptor in (gate_read, error_write):
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                gate_read = error_write = -1
+                if process is None:
+                    for descriptor in (authorization_fd, error_read):
+                        if descriptor >= 0:
+                            os.close(descriptor)
+                    authorization_fd = error_read = -1
         except OSError as error:
             reason = f"cannot establish atomic child launch signal mask: {error}"
             _write_status(
@@ -1454,6 +1485,82 @@ def main() -> int:
             "" if using_inherited else allow_canary,
         )
         tracker.start()
+        # Popen above starts only a trusted waiting launcher. Unmask first so
+        # any cancellation pending before or during that Popen closes the
+        # authorization writer. A successful one-byte write is the atomic
+        # launch decision; the launcher cannot exec a provider before it.
+        if cancel_requested or authorization_fd < 0:
+            if authorization_fd >= 0:
+                os.close(authorization_fd)
+                authorization_fd = -1
+            if error_read >= 0:
+                os.close(error_read)
+            try:
+                process.wait(timeout=GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                cleanup_ok = _terminate_tree(process, tracker,
+                                             arguments.descendant_signal_ready_file)
+                cleanup_attempted = True
+                _write_status(arguments.status_file, "cleanup_failed",
+                              "pre-launch cancellation could not reap the waiting launcher",
+                              arguments.max_runtime_seconds, child_started=False)
+                return 70
+            reason = f"cancelled by {signal.Signals(interrupted).name} before child launch"
+            _write_status(arguments.status_file, "launch_failed", reason,
+                          arguments.max_runtime_seconds)
+            return 128 + interrupted
+        try:
+            os.write(authorization_fd, b"G")
+        except OSError:
+            if error_read >= 0:
+                os.close(error_read)
+            try:
+                process.wait(timeout=GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                cleanup_ok = _terminate_tree(process, tracker,
+                                             arguments.descendant_signal_ready_file)
+                cleanup_attempted = True
+                _write_status(arguments.status_file, "cleanup_failed",
+                              "authorization failure could not reap the waiting launcher",
+                              arguments.max_runtime_seconds, child_started=False)
+                return 70
+            if cancel_requested:
+                reason = f"cancelled by {signal.Signals(interrupted).name} before child launch"
+                _write_status(arguments.status_file, "launch_failed", reason,
+                              arguments.max_runtime_seconds)
+                return 128 + interrupted
+            _write_status(arguments.status_file, "cleanup_failed",
+                          "cannot authorize child launch", arguments.max_runtime_seconds,
+                          child_started=False)
+            return 70
+        finally:
+            if authorization_fd >= 0:
+                os.close(authorization_fd)
+                authorization_fd = -1
+        try:
+            if not select.select([error_read], [], [], GRACE_SECONDS)[0]:
+                cleanup_ok = _terminate_tree(process, tracker,
+                                             arguments.descendant_signal_ready_file)
+                cleanup_attempted = True
+                _write_status(arguments.status_file, "cleanup_failed",
+                              "child exec gate did not confirm launch",
+                              arguments.max_runtime_seconds)
+                return 70
+            launch_error = os.read(error_read, 4097)
+        finally:
+            os.close(error_read)
+        if launch_error:
+            try:
+                detail = json.loads(launch_error)
+                launch_errno = int(detail["errno"])
+                reason = f"child launch failed: {detail['reason']}"
+            except (ValueError, TypeError, KeyError):
+                launch_errno = 1
+                reason = "child launch failed with malformed exec evidence"
+            process.wait(timeout=GRACE_SECONDS)
+            _write_status(arguments.status_file, "launch_failed", reason,
+                          arguments.max_runtime_seconds)
+            return 127 if launch_errno == errno.ENOENT else 126
         if launch_gate_file:
             try:
                 _write_launch_gate(
@@ -1481,7 +1588,13 @@ def main() -> int:
             # Freeze that flag until the observed outcome is recorded.
             observed_mask = signal.pthread_sigmask(signal.SIG_BLOCK, launch_signals)
             try:
-                cancellation_before_poll = cancel_requested
+                # A blocked signal has not run the Python handler yet. Count
+                # it as cancellation when already pending before this poll;
+                # a signal first delivered by poll() after observing exit is
+                # later and must not rewrite a completed child.
+                cancellation_before_poll = cancel_requested or bool(
+                    signal.sigpending() & launch_signals
+                )
                 completed = process.poll() is not None
                 if completed:
                     completed_before_cleanup = not cancellation_before_poll

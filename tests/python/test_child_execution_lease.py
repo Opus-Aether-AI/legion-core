@@ -461,6 +461,53 @@ def test_signal_pending_inside_atomic_launch_region_refuses_before_popen(
     }
 
 
+def test_signal_after_waiting_launcher_starts_cannot_exec_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_file = tmp_path / "launcher-cancelled.json"
+    marker = tmp_path / "provider-started"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_exec_gate", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    real_popen = subprocess.Popen
+
+    def signal_after_launcher(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return child
+
+    class FinishedTracker:
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def close(self):
+            return True
+
+    handlers = {caught: signal.getsignal(caught)
+                for caught in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    monkeypatch.setattr(supervisor.sys, "platform", "linux")
+    monkeypatch.setattr(supervisor.subprocess, "Popen", signal_after_launcher)
+    monkeypatch.setattr(supervisor, "DescendantTracker", FinishedTracker)
+    monkeypatch.setattr(supervisor, "_terminate_tree", lambda *_args: True)
+    monkeypatch.setattr(
+        supervisor.sys, "argv",
+        [str(SUPERVISOR), "--cwd", str(tmp_path), "--max-runtime-seconds", "30",
+         "--status-file", str(status_file), "--", sys.executable, "-c",
+         f"from pathlib import Path; Path({str(marker)!r}).touch()"],
+    )
+    try:
+        assert supervisor.main() == 143
+    finally:
+        for caught, handler in handlers.items():
+            signal.signal(caught, handler)
+    assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "launch_failed"
+    assert not marker.exists()
+
+
 def test_signal_during_cleanup_cannot_rewrite_an_observed_child_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -571,6 +618,74 @@ def test_signal_between_completed_poll_and_cancel_snapshot_keeps_completion(
     receipt = json.loads(status_file.read_text(encoding="utf-8"))
     assert receipt["status"] == "completed"
     assert receipt["child_exit_code"] == 0
+
+
+def test_signal_pending_before_completed_poll_remains_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_file = tmp_path / "pending-before-poll.json"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_pending_poll", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+
+    real_popen = subprocess.Popen
+
+    class CompletedChild:
+        def __init__(self, *args, **kwargs):
+            self.child = real_popen(*args, **kwargs)
+            self.pid = self.child.pid
+
+        def poll(self):
+            return 0
+
+        def __getattr__(self, name):
+            return getattr(self.child, name)
+
+    class FinishedTracker:
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def raise_if_error(self):
+            pass
+
+        def close(self):
+            return True
+
+    real_mask = signal.pthread_sigmask
+    mask_count = 0
+
+    def pending_at_poll(operation, signals):
+        nonlocal mask_count
+        previous = real_mask(operation, signals)
+        if operation == signal.SIG_BLOCK:
+            mask_count += 1
+            if mask_count == 2:
+                os.kill(os.getpid(), signal.SIGTERM)
+        return previous
+
+    handlers = {caught: signal.getsignal(caught)
+                for caught in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    monkeypatch.setattr(supervisor.sys, "platform", "linux")
+    monkeypatch.setattr(supervisor.signal, "pthread_sigmask", pending_at_poll)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", CompletedChild)
+    monkeypatch.setattr(supervisor, "DescendantTracker", FinishedTracker)
+    monkeypatch.setattr(supervisor, "_terminate_tree", lambda *_args: True)
+    monkeypatch.setattr(
+        supervisor.sys, "argv",
+        [str(SUPERVISOR), "--cwd", str(tmp_path), "--max-runtime-seconds", "30",
+         "--status-file", str(status_file), "--", "/usr/bin/true"],
+    )
+    try:
+        assert supervisor.main() == 143
+    finally:
+        real_mask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+        for caught, handler in handlers.items():
+            signal.signal(caught, handler)
+    assert json.loads(status_file.read_text(encoding="utf-8"))["status"] == "cancelled"
 
 
 def test_command_disappearing_before_popen_still_writes_lease_receipt(

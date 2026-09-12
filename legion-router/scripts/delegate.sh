@@ -232,7 +232,7 @@ write_strict_containment_lease() {
      reason:$reason,max_runtime_seconds:$runtime}
   ' > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  if ! legion_adapter_durable_exclusive_link "$tmp" "$path"; then
+  if ! legion_adapter_durable_replace_lease "$tmp" "$path"; then
     rm -f "$tmp"
     return 1
   fi

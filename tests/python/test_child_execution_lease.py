@@ -15,6 +15,54 @@ ROOT = Path(__file__).parents[2]
 SUPERVISOR = ROOT / "legion-router" / "scripts" / "legion-process-supervisor.py"
 
 
+def test_vanished_proc_entries_do_not_interrupt_descendant_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = importlib.util.spec_from_file_location("lease_supervisor_proc_race", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+
+    class VanishedProcPath:
+        def __init__(self, name: str):
+            self.name = name.rsplit("/", 1)[-1]
+
+        def is_dir(self):
+            return True
+
+        def iterdir(self):
+            return [VanishedProcPath("4242")]
+
+        def __truediv__(self, part):
+            return VanishedProcPath(str(part))
+
+        def read_bytes(self):
+            raise ProcessLookupError("process vanished between enumeration and read")
+
+        def read_text(self, **_kwargs):
+            raise ProcessLookupError("process vanished between enumeration and read")
+
+    monkeypatch.setattr(supervisor.sys, "platform", "linux")
+    monkeypatch.setattr(supervisor, "Path", VanishedProcPath)
+    assert supervisor._proc_child_pids(1) == set()
+    assert supervisor._token_pids("fixture") == set()
+    assert supervisor.DescendantTracker._current_parent(4242) is None
+
+    class VanishedHandle:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    handle = VanishedHandle()
+    monkeypatch.setattr(supervisor, "_token_pids", lambda _token: {4242})
+    monkeypatch.setattr(supervisor.ProcessHandle, "open", lambda _pid: handle)
+    tracker = supervisor.DescendantTracker(1, "fixture")
+    tracker._capture_token_pids()
+    assert handle.closed
+    assert tracker._handles == {}
+
+
 def run_supervised(tmp_path: Path, seconds: int, command: list[str], **kwargs):
     status_file = tmp_path / "lease.json"
     started = time.monotonic()

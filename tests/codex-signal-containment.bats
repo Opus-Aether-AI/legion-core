@@ -293,7 +293,12 @@ SH
   kill -TERM "$pid"
   wait "$pid" || rc=$?
 
-  [ "$rc" -eq 143 ]
+  [ "$rc" -eq 143 ] || {
+    printf 'prompt review signal rc=%s out=%s err=%s\n' "$rc" \
+      "$(tail -n 1 "$TEST_TMPDIR/prompt.out")" \
+      "$(tail -n 15 "$TEST_TMPDIR/prompt.err")" >&2
+    return 1
+  }
   ! kill -0 "$provider_pid" 2>/dev/null
   art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
   attempt="$(find "$art" -path '*/prompt-review-*/attempt.json' -print -quit)"
@@ -301,7 +306,14 @@ SH
   [ -f "$attempt" ]
   [ -f "$lease" ]
   jq -e '.executor == "cursor" and .provider == "cursor"
-    and .terminal_status == "cancelled" and .failure.class == "cancelled"' "$attempt"
+    and .terminal_status == "cancelled" and .failure.class == "cancelled"' "$attempt" || {
+      printf 'prompt review signal attempt=%s lease=%s terminal=%s err=%s\n' \
+        "$(jq -c '{executor,provider,terminal_status,failure}' "$attempt")" \
+        "$(jq -c '{status,reason}' "$lease")" \
+        "$(jq -c '{status,reason,codex_exit}' "$art/terminal.json")" \
+        "$(tail -n 15 "$TEST_TMPDIR/prompt.err")" >&2
+      return 1
+    }
   [ "$(find "$art" -path '*/prompt-review-*/attempt.json' | wc -l | tr -d ' ')" -eq 1 ]
   [ "$(find "$art" -path '*/prompt-review-*/failure.json' | wc -l | tr -d ' ')" -eq 1 ]
   jq -e '.schema == "legion.child-execution-lease.v1"' "$lease"

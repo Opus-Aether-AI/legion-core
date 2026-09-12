@@ -50,6 +50,38 @@ SH
   export PATH="$shim_dir:$PATH"
 }
 
+@test "strict containment lease durably replaces a regular supervisor lease but never a link" {
+  local art="$TEST_TMPDIR/containment" source lease target
+  mkdir -p "$art"
+  source="$art/strict.tmp"
+  lease="$art/lease.json"
+  target="$art/target.json"
+  printf '%s\n' '{"schema":"legion.child-execution-lease.v1","status":"completed"}' > "$lease"
+  printf '%s\n' '{"schema":"legion.child-execution-lease.v1","status":"cleanup_failed","reason":"provider launch evidence pending"}' > "$source"
+  chmod 600 "$source"
+
+  run bash -c 'source "$1"; legion_adapter_durable_replace_lease "$2" "$3"' _ \
+    "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$source" "$lease"
+  [ "$status" -eq 0 ]
+  jq -e '.status == "cleanup_failed" and (.reason | contains("provider launch evidence"))' "$lease"
+  [ ! -e "$source" ]
+
+  printf '%s\n' 'original' > "$target"
+  ln -s "$target" "$art/symlink.json"
+  printf '%s\n' 'replacement' > "$source"
+  run bash -c 'source "$1"; legion_adapter_durable_replace_lease "$2" "$3"' _ \
+    "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$source" "$art/symlink.json"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$target")" = original ]
+  [ -L "$art/symlink.json" ]
+
+  ln "$target" "$art/hardlink.json"
+  run bash -c 'source "$1"; legion_adapter_durable_replace_lease "$2" "$3"' _ \
+    "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$source" "$art/hardlink.json"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$target")" = original ]
+}
+
 @test "authenticated launch failure suppresses signal-path provider accounting" {
   local art="$TEST_TMPDIR/signal-art" lease="$TEST_TMPDIR/signal-lease.json"
   mkdir -p "$art"

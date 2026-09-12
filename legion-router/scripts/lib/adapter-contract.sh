@@ -217,6 +217,52 @@ finally:
 PY
 }
 
+# A supervisor may have already published its own lease before an adapter
+# discovers unresolved provider-launch evidence. Replace only that regular,
+# private lease with the stricter containment result, and sync both the new
+# contents and its directory entry before callers trust the override.
+legion_adapter_durable_replace_lease() {
+  local source="$1" destination="$2"
+  python3 - "$source" "$destination" <<'PY'
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:]
+directory_path = os.path.dirname(source)
+if directory_path != os.path.dirname(destination):
+    raise SystemExit("durable lease replacement must stay in one directory")
+source_name = os.path.basename(source)
+destination_name = os.path.basename(destination)
+if source_name in {"", ".", ".."} or destination_name in {"", ".", ".."}:
+    raise SystemExit("invalid durable lease leaf")
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+directory = os.open(directory_path, flags)
+source_fd = None
+try:
+    source_fd = os.open(source_name, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) |
+                        getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+    original = os.fstat(source_fd)
+    source_path = os.stat(source_name, dir_fd=directory, follow_symlinks=False)
+    previous = os.stat(destination_name, dir_fd=directory, follow_symlinks=False)
+    if (not stat.S_ISREG(original.st_mode) or original.st_nlink != 1 or
+            (original.st_dev, original.st_ino) != (source_path.st_dev, source_path.st_ino) or
+            not stat.S_ISREG(previous.st_mode) or previous.st_nlink != 1):
+        raise OSError("unsafe durable lease replacement")
+    os.fsync(source_fd)
+    os.replace(source_name, destination_name, src_dir_fd=directory,
+               dst_dir_fd=directory)
+    os.fsync(directory)
+except OSError as error:
+    print(f"legion adapter durable lease replacement: {error}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    if source_fd is not None:
+        os.close(source_fd)
+    os.close(directory)
+PY
+}
+
 legion_adapter_write_final_gate_no_launch() {
   local status_file="$1" max_runtime="$2" signum="$3" directory temp
   [[ -n "$status_file" && "$max_runtime" =~ ^[1-9][0-9]*$ \

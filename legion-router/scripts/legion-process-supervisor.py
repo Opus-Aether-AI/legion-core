@@ -86,7 +86,7 @@ def _proc_child_pids(parent: int) -> set[int]:
             fields = (entry / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
             if len(fields) > 1 and int(fields[1]) == parent:
                 children.add(int(entry.name))
-        except (FileNotFoundError, IndexError, PermissionError, ValueError):
+        except (FileNotFoundError, ProcessLookupError, IndexError, PermissionError, ValueError):
             continue
     return children
 
@@ -403,7 +403,7 @@ def _token_pids(token: str) -> set[int]:
             try:
                 if marker in (entry / "environ").read_bytes().split(b"\0"):
                     result.add(int(entry.name))
-            except (FileNotFoundError, PermissionError):
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
                 continue
     return result
 
@@ -665,7 +665,7 @@ class DescendantTracker:
         try:
             fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
             return int(fields[1])
-        except (FileNotFoundError, IndexError, PermissionError, ValueError):
+        except (FileNotFoundError, ProcessLookupError, IndexError, PermissionError, ValueError):
             return None
 
     def _capture_child(self, pid: int, parents: dict[int, ProcessHandle]) -> bool:
@@ -720,7 +720,7 @@ class DescendantTracker:
                 continue
             try:
                 still_owned = marker in (Path("/proc") / str(pid) / "environ").read_bytes().split(b"\0")
-            except (FileNotFoundError, PermissionError):
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
                 still_owned = False
             if not still_owned or not handle.is_live():
                 handle.close()

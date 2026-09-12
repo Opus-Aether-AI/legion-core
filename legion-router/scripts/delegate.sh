@@ -810,20 +810,8 @@ sandcastle_provider_launch_status() {
     printf 'malformed'
     return 0
   }
-  jq -er --arg token "$token" '
-    if type != "object"
-       or .schema != "legion.sandcastle-provider-launch.v1"
-       or .token != $token
-       or ((keys | sort) !=
-           (if .status == "started"
-            then ["provider_pid","schema","status","token"]
-            else ["schema","status","token"] end))
-       or (.status == "started" and ((.provider_pid | type) != "number" or .provider_pid < 1))
-       or (.status != "started" and .status != "pending" and .status != "not-started")
-    then "malformed"
-    else .status
-    end
-  ' "$marker" 2>/dev/null || printf 'malformed'
+  printf '%s' "$token" | python3 "$_self_dir/lib/sandcastle-provider-launch.py" --verify "$marker" \
+    2>/dev/null || printf 'malformed'
 }
 
 # Run Sandcastle for one model into $art files; sets the caller's $rc (dynamic scope).
@@ -831,7 +819,7 @@ sandcastle_provider_launch_status() {
 # delegate flow consumes that same artifact path.
 run_sandcastle() {
   local node_bin python_bin sandcastle_script provider_wrapper_dir provider_wrapper
-  local provider_launcher provider_marker
+  local provider_launcher provider_marker provider_token_file provider_exec_gate
   SANDCASTLE_SETUP_REFUSED=0
   SANDCASTLE_CONTAINMENT_FAILED=0
   SANDCASTLE_CONTAINMENT_REASON=""
@@ -853,7 +841,9 @@ run_sandcastle() {
   provider_wrapper_dir="$art/sandcastle-provider-bin"
   provider_wrapper="$provider_wrapper_dir/codex"
   provider_launcher="$provider_wrapper_dir/provider-launch.py"
+  provider_exec_gate="$provider_wrapper_dir/child-exec-gate.py"
   provider_marker="$art/sandcastle-provider-launched"
+  provider_token_file="$provider_wrapper_dir/provider-launch.token"
   SANDCASTLE_PROVIDER_MARKER="$provider_marker"
   SANDCASTLE_PROVIDER_TOKEN="$(python3 - <<'PY'
 import secrets
@@ -866,51 +856,14 @@ PY
   }
   mkdir -p "$provider_wrapper_dir"
   rm -f "$provider_marker"
-  printf '%s\n' '#!/usr/bin/env python3' \
-    'import json, os, signal, subprocess, sys, tempfile' \
-    'marker, token, executable, *arguments = sys.argv[1:]' \
-    'def write_marker(status, provider_pid=None):' \
-    '    directory = os.path.dirname(marker)' \
-    '    descriptor, temporary = tempfile.mkstemp(prefix=".sandcastle-provider.", suffix=".tmp", dir=directory)' \
-    '    try:' \
-    '        payload = {"schema":"legion.sandcastle-provider-launch.v1", "token":token, "status":status}' \
-    '        if provider_pid is not None:' \
-    '            payload["provider_pid"] = provider_pid' \
-    '        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:' \
-    '            json.dump(payload, destination, separators=(",", ":"))' \
-    '            destination.write("\n")' \
-    '            destination.flush()' \
-    '            os.fsync(destination.fileno())' \
-    '        os.chmod(temporary, 0o600)' \
-    '        os.replace(temporary, marker)' \
-    '        directory_fd = os.open(directory, os.O_RDONLY)' \
-    '        try:' \
-    '            os.fsync(directory_fd)' \
-    '        finally:' \
-    '            os.close(directory_fd)' \
-    '    finally:' \
-    '        try:' \
-    '            os.unlink(temporary)' \
-    '        except FileNotFoundError:' \
-    '            pass' \
-    'write_marker("pending")' \
-    'try:' \
-    '    child = subprocess.Popen([executable, *arguments])' \
-    'except OSError as error:' \
-    '    write_marker("not-started")' \
-    '    print(f"provider launch failed: {error}", file=sys.stderr)' \
-    '    raise SystemExit(127 if getattr(error, "errno", None) == 2 else 126)' \
-    'write_marker("started", child.pid)' \
-    'def forward(signum, _frame):' \
-    '    try:' \
-    '        child.send_signal(signum)' \
-    '    except ProcessLookupError:' \
-    '        pass' \
-    'for caught in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):' \
-    '    signal.signal(caught, forward)' \
-    'raise SystemExit(child.wait())' > "$provider_launcher"
-  printf '#!/usr/bin/env bash\nexec %q %q %q %q %q "$@"\n' \
-    "$python_bin" "$provider_launcher" "$provider_marker" "$SANDCASTLE_PROVIDER_TOKEN" \
+  cp "$_self_dir/lib/sandcastle-provider-launch.py" "$provider_launcher"
+  cp "$_self_dir/lib/child-exec-gate.py" "$provider_exec_gate"
+  chmod 500 "$provider_launcher" "$provider_exec_gate"
+  (umask 077; set -o noclobber; printf '%s\n' "$SANDCASTLE_PROVIDER_TOKEN" > "$provider_token_file") \
+    || die 'unable to persist Sandcastle launch token'
+  printf '#!/usr/bin/env bash\nexec %q %q %q %q %q %q %q "$@"\n' \
+    "$python_bin" "$provider_launcher" "$provider_marker" "$provider_token_file" \
+    "$provider_exec_gate" "$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")" \
     "$CODEX_BIN" > "$provider_wrapper"
   chmod 700 "$provider_wrapper"
   : > "$art/stream.jsonl"

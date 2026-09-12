@@ -14,6 +14,53 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 SUPERVISOR = ROOT / "legion-router" / "scripts" / "legion-process-supervisor.py"
+EXEC_GATE = ROOT / "legion-router" / "scripts" / "lib" / "child-exec-gate.py"
+
+
+def test_linux_elf_gate_executes_verified_inode_after_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = importlib.util.spec_from_file_location("linux_inode_gate", EXEC_GATE)
+    assert spec is not None and spec.loader is not None
+    gate_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate_module)
+    provider = tmp_path / "provider"
+    provider.write_bytes(b"\x7fELForiginal")
+    provider.chmod(0o700)
+    expected = hashlib.sha256(provider.read_bytes()).hexdigest()
+    gate_read, gate_write = os.pipe()
+    error_read, error_write = os.pipe()
+    os.write(gate_write, b"G")
+    os.close(gate_write)
+    seen = []
+    real_pread = os.pread
+
+    def replace_during_last_probe(descriptor: int, size: int, offset: int) -> bytes:
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"\x7fELFunadmitted")
+        replacement.chmod(0o700)
+        os.replace(replacement, provider)
+        return real_pread(descriptor, size, offset)
+
+    def checked_exec(path: str, _argv: list[str], _env: dict[str, str]) -> None:
+        descriptor = int(path.rsplit("/", 1)[1])
+        seen.append((path, real_pread(descriptor, 12, 0)))
+        raise OSError(errno.ECANCELED, "test stops before actual exec")
+
+    monkeypatch.setattr(gate_module.sys, "platform", "linux")
+    monkeypatch.setattr(gate_module.os, "pread", replace_during_last_probe)
+    monkeypatch.setattr(gate_module.os, "execve", checked_exec)
+    monkeypatch.setattr(gate_module.sys, "argv", ["gate", str(gate_read), str(error_write), str(provider)])
+    monkeypatch.setenv("LEGION_EXEC_GATE_EXPECTED_SHA256", expected)
+    monkeypatch.setenv("LEGION_EXEC_GATE_ADMITTED_PATH", str(provider))
+    try:
+        assert gate_module.main() == 126
+        assert seen and seen[0][0].startswith("/proc/self/fd/")
+        assert seen[0][1] == b"\x7fELForiginal"
+        assert provider.read_bytes() == b"\x7fELFunadmitted"
+    finally:
+        os.close(error_read)
+        os.close(error_write)
 
 
 def test_vanished_proc_entries_do_not_interrupt_descendant_cleanup(

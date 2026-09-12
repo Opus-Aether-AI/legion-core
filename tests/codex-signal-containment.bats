@@ -138,11 +138,11 @@ install_sandcastle_pending_python() {
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'if [[ "${1:-}" == */sandcastle-provider-bin/provider-launch.py ]]; then' \
-    '  marker="$2"; token="$3"' \
+    '  marker="$2"; token="$(tr -d "\n" < "$3")"' \
     '  if [[ "${MOCK_SANDCASTLE_MARKER_STATE:-pending}" == malformed ]]; then' \
     '    printf "%s\n" "{malformed" > "$marker"' \
     '  else' \
-    '    jq -cn --arg token "$token" --arg status "${MOCK_SANDCASTLE_MARKER_STATE:-pending}" '\''{schema:"legion.sandcastle-provider-launch.v1",token:$token,status:$status}'\'' > "$marker"' \
+    '    "$LEGION_TEST_REAL_PYTHON" -c '\''import hashlib,hmac,json,sys; path,token,status=sys.argv[1:]; payload={"schema":"legion.sandcastle-provider-launch.v2","status":status}; payload["auth"]=hmac.new(token.encode(),json.dumps(payload,sort_keys=True,separators=(",",":")).encode(),hashlib.sha256).hexdigest(); open(path,"w").write(json.dumps(payload))'\'' "$marker" "$token" "${MOCK_SANDCASTLE_MARKER_STATE:-pending}"' \
     '  fi' \
     '  : > "$LEGION_TEST_PROVIDER_MARKER_READY"' \
     '  [[ "${MOCK_SANDCASTLE_MARKER_EXIT_IMMEDIATELY:-0}" != 1 ]] || exit 0' \
@@ -398,13 +398,14 @@ SH
   pid=$!
   marker="$repo/.legion/runs/sandcastle-provider-signal/sandcastle-provider-launched"
   for _ in $(seq 1 200); do
-    jq -e '.schema == "legion.sandcastle-provider-launch.v1" and .status == "started"' \
+  jq -e '.schema == "legion.sandcastle-provider-launch.v2" and .status == "started"' \
       "$marker" >/dev/null 2>&1 && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.05
   done
-  jq -e '.schema == "legion.sandcastle-provider-launch.v1" and .status == "started"
-    and (.token | type == "string" and length == 48) and .provider_pid > 0' "$marker"
+  jq -e '.schema == "legion.sandcastle-provider-launch.v2" and .status == "started"
+    and (.auth | type == "string" and length == 64) and .provider_pid > 0
+    and (has("token") | not)' "$marker"
   provider_pid="$(cat "$MOCK_CODEX_DELAY_PID_FILE")"
   kill -TERM "$pid"
   wait "$pid" || rc=$?
@@ -440,7 +441,7 @@ SH
 
   [ "$rc" -eq 143 ]
   art="$repo/.legion/runs/sandcastle-not-started-signal"
-  jq -e '.schema == "legion.sandcastle-provider-launch.v1" and .status == "not-started"' \
+  jq -e '.schema == "legion.sandcastle-provider-launch.v2" and .status == "not-started"' \
     "$art/sandcastle-provider-launched"
   [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 0 ]
   [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 0 ]

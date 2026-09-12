@@ -98,6 +98,7 @@ def _empty_activity() -> dict[str, Any]:
     return {
         "usage": _zero_usage(),
         "_usage_observed": False,
+        "_usage_attempts": 0,
         "tools": [],
         "files": [],
         "items": 0,
@@ -426,8 +427,10 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
     files: set[str] = set()
     items = 0
     usage_observed = False
+    usage_attempts = 0
 
     for stream_path in stream_paths:
+        stream_has_usage = False
         try:
             with open(stream_path, encoding="utf-8") as handle:
                 for raw_line in handle:
@@ -448,6 +451,9 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
                             usage_payload = _dict(_dict(event.get("payload")).get("usage"))
                         if _valid_stream_usage(usage_payload):
                             usage_observed = True
+                            if not stream_has_usage:
+                                usage_attempts += 1
+                                stream_has_usage = True
                             _sum_usage(usage, usage_payload)
                         continue
 
@@ -472,6 +478,7 @@ def _parse_streams(stream_paths: list[str]) -> dict[str, Any]:
     return {
         "usage": usage,
         "_usage_observed": usage_observed,
+        "_usage_attempts": usage_attempts,
         "tools": tools,
         "files": file_list,
         "items": items,
@@ -590,7 +597,8 @@ def load_span_costs(spans_dir: str) -> dict[str, dict[str, Any]]:
                         span = json.loads(line)
                     except ValueError:
                         continue
-                    if not isinstance(span, dict) or _is_rollup_only(span):
+                    if (not isinstance(span, dict) or
+                            span.get("schema") != "legion.span.v1" or _is_rollup_only(span)):
                         continue
                     rid = span.get("run_id")
                     if isinstance(rid, str):
@@ -642,7 +650,7 @@ def enrich_run(
                 "cost_usd": stream_cost,
                 "cost_status": "known",
                 "known_cost_usd": stream_cost,
-                "known_cost_attempts": 1,
+                "known_cost_attempts": activity.get("_usage_attempts", 0),
             }
         else:
             metering = {"cost_usd": None, "cost_status": "unknown",

@@ -505,7 +505,8 @@ SH
   [ "$status" -eq 0 ]
   evidence="$(printf '%s\n' "$output" | sed -n '1p')"
   reason="$(printf '%s\n' "$output" | sed -n '2p')"
-  jq -e '.status == "launch_failed" and .reason == "verified original reason"' \
+  jq -e '.status == "launch_failed" and .errno == 2
+    and .reason == "verified original reason"' \
     <<<"$evidence"
   [ "$reason" = "verified original reason" ]
 }

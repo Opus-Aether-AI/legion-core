@@ -161,6 +161,16 @@ make_test_repo() {
       and .cost_usd == null' "$attempt"
 }
 
+@test "legion-opencode: partial token counters cannot become exact priced usage" {
+    local repo attempt; repo="$(make_test_repo partial-tokens)"
+    MOCK_OPENCODE_PARTIAL_TOKENS=1 run "$LEGION_OPENCODE" run --task edit \
+      --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.usage_status == "unknown" and .usage == null
+      and .cost_status == "unknown" and .cost_usd == null' "$attempt"
+}
+
 @test "legion-opencode: task-file above per-argument limit still publishes a span" {
     local repo task_file attempt
     repo="$(make_test_repo large-task-span)"

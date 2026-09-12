@@ -507,7 +507,10 @@ except OSError:
   if jq -R -s -e '[splits("\n") | fromjson? | select(
       (.type=="message.updated" and (.properties.info.role? == "assistant") and (.properties.info.tokens? | type)=="object")
       or (.type=="step_finish" and (.part.tokens? | type)=="object"))] | length > 0' \
-      "$out_file" >/dev/null 2>&1; then
+      "$out_file" >/dev/null 2>&1 \
+      && jq -e 'all([.input_tokens,.output_tokens,.reasoning_output_tokens,
+                        .cache_read_input_tokens,.cache_creation_input_tokens][];
+                     type == "number" and . >= 0)' <<<"$usage" >/dev/null 2>&1; then
     usage_status=known; usage_source=opencode-jsonl
   fi
 

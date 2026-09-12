@@ -121,6 +121,21 @@ EOF
     [[ "$output" == *"timed out waiting"* ]]
 }
 
+@test "required workflow gate observes a pending run before it turns green" {
+    export CHECK_TIMEOUT_SECONDS=30
+    # Keep the traced child alive for a real poll interval so kcov can attach
+    # and record the wait branch even on a busy runner.
+    export CHECK_POLL_INTERVAL_SECONDS=1
+    export MOCK_REQUIRED_WORKFLOW_ONCE_PENDING_FILE="$TEST_TMPDIR/first-poll-done"
+    export MOCK_REQUIRED_WORKFLOW_RUNS=$'validate\tcompleted\tsuccess'
+
+    run bash "$AWAIT_REQUIRED_WORKFLOWS" validate
+    [ "$status" -eq 0 ]
+    [ -f "$MOCK_REQUIRED_WORKFLOW_ONCE_PENDING_FILE" ]
+    [[ "$output" == *"waiting for: validate(in_progress)"* ]]
+    [[ "$output" == *"all required checks green"* ]]
+}
+
 @test "required workflow gate accepts green validate and legion-ci push runs" {
     export MOCK_REQUIRED_WORKFLOW_RUNS=$'validate\tcompleted\tsuccess\nlegion-ci\tcompleted\tsuccess'
 

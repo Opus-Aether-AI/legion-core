@@ -423,6 +423,40 @@ def test_completed_multi_attempt_activity_prefers_durable_reconciliation(tmp_pat
     assert running["known_cost_attempts"] == 1
 
 
+def test_running_resumed_streams_count_each_usage_bearing_provider_attempt(tmp_path):
+    run_dir = tmp_path / "runs" / "resumed"
+    run_dir.mkdir(parents=True)
+    for name in ("stream.jsonl", "resume-stream.jsonl"):
+        (run_dir / name).write_text(
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 100}}) + "\n",
+            encoding="utf-8",
+        )
+    enriched = activity.enrich_run(
+        {"run_id": "resumed", "model": "test-model-alpha",
+         "lifecycle": {"phase": "running"}},
+        str(run_dir), _costs_payload(),
+    )
+    assert enriched["cost_status"] == "known"
+    assert enriched["known_cost_attempts"] == 2
+
+
+def test_non_span_jsonl_cannot_downgrade_durable_provider_cost(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "2026-09-11.jsonl").write_text("\n".join([
+        json.dumps({"schema": "legion.span.v1", "run_id": "valid",
+                    "cost_usd": 0.25, "cost_status": "known"}),
+        json.dumps({"schema": "unrelated.event.v1", "run_id": "valid"}),
+    ]) + "\n", encoding="utf-8")
+    assert activity.load_span_costs(str(spans))["valid"] == {
+        "cost_usd": 0.25,
+        "cost_status": "known",
+        "known_cost_usd": 0.25,
+        "known_cost_attempts": 1,
+        "attempt_count": 1,
+    }
+
+
 def test_completed_all_unknown_retries_still_prefer_durable_unknown(tmp_path):
     spans = tmp_path / "spans"
     spans.mkdir()

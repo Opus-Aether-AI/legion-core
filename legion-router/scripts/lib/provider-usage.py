@@ -62,18 +62,18 @@ def opencode_usage(path):
                 messages[info.get("id")] = info
     result = dict.fromkeys(FIELDS, 0)
     for item in (*messages.values(), *steps.values()):
-        tokens = item.get("tokens") or {}
-        if not isinstance(tokens, dict):
-            raise ValueError("invalid token object")
-        cache = tokens.get("cache") or {}
-        if not isinstance(cache, dict):
-            raise ValueError("invalid cache object")
+        tokens = item.get("tokens")
+        if not isinstance(tokens, dict) or not {"input", "output", "reasoning", "cache"} <= tokens.keys():
+            raise ValueError("incomplete token object")
+        cache = tokens["cache"]
+        if not isinstance(cache, dict) or not {"read", "write"} <= cache.keys():
+            raise ValueError("incomplete cache counters")
         for field, value in (
-            ("input_tokens", tokens.get("input", 0)),
-            ("output_tokens", tokens.get("output", 0)),
-            ("reasoning_output_tokens", tokens.get("reasoning", 0)),
-            ("cache_read_input_tokens", cache.get("read", 0)),
-            ("cache_creation_input_tokens", cache.get("write", 0)),
+            ("input_tokens", tokens["input"]),
+            ("output_tokens", tokens["output"]),
+            ("reasoning_output_tokens", tokens["reasoning"]),
+            ("cache_read_input_tokens", cache["read"]),
+            ("cache_creation_input_tokens", cache["write"]),
         ):
             result[field] += counter(value)
     return result

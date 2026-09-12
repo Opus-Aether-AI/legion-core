@@ -480,7 +480,7 @@ def _version_deadline_ns(env):
     return min(own_deadline, inherited_deadline)
 
 
-def _supervised_version_output(executable, args, env):
+def _supervised_version_output(executable, args, env, binary_digest):
     """Run one version probe under the canonical descendant-aware lease."""
 
     environment = dict(env)
@@ -500,6 +500,10 @@ def _supervised_version_output(executable, args, env):
                 str(VERSION_DISCOVERY_SECONDS),
                 "--status-file",
                 str(lease_path),
+                "--admitted-binary-sha256",
+                binary_digest,
+                "--admitted-binary-path",
+                executable,
                 "--",
                 executable,
                 *args,
@@ -627,7 +631,7 @@ def _discover_version(executable, config, cache_dir, binary_digest, config_diges
     probe = {"status": "not_requested", "reason": None, "lease": None}
     if args:
         try:
-            raw, probe = _supervised_version_output(executable, args, env)
+            raw, probe = _supervised_version_output(executable, args, env, binary_digest)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             raw = None
             probe = {

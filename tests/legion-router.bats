@@ -1745,8 +1745,9 @@ SH
       and .attempt_receipt != null and .failure_receipt != null and .lease_receipt != null'
     art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
     [ -f "$art/sandcastle-provider-launched" ]
-    jq -e '.schema == "legion.sandcastle-provider-launch.v1" and .status == "started"
-      and (.token | type == "string" and length == 48) and .provider_pid > 0' \
+    jq -e '.schema == "legion.sandcastle-provider-launch.v2" and .status == "started"
+      and (.auth | type == "string" and length == 64) and .provider_pid > 0
+      and (has("token") | not)' \
       "$art/sandcastle-provider-launched"
     attempt="$(find "$art" -maxdepth 1 -type f -name 'attempt-*.json' -print -quit)"
     jq -e '.terminal_status == "failed" and .failure.class == "provider"' "$attempt"
@@ -1783,8 +1784,9 @@ SH
     echo "$output" | tail -n 1 | jq -e '.status == "refused"
       and .attempt_receipt == null and .failure_receipt == null'
     art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
-    jq -e '.schema == "legion.sandcastle-provider-launch.v1" and .status == "not-started"
-      and (.token | type == "string" and length == 48)' "$art/sandcastle-provider-launched"
+    jq -e '.schema == "legion.sandcastle-provider-launch.v2" and .status == "not-started"
+      and (.auth | type == "string" and length == 64)
+      and (has("token") | not)' "$art/sandcastle-provider-launched"
     [ "$(find "$art" -maxdepth 1 -type f -name 'attempt-[0-9]*.json' | wc -l | tr -d ' ')" -eq 0 ]
     [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 0 ]
 }

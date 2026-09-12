@@ -375,7 +375,8 @@ def test_supervised_version_probe_rejects_unsafe_lease_leaf_without_blocking(
     monkeypatch.setattr(preflight.subprocess, "Popen", FinishedSupervisor)
     started = time.monotonic()
     version, probe = preflight._supervised_version_output(
-        "/usr/bin/true", ["--version"], {"PATH": os.environ["PATH"]}
+        "/usr/bin/true", ["--version"], {"PATH": os.environ["PATH"]},
+        preflight._sha256_file("/usr/bin/true"),
     )
     assert time.monotonic() - started < 1
     assert version is None
@@ -408,6 +409,27 @@ def test_malformed_matching_cache_reprobes_without_crashing(tmp_path: Path) -> N
     assert first["status"] == second["status"] == "supported"
     assert second["cache"]["hit"] is False
     assert second["identity"]["version"] == "1.2.3"
+
+
+def test_version_probe_refuses_binary_replaced_after_admission(tmp_path: Path) -> None:
+    binary = executable(tmp_path / "fixture")
+    admitted_digest = preflight._sha256_file(binary)
+    marker = tmp_path / "unadmitted-ran"
+    replacement = tmp_path / "replacement"
+    replacement.write_text(
+        f"#!/bin/sh\nprintf replaced > {marker}\nprintf 'fixture-provider 1.2.3\\n'\n",
+        encoding="utf-8",
+    )
+    replacement.chmod(0o700)
+    os.replace(replacement, binary)
+
+    raw, probe = preflight._supervised_version_output(
+        str(binary), ["--version"], {"PATH": os.environ["PATH"]}, admitted_digest,
+    )
+
+    assert raw is None
+    assert probe["status"] == "launch_failed"
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize(

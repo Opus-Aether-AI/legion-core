@@ -737,6 +737,7 @@ print(
         {
             "status": status,
             "reason": value.get("reason") if status == "launch_failed" else None,
+            "errno": value.get("errno") if status == "launch_failed" else None,
         },
         separators=(",", ":"),
     ),

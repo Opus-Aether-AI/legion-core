@@ -53,6 +53,14 @@ make_test_repo() {
     grep -Eq '^opencode active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
+@test "legion-opencode: catalog role is resolved before provider launch" {
+    local repo; repo="$(make_test_repo catalog-role)"
+    run "$LEGION_OPENCODE" run --model opencode_default --task inspect --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    assert_mock_called opencode "-m $OPENCODE_DEFAULT"
+    ! grep -q -- '-m opencode_default' "$MOCK_CALL_LOG"
+}
+
 @test "legion-opencode: adopts a preallocated run id and closes its queued lifecycle" {
     local repo; repo="$(make_test_repo adopted-id)"
     local run_id="queued-slice-opencode"

@@ -653,6 +653,26 @@ SH
   ' "$attempt"
 }
 
+@test "Pi and Hermes catalog roles launch their admitted concrete models" {
+  local kind repo model result attempt
+  for kind in pi hermes; do
+    repo="$(make_test_repo "$kind-catalog-role")"
+    model="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref "${kind}_default")"
+    if [[ "$kind" == pi ]]; then
+      PI_BIN=pi run "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+        --model pi_default --repo "$repo" --quiet
+    else
+      HERMES_BIN=hermes run "$REPO_ROOT/legion-router/bin/legion-hermes" run --task inspect \
+        --model hermes_default --repo "$repo" --quiet
+    fi
+    [ "$status" -eq 0 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    attempt="$(jq -r .attempt_receipt <<<"$result")"
+    jq -e --arg model "$model" '.requested_model == $model' "$attempt"
+    assert_mock_called "$kind" "$model"
+  done
+}
+
 @test "Pi and Hermes provider spans use the observed model from their attempt receipts" {
   local kind repo result attempt
   for kind in pi hermes; do

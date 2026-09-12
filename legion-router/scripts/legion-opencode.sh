@@ -317,6 +317,7 @@ cmd_run() {
   fi
   default_model="$(legion_model_ref opencode_default)" || die "could not resolve opencode_default in models.toml"
   [[ -n "$model" ]] || model="$default_model"
+  model="$(legion_provider_model opencode "$model")"
   if [[ -n "$preset_run_id" ]]; then
     legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" ""

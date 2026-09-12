@@ -627,6 +627,7 @@ cmd_run() {
   default_model="$(legion_model_ref claude_default)" || die "could not resolve claude_default in models.toml"
   default_fallback_model="$(legion_model_ref codex_workhorse)" || die "could not resolve codex_workhorse in models.toml"
   [[ -n "$model" ]] || model="$default_model"
+  model="$(legion_provider_model claude "$model")"
   [[ -n "$fallback_model" ]] || fallback_model="$default_fallback_model"
   [[ -n "$sandbox" ]] || sandbox="workspace-write"
   case "$sandbox" in

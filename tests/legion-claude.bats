@@ -851,6 +851,16 @@ PY
     assert_mock_called claude "output-format json --model $CLAUDE_DEFAULT"
 }
 
+@test "legion-claude: catalog role launches its admitted concrete provider model" {
+    local repo; repo="$(make_test_repo catalog-role)"
+    run "$LEGION_CLAUDE" run --model claude_default --task inspect --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | tail -n 1 | jq -e --arg model "$CLAUDE_DEFAULT" \
+      '.model == $model and .status == "ok"'
+    assert_mock_called claude "--model $CLAUDE_DEFAULT"
+    ! grep -q -- '--model claude_default' "$MOCK_CALL_LOG"
+}
+
 # ── same-vendor model chain (--fallback-models) ──────────────────────────
 # The chain exists because the Claude adapter's only escape used to be
 # CROSS-EXECUTOR: a model that declined handed the work to a codex model, which

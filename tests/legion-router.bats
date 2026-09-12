@@ -1656,6 +1656,15 @@ $run_error" ]
     assert_mock_called codex "skip-git-repo-check"
 }
 
+@test "delegate run: catalog role launches the concrete Codex model" {
+    local repo model; repo="$(make_test_repo codex-catalog-role)"
+    model="$("$REPO_ROOT/legion-router/bin/legion-route" --model-ref codex_workhorse)"
+    run "$DELEGATE" run --model codex_workhorse --task inspect --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    assert_mock_called codex "exec --json -m $model"
+    ! grep -q -- '-m codex_workhorse' "$MOCK_CALL_LOG"
+}
+
 @test "delegate run: span records copied secret names without values" {
     local repo; repo="$(make_test_repo secret-audit)"
     mkdir -p "$repo/.legion"
@@ -2507,6 +2516,33 @@ SH
       'select(.run_id == \"$run_id\" and .executor == \"codex-review\" and .status == \"failed\")'"
     [ "$status" -eq 0 ]
     [ "$(find "$repo/.legion/worktrees" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
+}
+
+@test "delegate review: immutable attempt collision fails containment instead of losing paid evidence" {
+    local repo pid_file stdout stderr review_pid rc=0 art receipt
+    repo="$(make_test_repo review-attempt-collision)"
+    pid_file="$TEST_TMPDIR/review-attempt-collision.pid"
+    stdout="$TEST_TMPDIR/review-attempt-collision.out"
+    stderr="$TEST_TMPDIR/review-attempt-collision.err"
+    MOCK_CODEX_REVIEW_DELAY=2 MOCK_CODEX_REVIEW_CHILD_PID_FILE="$pid_file" \
+      "$DELEGATE" review --model test-model-beta --base HEAD --repo "$repo" --quiet \
+        >"$stdout" 2>"$stderr" &
+    review_pid=$!
+    for _ in {1..200}; do
+      [[ -s "$pid_file" ]] && break
+      sleep 0.02
+    done
+    [ -s "$pid_file" ]
+    art="$(find "$repo/.legion/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    [ -n "$art" ]
+    printf '{}\n' > "$art/attempt-1.json"
+    wait "$review_pid" || rc=$?
+    [ "$rc" -eq 70 ]
+    receipt="$art/terminal.json"
+    jq -e '.status == "containment_failed" and .codex_exit == 70
+      and (.reason | contains("attempt receipt could not be published"))' "$receipt"
+    [ "$(cat "$art/attempt-1.json")" = '{}' ]
+    [ -d "$(jq -r .worktree "$art/status.json")" ]
 }
 
 @test "delegate review: a delayed signal preserves an authoritative completed receipt" {

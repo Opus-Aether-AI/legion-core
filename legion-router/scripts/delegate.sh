@@ -168,6 +168,7 @@ SANDCASTLE_PROVIDER_MARKER=""
 SANDCASTLE_PROVIDER_TOKEN=""
 SANDCASTLE_CONTAINMENT_FAILED=0
 SANDCASTLE_CONTAINMENT_REASON=""
+SANDCASTLE_LAUNCH_UNCERTAIN=0
 PROMPT_CHILD_PID=""
 PROMPT_CHILD_RC=0
 PROMPT_ATTEMPT_LAUNCHED=0
@@ -291,12 +292,14 @@ write_interrupted_native_attempt() {
     NATIVE_ATTEMPT_ART=""
     return 0
   fi
-  if legion_adapter_supervisor_cleanup_failed_before_launch "$NATIVE_LEASE_STATUS"; then
+  if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 ]] \
+      && legion_adapter_supervisor_cleanup_failed_before_launch "$NATIVE_LEASE_STATUS"; then
     NATIVE_ATTEMPT_ART=""
     NATIVE_ATTEMPT_LAUNCHED=0
     return 0
   fi
-  if legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
+  if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 ]] \
+      && legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
     # Popen never returned a child, so even a signal arriving after the
     # supervisor exits must not invent a cancelled provider attempt.
     NATIVE_ATTEMPT_ART=""
@@ -306,6 +309,12 @@ write_interrupted_native_attempt() {
   local ended_at end_ms duration usage cost output_started=false lease_status="" child_rc
   local usage_status=unknown cost_status=unknown terminal_status=cancelled
   local failure_class=cancelled provider_code=143 message="provider attempt interrupted by signal"
+  if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -eq 1 ]]; then
+    terminal_status=failed
+    failure_class=internal
+    provider_code=70
+    message="Sandcastle provider launch is ambiguous after termination; possible paid attempt"
+  fi
   ended_at="$(_now)"; end_ms="$(date +%s000)"
   duration=$((end_ms-NATIVE_ATTEMPT_START_MS)); [[ "$duration" -ge 0 ]] || duration=0
   usage="$(codex_usage "$NATIVE_ATTEMPT_STREAM" 2>/dev/null || printf '{}')"
@@ -332,11 +341,19 @@ write_interrupted_native_attempt() {
     then (.child_exit_code | tostring) else "" end
   ' "$NATIVE_LEASE_STATUS" 2>/dev/null || true)"
   [[ -n "$child_rc" ]] || child_rc="$CODEX_CHILD_RC"
+  if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -eq 1 ]]; then
+    usage='{}'
+    cost=0
+    usage_status=unknown
+    cost_status=unknown
+  fi
   case "$lease_status" in
     completed)
       # wait(1) and the lease sidecar can become authoritative just before Bash
       # dispatches a pending signal. Preserve that completed provider outcome.
-      if [[ "$child_rc" =~ ^[0-9]+$ && "$child_rc" -eq 0 ]]; then
+      if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -eq 1 ]]; then
+        : # An outer Sandcastle completion cannot authenticate an inner launch.
+      elif [[ "$child_rc" =~ ^[0-9]+$ && "$child_rc" -eq 0 ]]; then
         terminal_status=succeeded
         failure_class=""
         provider_code=""
@@ -349,10 +366,12 @@ write_interrupted_native_attempt() {
       fi
       ;;
     timed_out)
-      terminal_status=timed_out
-      failure_class=timed_out
-      provider_code=124
-      message="$(legion_adapter_lease_reason "$NATIVE_LEASE_STATUS")"
+      if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 ]]; then
+        terminal_status=timed_out
+        failure_class=timed_out
+        provider_code=124
+        message="$(legion_adapter_lease_reason "$NATIVE_LEASE_STATUS")"
+      fi
       ;;
   esac
   legion_adapter_write_attempt "$NATIVE_ATTEMPT_ART" "$NATIVE_ATTEMPT_EXECUTOR" openai \
@@ -451,9 +470,8 @@ on_terminating_signal() {
       pending|malformed)
         # A pending or invalid marker cannot distinguish a child created just
         # before termination from no launch. Fail containment closed and retain
-        # the evidence, but do not fabricate provider accounting.
-        interrupted_native_launched=0
-        NATIVE_ATTEMPT_LAUNCHED=0
+        # the evidence and conservatively count a possible paid attempt.
+        SANDCASTLE_LAUNCH_UNCERTAIN=1
         terminal_status=containment_failed
         provider_exit=70
         LEGION_WT_KEEP=1
@@ -823,6 +841,7 @@ run_sandcastle() {
   SANDCASTLE_SETUP_REFUSED=0
   SANDCASTLE_CONTAINMENT_FAILED=0
   SANDCASTLE_CONTAINMENT_REASON=""
+  SANDCASTLE_LAUNCH_UNCERTAIN=0
   node_bin="$(command -v node 2>/dev/null || true)"
   [[ -n "$node_bin" ]] || {
     printf 'legion-delegate: node is required for --sandbox %s. Run: npm i -D @ai-hero/sandcastle\n' "$sandbox" >&2
@@ -908,6 +927,9 @@ PY
   provider_launch_status="$(sandcastle_provider_launch_status)"
   if [[ "$NATIVE_LAUNCH_GATE_UNRESOLVED" -eq 1 \
       || "$provider_launch_status" == pending || "$provider_launch_status" == malformed ]]; then
+    if [[ "$provider_launch_status" == pending || "$provider_launch_status" == malformed ]]; then
+      SANDCASTLE_LAUNCH_UNCERTAIN=1
+    fi
     SANDCASTLE_CONTAINMENT_FAILED=1
     LEGION_WT_KEEP=1
     rc=70
@@ -2122,6 +2144,7 @@ cmd_run() {
   esac
   [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
   [[ -n "$model" ]] || die "run: --model or --archetype required"
+  model="$(legion_provider_model codex "$model")"
 
   if ! legion_adapter_preflight codex "$art" "$sandbox" stdin "$model" "$effort" 0 "$CODEX_BIN"; then
     local preflight_disposition
@@ -2253,6 +2276,7 @@ cmd_run() {
   local tried="" attempt
   for attempt in ${model_list//,/ }; do
     [[ -z "$attempt" ]] && continue
+    attempt="$(legion_provider_model codex "$attempt")"
     case ",$tried," in *",$attempt,"*) continue ;; esac    # dedup
     tried="${tried:+$tried,}$attempt"
     candidate_ordinal=$((candidate_ordinal + 1))
@@ -2351,13 +2375,16 @@ cmd_run() {
       rm -f "$art/attempt.json" "$art/failure.json"
       LEGION_ADAPTER_ATTEMPT_PATH=""
       LEGION_ADAPTER_FAILURE_PATH=""
-      NATIVE_ATTEMPT_ART=""
-      NATIVE_ATTEMPT_LAUNCHED=0
-      CODEX_SIGNAL_CHILD_PID=""
-      CODEX_CHILD_RC=0
-      break
+      if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 ]]; then
+        NATIVE_ATTEMPT_ART=""
+        NATIVE_ATTEMPT_LAUNCHED=0
+        CODEX_SIGNAL_CHILD_PID=""
+        CODEX_CHILD_RC=0
+        break
+      fi
     fi
-    if legion_adapter_supervisor_cleanup_failed_before_launch "$NATIVE_LEASE_STATUS"; then
+    if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 ]] \
+        && legion_adapter_supervisor_cleanup_failed_before_launch "$NATIVE_LEASE_STATUS"; then
       containment_failed=1
       lease_receipt="$NATIVE_LEASE_STATUS"
       lease_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS") (evidence: $NATIVE_LEASE_STATUS; worktree retained: $wt)"
@@ -2370,7 +2397,8 @@ cmd_run() {
       CODEX_SIGNAL_CHILD_PID=""
       CODEX_CHILD_RC=0
       break
-    elif legion_adapter_supervisor_timed_out_before_launch "$NATIVE_LEASE_STATUS" "$rc"; then
+    elif [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 ]] \
+        && legion_adapter_supervisor_timed_out_before_launch "$NATIVE_LEASE_STATUS" "$rc"; then
       # The strict sidecar proves no provider launch, while rc 124 proves the
       # shared lease—not executor availability—ended candidate selection.
       lease_exhausted=1
@@ -2385,7 +2413,8 @@ cmd_run() {
       CODEX_SIGNAL_CHILD_PID=""
       CODEX_CHILD_RC=0
       break
-    elif legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
+    elif [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 ]] \
+        && legion_adapter_supervisor_launch_failed "$NATIVE_LEASE_STATUS"; then
       launch_failed=1
       lease_receipt="$NATIVE_LEASE_STATUS"
       launch_failure_reason="$(legion_adapter_supervisor_reason "$NATIVE_LEASE_STATUS")"
@@ -2402,7 +2431,7 @@ cmd_run() {
       CODEX_CHILD_RC=0
       break
     fi
-    if [[ "$SANDCASTLE_SETUP_REFUSED" -eq 1 ]]; then
+    if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 && "$SANDCASTLE_SETUP_REFUSED" -eq 1 ]]; then
       sandcastle_setup_refused=1
       sandcastle_setup_reason="$(error_log_summary "$art/codex.err" "$art/codex.err")"
       [[ -n "$sandcastle_setup_reason" ]] || sandcastle_setup_reason="Sandcastle setup failed before provider launch"
@@ -2428,10 +2457,12 @@ cmd_run() {
     fi
     if is_sandcastle_sandbox "$sandbox"; then
       attempt_usage="$(jq -c '.usage // {}' "$art/sandcastle-result.json" 2>/dev/null || printf '{}')"
+      [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 ]] || attempt_usage='{}'
       if jq -e '.status == "ok"' "$art/sandcastle-result.json" >/dev/null 2>&1; then
         attempt_output_started=true
       fi
-      if jq -e '.usage | type == "object"' "$art/sandcastle-result.json" >/dev/null 2>&1; then
+      if [[ "$SANDCASTLE_LAUNCH_UNCERTAIN" -ne 1 ]] \
+          && jq -e '.usage | type == "object"' "$art/sandcastle-result.json" >/dev/null 2>&1; then
         attempt_usage_status=known
         cost_model_has_pricing "$attempt" && attempt_cost_status=known
       fi
@@ -3863,6 +3894,7 @@ cmd_review() {
       note "⚠ reviewer '$review_executor' has no resolvable model ($review_model_ref); trying the next candidate"
       continue
     fi
+    model="$(legion_provider_model "$review_executor" "$model")"
     # Terminal identity belongs to the candidate currently being admitted,
     # independently of any earlier paid attempts retained for reconciliation.
     REVIEW_EXECUTOR_LABEL="$review_executor"
@@ -3996,14 +4028,21 @@ cmd_review() {
         usage_status=known
         cost_model_has_pricing "$model" && cost_status=known
       fi
-      legion_adapter_write_attempt "$art" codex-review openai "$attempt" "$model" "" \
+      if ! legion_adapter_write_attempt "$art" codex-review openai "$attempt" "$model" "" \
         "$effort" "$effort" "$sandbox" "$terminal" "$native_attempt_started_at" \
         "$native_attempt_ended_at" "$((native_attempt_end_ms-native_attempt_start_ms))" \
         "$attempt_usage" "$usage_status" \
         "$([[ "$usage_status" == known ]] && printf codex-jsonl)" "$attempt_cost" \
         "$cost_status" "$([[ "$cost_status" == known ]] && printf legion-cost-table)" \
         "$failure" "$retryable" "$output_started" \
-        "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$message"
+        "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$message"; then
+        review_containment_failed=1
+        LEGION_WT_KEEP=1
+        status=containment_failed
+        reason="native reviewer ran but its immutable attempt receipt could not be published (expected: $art/attempt-$attempt.json; worktree retained: $wt)"
+        rc=70
+        return 1
+      fi
       review_attempt_receipt="$LEGION_ADAPTER_ATTEMPT_PATH"
       review_failure_receipt="$LEGION_ADAPTER_FAILURE_PATH"
       review_track_attempt_receipt "$review_attempt_receipt"
@@ -4498,6 +4537,7 @@ cmd_resume() {
   # Inherit the original run's model (persisted by `run`) so resume doesn't silently drift (M2).
   [[ -n "$model" ]] || model="$(cat "$art/model.txt" 2>/dev/null || true)"
   [[ -n "$model" ]] || model="$(legion_model_ref codex_workhorse)" || die "could not resolve codex_workhorse in models.toml"
+  model="$(legion_provider_model codex "$model")"
   [[ -n "$effort" ]] || effort="xhigh"   # codex always at xhigh unless overridden
   case "$(jq -r '.sandbox // empty' "$art/attempt.json" 2>/dev/null || true)" in
     read-only) resume_sandbox="read-only" ;;

@@ -1315,6 +1315,7 @@ cmd_run() {
   if [[ "$ADAPTER_KIND" == pi && "$MODEL" =~ :(off|minimal|low|medium|high|xhigh|max)$ ]]; then
     [[ -n "$THINKING" ]] || THINKING="${BASH_REMATCH[1]}"; MODEL="${MODEL%:*}"
   fi
+  MODEL="$(legion_provider_model "$ADAPTER_KIND" "$MODEL")"
   [[ "$ADAPTER_KIND" != pi || -z "$THINKING" ]] || valid_thinking "$THINKING" || die "invalid --thinking '$THINKING' (off|minimal|low|medium|high|xhigh|max)"
   local requested_model="$MODEL"
   RUN_ID="${PRESET_RUN_ID:-$(_run_id)}"; WT="$REPO/.legion/worktrees/$RUN_ID"; WT_RECORD="$WT"; ART="$REPO/.legion/runs/$RUN_ID"; BRANCH="legion/$ADAPTER_KIND-$RUN_ID"

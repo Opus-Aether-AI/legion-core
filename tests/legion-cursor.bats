@@ -53,6 +53,14 @@ make_test_repo() {
     grep -Eq '^agent active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
 }
 
+@test "legion-cursor: catalog role is resolved before provider launch" {
+    local repo; repo="$(make_test_repo catalog-role)"
+    run "$LEGION_CURSOR" run --model cursor_default --task inspect --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    assert_mock_called agent "--model $CURSOR_DEFAULT"
+    ! grep -q -- '--model cursor_default' "$MOCK_CALL_LOG"
+}
+
 @test "legion-cursor: provider failure reports unknown metering as nullable" {
     local repo; repo="$(make_test_repo failed-metering)"
 

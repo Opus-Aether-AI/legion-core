@@ -471,15 +471,18 @@ SH
 
     [ "$rc" -eq 70 ]
     art="$repo/.legion/runs/sandcastle-$state-signal"
-    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 0 ]
-    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s '[.[] | select(.artifacts.provider_attempt == true)] | length')" -eq 0 ]
+    jq -e '.terminal_status == "failed" and .failure.class == "internal"
+      and .usage_status == "unknown" and .cost_status == "unknown"' "$art/attempt-1.json"
+    [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 1 ]
+    [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s --arg run "sandcastle-$state-signal" \
+      '[.[] | select(.run_id == $run and .artifacts.provider_attempt == true)] | length')" -eq 1 ]
     jq -e '.lifecycle.phase == "containment_failed"' \
       "$LEGION_REGISTRY_DIR/sandcastle-$state-signal.json"
     [ -d "$repo/.legion/worktrees/sandcastle-$state-signal" ]
   done
 }
 
-@test "Sandcastle pending and malformed markers suppress accounting after success or lease expiry" {
+@test "Sandcastle pending and malformed markers conservatively account for a possible attempt" {
   local state mode repo rc art result lease
   install_mock_sandcastle_provider_node
   install_sandcastle_pending_python
@@ -504,8 +507,8 @@ SH
         "$state" "$mode" "$rc" "$(cat "$TEST_TMPDIR/$state-$mode.out")" \
         "$(cat "$TEST_TMPDIR/$state-$mode.err")" >&2; return 1; }
       result="$(tail -n 1 "$TEST_TMPDIR/$state-$mode.out")"
-      jq -e '.status == "containment_failed" and .attempt_receipt == null
-        and .failure_receipt == null and .usage_status == "unknown"
+      jq -e '.status == "containment_failed" and (.attempt_receipt | endswith("/attempt-1.json"))
+        and .usage_status == "unknown"
         and .cost_status == "unknown"' <<<"$result" || {
           printf 'state=%s mode=%s result=%s err=%s\n' \
             "$state" "$mode" "$result" "$(cat "$TEST_TMPDIR/$state-$mode.err")" >&2
@@ -514,9 +517,11 @@ SH
       art="$repo/.legion/runs/sandcastle-$state-$mode"
       lease="$(jq -r .lease_receipt <<<"$result")"
       jq -e '.status == "cleanup_failed" and (.reason | contains("provider launch evidence"))' "$lease"
-      [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 0 ]
+      jq -e '.terminal_status == "failed" and .failure.class == "internal"
+        and .usage_status == "unknown" and .cost_status == "unknown"' "$art/attempt-1.json"
+      [ "$(find "$art" -maxdepth 1 -name 'attempt-*.json' ! -name '*.lease.json' | wc -l | tr -d ' ')" -eq 1 ]
       [ "$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -s --arg run "sandcastle-$state-$mode" \
-        '[.[] | select(.run_id == $run and .artifacts.provider_attempt == true)] | length')" -eq 0 ]
+        '[.[] | select(.run_id == $run and .artifacts.provider_attempt == true)] | length')" -eq 1 ]
       jq -e '.lifecycle.phase == "containment_failed"' \
         "$LEGION_REGISTRY_DIR/sandcastle-$state-$mode.json"
       [ -d "$repo/.legion/worktrees/sandcastle-$state-$mode" ]

@@ -51,10 +51,23 @@ def load(paths):
 
 def _num(x):
     # reject bool (True is int 1), NaN (x != x), and non-numerics
-    return x if (
-        isinstance(x, (int, float)) and not isinstance(x, bool)
-        and math.isfinite(x)
-    ) else 0
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return 0.0
+    try:
+        value = float(x)
+    except OverflowError:
+        return 0.0
+    return value if math.isfinite(value) else 0.0
+
+
+def _nonnegative_num(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) and numeric >= 0 else None
 
 
 def _valid_usage(value):
@@ -68,18 +81,18 @@ def _provenance_status(span, kind):
     status = span.get(f"{kind}_status")
     value = span.get("cost_usd" if kind == "cost" else "tokens")
     value_is_known = (
-        isinstance(value, (int, float)) and not isinstance(value, bool)
-        and math.isfinite(value) and value >= 0
-    ) if kind == "cost" else _valid_usage(value)
+        _nonnegative_num(value) is not None
+        if kind == "cost" else _valid_usage(value)
+    )
     if status == "known":
         return "known" if value_is_known else "unknown"
     if status == "partial":
         known_value = span.get("known_cost_usd" if kind == "cost" else "known_usage")
         known_count = span.get("known_cost_attempts" if kind == "cost" else "known_usage_attempts")
         known_value_is_valid = (
-            isinstance(known_value, (int, float)) and not isinstance(known_value, bool)
-            and math.isfinite(known_value) and known_value >= 0
-        ) if kind == "cost" else _valid_usage(known_value)
+            _nonnegative_num(known_value) is not None
+            if kind == "cost" else _valid_usage(known_value)
+        )
         return "partial" if known_value_is_valid and _positive_count(known_count) else "unknown"
     if status in {"unknown", "not_applicable"}:
         return status
@@ -102,6 +115,7 @@ def _merged_status(known, partial, unknown, not_applicable):
 def _new_group():
     return {
         "count": 0, "ok": 0, "_known_cost": 0.0, "_dur": [],
+        "_cost_overflow": 0,
         "_cost_known": 0, "_cost_partial": 0, "_cost_unknown": 0, "_cost_na": 0,
         "_usage_known": 0, "_usage_partial": 0, "_usage_unknown": 0, "_usage_na": 0,
         "_known_cost_runs": 0, "_known_usage_runs": 0,
@@ -115,9 +129,11 @@ def _record_provenance(group, span):
     group[f"_usage_{'na' if usage_status == 'not_applicable' else usage_status}"] += 1
     if cost_status == "known":
         group["_known_cost"] += _num(span.get("cost_usd"))
+        group["_cost_overflow"] += not math.isfinite(group["_known_cost"])
         group["_known_cost_runs"] += 1
     elif cost_status == "partial":
         group["_known_cost"] += _num(span.get("known_cost_usd"))
+        group["_cost_overflow"] += not math.isfinite(group["_known_cost"])
         group["_known_cost_runs"] += _positive_count(span.get("known_cost_attempts"))
     if usage_status == "known":
         group["_known_usage_runs"] += 1
@@ -136,6 +152,10 @@ def _finalize_group(group):
     usage_status = _merged_status(
         group["_usage_known"], group["_usage_partial"], group["_usage_unknown"], group["_usage_na"]
     )
+    if group["_cost_overflow"]:
+        cost_status = "unknown"
+        group["_known_cost_runs"] = 0
+        group["_known_cost"] = 0.0
     known_cost = round(group["_known_cost"], 6)
     return {
         "count": group["count"],
@@ -143,7 +163,7 @@ def _finalize_group(group):
         "success_rate": round(group["ok"] / group["count"], 4) if group["count"] else 0,
         "cost_usd": known_cost if cost_status == "known" else None,
         "cost_status": cost_status,
-        "known_cost_usd": known_cost if group["_cost_known"] or group["_cost_partial"] else None,
+        "known_cost_usd": known_cost if group["_known_cost_runs"] else None,
         "known_cost_runs": group["_known_cost_runs"],
         "usage_status": usage_status,
         "known_usage_runs": group["_known_usage_runs"],

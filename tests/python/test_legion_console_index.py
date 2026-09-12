@@ -229,6 +229,32 @@ def test_load_spans_latest_ts_wins_and_sums_cost_and_tokens(tmp_path):
     }
 
 
+def test_console_downgrades_huge_cost_and_preserves_huge_token_map(tmp_path):
+    huge = 10**1000
+    span = _span("huge", cost_usd=huge, tokens={"input_tokens": huge})
+    span.update({"cost_status": "known", "usage_status": "known", "duration_ms": huge})
+    _write_spans(tmp_path / "spans", span)
+
+    loaded = indexer.load_spans(str(tmp_path / "spans"))["huge"]
+    assert loaded["cost_status"] == "unknown"
+    assert loaded["cost_usd"] is None
+    assert loaded["known_cost_usd"] is None
+    assert loaded["tokens"]["input_tokens"] == huge
+    run = indexer.build_run(_record("huge"), loaded)
+    assert run["tokens_total"] == huge
+    assert indexer._format_cost(huge, "known") == "unknown"
+
+    overflow_dir = tmp_path / "overflow-spans"
+    _write_spans(
+        overflow_dir,
+        _span("overflow", cost_usd=1e308),
+        _span("overflow", ts="2026-06-15T10:11:00Z", cost_usd=1e308),
+    )
+    overflow = indexer.load_spans(str(overflow_dir))["overflow"]
+    assert overflow["cost_status"] == "unknown"
+    assert overflow["known_cost_usd"] is None
+
+
 def test_console_index_preserves_unknown_and_partial_metering(tmp_path):
     spans_dir = tmp_path / "spans"
     known = _span("mixed", cost_usd=0)

@@ -430,7 +430,9 @@ assert_signal_receipt() {
       PENDING=""
       trap '\''
         if [[ "${LEGION_TEST_RACE_FIRED:-0}" == 0
-              && "$BASH_COMMAND" == mv\ -f* \
+              && "$BASH_COMMAND" == "LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE=0" \
+              && "${LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN:-0}" == 1 \
+              && "${decision:-}" == go \
               && " ${FUNCNAME[*]:-} " == *" legion_adapter_complete_supervisor_launch_gate "* ]]; then
           LEGION_TEST_RACE_FIRED=1
           trap - DEBUG
@@ -447,7 +449,8 @@ assert_signal_receipt() {
   rc=$status
   kill "$supervisor" 2>/dev/null || true
   wait "$supervisor" 2>/dev/null || true
-  [ "$rc" -eq 0 ]
+  [ "$rc" -eq 0 ] || { printf 'child rc=%s output=%s gate=%s lease=%s\n' \
+    "$rc" "$output" "$(cat "$gate" 2>/dev/null)" "$(cat "$lease" 2>/dev/null)" >&2; return 1; }
   [ ! -e "$launched" ]
   jq -e '
     .schema == "legion.child-launch-gate.v1" and .status == "cancel"
@@ -769,13 +772,13 @@ SH
     emit_span() {
       jq -cn --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
         '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+        >> "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl"
     }
     legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"
     legion_adapter_write_signal_receipt 15 127 ""
     legion_adapter_emit_signal_span delayed "" || true
     [[ -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
-    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d " ")" == 1 ]]
+    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl" | tr -d " ")" == 1 ]]
   ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$art" "$spans"
   [ "$status" -eq 0 ]
 }
@@ -800,11 +803,11 @@ SH
     emit_span() {
       jq -cn --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
         '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+        >> "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl"
     }
     legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH"
     [[ -d "$LEGION_ADAPTER_ATTEMPT_PATH.provider-span-emitted" ]]
-    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d " ")" == 1 ]]
+    [[ "$(wc -l < "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl" | tr -d " ")" == 1 ]]
   ' _ "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" "$art" "$spans"
   [ "$status" -eq 0 ]
 }

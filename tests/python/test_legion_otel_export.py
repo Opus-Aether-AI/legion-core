@@ -99,6 +99,28 @@ def test_span_to_otlp_tolerates_nonnumeric_duration_and_cost():
     assert "legion.cost_usd" not in attributes
 
 
+def test_otlp_downgrades_huge_cost_and_preserves_huge_usage_as_json():
+    huge = 10**1000
+    span = oe.span_to_otlp(
+        {
+            **_SPAN,
+            "cost_usd": huge,
+            "cost_status": "known",
+            "duration_ms": huge,
+            "tokens": {"input_tokens": huge},
+            "usage_status": "known",
+            "attempt_ordinal": huge,
+        }
+    )
+    attributes = {item["key"]: item["value"] for item in span["attributes"]}
+    assert attributes["legion.cost_status"]["stringValue"] == "unknown"
+    assert "legion.cost_usd" not in attributes
+    assert "legion.attempt_ordinal" not in attributes
+    assert "legion.tokens.input_tokens" not in attributes
+    assert json.loads(attributes["legion.usage"]["stringValue"])["input_tokens"] == huge
+    assert span["endTimeUnixNano"] == span["startTimeUnixNano"]
+
+
 def test_ts_nanos_naive_is_assumed_utc():
     assert oe._ts_nanos("2026-06-15T12:00:00Z") == oe._ts_nanos("2026-06-15T12:00:00")
 

@@ -102,8 +102,36 @@ SH
     '
 
   [ "$status" -ne 0 ]
-  jq -e '.schema == "legion.preflight.v1" and .status == "untested"' \
+  jq -e '.schema == "legion.preflight.v1" and .status == "invalid"
+    and (.reason | contains("malformed or incomplete"))' \
     "$art/fixture-preflight.json"
+}
+
+@test "adapter contract rejects incomplete supported output and never follows preflight alias" {
+  local fake_root="$TEST_TMPDIR/fake-supported" art="$TEST_TMPDIR/art-supported"
+  local target="$TEST_TMPDIR/host-target"
+  mkdir -p "$fake_root/legion-router/bin" "$art"
+  printf 'host-data\n' > "$target"
+  ln -s "$target" "$art/preflight.json"
+  cat > "$fake_root/legion-router/bin/legion-preflight" <<'SH'
+#!/usr/bin/env bash
+jq -cn '{schema:"legion.preflight.v1",checked_at:"2026-01-01T00:00:00Z",
+  executor:"fixture",status:"supported",reason:"fixture",identity:null,
+  cache:{hit:false,key:null},compatibility:{}}'
+SH
+  chmod +x "$fake_root/legion-router/bin/legion-preflight"
+
+  run env FAKE_ROOT="$fake_root" ART="$art" \
+    CONTRACT="$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh" bash -c '
+      source "$CONTRACT"
+      legion_adapter_contract_root() { printf "%s\n" "$FAKE_ROOT"; }
+      legion_adapter_preflight fixture "$ART" read-only stdin fixture-model
+    '
+
+  [ "$status" -ne 0 ]
+  [ "$(cat "$target")" = host-data ]
+  [ -L "$art/preflight.json" ]
+  [ ! -e "$art/fixture-preflight.json" ]
 }
 
 @test "legion-preflight: premium model requires explicit consent without provider launch" {

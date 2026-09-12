@@ -894,6 +894,21 @@ def test_self_learning_rejects_malformed_known_and_partial_usage_maps():
         ) is None
 
 
+def test_self_learning_rejects_unrepresentable_cost_but_keeps_huge_tokens_exact():
+    huge = 10**1000
+    valid = _span("huge", "2026-08-16T01:00:00Z")
+    assert self_learn._validated_span(
+        {**valid, "cost_usd": huge, "cost_status": "known"}
+    ) is None
+    assert self_learn._validated_span({**valid, "duration_ms": huge}) is None
+
+    metered = self_learn._validated_span(
+        {**valid, "tokens": {"input_tokens": huge}, "usage_status": "known"}
+    )
+    assert metered is not None
+    assert metered["tokens"]["input_tokens"] == huge
+
+
 def test_cached_sibling_requires_recorded_checkout_to_still_exist(
     tmp_path, monkeypatch
 ):

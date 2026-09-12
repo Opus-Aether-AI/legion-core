@@ -56,12 +56,12 @@
           "properties": {
             "usage": {"$ref": "#/$defs/nullableUsage"},
             "usage_status": {"enum": ["known", "partial", "unknown"]},
-            "usage_source": {"type": ["string", "null"]},
+            "usage_source": {"type": ["string", "null"], "minLength": 1},
             "known_usage": {"$ref": "#/$defs/nullableUsage"},
             "known_usage_attempts": {"type": "integer", "minimum": 0},
             "cost_usd": {"type": ["number", "null"], "minimum": 0},
             "cost_status": {"enum": ["known", "partial", "unknown"]},
-            "cost_source": {"type": ["string", "null"]},
+            "cost_source": {"type": ["string", "null"], "minLength": 1},
             "known_cost_usd": {"type": ["number", "null"], "minimum": 0},
             "known_cost_attempts": {"type": "integer", "minimum": 0},
             "attempt_count": {"type": "integer", "minimum": 1}
@@ -91,7 +91,14 @@
     },
     {
       "if": {"properties": {"attempt_kind": {"const": "provider"}}},
-      "then": {"properties": {"child_attempt_ids": {"maxItems": 0}, "reconciliation": {"type": "null"}}},
+      "then": {
+        "properties": {
+          "usage_status": {"enum": ["known", "unknown", "not_applicable"]},
+          "cost_status": {"enum": ["known", "unknown", "not_applicable"]},
+          "child_attempt_ids": {"maxItems": 0},
+          "reconciliation": {"type": "null"}
+        }
+      },
       "else": {"properties": {"child_attempt_ids": {"minItems": 1}, "reconciliation": {"type": "object"}}}
     },
     {

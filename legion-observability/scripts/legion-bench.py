@@ -115,8 +115,13 @@ def _list(value: Any) -> list[Any]:
 def _num(value: Any) -> float:
     if isinstance(value, bool):
         return 0.0
-    if isinstance(value, (int, float)) and value == value:
-        return float(value)
+    if isinstance(value, (int, float)):
+        try:
+            numeric = float(value)
+        except OverflowError:
+            return 0.0
+        if math.isfinite(numeric):
+            return numeric
     return 0.0
 
 
@@ -774,6 +779,7 @@ def _new_metering_accumulator() -> dict[str, Any]:
         "_cost_known": 0, "_cost_partial": 0, "_cost_unknown": 0, "_cost_na": 0,
         "_usage_known": 0, "_usage_partial": 0, "_usage_unknown": 0, "_usage_na": 0,
         "_known_cost": 0.0, "_known_cost_attempts": 0,
+        "_cost_overflow": False,
         "_known_usage": {}, "_known_usage_attempts": 0,
     }
 
@@ -789,9 +795,17 @@ def _record_metering(accumulator: dict[str, Any], payload: dict[str, Any]) -> No
         accumulator[f"_{kind}_{'na' if status == 'not_applicable' else status}"] += 1
         if kind == "cost" and status == "known":
             accumulator["_known_cost"] += float(payload["cost_usd"])
+            accumulator["_cost_overflow"] = (
+                accumulator["_cost_overflow"]
+                or not math.isfinite(accumulator["_known_cost"])
+            )
             accumulator["_known_cost_attempts"] += _positive_count(payload.get("known_cost_attempts")) or 1
         elif kind == "cost" and status == "partial":
             accumulator["_known_cost"] += float(payload["known_cost_usd"])
+            accumulator["_cost_overflow"] = (
+                accumulator["_cost_overflow"]
+                or not math.isfinite(accumulator["_known_cost"])
+            )
             accumulator["_known_cost_attempts"] += _positive_count(payload.get("known_cost_attempts"))
         elif kind == "usage" and status == "known":
             _merge_usage(accumulator["_known_usage"], _usage_value(payload["tokens"]) or {})
@@ -810,6 +824,10 @@ def _finalize_metering(accumulator: dict[str, Any]) -> dict[str, Any]:
         accumulator["_usage_known"], accumulator["_usage_partial"],
         accumulator["_usage_unknown"], accumulator["_usage_na"],
     )
+    if accumulator["_cost_overflow"]:
+        cost_status = "unknown"
+        accumulator["_known_cost"] = 0.0
+        accumulator["_known_cost_attempts"] = 0
     known_cost = round(accumulator["_known_cost"], 6)
     known_usage = dict(sorted(accumulator["_known_usage"].items()))
     return {
@@ -1690,13 +1708,39 @@ def gate_decision(compare: dict[str, Any], gate: dict[str, Any] | None = None) -
     max_cost_delta = gate.get("max_cost_delta")
     if isinstance(max_cost_delta, (int, float)):
         cost_delta = _dict(metrics.get("cost_usd")).get("delta")
-        if not isinstance(cost_delta, (int, float)) or isinstance(cost_delta, bool) or not math.isfinite(cost_delta):
+        try:
+            numeric_cost_delta = (
+                float(cost_delta)
+                if isinstance(cost_delta, (int, float))
+                and not isinstance(cost_delta, bool)
+                else None
+            )
+            numeric_max_cost_delta = (
+                float(max_cost_delta) if not isinstance(max_cost_delta, bool) else None
+            )
+        except OverflowError:
+            numeric_cost_delta = numeric_max_cost_delta = None
+        if (
+            numeric_cost_delta is None
+            or numeric_max_cost_delta is None
+            or not math.isfinite(numeric_cost_delta)
+            or not math.isfinite(numeric_max_cost_delta)
+        ):
             failures.append("cost_usd")
-        elif float(cost_delta) > float(max_cost_delta):
+        elif numeric_cost_delta > numeric_max_cost_delta:
             failures.append("cost_usd")
     max_duration_ms_delta = gate.get("max_duration_ms_delta")
     if isinstance(max_duration_ms_delta, (int, float)):
-        if _num(_dict(metrics.get("duration_ms")).get("delta")) > float(max_duration_ms_delta):
+        try:
+            numeric_duration_limit = float(max_duration_ms_delta)
+        except OverflowError:
+            numeric_duration_limit = None
+        if (
+            numeric_duration_limit is None
+            or not math.isfinite(numeric_duration_limit)
+            or _num(_dict(metrics.get("duration_ms")).get("delta"))
+            > numeric_duration_limit
+        ):
             failures.append("duration_ms")
     allow_neutral = bool(gate.get("allow_neutral", True))
     if not allow_neutral and not compare.get("quality_improvements") and not failures:
@@ -2823,7 +2867,7 @@ def _markdown_float(value: Any, digits: int = 3) -> str:
         return "n/a"
     try:
         return f"{float(value):.{digits}f}"
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return "n/a"
 
 
@@ -2847,8 +2891,16 @@ def _usage_text(metrics: dict[str, Any]) -> str:
 
 def _cost_delta_text(comparison: dict[str, Any]) -> str:
     delta = comparison.get("cost_usd_delta")
-    if isinstance(delta, (int, float)) and not isinstance(delta, bool) and math.isfinite(delta):
-        return f"${float(delta):+.6f}"
+    try:
+        numeric_delta = (
+            float(delta)
+            if isinstance(delta, (int, float)) and not isinstance(delta, bool)
+            else None
+        )
+    except OverflowError:
+        numeric_delta = None
+    if numeric_delta is not None and math.isfinite(numeric_delta):
+        return f"${numeric_delta:+.6f}"
     cost = _dict(comparison.get("cost"))
     statuses = {cost.get("baseline_status"), cost.get("candidate_status")}
     return "unknown" if "unknown" in statuses else "n/a"

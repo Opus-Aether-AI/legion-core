@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import time
 
 import pytest
 
@@ -105,6 +106,55 @@ def test_canonical_cache_field_types_are_accepted(
     cache.write_text(json.dumps(record), encoding="utf-8")
 
     assert preflight._read_cache(cache, "expected-key") == record
+
+
+def test_cache_fifo_is_a_nonblocking_miss(tmp_path: Path) -> None:
+    cache = tmp_path / "cache.fifo"
+    os.mkfifo(cache)
+
+    started = time.monotonic()
+    assert preflight._read_cache(cache, "expected-key") is None
+    assert time.monotonic() - started < 1
+
+
+def test_cache_symlink_and_oversized_file_are_misses(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    target.write_text('{"cache_key":"expected-key","version_raw":null,"version":null}')
+    linked = tmp_path / "linked.json"
+    linked.symlink_to(target)
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b" " * (preflight.VERSION_CACHE_BYTES + 1))
+
+    assert preflight._read_cache(linked, "expected-key") is None
+    assert preflight._read_cache(oversized, "expected-key") is None
+
+
+def test_supported_preflight_requires_complete_identity_and_compatibility(tmp_path: Path) -> None:
+    incomplete = {
+        "schema": "legion.preflight.v1",
+        "checked_at": "2026-01-01T00:00:00Z",
+        "executor": "fixture",
+        "status": "supported",
+        "reason": "claimed support",
+        "identity": None,
+        "cache": {"hit": False, "key": None},
+        "compatibility": {},
+    }
+
+    with pytest.raises(ValueError):
+        preflight.validate_preflight_receipt(
+            incomplete, executor="fixture", model="fixture", sandbox="read-only"
+        )
+
+
+def test_preflight_receipt_file_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "receipt.json"
+    target.write_text("{}", encoding="utf-8")
+    linked = tmp_path / "receipt-link.json"
+    linked.symlink_to(target)
+
+    with pytest.raises(OSError):
+        preflight.validate_preflight_receipt_file(linked)
 
 
 def test_malformed_matching_cache_reprobes_without_crashing(tmp_path: Path) -> None:

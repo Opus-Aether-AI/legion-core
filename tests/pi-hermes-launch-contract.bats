@@ -731,6 +731,51 @@ PY
   ' "$receipt"
 }
 
+@test "Pi Hermes wrapper refuses a signal pending in its atomic provider launch region" {
+  local repo run_id art wrapper harness receipt token_file rc=0
+  repo="$(make_test_repo atomic-provider-signal)"
+  run_id=atomic-provider-signal
+  PI_BIN=pi run "$REPO_ROOT/legion-router/bin/legion-pi" run --task inspect \
+    --repo "$repo" --run-id "$run_id" --keep --quiet
+  [ "$status" -eq 0 ]
+  art="$repo/.legion/runs/$run_id"
+  wrapper="$art/provider-launch-wrapper.py"
+  [ -x "$wrapper" ]
+
+  harness="$TEST_TMPDIR/atomic-provider-signal-harness.py"
+  cat > "$harness" <<'PY'
+import importlib.util
+import signal
+import sys
+
+wrapper, *wrapper_arguments = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("legion_atomic_provider_wrapper", wrapper)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+calls = []
+module.signal.pthread_sigmask = lambda operation, signals: calls.append(operation) or set()
+module.signal.sigpending = lambda: {signal.SIGTERM}
+module.subprocess.Popen = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    AssertionError("provider Popen ran with a launch signal pending")
+)
+sys.argv = [wrapper, *wrapper_arguments]
+raise SystemExit(module.main())
+PY
+  receipt="$TEST_TMPDIR/atomic-provider-signal.json"
+  token_file="$TEST_TMPDIR/atomic-provider-signal.token"
+  printf '%064d\n' 0 > "$token_file"
+  python3 "$harness" "$wrapper" "$receipt" "$token_file" -- /fixture/provider || rc=$?
+  [ "$rc" -eq 143 ]
+  jq -e --argjson cancelled_errno "$(python3 -c 'import errno; print(errno.ECANCELED)')" '
+    .schema == "legion.provider-launch.v1" and .status == "launch_failed"
+    and .errno == $cancelled_errno
+    and (.reason | contains("cancelled before process creation"))
+    and (.auth | type == "string" and length == 64)
+    and (has("provider_pid") | not) and (has("token") | not)
+  ' "$receipt"
+}
+
 @test "Pi production supervisor defers descendant shutdown until started receipt is durable" {
   local repo run_id art provider result_file error_file assigned release child_pid_file signal_file
   local adapter_pid child_pid rc=0 attempt

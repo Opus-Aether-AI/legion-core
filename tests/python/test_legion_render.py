@@ -104,3 +104,28 @@ def test_unclassified_unknown_cost_is_not_rendered_as_free():
 
     assert "unclassified cost unknown" in render.tui(report)
     assert "<strong>unknown</strong>" in render.to_html(report)
+
+
+def test_render_downgrades_unrepresentable_numbers_without_crashing():
+    huge = 10**1000
+    report = _report()
+    report["groups"] = {
+        "huge": {
+            "count": 1,
+            "ok": 1,
+            "success_rate": huge,
+            "cost_usd": huge,
+            "cost_status": "known",
+            "p50_ms": huge,
+            "p95_ms": huge,
+        }
+    }
+    report["total"].update({"cost_usd": huge, "cost_status": "known"})
+    report["classification"].update(
+        {"unclassified_cost_usd": huge, "unclassified_cost_status": "known"}
+    )
+
+    tui = render.tui(report)
+    rendered_html = render.to_html(report)
+    assert "unknown" in tui
+    assert "unknown" in rendered_html

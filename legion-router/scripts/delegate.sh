@@ -1111,18 +1111,7 @@ native_span_publication_end() {
 }
 
 native_provider_span_is_recorded() {
-  local attempt_path="$1" span_file
-  [[ -n "$attempt_path" && -d "$LEGION_TELEMETRY_DIR" ]] || return 1
-  for span_file in "$LEGION_TELEMETRY_DIR"/*.jsonl; do
-    [[ -f "$span_file" ]] || continue
-    jq -R -e --arg attempt "$attempt_path" '
-      try (fromjson | select(.schema == "legion.span.v1"
-        and .artifacts.provider_attempt == true
-        and .artifacts.rollup_only != true
-        and .artifacts.attempt_receipt == $attempt)) catch empty
-    ' "$span_file" >/dev/null 2>&1 && return 0
-  done
-  return 1
+  legion_adapter_provider_span_is_durable "$1"
 }
 
 # Returns 0 with a newly owned claim, 2 when telemetry already proves the span
@@ -3048,7 +3037,7 @@ preserve_prompt_review_receipt() {
 validate_prompt_review_attempt() {
   local path="$1" executor="$2" provider="$3" model="$4" run_id="$5" sandbox="$6"
   PYTHONPATH="$_self_dir/../../legion-observability/scripts" \
-    python3 - "$path" "$executor" "$provider" "$model" "$run_id" "$sandbox" <<'PY'
+  python3 - "$path" "$executor" "$provider" "$model" "$run_id" "$sandbox" 2>/dev/null <<'PY'
 import json
 import sys
 
@@ -3058,25 +3047,32 @@ path, executor, provider, model, run_id, sandbox = sys.argv[1:]
 with open(path, encoding="utf-8") as handle:
     attempt = json.load(handle)
 validate_attempt(attempt)
-assert attempt["executor"] == executor
-assert attempt["provider"] == provider
-assert attempt["run_id"] == run_id
-assert attempt["ordinal"] == 1
-assert attempt["requested_model"] == model
-assert attempt["effective_model"] in {None, model}
-assert attempt["sandbox"] == sandbox
-assert attempt["parent_attempt_id"] is None
-assert attempt["cache_lineage"]["previous_attempt_id"] is None
-assert attempt["terminal_status"] in {"succeeded", "failed", "cancelled", "timed_out"}
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+require(attempt["executor"] == executor, "attempt executor mismatch")
+require(attempt["provider"] == provider, "attempt provider mismatch")
+require(attempt["run_id"] == run_id, "attempt run mismatch")
+require(attempt["ordinal"] == 1, "attempt ordinal mismatch")
+require(attempt["requested_model"] == model, "attempt model mismatch")
+require(attempt["effective_model"] in {None, model}, "effective model mismatch")
+require(attempt["sandbox"] == sandbox, "attempt sandbox mismatch")
+require(attempt["parent_attempt_id"] is None, "unexpected parent attempt")
+require(attempt["cache_lineage"]["previous_attempt_id"] is None,
+        "unexpected previous attempt")
+require(attempt["terminal_status"] in {"succeeded", "failed", "cancelled", "timed_out"},
+        "invalid prompt attempt terminal status")
 expected_usage_source = {
     "anthropic": "claude-result",
     "cursor": "cursor-json",
     "opencode": "opencode-jsonl",
 }.get(provider)
 if attempt["usage_status"] == "known":
-    assert attempt["usage_source"] == expected_usage_source
+    require(attempt["usage_source"] == expected_usage_source, "usage source mismatch")
 if attempt["cost_status"] == "known":
-    assert attempt["cost_source"] in {expected_usage_source, "legion-cost-table"}
+    require(attempt["cost_source"] in {expected_usage_source, "legion-cost-table"},
+            "cost source mismatch")
 PY
 }
 
@@ -3087,10 +3083,11 @@ validate_prompt_review_bundle() {
     || return 1
   PYTHONPATH="$_self_dir/../../legion-observability/scripts" \
     python3 - "$attempt" "$preflight" "$failure" "$lease" "$executor" \
-      "$run_id" "$sandbox" <<'PY'
+      "$run_id" "$sandbox" 2>/dev/null <<'PY'
 import json
 import sys
 
+from legion_preflight import validate_preflight_receipt
 from legion_receipts import validate_failure
 
 attempt_path, preflight_path, failure_path, lease_path, executor, run_id, sandbox = sys.argv[1:]
@@ -3100,59 +3097,80 @@ with open(preflight_path, encoding="utf-8") as handle:
     preflight = json.load(handle)
 with open(lease_path, encoding="utf-8") as handle:
     lease = json.load(handle)
-assert preflight["schema"] == "legion.preflight.v1"
-assert preflight["executor"] == executor
-assert preflight["status"] == "supported"
-assert preflight["compatibility"]["sandbox"]["requested"] == sandbox
-assert attempt["cache_lineage"]["preflight_cache_key"] == preflight["cache"]["key"]
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+validate_preflight_receipt(
+    preflight, executor=executor, model=attempt["requested_model"], sandbox=sandbox
+)
+require(preflight["status"] == "supported", "attempt preflight was not supported")
+require(attempt["cache_lineage"]["preflight_cache_key"] == preflight["cache"]["key"],
+        "preflight cache lineage mismatch")
 identity = preflight.get("identity")
-assert identity is not None
-assert attempt["config_identity"] == identity["config_sha256"]
-assert lease["schema"] == "legion.child-execution-lease.v1"
-assert lease["status"] in {"completed", "cancelled", "timed_out", "cleanup_failed", "containment_failed"}
-if attempt["terminal_status"] == "timed_out":
-    assert lease["status"] == "timed_out"
-elif attempt["terminal_status"] == "cancelled":
-    assert lease["status"] == "cancelled"
-elif lease["status"] == "timed_out":
-    raise AssertionError("non-timeout attempt has timed-out lease")
+require(identity is not None, "supported preflight lacks identity")
+require(attempt["config_identity"] == identity["config_sha256"],
+        "preflight configuration identity mismatch")
+require(isinstance(lease, dict), "lease must be an object")
+base_keys = {"schema", "status", "reason", "max_runtime_seconds"}
+require(lease.get("schema") == "legion.child-execution-lease.v1", "invalid lease schema")
+require(isinstance(lease.get("reason"), str) and lease["reason"], "missing lease reason")
+require(type(lease.get("max_runtime_seconds")) is int
+        and lease["max_runtime_seconds"] >= 1, "invalid lease runtime")
+lease_status = lease.get("status")
+if lease_status == "completed":
+    require(set(lease) == base_keys | {"child_exit_code"}, "invalid completed lease keys")
+    require(lease["reason"] == "child completed", "invalid completed lease reason")
+    require(type(lease.get("child_exit_code")) is int
+            and 0 <= lease["child_exit_code"] <= 255, "invalid child exit code")
+else:
+    require(lease_status in {"cancelled", "timed_out", "cleanup_failed"},
+            "invalid post-launch lease status")
+    require(set(lease) == base_keys, "invalid terminal lease keys")
+expected_lease = {
+    "succeeded": "completed", "failed": "completed",
+    "cancelled": "cancelled", "timed_out": "timed_out",
+}[attempt["terminal_status"]]
+if attempt["terminal_status"] == "failed" and (attempt.get("failure") or {}).get("class") == "internal":
+    expected_lease = "cleanup_failed"
+require(lease_status == expected_lease, "attempt and lease terminal status contradict")
+if attempt["terminal_status"] == "succeeded":
+    require(lease["child_exit_code"] == 0, "successful attempt has nonzero child exit")
 if failure_path:
     with open(failure_path, encoding="utf-8") as handle:
         failure = json.load(handle)
     validate_failure(failure)
-    assert failure == attempt["failure"]
-    assert failure["run_id"] == run_id
+    require(failure == attempt["failure"], "failure receipt does not match attempt")
+    require(failure["run_id"] == run_id, "failure run mismatch")
 else:
-    assert attempt["failure"] is None
+    require(attempt["failure"] is None, "missing failure receipt")
 PY
 }
 
 prompt_review_preflight_no_spend_status() {
   local path="$1" executor="$2" model="$3" sandbox="$4"
-  [[ -n "$path" && -f "$path" ]] || return 1
-  jq -er --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" '
-    select(.schema == "legion.preflight.v1" and .executor == $executor)
-    | select(
-        (.status == "unavailable" and .identity == null
-         and ((.compatibility.model.requested? // $model) == $model)
-         and ((.compatibility.sandbox.requested? // $sandbox) == $sandbox))
-        or
-        (.status == "incompatible"
-         and (.identity == null or (.identity | type) == "object")
-         and .compatibility.model.requested == $model
-         and .compatibility.sandbox.requested == $sandbox
-         and any(.compatibility[]?; type == "object" and .status == "incompatible")
-         and (.reason | type) == "string" and (.reason | length) > 0)
-        or
-        (.status == "untested"
-         and (.identity | type) == "object"
-         and .compatibility.model.requested == $model
-         and .compatibility.sandbox.requested == $sandbox
-         and any(.compatibility[]?; type == "object" and .status == "untested")
-         and (.reason | type) == "string" and (.reason | length) > 0)
-      )
-    | .status
-  ' "$path"
+  [[ -n "$path" && -f "$path" && ! -L "$path" ]] || return 1
+  PYTHONPATH="$_self_dir/../../legion-observability/scripts" \
+    python3 - "$path" "$executor" "$model" "$sandbox" 2>/dev/null <<'PY'
+import sys
+from legion_preflight import validate_preflight_receipt_file
+
+path, executor, model, sandbox = sys.argv[1:]
+receipt = validate_preflight_receipt_file(
+    path, executor=executor, model=model, sandbox=sandbox
+)
+status = receipt["status"]
+if status not in {"unavailable", "incompatible", "untested"}:
+    raise ValueError("preflight is not a no-spend refusal")
+checks = receipt["compatibility"]
+if status in {"incompatible", "untested"}:
+    if not any(isinstance(check, dict) and check.get("status") == status
+               for check in checks.values()):
+        raise ValueError("preflight status lacks matching compatibility evidence")
+elif receipt["identity"] is not None:
+    raise ValueError("unavailable preflight unexpectedly has an identity")
+print(status)
+PY
 }
 
 prompt_review_launch_failed_no_spend() {
@@ -3163,14 +3181,18 @@ prompt_review_launch_failed_no_spend() {
   # being reclassified as an unavailable reviewer.
   legion_adapter_supervisor_cleanup_failed "$lease" && return 1
   legion_adapter_supervisor_launch_failed "$lease" || return 1
-  jq -e --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" '
-    .schema == "legion.preflight.v1"
-    and .status == "supported"
-    and .executor == $executor
-    and (.identity | type) == "object"
-    and .compatibility.model.requested == $model
-    and .compatibility.sandbox.requested == $sandbox
-  ' "$preflight" >/dev/null 2>&1
+  PYTHONPATH="$_self_dir/../../legion-observability/scripts" \
+    python3 - "$preflight" "$executor" "$model" "$sandbox" 2>/dev/null <<'PY'
+import sys
+from legion_preflight import validate_preflight_receipt_file
+
+path, executor, model, sandbox = sys.argv[1:]
+receipt = validate_preflight_receipt_file(
+    path, executor=executor, model=model, sandbox=sandbox
+)
+if receipt["status"] != "supported":
+    raise ValueError("launch-failed preflight was not supported")
+PY
 }
 
 preserve_interrupted_prompt_receipts() {

@@ -329,15 +329,24 @@ install_refused_fallback_preflight_shim() {
     cat > "$shim_dir/python3" <<'SH'
 #!/usr/bin/env bash
 if [[ "${1:-}" == */legion_preflight.py ]]; then
+  executor=""; model=""; sandbox=""
   for ((i=1; i <= $#; i++)); do
-    if [[ "${!i}" == --model ]]; then
-      j=$((i + 1))
-      if [[ "${!j}" == refused-fallback ]]; then
-        printf '%s\n' '{"schema":"legion.preflight.v1","executor":"codex","status":"incompatible","reason":"forced fallback refusal","identity":null,"cache":{"hit":false,"key":null},"compatibility":{}}'
-        exit 1
-      fi
-    fi
+    case "${!i}" in
+      --executor) j=$((i + 1)); executor="${!j}" ;;
+      --model) j=$((i + 1)); model="${!j}" ;;
+      --sandbox) j=$((i + 1)); sandbox="${!j}" ;;
+    esac
   done
+  if [[ "$model" == refused-fallback ]]; then
+    jq -cn --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" \
+      --arg checked "2026-09-12T00:00:00Z" '
+      {schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,
+       status:"incompatible",reason:"forced fallback refusal",identity:null,
+       cache:{hit:false,key:null},
+       compatibility:{model:{requested:$model,policy_model:$model,model_ref:null,status:"incompatible"},
+                      sandbox:{requested:$sandbox,status:"supported",provider_sandbox:$sandbox,wrapper:null}}}'
+    exit 1
+  fi
 fi
 exec "$LEGION_TEST_REAL_PYTHON" "$@"
 SH
@@ -364,12 +373,17 @@ if [[ "${1:-}" == */legion_preflight.py ]]; then
   done
   if [[ "$executor" == "$LEGION_TEST_REFUSED_EXECUTOR" \
         && "$model" == "$LEGION_TEST_REFUSED_MODEL" ]]; then
-    jq -cn --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" '
-      {schema:"legion.preflight.v1",executor:$executor,status:"incompatible",
+    jq -cn --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" \
+      --arg checked "2026-09-12T00:00:00Z" '
+      {schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,status:"incompatible",
        reason:"authenticated model incompatibility",
        identity:null,cache:{hit:false,key:null},
-       compatibility:{model:{requested:$model,status:"incompatible"},
-                      sandbox:{requested:$sandbox,status:"supported"}}}'
+       compatibility:{model:{requested:$model,policy_model:$model,model_ref:null,status:"incompatible"},
+                      sandbox:{requested:$sandbox,status:"supported",provider_sandbox:$sandbox,wrapper:null},
+                      version:{discovered:"1.0",status:"supported",probe_status:"completed",
+                               probe_reason:"child completed",
+                               probe_lease:{schema:"legion.child-execution-lease.v1",status:"completed",
+                                            reason:"child completed",max_runtime_seconds:5,child_exit_code:0}}}}'
     exit 1
   fi
 fi
@@ -400,14 +414,21 @@ if [[ "${1:-}" == */legion_preflight.py ]]; then
   done
   if [[ "$executor" == "$LEGION_TEST_REFUSED_EXECUTOR" \
         && "$model" == "$LEGION_TEST_REFUSED_MODEL" ]]; then
-    jq -cn --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" '
-      {schema:"legion.preflight.v1",executor:$executor,status:"untested",
+    jq -cn --arg executor "$executor" --arg model "$model" --arg sandbox "$sandbox" \
+      --arg checked "2026-09-12T00:00:00Z" --arg hash "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+      --arg config "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+      --arg cache_key "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" '
+      {schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,status:"untested",
        reason:"authenticated executable version is untested",
-       identity:{executable_path:"/trusted/agent",version:"future",config_sha256:"fixture"},
-       cache:{hit:false,key:null},
-       compatibility:{model:{requested:$model,status:"supported"},
-                      sandbox:{requested:$sandbox,status:"supported"},
-                      version:{status:"untested"}}}'
+       identity:{executable_path:"/trusted/agent",binary_sha256:$hash,
+                 config_sha256:$config,version:"future",version_raw:"agent future"},
+       cache:{hit:false,key:$cache_key},
+       compatibility:{model:{requested:$model,policy_model:$model,model_ref:null,status:"supported"},
+                      sandbox:{requested:$sandbox,status:"supported",provider_sandbox:$sandbox,wrapper:null},
+                      version:{discovered:"future",status:"untested",probe_status:"completed",
+                               probe_reason:"child completed",
+                               probe_lease:{schema:"legion.child-execution-lease.v1",status:"completed",
+                                            reason:"child completed",max_runtime_seconds:5,child_exit_code:0}}}}'
     exit 1
   fi
 fi
@@ -2721,10 +2742,11 @@ SH
     helper="$TEST_TMPDIR/native-span-signal.sh"
     art="$TEST_TMPDIR/native-span-signal-art"
     signal_seen="$TEST_TMPDIR/native-span-signal.seen"
-    telemetry="$TEST_TMPDIR/native-span-signal.jsonl"
+    telemetry="$TEST_TMPDIR/2026-01-01.jsonl"
     mkdir -p "$art"
-    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null}' > "$art/attempt-1.json"
+    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null,"ended_at":"2026-01-01T00:00:01Z"}' > "$art/attempt-1.json"
     {
+      printf 'source %q\n' "$LIB/adapter-contract.sh"
       sed -n '/^legion_adapter_record_launch_signal()/,/^}/p' \
         "$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh"
       sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
@@ -2766,13 +2788,14 @@ SH
     local helper art telemetry
     helper="$TEST_TMPDIR/native-span-reclaim.sh"
     art="$TEST_TMPDIR/native-span-reclaim-art"
-    telemetry="$TEST_TMPDIR/native-span-reclaim.jsonl"
+    telemetry="$TEST_TMPDIR/2026-01-01.jsonl"
     mkdir -p "$art/attempt-1.json.span-emitted"
-    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null}' > "$art/attempt-1.json"
+    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null,"ended_at":"2026-01-01T00:00:01Z"}' > "$art/attempt-1.json"
     printf '%s\n' 99999999 > "$art/attempt-1.json.span-emitted/owner"
     : > "$art/attempt-1.json.span-emitted/committed"
     printf '%s\n' 99999999 > "$art/attempt-1.json.span-publishing"
     {
+      printf 'source %q\n' "$LIB/adapter-contract.sh"
       sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
       sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
@@ -2818,15 +2841,16 @@ SH
     local helper art telemetry
     helper="$TEST_TMPDIR/native-span-malformed-tail.sh"
     art="$TEST_TMPDIR/native-span-malformed-tail-art"
-    telemetry="$TEST_TMPDIR/native-span-malformed-tail.jsonl"
+    telemetry="$TEST_TMPDIR/2026-01-01.jsonl"
     mkdir -p "$art"
-    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null}' > "$art/attempt-1.json"
+    printf '%s\n' '{"executor":"codex","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"succeeded","duration_ms":1,"usage":null,"usage_status":"unknown","cost_usd":null,"cost_status":"unknown","failure":null,"ended_at":"2026-01-01T00:00:01Z"}' > "$art/attempt-1.json"
     jq -cn --arg attempt "$art/attempt-1.json" \
       '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
       > "$telemetry"
     printf '%s\n' '{malformed trailing record' >> "$telemetry"
     printf '%s\n' '"structurally malformed record"' >> "$telemetry"
     {
+      printf 'source %q\n' "$LIB/adapter-contract.sh"
       sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
       sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
@@ -3010,8 +3034,9 @@ SH
     art="$TEST_TMPDIR/native-review-ingest-art"
     ingest="$TEST_TMPDIR/native-review-ingest.args"
     mkdir -p "$art"
-    printf '%s\n' '{"executor":"codex-review","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"failed","duration_ms":1,"usage":{"input_tokens":1},"usage_status":"known","cost_usd":0.01,"cost_status":"known","failure":{"provider_code":17}}' > "$art/attempt-1.json"
+    printf '%s\n' '{"executor":"codex-review","provider":"openai","requested_model":"fixture-model","effective_model":"fixture-model","terminal_status":"failed","duration_ms":1,"usage":{"input_tokens":1},"usage_status":"known","cost_usd":0.01,"cost_status":"known","failure":{"provider_code":17},"ended_at":"2026-01-01T00:00:01Z"}' > "$art/attempt-1.json"
     {
+      printf 'source %q\n' "$LIB/adapter-contract.sh"
       sed -n '/^native_span_publication_begin()/,/^}/p' "$DELEGATE"
       sed -n '/^native_span_publication_end()/,/^}/p' "$DELEGATE"
       sed -n '/^native_provider_span_is_recorded()/,/^}/p' "$DELEGATE"
@@ -3031,7 +3056,7 @@ ATTEMPT_ROOT="$1"
 emit_span() {
   jq -cn --arg attempt "$ATTEMPT_ROOT/attempt-1.json" \
     '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
-    >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+    >> "$LEGION_TELEMETRY_DIR/2026-01-01.jsonl"
 }
 ingest_usage() { printf '%s\n' "$3" > "$INGEST"; }
 emit_native_review_provider_span "$1/attempt-1.json" fixture ""
@@ -4342,6 +4367,84 @@ PY
     [ -f "$art/prompt-review-2-1/attempt.json" ]
     [ ! -f "$art/prompt-review-2-1/lease.json" ]
     [ -d "$(echo "$output" | jq -r .worktree)" ]
+}
+
+@test "delegate review: optimized Python rejects a successful attempt with a contradictory lease" {
+    local attempt="$TEST_TMPDIR/prompt-attempt.json"
+    local preflight="$TEST_TMPDIR/prompt-preflight.json"
+    local lease="$TEST_TMPDIR/prompt-lease.json"
+    local helper="$TEST_TMPDIR/validate-contradictory-prompt-bundle.sh"
+    PYTHONPATH="$REPO_ROOT/legion-observability/scripts" python3 - \
+      "$attempt" "$preflight" "$lease" <<'PY'
+import json
+import sys
+from legion_receipts import attempt_receipt
+
+attempt_path, preflight_path, lease_path = sys.argv[1:]
+cache_key = "c" * 64
+attempt = attempt_receipt(
+    attempt_id="prompt-run-cursor-attempt-1", run_id="prompt-run", ordinal=1,
+    executor="cursor", provider="cursor", config_identity="b" * 64,
+    requested_model="fixture-model", effective_model="fixture-model",
+    requested_effort=None, effective_effort=None, sandbox="read-only",
+    terminal_status="succeeded", started_at="2026-01-01T00:00:00Z",
+    ended_at="2026-01-01T00:00:01Z", duration_ms=1000,
+    usage=None, usage_status="unknown", usage_source=None,
+    cost_usd=None, cost_status="unknown", cost_source=None,
+    failure=None, output_started=True, parent_attempt_id=None,
+    cache_lineage={"preflight_cache_key": cache_key, "previous_attempt_id": None},
+)
+probe_lease = {"schema": "legion.child-execution-lease.v1", "status": "completed",
+               "reason": "child completed", "max_runtime_seconds": 5,
+               "child_exit_code": 0}
+preflight = {
+    "schema": "legion.preflight.v1", "checked_at": "2026-01-01T00:00:00Z",
+    "executor": "cursor", "status": "supported",
+    "reason": "declared capabilities and version are supported",
+    "identity": {"executable_path": "/trusted/agent", "binary_sha256": "a" * 64,
+                 "config_sha256": "b" * 64, "version": "1.0",
+                 "version_raw": "agent 1.0"},
+    "cache": {"hit": False, "key": cache_key},
+    "compatibility": {
+        "sandbox": {"requested": "read-only", "status": "supported",
+                    "provider_sandbox": "read-only", "wrapper": None},
+        "read_mode": {"requested": "provider-tools", "status": "supported"},
+        "task_transport": {"requested": "stdin", "status": "supported"},
+        "effort": {"requested": None, "status": "not_requested"},
+        "model": {"requested": "fixture-model", "policy_model": "fixture-model",
+                  "model_ref": None, "status": "supported"},
+        "configuration": {"missing": [], "status": "supported"},
+        "billing": {"class": "metered", "explicit_consent_required": False,
+                    "status": "supported"},
+        "version": {"discovered": "1.0", "status": "supported",
+                    "probe_status": "completed", "probe_reason": "child completed",
+                    "probe_lease": probe_lease},
+    },
+}
+lease = {"schema": "legion.child-execution-lease.v1", "status": "completed",
+         "reason": "child completed", "max_runtime_seconds": 30,
+         "child_exit_code": 0}
+for path, value in ((attempt_path, attempt), (preflight_path, preflight), (lease_path, lease)):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, separators=(",", ":"))
+        handle.write("\n")
+PY
+    {
+      sed -n '/^validate_prompt_review_attempt()/,/^validate_prompt_review_bundle()/p' \
+        "$DELEGATE" | sed '$d'
+      sed -n '/^validate_prompt_review_bundle()/,/^prompt_review_preflight_no_spend_status()/p' \
+        "$DELEGATE" | sed '$d'
+      cat <<SH
+_self_dir=$(printf %q "$REPO_ROOT/legion-router/scripts")
+validate_prompt_review_bundle "\$1" "\$2" "" "\$3" cursor cursor "\$4" "\$5" read-only
+SH
+    } > "$helper"
+
+    PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" fixture-model prompt-run
+    [ "$status" -eq 0 ]
+    jq '.child_exit_code=1' "$lease" > "$lease.tmp"; mv -f "$lease.tmp" "$lease"
+    PYTHONOPTIMIZE=1 run bash "$helper" "$attempt" "$preflight" "$lease" fixture-model prompt-run
+    [ "$status" -ne 0 ]
 }
 
 @test "delegate review: prompt launch_failed bundle is authenticated no-spend rather than containment failure" {

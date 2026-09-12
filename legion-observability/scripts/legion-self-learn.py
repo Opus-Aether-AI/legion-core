@@ -778,6 +778,16 @@ def _valid_usage(value: Any) -> bool:
     )
 
 
+def _finite_nonnegative_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return False
+    return math.isfinite(numeric) and numeric >= 0
+
+
 def _validated_span(payload: Any) -> dict[str, Any] | None:
     """Validate and bound the in-repository ``legion.span.v1`` contract."""
     if not isinstance(payload, dict) or payload.get("schema") != SPAN_SCHEMA:
@@ -813,23 +823,13 @@ def _validated_span(payload: Any) -> dict[str, Any] | None:
         if field not in payload:
             continue
         value = payload.get(field)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or value < 0
-        ):
+        if not _finite_nonnegative_number(value):
             return None
     for field in ("cost_usd", "known_cost_usd"):
         if field not in payload or payload.get(field) is None:
             continue
         value = payload.get(field)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or value < 0
-        ):
+        if not _finite_nonnegative_number(value):
             return None
     for field in ("tokens", "known_usage"):
         if (

@@ -116,45 +116,65 @@ install_claude_fallback_preflight_shim() {
 #!/usr/bin/env bash
 if [[ "${1:-}" == */legion_preflight.py \
       && " $* " == *" --model ${LEGION_TEST_FALLBACK_PREFLIGHT_MODEL} "* ]]; then
+  executor=""; model=""; sandbox=""
+  for ((i=1; i <= $#; i++)); do
+    case "${!i}" in
+      --executor) j=$((i + 1)); executor="${!j}" ;;
+      --model) j=$((i + 1)); model="${!j}" ;;
+      --sandbox) j=$((i + 1)); sandbox="${!j}" ;;
+    esac
+  done
   case "$LEGION_TEST_FALLBACK_PREFLIGHT_MODE" in
     timed_out)
-      jq -cn '{schema:"legion.preflight.v1",status:"unavailable",
+      jq -cn --arg executor "$executor" --arg checked "2026-09-12T00:00:00Z" \
+        '{schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,status:"unavailable",
         reason:"fallback version probe deadline expired",identity:null,
-        cache:{hit:false,key:null},compatibility:{version:{probe_status:"timed_out",
+        cache:{hit:false,key:null},compatibility:{version:{discovered:null,status:"unavailable",probe_status:"timed_out",
           probe_reason:"inherited child lease deadline expired during launch setup",
           probe_lease:{schema:"legion.child-execution-lease.v1",status:"launch_failed",
             reason:"inherited child lease deadline expired during launch setup",
             max_runtime_seconds:30}}}}'
       ;;
     containment_failed)
-      jq -cn '{schema:"legion.preflight.v1",status:"unavailable",
+      jq -cn --arg executor "$executor" --arg checked "2026-09-12T00:00:00Z" \
+        '{schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,status:"unavailable",
         reason:"fallback version evidence malformed",identity:null,
-        cache:{hit:false,key:null},compatibility:{version:{probe_status:"cleanup_failed",
-          probe_reason:"cleanup ownership unresolved"}}}'
+        cache:{hit:false,key:null},compatibility:{version:{discovered:null,status:"unavailable",probe_status:"cleanup_failed",
+          probe_reason:"cleanup ownership unresolved",
+          probe_lease:{schema:"legion.child-execution-lease.v1",status:"cleanup_failed",
+            reason:"cleanup ownership unresolved",max_runtime_seconds:30,child_started:false}}}}'
       ;;
     malformed)
-      jq -cn '{schema:"legion.preflight.v1",status:"unexpected",
+      jq -cn --arg executor "$executor" --arg checked "2026-09-12T00:00:00Z" \
+        '{schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,status:"unavailable",
         reason:"fallback receipt status malformed",identity:null,
-        cache:{hit:false,key:null},compatibility:{}}'
+        cache:{hit:false,key:null},compatibility:{version:{discovered:null,status:"unavailable",
+          probe_status:"invalid",probe_reason:"fallback receipt status malformed",probe_lease:null}}}'
       ;;
     launch_failed)
-      jq -cn '{schema:"legion.preflight.v1",status:"unavailable",
+      jq -cn --arg executor "$executor" --arg checked "2026-09-12T00:00:00Z" \
+        '{schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,status:"unavailable",
         reason:"fallback executable disappeared",identity:null,
-        cache:{hit:false,key:null},compatibility:{version:{probe_status:"launch_failed",
+        cache:{hit:false,key:null},compatibility:{version:{discovered:null,status:"unavailable",probe_status:"launch_failed",
           probe_reason:"child launch failed: command not found: admitted-claude",
           probe_lease:{schema:"legion.child-execution-lease.v1",status:"launch_failed",
             reason:"child launch failed: command not found: admitted-claude",
             max_runtime_seconds:30}}}}'
       ;;
     unavailable)
-      jq -cn '{schema:"legion.preflight.v1",status:"unavailable",
+      jq -cn --arg executor "$executor" --arg checked "2026-09-12T00:00:00Z" \
+        '{schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,status:"unavailable",
         reason:"fallback configuration unavailable",identity:null,
         cache:{hit:false,key:null},compatibility:{}}'
       ;;
     refused)
-      jq -cn '{schema:"legion.preflight.v1",status:"incompatible",
+      jq -cn --arg executor "$executor" --arg checked "2026-09-12T00:00:00Z" \
+        --arg model "$model" --arg sandbox "$sandbox" \
+        '{schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,status:"incompatible",
         reason:"fallback model refused by policy",identity:null,
-        cache:{hit:false,key:null},compatibility:{model:{status:"incompatible"}}}'
+        cache:{hit:false,key:null},
+        compatibility:{model:{requested:$model,policy_model:$model,model_ref:null,status:"incompatible"},
+          sandbox:{requested:$sandbox,status:"supported",provider_sandbox:$sandbox,wrapper:null}}}'
       ;;
     *) exit 70 ;;
   esac

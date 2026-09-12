@@ -213,6 +213,53 @@ def test_malformed_base_and_default_rates_fail_closed_without_huge_int_crash():
         assert default_observed is False
 
 
+def test_huge_stream_tokens_remain_exact_but_unrepresentable_cost_is_unknown(tmp_path):
+    huge = 10**1000
+    run_dir = tmp_path / "huge"
+    run_dir.mkdir()
+    (run_dir / "stream.jsonl").write_text(
+        json.dumps(
+            {"type": "turn.completed", "usage": {"input_tokens": huge}}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parsed = activity.parse_stream(str(run_dir / "stream.jsonl"))
+    assert parsed["usage"]["input_tokens"] == huge
+
+    enriched = activity.enrich_run(
+        {
+            "run_id": "huge",
+            "model": "test-model-alpha",
+            "lifecycle": {"phase": "running"},
+        },
+        str(run_dir),
+        activity._normalize_costs(_costs_payload()),
+    )
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+    assert activity._format_cost(huge, "known") == "unknown"
+
+
+def test_huge_durable_cost_is_downgraded_without_overflow():
+    huge = 10**1000
+    summary = activity._cost_summary(
+        [{"cost_usd": huge, "cost_status": "known"}]
+    )
+    assert summary["cost_status"] == "unknown"
+    assert summary["cost_usd"] is None
+    assert summary["known_cost_usd"] is None
+
+    summed = activity._cost_summary(
+        [
+            {"cost_usd": 1e308, "cost_status": "known"},
+            {"cost_usd": 1e308, "cost_status": "known"},
+        ]
+    )
+    assert summed["cost_status"] == "unknown"
+    assert summed["known_cost_usd"] is None
+
+
 def test_parse_stream_sums_usage_and_collects_tools_files_and_items(tmp_path):
     stream_path = tmp_path / "stream.jsonl"
     _write_stream(stream_path)

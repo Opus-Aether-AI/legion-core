@@ -28,11 +28,23 @@ DEFAULT_ROOT = legion_state.default_log_root()
 
 
 def _num(value: Any) -> float:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
-    if isinstance(value, (int, float)) and math.isfinite(value):
-        return float(value)
-    return 0.0
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return 0.0
+    return numeric if math.isfinite(numeric) else 0.0
+
+
+def _nonnegative_num(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) and numeric >= 0 else None
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -57,8 +69,13 @@ def _valid_usage(value: Any) -> bool:
 def _parse_epoch(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)) and value == value:
-        return float(value)
+    if isinstance(value, (int, float)):
+        try:
+            numeric = float(value)
+        except OverflowError:
+            return None
+        if math.isfinite(numeric):
+            return numeric
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -113,32 +130,38 @@ def _resolve_now(now: Any = None) -> tuple[str, float]:
 def _sum_tokens(total: dict[str, int], tokens: Any) -> None:
     data = _dict(tokens)
     for field in TOKEN_FIELDS:
-        total[field] += int(_num(data.get(field)))
+        value = data.get(field, 0)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            total[field] += value
 
 
 def _tokens_total(tokens: Any) -> int:
     data = _dict(tokens)
-    return sum(int(_num(data.get(field))) for field in TOKEN_FIELDS)
+    return sum(
+        value
+        for field in TOKEN_FIELDS
+        if isinstance((value := data.get(field, 0)), int)
+        and not isinstance(value, bool)
+        and value >= 0
+    )
 
 
 def _provenance_status(record: dict[str, Any], kind: str) -> str:
     status = record.get(f"{kind}_status")
     value = record.get("cost_usd" if kind == "cost" else "tokens")
     known_value = (
-        (kind == "cost" and isinstance(value, (int, float)) and not isinstance(value, bool))
-        or (kind == "usage" and _valid_usage(value))
+        _nonnegative_num(value) is not None
+        if kind == "cost" else _valid_usage(value)
     )
-    if kind == "cost" and known_value:
-        known_value = math.isfinite(value) and value >= 0
     if status == "known":
         return "known" if known_value else "unknown"
     if status == "partial":
         lower = record.get("known_cost_usd" if kind == "cost" else "known_usage")
         count = record.get("known_cost_attempts" if kind == "cost" else "known_usage_attempts")
         lower_valid = (
-            isinstance(lower, (int, float)) and not isinstance(lower, bool)
-            and math.isfinite(lower) and lower >= 0
-        ) if kind == "cost" else _valid_usage(lower)
+            _nonnegative_num(lower) is not None
+            if kind == "cost" else _valid_usage(lower)
+        )
         return "partial" if lower_valid and _positive_int(count) is not None else "unknown"
     if status in {"unknown", "not_applicable"}:
         return status
@@ -159,21 +182,28 @@ def _merged_status(known: int, partial: int, unknown: int, not_applicable: int) 
 def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     known = partial = unknown = not_applicable = known_count = 0
     subtotal = 0.0
+    overflow = False
     for record in records:
         status = _provenance_status(record, "cost")
         if status == "known":
             known += 1
             known_count += _positive_int(record.get("known_cost_attempts")) or 1
             subtotal += _num(record.get("cost_usd"))
+            overflow = overflow or not math.isfinite(subtotal)
         elif status == "partial":
             partial += 1
             known_count += _positive_int(record.get("known_cost_attempts")) or 0
             subtotal += _num(record.get("known_cost_usd"))
+            overflow = overflow or not math.isfinite(subtotal)
         elif status == "unknown":
             unknown += 1
         else:
             not_applicable += 1
     status = _merged_status(known, partial, unknown, not_applicable)
+    if overflow:
+        status = "unknown"
+        known_count = 0
+        subtotal = 0.0
     subtotal = round(subtotal, 6)
     return {
         "cost_usd": subtotal if status == "known" else None,
@@ -535,10 +565,10 @@ def build_snapshot(
 
 def _format_cost(value: Any, status: Any = None, known: Any = None) -> str:
     if status == "partial":
-        return f">={_num(known):.4f}"
+        return f">={_num(known):.4f}" if _nonnegative_num(known) is not None else "unknown"
     if status in {"unknown", "not_applicable"} or value is None:
         return str(status or "unknown")
-    return f"{_num(value):.4f}"
+    return f"{_num(value):.4f}" if _nonnegative_num(value) is not None else "unknown"
 
 
 def _format_elapsed(value: Any) -> str:

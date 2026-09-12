@@ -1371,48 +1371,81 @@ def main() -> int:
         # inspections. An inherited/lowered absolute lease may expire during
         # that setup, so recheck at the last possible point before any child can
         # launch. The surrounding finally block releases all setup resources.
-        if absolute_deadline_ns is not None and absolute_deadline_ns <= time.monotonic_ns():
-            reason = "inherited child lease deadline expired during launch setup"
-            _write_status(
-                arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds
-            )
-            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
-            return 124
-        if cancel_requested:
-            reason = f"cancelled by {signal.Signals(interrupted).name}"
-            _write_status(
-                arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds
-            )
-            return 128 + interrupted
+        launch_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, launch_signals)
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=arguments.cwd,
-                stdin=None,
-                stdout=None,
-                stderr=None,
-                env=environment,
-                start_new_session=True,
-            )
+            # Blocking the handled signals makes the final cancellation check
+            # and Popen one linearized region. A signal pending before the mask
+            # is observed here; one arriving after it is restored only after
+            # `process` names the real child, so it cannot resume into Popen
+            # from a pre-launch handler and accidentally spend.
+            if absolute_deadline_ns is not None and absolute_deadline_ns <= time.monotonic_ns():
+                reason = "inherited child lease deadline expired during launch setup"
+                _write_status(
+                    arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds
+                )
+                print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+                return 124
+            if cancel_requested:
+                reason = f"cancelled by {signal.Signals(interrupted).name}"
+                _write_status(
+                    arguments.status_file, "launch_failed", reason, arguments.max_runtime_seconds
+                )
+                return 128 + interrupted
+            pending_launch_signals = signal.sigpending() & launch_signals
+            if pending_launch_signals:
+                interrupted = min(pending_launch_signals)
+                reason = f"cancelled by {signal.Signals(interrupted).name} before child launch"
+                _write_status(
+                    arguments.status_file, "launch_failed", reason,
+                    arguments.max_runtime_seconds
+                )
+                return 128 + interrupted
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=arguments.cwd,
+                    stdin=None,
+                    stdout=None,
+                    stderr=None,
+                    env=environment,
+                    start_new_session=True,
+                    # The parent keeps termination signals blocked across its
+                    # last cancellation check and process creation. Restore the
+                    # caller's mask in the forked child before exec so the new
+                    # process cannot inherit an indefinitely blocked TERM/HUP.
+                    preexec_fn=lambda: signal.pthread_sigmask(
+                        signal.SIG_SETMASK, previous_mask
+                    ),
+                )
+            except OSError as error:
+                # Admission and launch are separated by an unavoidable filesystem
+                # race. Authenticate that no provider process was created with a
+                # dedicated lease outcome; "completed" would make adapters account
+                # for a provider attempt that never happened.
+                if error.errno == errno.ENOENT:
+                    reason = f"child launch failed: command not found: {command[0]}"
+                    exit_code = 127
+                else:
+                    reason = f"child launch failed: {error}"
+                    exit_code = 126
+                _write_status(
+                    arguments.status_file,
+                    "launch_failed",
+                    reason,
+                    arguments.max_runtime_seconds,
+                )
+                print(f"legion-process-supervisor: {reason}", file=sys.stderr)
+                return exit_code
         except OSError as error:
-            # Admission and launch are separated by an unavoidable filesystem
-            # race. Authenticate that no provider process was created with a
-            # dedicated lease outcome; "completed" would make adapters account
-            # for a provider attempt that never happened.
-            if error.errno == errno.ENOENT:
-                reason = f"child launch failed: command not found: {command[0]}"
-                exit_code = 127
-            else:
-                reason = f"child launch failed: {error}"
-                exit_code = 126
+            reason = f"cannot establish atomic child launch signal mask: {error}"
             _write_status(
-                arguments.status_file,
-                "launch_failed",
-                reason,
-                arguments.max_runtime_seconds,
+                arguments.status_file, "cleanup_failed", reason,
+                arguments.max_runtime_seconds, child_started=False
             )
-            print(f"legion-process-supervisor: {reason}", file=sys.stderr)
-            return exit_code
+            return 70
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         tracker = DescendantTracker(
             process.pid,
             supervisor_token,

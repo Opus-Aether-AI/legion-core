@@ -1081,6 +1081,64 @@ def test_span_totals_preserve_integral_float_legacy_scalar_compatibility(tmp_pat
     assert bench._usage_value(huge_map_total) is None
 
 
+def test_bench_downgrades_huge_cost_and_duration_but_keeps_map_tokens_exact(tmp_path):
+    huge = 10**1000
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    (spans / "huge.jsonl").write_text(
+        json.dumps(
+            {
+                "model": "huge",
+                "cost_usd": huge,
+                "cost_status": "known",
+                "duration_ms": huge,
+                "tokens": {"total_tokens": huge},
+                "usage_status": "known",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    totals = bench._span_totals(str(tmp_path / "logs"))
+    assert totals["cost_status"] == "unknown"
+    assert totals["cost_usd"] is None
+    assert totals["span_duration_ms"] == 0
+    assert totals["usage_status"] == "known"
+    assert totals["tokens"] == huge
+
+    overflow_logs = tmp_path / "overflow" / "spans"
+    overflow_logs.mkdir(parents=True)
+    (overflow_logs / "overflow.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {"model": "overflow", "cost_usd": 1e308,
+                 "cost_status": "known", "tokens": 0, "usage_status": "known"}
+            )
+            for _ in range(2)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    overflow = bench._span_totals(str(overflow_logs.parent))
+    assert overflow["cost_status"] == "unknown"
+    assert overflow["known_cost_usd"] is None
+
+    comparison = {
+        "metrics": {
+            "cost_usd": {"delta": huge},
+            "duration_ms": {"delta": 1},
+        },
+        "quality_regressions": [],
+        "quality_improvements": [],
+    }
+    decision = bench.gate_decision(
+        comparison, {"max_cost_delta": huge, "max_duration_ms_delta": huge}
+    )
+    assert decision["status"] == "fail"
+    assert "cost_usd" in decision["failures"]
+    assert "duration_ms" in decision["failures"]
+
+
 def test_compare_and_cost_gate_fail_closed_for_partial_metering():
     baseline = {
         "run_id": "base", "suite": "core",

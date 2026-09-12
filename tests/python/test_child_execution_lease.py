@@ -420,6 +420,47 @@ def test_signal_after_handlers_before_popen_cancels_without_child_launch(
     }
 
 
+def test_signal_pending_inside_atomic_launch_region_refuses_before_popen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_file = tmp_path / "atomic-prelaunch-cancelled.json"
+    spec = importlib.util.spec_from_file_location("lease_supervisor_atomic_signal", SUPERVISOR)
+    assert spec is not None and spec.loader is not None
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    mask_calls = []
+
+    monkeypatch.setattr(supervisor.sys, "platform", "linux")
+    monkeypatch.setattr(supervisor.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(
+        supervisor.signal,
+        "pthread_sigmask",
+        lambda operation, signals: mask_calls.append((operation, set(signals))) or set(),
+    )
+    monkeypatch.setattr(supervisor.signal, "sigpending", lambda: {signal.SIGTERM})
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("Popen ran with a launch signal pending"),
+    )
+    monkeypatch.setattr(
+        supervisor.sys,
+        "argv",
+        [str(SUPERVISOR), "--cwd", str(tmp_path), "--max-runtime-seconds", "30",
+         "--status-file", str(status_file), "--", "/fixture/provider"],
+    )
+
+    assert supervisor.main() == 143
+    assert mask_calls[0][0] == signal.SIG_BLOCK
+    assert mask_calls[-1][0] == signal.SIG_SETMASK
+    assert json.loads(status_file.read_text(encoding="utf-8")) == {
+        "schema": "legion.child-execution-lease.v1",
+        "status": "launch_failed",
+        "reason": "cancelled by SIGTERM before child launch",
+        "max_runtime_seconds": 30,
+    }
+
+
 def test_command_disappearing_before_popen_still_writes_lease_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

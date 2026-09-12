@@ -9,7 +9,9 @@ setup() {
   mkdir -p "$LEGION_TELEMETRY_DIR"
   export CONTRACT="$REPO_ROOT/legion-router/scripts/lib/adapter-contract.sh"
   export ATTEMPT="$TEST_TMPDIR/attempt-1.json"
-  printf '{}\n' > "$ATTEMPT"
+  export ATTEMPT_DATE=2026-09-12
+  export SPAN_FILE="$LEGION_TELEMETRY_DIR/$ATTEMPT_DATE.jsonl"
+  printf '%s\n' '{"ended_at":"2026-09-12T00:00:00Z"}' > "$ATTEMPT"
 }
 
 teardown() {
@@ -34,7 +36,7 @@ teardown() {
       while [[ ! -f "$release" ]]; do sleep 0.02; done
       jq -cn --arg attempt "$attempt" \
         '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+        >> "$LEGION_TELEMETRY_DIR/2026-09-12.jsonl"
     }
     legion_adapter_emit_normal_provider_span "$attempt"
   ' _ "$CONTRACT" "$LEGION_TELEMETRY_DIR" "$ATTEMPT" "$calls" "$entered" "$release" &
@@ -62,7 +64,7 @@ teardown() {
   wait "$publisher"
   SPAN_CLAIM_PUBLISHER_PID=""
   [ "$(grep -c '^publisher$' "$calls")" -eq 1 ]
-  [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 1 ]
+  [ "$(wc -l < "$SPAN_FILE" | tr -d ' ')" -eq 1 ]
 }
 
 @test "a dead publisher claim is reclaimed before publication" {
@@ -81,12 +83,12 @@ teardown() {
     emit_span() {
       jq -cn --arg attempt "$attempt" \
         '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-        >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+        >> "$LEGION_TELEMETRY_DIR/2026-09-12.jsonl"
     }
     legion_adapter_emit_normal_provider_span "$attempt"
   ' _ "$CONTRACT" "$LEGION_TELEMETRY_DIR" "$ATTEMPT"
   [ "$status" -eq 0 ]
-  [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 1 ]
+  [ "$(wc -l < "$SPAN_FILE" | tr -d ' ')" -eq 1 ]
 }
 
 @test "valid JSON non-object claim owners are malformed and reclaimable" {
@@ -176,7 +178,7 @@ teardown() {
         sleep 0.1
         jq -cn --arg attempt "$attempt" \
           '\''{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}'\'' \
-          >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+          >> "$LEGION_TELEMETRY_DIR/2026-09-12.jsonl"
       }
       legion_adapter_emit_normal_provider_span "$attempt"
     ' _ "$CONTRACT" "$LEGION_TELEMETRY_DIR" "$ATTEMPT" "$calls" &
@@ -187,16 +189,19 @@ teardown() {
   done
   [ "$rc" -eq 0 ]
   [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ]
-  [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 1 ]
+  [ "$(wc -l < "$SPAN_FILE" | tr -d ' ')" -eq 1 ]
 }
 
 @test "malformed trailing telemetry cannot hide an already durable provider span" {
   local calls="$TEST_TMPDIR/malformed-tail-calls"
+  # Historical telemetry is not part of this attempt's lookup. A global rescan
+  # would block on this FIFO; the attempt-bound recovery reads only its date.
+  mkfifo "$LEGION_TELEMETRY_DIR/1900-01-01.jsonl"
   jq -cn --arg attempt "$ATTEMPT" \
     '{schema:"legion.span.v1",artifacts:{provider_attempt:true,attempt_receipt:$attempt}}' \
-    > "$LEGION_TELEMETRY_DIR/spans.jsonl"
-  printf '%s\n' '{malformed trailing record' >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
-  printf '%s\n' '"structurally malformed record"' >> "$LEGION_TELEMETRY_DIR/spans.jsonl"
+    > "$SPAN_FILE"
+  printf '%s\n' '{malformed trailing record' >> "$SPAN_FILE"
+  printf '%s\n' '"structurally malformed record"' >> "$SPAN_FILE"
 
   run bash -c '
     set -euo pipefail
@@ -209,7 +214,13 @@ teardown() {
 
   [ "$status" -eq 0 ]
   [ ! -e "$calls" ]
-  [ "$(wc -l < "$LEGION_TELEMETRY_DIR/spans.jsonl" | tr -d ' ')" -eq 3 ]
+  [ "$(wc -l < "$SPAN_FILE" | tr -d ' ')" -eq 3 ]
+  jq -e --arg attempt "$ATTEMPT" --arg telemetry "$SPAN_FILE" '
+    .schema == "legion.provider-span-ack.v1"
+    and .attempt_receipt == $attempt and .telemetry_path == $telemetry
+    and (.offset | type) == "number" and (.length | type) == "number"
+    and (.span_sha256 | test("^[a-f0-9]{64}$"))
+  ' "$ATTEMPT.provider-span-ack"
 }
 
 @test "process incarnation reclaims a same-PID collision while legacy live owners remain conservative" {

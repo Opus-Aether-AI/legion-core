@@ -1,4 +1,5 @@
 import importlib
+import json
 from pathlib import Path
 import sys
 
@@ -8,6 +9,8 @@ import pytest
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT / "legion-observability" / "scripts"))
 receipts = importlib.import_module("legion_receipts")
+ATTEMPT_SCHEMA_PATH = ROOT / "legion-observability" / "schema" / "legion.attempt.v1.schema.json"
+FAILURE_SCHEMA_PATH = ROOT / "legion-observability" / "schema" / "legion.failure.v1.schema.json"
 
 
 def attempt_fields(*, attempt_id, terminal_status="succeeded", failure=None, parent_attempt_id=None):
@@ -140,6 +143,53 @@ def partial_aggregate():
     )
 
 
+def known_cost_attempt(*, attempt_id, ordinal, cost, parent_attempt_id=None):
+    fields = attempt_fields(attempt_id=attempt_id, parent_attempt_id=parent_attempt_id)
+    fields["ordinal"] = ordinal
+    return receipts.attempt_receipt(
+        **fields,
+        cost_usd=cost,
+        cost_status="known",
+        cost_source="provider-json",
+    )
+
+
+def test_reconciliation_rejects_non_finite_known_cost_sum():
+    attempts = [
+        known_cost_attempt(attempt_id="attempt-1", ordinal=1, cost=1e308),
+        known_cost_attempt(attempt_id="attempt-2", ordinal=2, cost=1e308),
+    ]
+
+    with pytest.raises(ValueError, match="cost_usd must be a finite non-negative number"):
+        receipts.reconcile_attempts(attempts)
+
+    with pytest.raises(ValueError, match="cost_usd must be a finite non-negative number"):
+        receipts.aggregate_attempt_receipt(
+            child_attempts=attempts,
+            **attempt_fields(attempt_id="parent-1"),
+        )
+
+
+def test_aggregate_constructor_rejects_parent_id_reused_by_child():
+    child = receipts.attempt_receipt(
+        **attempt_fields(attempt_id="shared-id", parent_attempt_id="shared-id")
+    )
+
+    with pytest.raises(ValueError, match="distinct from child attempt ids"):
+        receipts.aggregate_attempt_receipt(
+            child_attempts=[child],
+            **attempt_fields(attempt_id="shared-id"),
+        )
+
+
+def test_aggregate_validator_rejects_self_referential_child_id():
+    aggregate = partial_aggregate()
+    aggregate["child_attempt_ids"][0] = aggregate["attempt_id"]
+
+    with pytest.raises(ValueError, match="distinct from child attempt ids"):
+        receipts.validate_attempt(aggregate)
+
+
 @pytest.mark.parametrize("field", ["usage_source", "cost_source"])
 @pytest.mark.parametrize("source", ["", 0, 1, False, True, [], {}])
 def test_aggregate_validator_rejects_mirrored_invalid_partial_source(field, source):
@@ -168,6 +218,48 @@ def test_partial_aggregate_source_may_be_null_per_schema(field):
     aggregate["reconciliation"][field] = None
 
     receipts.validate_attempt(aggregate)
+
+
+def test_attempt_schema_declares_runtime_provenance_constraints():
+    schema = json.loads(ATTEMPT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    reconciliation = schema["properties"]["reconciliation"]["oneOf"][1]["properties"]
+    assert reconciliation["usage_source"]["minLength"] == 1
+    assert reconciliation["cost_source"]["minLength"] == 1
+
+    provider_rule = next(
+        rule for rule in schema["allOf"]
+        if rule.get("if", {}).get("properties", {}).get("attempt_kind", {}).get("const") == "provider"
+    )
+    allowed = provider_rule["then"]["properties"]
+    assert "partial" not in allowed["usage_status"]["enum"]
+    assert "partial" not in allowed["cost_status"]["enum"]
+
+
+def test_attempt_schema_draft_2020_12_rejects_contradictory_provenance():
+    jsonschema = pytest.importorskip("jsonschema")
+    referencing = pytest.importorskip("referencing")
+    schema = json.loads(ATTEMPT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    failure_schema = json.loads(FAILURE_SCHEMA_PATH.read_text(encoding="utf-8"))
+    registry = referencing.Registry().with_resource(
+        failure_schema["$id"], referencing.Resource.from_contents(failure_schema)
+    )
+    validator = jsonschema.Draft202012Validator(schema, registry=registry)
+    validator.check_schema(schema)
+
+    provider = receipts.attempt_receipt(**attempt_fields(attempt_id="attempt-1"))
+    for field in ("usage", "cost"):
+        contradictory = dict(provider)
+        contradictory[f"{field}_status"] = "partial"
+        contradictory[f"{field}_source"] = "mixed"
+        assert list(validator.iter_errors(contradictory))
+
+    aggregate = partial_aggregate()
+    validator.validate(aggregate)
+    for field in ("usage_source", "cost_source"):
+        contradictory = dict(aggregate)
+        contradictory["reconciliation"] = dict(aggregate["reconciliation"])
+        contradictory["reconciliation"][field] = ""
+        assert list(validator.iter_errors(contradictory))
 
 
 def test_constructor_rejects_failure_on_succeeded_attempt():

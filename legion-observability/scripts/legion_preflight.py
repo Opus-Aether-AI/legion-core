@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import select
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,7 @@ SCHEMA = "legion.preflight.v1"
 PASSING_STATES = frozenset({"supported"})
 VERSION_DISCOVERY_SECONDS = 5
 VERSION_OUTPUT_BYTES = 4096
+VERSION_CACHE_BYTES = 16384
 VERSION_CACHE_CONTRACT = "legion.supervised-version.v1"
 PROCESS_SUPERVISOR = (
     Path(__file__).resolve().parents[2]
@@ -35,6 +37,207 @@ PROCESS_SUPERVISOR = (
     / "scripts"
     / "legion-process-supervisor.py"
 )
+
+
+def _require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def _read_bounded_regular_json(path, limit=65536):
+    """Read one stable, singly-linked regular JSON file without following links."""
+    descriptor = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        _require(
+            stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1 and opened.st_size <= limit,
+            "receipt is not a bounded singly-linked regular file",
+        )
+        path_stat = os.stat(path, follow_symlinks=False)
+        _require(
+            (path_stat.st_dev, path_stat.st_ino) == (opened.st_dev, opened.st_ino),
+            "receipt path changed while opening",
+        )
+        raw = bytearray()
+        while len(raw) <= limit:
+            chunk = os.read(descriptor, min(4096, limit + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        closed = os.fstat(descriptor)
+        path_stat = os.stat(path, follow_symlinks=False)
+        _require(
+            len(raw) <= limit
+            and stat.S_ISREG(closed.st_mode)
+            and closed.st_nlink == 1
+            and closed.st_size <= limit
+            and (closed.st_dev, closed.st_ino) == (opened.st_dev, opened.st_ino)
+            and (path_stat.st_dev, path_stat.st_ino) == (opened.st_dev, opened.st_ino)
+            and closed.st_size == opened.st_size
+            and closed.st_mtime_ns == opened.st_mtime_ns
+            and closed.st_ctime_ns == opened.st_ctime_ns,
+            "receipt changed while reading",
+        )
+        return json.loads(bytes(raw).decode("utf-8"))
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def validate_preflight_receipt(receipt, *, executor=None, model=None, sandbox=None):
+    """Validate the full no-spend receipt contract and requested route binding."""
+    _require(isinstance(receipt, dict), "preflight receipt must be an object")
+    required = {"schema", "checked_at", "executor", "status", "reason",
+                "identity", "cache", "compatibility"}
+    _require(set(receipt) == required, "preflight receipt keys are not canonical")
+    _require(receipt["schema"] == SCHEMA, "invalid preflight schema")
+    _require(isinstance(receipt["checked_at"], str) and receipt["checked_at"],
+             "missing preflight timestamp")
+    _require(isinstance(receipt["executor"], str) and receipt["executor"],
+             "missing preflight executor")
+    if executor is not None:
+        _require(receipt["executor"] == executor, "preflight executor mismatch")
+    status_value = receipt["status"]
+    _require(status_value in {"supported", "untested", "incompatible", "unavailable"},
+             "invalid preflight status")
+    _require(isinstance(receipt["reason"], str) and receipt["reason"],
+             "missing preflight reason")
+    cache = receipt["cache"]
+    _require(isinstance(cache, dict) and set(cache) == {"hit", "key"}
+             and type(cache["hit"]) is bool
+             and (cache["key"] is None or isinstance(cache["key"], str)),
+             "invalid preflight cache evidence")
+    identity = receipt["identity"]
+    if identity is not None:
+        _require(isinstance(identity, dict) and set(identity) == {
+            "executable_path", "binary_sha256", "config_sha256", "version", "version_raw"
+        }, "invalid preflight identity keys")
+        _require(isinstance(identity["executable_path"], str) and identity["executable_path"],
+                 "invalid executable identity")
+        for digest_name in ("binary_sha256", "config_sha256"):
+            _require(isinstance(identity[digest_name], str)
+                     and re.fullmatch(r"[a-f0-9]{64}", identity[digest_name]) is not None,
+                     f"invalid {digest_name}")
+        for version_name in ("version", "version_raw"):
+            _require(identity[version_name] is None or isinstance(identity[version_name], str),
+                     f"invalid {version_name}")
+    compatibility = receipt["compatibility"]
+    _require(isinstance(compatibility, dict), "invalid compatibility evidence")
+    expected_checks = {"sandbox", "read_mode", "task_transport", "effort",
+                       "model", "configuration", "billing", "version"}
+    _require(set(compatibility) <= expected_checks, "unknown compatibility evidence")
+    simple_states = {"supported", "untested", "incompatible", "unavailable", "not_requested"}
+    for name in ("read_mode", "task_transport", "effort"):
+        if name in compatibility:
+            check = compatibility[name]
+            _require(isinstance(check, dict) and set(check) == {"requested", "status"}
+                     and check["status"] in simple_states,
+                     f"invalid {name} compatibility")
+    if "sandbox" in compatibility:
+        check = compatibility["sandbox"]
+        _require(isinstance(check, dict)
+                 and set(check) == {"requested", "status", "provider_sandbox", "wrapper"}
+                 and check["status"] in simple_states,
+                 "invalid sandbox compatibility")
+    if "model" in compatibility:
+        check = compatibility["model"]
+        _require(isinstance(check, dict)
+                 and set(check) == {"requested", "policy_model", "model_ref", "status"}
+                 and check["status"] in simple_states,
+                 "invalid model compatibility")
+    if "configuration" in compatibility:
+        check = compatibility["configuration"]
+        _require(isinstance(check, dict) and set(check) == {"missing", "status"}
+                 and isinstance(check["missing"], list)
+                 and all(isinstance(item, str) and item for item in check["missing"])
+                 and check["status"] in {"supported", "unavailable", "incompatible"},
+                 "invalid configuration compatibility")
+    if "billing" in compatibility:
+        check = compatibility["billing"]
+        _require(isinstance(check, dict)
+                 and set(check) == {"class", "explicit_consent_required", "status"}
+                 and isinstance(check["class"], str) and check["class"]
+                 and type(check["explicit_consent_required"]) is bool
+                 and check["status"] in {"supported", "incompatible"},
+                 "invalid billing compatibility")
+    if "version" in compatibility:
+        check = compatibility["version"]
+        _require(isinstance(check, dict) and set(check) == {
+            "discovered", "status", "probe_status", "probe_reason", "probe_lease"
+        }, "invalid version compatibility keys")
+        _require(check["discovered"] is None or isinstance(check["discovered"], str),
+                 "invalid discovered version")
+        _require(check["status"] in {"supported", "untested", "unavailable"},
+                 "invalid version status")
+        _require(check["probe_status"] in {"completed", "cached", "not_requested",
+                 "launch_failed", "timed_out", "cancelled", "cleanup_failed", "invalid"},
+                 "invalid version probe status")
+        _require(check["probe_reason"] is None or
+                 (isinstance(check["probe_reason"], str) and check["probe_reason"]),
+                 "invalid version probe reason")
+        lease = check["probe_lease"]
+        if lease is not None:
+            _require(isinstance(lease, dict), "invalid version probe lease")
+            base = {"schema", "status", "reason", "max_runtime_seconds"}
+            optional = set(lease) - base
+            _require(set(lease) >= base and optional <= {"child_started", "child_exit_code"}
+                     and lease["schema"] == "legion.child-execution-lease.v1"
+                     and lease["status"] in {"completed", "cancelled", "timed_out",
+                                                    "cleanup_failed", "launch_failed"}
+                     and isinstance(lease["reason"], str) and lease["reason"]
+                     and type(lease["max_runtime_seconds"]) is int
+                     and lease["max_runtime_seconds"] >= 1,
+                     "invalid version probe lease fields")
+            if "child_started" in lease:
+                _require(lease["child_started"] is False, "invalid child_started evidence")
+            if "child_exit_code" in lease:
+                _require(type(lease["child_exit_code"]) is int
+                         and 0 <= lease["child_exit_code"] <= 255,
+                         "invalid version probe exit code")
+    if status_value == "supported":
+        _require(identity is not None, "supported preflight lacks identity")
+        _require(isinstance(cache["key"], str) and cache["key"],
+                 "supported preflight lacks cache identity")
+    if model is not None:
+        model_check = compatibility.get("model")
+        # A missing executable is authenticated by its executor identity and has
+        # no compatibility checks because no provider can launch. If a check is
+        # present, however, it must still bind to this exact requested route.
+        _require(status_value == "unavailable" and model_check is None
+                 or isinstance(model_check, dict)
+                 and model in {model_check.get("requested"), model_check.get("policy_model"),
+                               model_check.get("model_ref")},
+                 "preflight model binding mismatch")
+    if sandbox is not None:
+        sandbox_check = compatibility.get("sandbox")
+        _require(status_value == "unavailable" and sandbox_check is None
+                 or isinstance(sandbox_check, dict)
+                 and sandbox_check.get("requested") == sandbox,
+                 "preflight sandbox binding mismatch")
+    if status_value == "supported":
+        _require(set(compatibility) == expected_checks,
+                 "supported preflight compatibility is incomplete")
+        for name, check in compatibility.items():
+            _require(isinstance(check, dict) and isinstance(check.get("status"), str),
+                     f"invalid {name} compatibility")
+            _require(check["status"] not in {"incompatible", "unavailable", "untested"},
+                     f"supported preflight contradicts {name} compatibility")
+        version_check = compatibility["version"]
+        _require(set(version_check) == {"discovered", "status", "probe_status",
+                                        "probe_reason", "probe_lease"},
+                 "invalid version compatibility keys")
+        _require(version_check["status"] == "supported"
+                 and version_check["probe_status"] in {"completed", "cached", "not_requested"},
+                 "unsupported version evidence in supported receipt")
+        _require(identity["version"] == version_check["discovered"],
+                 "version identity mismatch")
+    return receipt
+
+
+def validate_preflight_receipt_file(path, **expected):
+    return validate_preflight_receipt(_read_bounded_regular_json(path), **expected)
 
 
 def _sha256_bytes(value):
@@ -100,10 +303,40 @@ def _config_identity(config, env):
 
 
 def _read_cache(path, key):
+    descriptor = None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or opened.st_size > VERSION_CACHE_BYTES):
+            return None
+        path_stat = os.stat(path, follow_symlinks=False)
+        if (path_stat.st_dev, path_stat.st_ino) != (opened.st_dev, opened.st_ino):
+            return None
+        raw = bytearray()
+        while len(raw) <= VERSION_CACHE_BYTES:
+            chunk = os.read(descriptor, min(4096, VERSION_CACHE_BYTES + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        closed = os.fstat(descriptor)
+        path_stat = os.stat(path, follow_symlinks=False)
+        if (len(raw) > VERSION_CACHE_BYTES
+                or not stat.S_ISREG(closed.st_mode) or closed.st_nlink != 1
+                or closed.st_size > VERSION_CACHE_BYTES
+                or (closed.st_dev, closed.st_ino) != (opened.st_dev, opened.st_ino)
+                or (path_stat.st_dev, path_stat.st_ino) != (opened.st_dev, opened.st_ino)
+                or closed.st_size != opened.st_size
+                or closed.st_mtime_ns != opened.st_mtime_ns
+                or closed.st_ctime_ns != opened.st_ctime_ns):
+            return None
+        value = json.loads(bytes(raw).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
         return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     if not isinstance(value, dict):
         return None
     if set(value) != {"cache_key", "version_raw", "version"}:

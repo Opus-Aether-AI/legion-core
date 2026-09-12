@@ -155,10 +155,11 @@ def _nonnegative_num(value):
         return None
     if not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value):
+    try:
+        value = float(value)
+    except OverflowError:
         return None
-    value = float(value)
-    return value if value >= 0 else None
+    return value if math.isfinite(value) and value >= 0 else None
 
 
 def _positive_count(value):
@@ -183,16 +184,19 @@ def _cost_provenance(span):
 def _cost_summary(spans):
     known = partial = unknown = not_applicable = known_runs = 0
     lower_bound = 0.0
+    overflow = False
     for span in spans:
         status = _cost_provenance(span)
         if status == "known":
             known += 1
             known_runs += 1
             lower_bound += _nonnegative_num(span.get("cost_usd")) or 0.0
+            overflow = overflow or not math.isfinite(lower_bound)
         elif status == "partial":
             partial += 1
             known_runs += _positive_count(span.get("known_cost_attempts"))
             lower_bound += _nonnegative_num(span.get("known_cost_usd")) or 0.0
+            overflow = overflow or not math.isfinite(lower_bound)
         elif status == "unknown":
             unknown += 1
         else:
@@ -204,6 +208,10 @@ def _cost_summary(spans):
         else "unknown" if not known and not partial
         else "partial"
     )
+    if overflow:
+        status = "unknown"
+        known_runs = 0
+        lower_bound = 0.0
     lower_bound = round(lower_bound, 6)
     return {
         "cost_usd": lower_bound if status == "known" else None,
@@ -333,6 +341,7 @@ def stats_by_arch_route(spans):
                 "runs": 0,
                 "_success": 0,
                 "_cost": 0.0,
+                "_cost_overflow": False,
                 "_known_cost_runs": 0,
                 "_known_cost_attempts": 0,
                 "_partial_cost_runs": 0,
@@ -349,10 +358,16 @@ def stats_by_arch_route(spans):
         cost_status = _cost_provenance(span)
         if cost_status == "known":
             bucket["_cost"] += _nonnegative_num(span.get("cost_usd")) or 0.0
+            bucket["_cost_overflow"] = (
+                bucket["_cost_overflow"] or not math.isfinite(bucket["_cost"])
+            )
             bucket["_known_cost_runs"] += 1
             bucket["_known_cost_attempts"] += 1
         elif cost_status == "partial":
             bucket["_cost"] += _nonnegative_num(span.get("known_cost_usd")) or 0.0
+            bucket["_cost_overflow"] = (
+                bucket["_cost_overflow"] or not math.isfinite(bucket["_cost"])
+            )
             bucket["_known_cost_runs"] += 1
             bucket["_known_cost_attempts"] += _positive_count(
                 span.get("known_cost_attempts")
@@ -383,6 +398,11 @@ def stats_by_arch_route(spans):
                 else "partial" if known_cost_attempts
                 else "unknown"
             )
+            if bucket["_cost_overflow"]:
+                cost_status = "unknown"
+                known_cost_runs = 0
+                known_cost_attempts = 0
+                bucket["_cost"] = 0.0
             out[archetype][route] = {
                 "executor": bucket["_executor"],
                 "model": bucket["_model"],
@@ -636,13 +656,9 @@ def _format_stats(stats):
         known_cost = stats.get("known_cost_usd")
         known_runs = stats.get("known_cost_runs")
         runs = stats.get("runs")
-        if (
-            isinstance(known_cost, (int, float))
-            and not isinstance(known_cost, bool)
-            and math.isfinite(known_cost)
-            and known_cost >= 0
-        ):
-            cost = f"partial(known_total=${known_cost:.4f}"
+        known_cost_value = _nonnegative_num(known_cost)
+        if known_cost_value is not None:
+            cost = f"partial(known_total=${known_cost_value:.4f}"
             if isinstance(known_runs, int) and isinstance(runs, int):
                 cost += f", metered_runs={known_runs}/{runs}"
             cost += ")"
@@ -650,13 +666,8 @@ def _format_stats(stats):
             cost = "partial"
     elif cost_status == "not_applicable":
         cost = "n/a"
-    elif (
-        isinstance(mean_cost, (int, float))
-        and not isinstance(mean_cost, bool)
-        and math.isfinite(mean_cost)
-        and mean_cost >= 0
-    ):
-        cost = f"${mean_cost:.4f}"
+    elif (mean_cost_value := _nonnegative_num(mean_cost)) is not None:
+        cost = f"${mean_cost_value:.4f}"
     else:
         cost = "unknown"
     return (
@@ -680,12 +691,14 @@ def _build_payload(spans_dir, routing_file, proposals, min_samples, classificati
 def _classification_cost_text(classification):
     status = classification.get("unclassified_cost_status")
     if status == "partial":
-        return f'>=${classification.get("unclassified_known_cost_usd", 0):.4f}'
+        known = _nonnegative_num(classification.get("unclassified_known_cost_usd"))
+        return f">=${known:.4f}" if known is not None else "unknown"
     if status == "unknown":
         return "unknown"
     if status == "not_applicable":
         return "n/a"
-    return f'${classification.get("unclassified_cost_usd", 0):.4f}'
+    cost = _nonnegative_num(classification.get("unclassified_cost_usd"))
+    return f"${cost:.4f}" if cost is not None else "unknown"
 
 
 def main(argv=None):

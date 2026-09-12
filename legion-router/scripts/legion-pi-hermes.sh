@@ -850,27 +850,51 @@ def main() -> int:
     for caught in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(caught, forward)
     write_receipt(receipt, {**base, "status": "pending"}, token)
-    if pending_signal is not None:
-        reason = "provider launch cancelled before process creation"
-        write_receipt(receipt, {
-            **base,
-            "status": "launch_failed",
-            "reason": reason,
-            "errno": errno.ECANCELED,
-        }, token)
-        return 128 + pending_signal
+    launch_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, launch_signals)
     try:
-        child = subprocess.Popen(command, env=os.environ)
-    except OSError as error:
-        reason = f"provider launch failed before process creation: {error}"
-        write_receipt(receipt, {
-            **base,
-            "status": "launch_failed",
-            "reason": reason,
-            "errno": error.errno or 1,
-        }, token)
-        print(f"legion provider launcher: {reason}", file=sys.stderr)
-        return 127 if error.errno == 2 else 126
+        if pending_signal is not None:
+            reason = "provider launch cancelled before process creation"
+            write_receipt(receipt, {
+                **base,
+                "status": "launch_failed",
+                "reason": reason,
+                "errno": errno.ECANCELED,
+            }, token)
+            return 128 + pending_signal
+        pending_launch_signals = signal.sigpending() & launch_signals
+        if pending_launch_signals:
+            signum = min(pending_launch_signals)
+            reason = "provider launch cancelled before process creation"
+            write_receipt(receipt, {
+                **base,
+                "status": "launch_failed",
+                "reason": reason,
+                "errno": errno.ECANCELED,
+            }, token)
+            return 128 + signum
+        try:
+            child = subprocess.Popen(
+                command,
+                env=os.environ,
+                # Keep the parent's launch decision atomic without leaking its
+                # temporary blocked-signal mask into the provider after exec.
+                preexec_fn=lambda: signal.pthread_sigmask(
+                    signal.SIG_SETMASK, previous_mask
+                ),
+            )
+        except OSError as error:
+            reason = f"provider launch failed before process creation: {error}"
+            write_receipt(receipt, {
+                **base,
+                "status": "launch_failed",
+                "reason": reason,
+                "errno": error.errno or 1,
+            }, token)
+            print(f"legion provider launcher: {reason}", file=sys.stderr)
+            return 127 if error.errno == 2 else 126
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
     write_receipt(receipt, {**base, "status": "started", "provider_pid": child.pid}, token)
     started_durable = True
     if pending_signal is not None:

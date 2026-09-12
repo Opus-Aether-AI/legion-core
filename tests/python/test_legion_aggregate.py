@@ -128,6 +128,39 @@ def test_aggregate_rejects_malformed_known_and_partial_usage_values():
         assert partial["known_usage_runs"] == 0
 
 
+def test_aggregate_downgrades_unrepresentable_cost_and_duration_without_crash():
+    huge = 10**1000
+    result = agg.aggregate([
+        {
+            "schema": "legion.span.v1",
+            "executor": "huge",
+            "status": "ok",
+            "cost_usd": huge,
+            "cost_status": "known",
+            "duration_ms": huge,
+            "tokens": {"input_tokens": huge},
+            "usage_status": "known",
+        }
+    ])
+    group = result["groups"]["huge"]
+    assert group["cost_status"] == "unknown"
+    assert group["cost_usd"] is None
+    assert group["known_cost_usd"] is None
+    assert group["p50_ms"] == 0
+    assert group["usage_status"] == "known"
+
+    overflow = agg.aggregate(
+        [
+            {"schema": "legion.span.v1", "executor": "sum", "status": "ok",
+             "cost_usd": 1e308, "cost_status": "known"},
+            {"schema": "legion.span.v1", "executor": "sum", "status": "ok",
+             "cost_usd": 1e308, "cost_status": "known"},
+        ]
+    )["groups"]["sum"]
+    assert overflow["cost_status"] == "unknown"
+    assert overflow["known_cost_usd"] is None
+
+
 def test_load_tolerates_garbage_lines(tmp_path):
     p = tmp_path / "s.jsonl"
     p.write_text('{"schema":"legion.span.v1","executor":"a","model":"m","status":"ok"}\nGARBAGE\n\n')

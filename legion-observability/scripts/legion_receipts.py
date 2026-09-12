@@ -226,6 +226,8 @@ def attempt_receipt(*, run_id, ordinal, executor, provider, config_identity,
     if child_attempts is not None:
         if any(child["run_id"] != run_id for child in child_attempts):
             raise ValueError("aggregate children must share the parent run_id")
+        if any(child["attempt_id"] == actual_attempt_id for child in child_attempts):
+            raise ValueError("aggregate attempt_id must be distinct from child attempt ids")
         if any(child["parent_attempt_id"] != actual_attempt_id for child in child_attempts):
             raise ValueError("aggregate child parent_attempt_id does not match parent")
     return {
@@ -286,6 +288,8 @@ def reconcile_attempts(attempts):
             cost_sources.add(attempt["cost_source"])
             known_cost_values.append(Decimal(str(cost_value)))
     known_cost = float(sum(known_cost_values, Decimal("0")))
+    if cost_known:
+        _validate_cost(known_cost)
     usage_status = "known" if usage_known == attempt_count else ("partial" if usage_known else "unknown")
     cost_status = "known" if cost_known == attempt_count else ("partial" if cost_known else "unknown")
     return {
@@ -349,6 +353,8 @@ def validate_attempt(receipt):
                 or not all(isinstance(value, str) and value for value in child_ids) \
                 or len(set(child_ids)) != len(child_ids) or not isinstance(reconciliation, dict):
             raise ValueError("aggregate attempts require child reconciliation")
+        if receipt["attempt_id"] in child_ids:
+            raise ValueError("aggregate attempt_id must be distinct from child attempt ids")
         _validate_reconciliation(reconciliation)
         _validate_provenance("usage", receipt["usage"], receipt["usage_status"], receipt["usage_source"], aggregate=True)
         _validate_provenance("cost", receipt["cost_usd"], receipt["cost_status"], receipt["cost_source"], aggregate=True)

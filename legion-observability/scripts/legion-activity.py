@@ -108,7 +108,9 @@ def _empty_activity() -> dict[str, Any]:
 def _sum_usage(total: dict[str, int], usage: Any) -> None:
     data = _dict(usage)
     for field in TOKEN_FIELDS:
-        total[field] += int(max(0.0, _num(data.get(field))))
+        value = data.get(field, 0)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            total[field] += value
 
 
 def _valid_stream_usage(value: Any) -> bool:
@@ -253,11 +255,22 @@ def _rates_for_with_evidence(
 
 def cost_for(model: Any, usage: Any, costs: dict[str, Any]) -> float:
     """Compute USD cost from token usage using the Legion shared price table."""
+    return _cost_for_with_evidence(model, usage, costs)[0]
+
+
+def _cost_for_with_evidence(
+    model: Any, usage: Any, costs: dict[str, Any]
+) -> tuple[float, bool]:
     data = _dict(usage)
-    input_tokens = int(max(0.0, _num(data.get("input_tokens"))))
-    cached_tokens = int(max(0.0, _num(data.get("cached_input_tokens"))))
-    output_tokens = int(max(0.0, _num(data.get("output_tokens"))))
-    reasoning_tokens = int(max(0.0, _num(data.get("reasoning_output_tokens"))))
+    counters = []
+    for field in TOKEN_FIELDS:
+        value = data.get(field, 0)
+        counters.append(
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            else 0
+        )
+    input_tokens, cached_tokens, output_tokens, reasoning_tokens = counters
     billed_in = max(0, input_tokens - cached_tokens)
     billed_out = output_tokens + reasoning_tokens
     rates = _rates_for(model, costs)
@@ -270,12 +283,15 @@ def cost_for(model: Any, usage: Any, costs: dict[str, Any]) -> float:
     over = threshold >= 0 and (billed_in + cached_tokens) > threshold
     in_mult = rates["lc_input_multiplier"] if over else 1.0
     out_mult = rates["lc_output_multiplier"] if over else 1.0
-    total = (
-        billed_in * rates["input"] * in_mult
-        + billed_out * rates["output"] * out_mult
-        + cached_tokens * rates["cache_read"] * in_mult
-    )
-    return total / 1_000_000.0
+    try:
+        total = (
+            billed_in * rates["input"] * in_mult
+            + billed_out * rates["output"] * out_mult
+            + cached_tokens * rates["cache_read"] * in_mult
+        ) / 1_000_000.0
+    except OverflowError:
+        return 0.0, False
+    return (total, True) if math.isfinite(total) and total >= 0 else (0.0, False)
 
 
 def _first_typed_dict(value: Any) -> dict[str, Any]:
@@ -475,10 +491,7 @@ def run_cost(run_dir: str, model: Any, costs: dict[str, Any]) -> float:
 
 def _span_cost_status(span: dict[str, Any]) -> str:
     value = span.get("cost_usd")
-    numeric = (
-        isinstance(value, (int, float)) and not isinstance(value, bool)
-        and math.isfinite(value) and value >= 0
-    )
+    numeric = _valid_pricing_number(value)
     status = span.get("cost_status")
     if status == "known":
         return "known" if numeric else "unknown"
@@ -486,8 +499,7 @@ def _span_cost_status(span: dict[str, Any]) -> str:
         lower = span.get("known_cost_usd")
         count = span.get("known_cost_attempts")
         return "partial" if (
-            isinstance(lower, (int, float)) and not isinstance(lower, bool)
-            and math.isfinite(lower) and lower >= 0 and _positive_int(count) is not None
+            _valid_pricing_number(lower) and _positive_int(count) is not None
         ) else "unknown"
     if status in {"unknown", "not_applicable"}:
         return status
@@ -497,16 +509,19 @@ def _span_cost_status(span: dict[str, Any]) -> str:
 def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     known = partial = unknown = not_applicable = known_count = 0
     subtotal = 0.0
+    overflow = False
     for record in records:
         status = _span_cost_status(record)
         if status == "known":
             known += 1
             known_count += _positive_int(record.get("known_cost_attempts")) or 1
             subtotal += _num(record.get("cost_usd"))
+            overflow = overflow or not math.isfinite(subtotal)
         elif status == "partial":
             partial += 1
             known_count += _positive_int(record.get("known_cost_attempts")) or 0
             subtotal += _num(record.get("known_cost_usd"))
+            overflow = overflow or not math.isfinite(subtotal)
         elif status == "unknown":
             unknown += 1
         else:
@@ -518,6 +533,10 @@ def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "unknown" if not known and not partial else
         "partial"
     )
+    if overflow:
+        status = "unknown"
+        known_count = 0
+        subtotal = 0.0
     subtotal = round(subtotal, 6)
     return {
         "cost_usd": subtotal if status == "known" else None,
@@ -614,19 +633,27 @@ def enrich_run(
     )
     _, pricing_observed = _rates_for_with_evidence(model, costs)
     if activity.get("_usage_observed") is True and pricing_observed and not prefer_durable:
-        stream_cost = round(cost_for(model, activity.get("usage"), costs), 6)
-        metering = {
-            "cost_usd": stream_cost,
-            "cost_status": "known",
-            "known_cost_usd": stream_cost,
-            "known_cost_attempts": 1,
-        }
+        stream_cost, cost_observed = _cost_for_with_evidence(
+            model, activity.get("usage"), costs
+        )
+        if cost_observed:
+            stream_cost = round(stream_cost, 6)
+            metering = {
+                "cost_usd": stream_cost,
+                "cost_status": "known",
+                "known_cost_usd": stream_cost,
+                "known_cost_attempts": 1,
+            }
+        else:
+            metering = {"cost_usd": None, "cost_status": "unknown",
+                        "known_cost_usd": None, "known_cost_attempts": 0}
     else:
         if durable_metering is not None:
             metering = durable_metering
-        elif isinstance(durable, (int, float)) and not isinstance(durable, bool):
-            metering = {"cost_usd": round(float(durable), 6), "cost_status": "known",
-                        "known_cost_usd": round(float(durable), 6), "known_cost_attempts": 1}
+        elif _valid_pricing_number(durable):
+            durable_cost = round(_num(durable), 6)
+            metering = {"cost_usd": durable_cost, "cost_status": "known",
+                        "known_cost_usd": durable_cost, "known_cost_attempts": 1}
         else:
             metering = {"cost_usd": None, "cost_status": "unknown",
                         "known_cost_usd": None, "known_cost_attempts": 0}
@@ -786,10 +813,10 @@ def _short(text: Any, width: int) -> str:
 
 def _format_cost(value: Any, status: Any = None, known: Any = None) -> str:
     if status == "partial":
-        return f">={_num(known):.6f}"
+        return f">={_num(known):.6f}" if _valid_pricing_number(known) else "unknown"
     if status in {"unknown", "not_applicable"} or value is None:
         return str(status or "unknown")
-    return f"{_num(value):.6f}"
+    return f"{_num(value):.6f}" if _valid_pricing_number(value) else "unknown"
 
 
 def _render_rows(headers: list[str], rows: list[list[str]], generated_at: str) -> str:

@@ -17,15 +17,32 @@ from datetime import datetime, timezone
 
 def _num(x):
     # reject bool / NaN / non-numerics so a malformed span can't crash the export
-    return x if (
-        isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
-    ) else 0
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return 0.0
+    try:
+        value = float(x)
+    except OverflowError:
+        return 0.0
+    return value if math.isfinite(value) else 0.0
 
 
 def _nonnegative_number(x):
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return False
+    try:
+        value = float(x)
+    except OverflowError:
+        return False
+    return math.isfinite(value) and value >= 0
+
+
+def _otlp_int(value):
     return (
-        isinstance(x, (int, float)) and not isinstance(x, bool)
-        and math.isfinite(x) and x >= 0
+        value
+        if isinstance(value, int)
+        and not isinstance(value, bool)
+        and -(2**63) <= value < 2**63
+        else None
     )
 
 
@@ -122,7 +139,7 @@ def _ts_nanos(ts):
         if dt.tzinfo is None:          # naive -> assume UTC (don't drift by host tz)
             dt = dt.replace(tzinfo=timezone.utc)
         return int(dt.timestamp() * 1e9)
-    except (ValueError, TypeError):
+    except (OverflowError, OSError, ValueError, TypeError):
         return 0
 
 
@@ -146,7 +163,9 @@ def span_to_otlp(s):
     if attempt_id:
         a("legion.attempt_id", attempt_id)
     if attempt_ordinal is not None:
-        a("legion.attempt_ordinal", attempt_ordinal, "intValue")
+        ordinal_attribute = _otlp_int(attempt_ordinal)
+        if ordinal_attribute is not None:
+            a("legion.attempt_ordinal", ordinal_attribute, "intValue")
     cost_status = _metering_status(s, "cost")
     usage_status = _metering_status(s, "usage")
     a("legion.cost_status", cost_status)
@@ -156,25 +175,28 @@ def span_to_otlp(s):
     elif cost_status == "partial":
         if s.get("known_cost_usd") is not None:
             a("legion.known_cost_usd", float(_num(s.get("known_cost_usd"))), "doubleValue")
-        a("legion.known_cost_attempts", int(_num(s.get("known_cost_attempts"))), "intValue")
+        cost_attempts = _otlp_int(s.get("known_cost_attempts"))
+        if cost_attempts is not None:
+            a("legion.known_cost_attempts", cost_attempts, "intValue")
     tk = s.get("tokens") or {}
     if usage_status == "known" and isinstance(tk, dict):
+        a("legion.usage", json.dumps(tk, sort_keys=True, separators=(",", ":")))
         for key in ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"):
             if key in tk:
-                try:
-                    a(f"legion.tokens.{key}", int(tk[key]), "intValue")
-                except (ValueError, TypeError):
-                    pass
+                counter = _otlp_int(tk[key])
+                if counter is not None:
+                    a(f"legion.tokens.{key}", counter, "intValue")
     if usage_status == "partial":
         known_usage = s.get("known_usage")
         if isinstance(known_usage, dict):
             a("legion.known_usage", json.dumps(known_usage, sort_keys=True, separators=(",", ":")))
             for key, value in sorted(known_usage.items()):
-                try:
-                    a(f"legion.known_tokens.{key}", int(value), "intValue")
-                except (ValueError, TypeError):
-                    pass
-        a("legion.known_usage_attempts", int(_num(s.get("known_usage_attempts"))), "intValue")
+                counter = _otlp_int(value)
+                if counter is not None:
+                    a(f"legion.known_tokens.{key}", counter, "intValue")
+        usage_attempts = _otlp_int(s.get("known_usage_attempts"))
+        if usage_attempts is not None:
+            a("legion.known_usage_attempts", usage_attempts, "intValue")
     parent = s.get("parent_id")
     span = {
         "traceId": trace_id,

@@ -50,6 +50,7 @@ LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE=""
 LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN=""
 LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID=""
 LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
+LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN=0
 LEGION_ADAPTER_LAUNCH_GATE_PATH=""
 LEGION_ADAPTER_LAUNCH_GATE_TOKEN=""
 LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=""
@@ -200,13 +201,13 @@ legion_adapter_prepare_supervisor_launch_gate() {
   LEGION_ADAPTER_LAUNCH_GATE_OUTCOME=""
 }
 
-# Record a signal during the shell-to-supervisor launch handshake. While the
-# decision is unpublished, the trap replaces the exact temp file that the main
-# path will rename; once rename has linearized, it replaces a still-ready/go
-# gate with cancel. Thus the trap and publisher share one decision payload
-# instead of racing a local pending snapshot against an unconditional `go`.
+# Record a signal during the shell-to-supervisor launch handshake. The normal
+# path and this trap write to one already-open FIFO using Bash builtins. Bash
+# serializes trap execution with builtin execution, and the arbiter publishes
+# only the first complete decision, so `go` is never briefly visible before a
+# pre-publication cancellation.
 legion_adapter_record_launch_signal() {
-  local pending_name="$1" signum="$2" normalized="$2" directory cancel_temp=""
+  local pending_name="$1" signum="$2" normalized="$2"
   case "$normalized" in HUP) normalized=1 ;; INT) normalized=2 ;; TERM) normalized=15 ;; esac
   printf -v "$pending_name" '%s' "$signum"
   [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE" -eq 1 ]] || return 0
@@ -218,43 +219,10 @@ legion_adapter_record_launch_signal() {
   # publication; later handlers still update the caller's pending signal.
   [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY" -eq 0 ]] || return 0
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=1
-  directory="${LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE%/*}"
-  cancel_temp="$(mktemp "$directory/.launch-gate-signal.XXXXXX" 2>/dev/null || true)"
-  if [[ -z "$cancel_temp" ]] || ! jq -cn \
-      --arg token "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN" \
-      --argjson pid "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" \
-      --argjson signal "$normalized" '
-        {schema:"legion.child-launch-gate.v1",status:"cancel",token:$token,
-         supervisor_pid:$pid,signal:$signal}
-      ' > "$cancel_temp" \
-      || ! chmod 600 "$cancel_temp"; then
-    [[ -z "$cancel_temp" ]] || rm -f "$cancel_temp"
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN" -ne 1 ]] \
+      || ! printf 'cancel:%s\n' "$normalized" >&9; then
     LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
     kill -TERM "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" 2>/dev/null || true
-    LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=0
-    return 0
-  fi
-  if [[ -n "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP" \
-      && -e "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP" ]]; then
-    if ! mv -f "$cancel_temp" "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP"; then
-      rm -f "$cancel_temp"
-      LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
-      kill -TERM "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" 2>/dev/null || true
-    fi
-  elif jq -e --arg token "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN" \
-      --argjson pid "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" '
-        .schema == "legion.child-launch-gate.v1"
-        and (.status == "ready" or .status == "go")
-        and .token == $token and .supervisor_pid == $pid
-        and ((keys_unsorted - ["schema","status","token","supervisor_pid"]) | length == 0)
-      ' "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE" >/dev/null 2>&1; then
-    if ! mv -f "$cancel_temp" "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE"; then
-      rm -f "$cancel_temp"
-      LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
-      kill -TERM "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID" 2>/dev/null || true
-    fi
-  else
-    rm -f "$cancel_temp"
   fi
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_BUSY=0
 }
@@ -267,12 +235,113 @@ legion_adapter_close_launch_signal_window() {
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN=""
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID=""
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN=0
+}
+
+legion_adapter_launch_gate_decision_arbiter() {
+  local gate="$1" fifo="$2" token="$3" supervisor_pid="$4"
+  python3 - "$gate" "$fifo" "$token" "$supervisor_pid" <<'PY'
+import json
+import os
+import stat
+import sys
+import tempfile
+
+gate, fifo, token, supervisor_pid_text = sys.argv[1:]
+supervisor_pid = int(supervisor_pid_text)
+
+def fail(message):
+    print(f"launch-gate decision arbiter: {message}", file=sys.stderr)
+    raise SystemExit(70)
+
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(gate, flags)
+try:
+    opened = os.fstat(descriptor)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_size > 4096:
+        fail("unsafe ready receipt")
+    raw = os.read(descriptor, 4097)
+    current = os.fstat(descriptor)
+    path_stat = os.stat(gate, follow_symlinks=False)
+    if ((opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or (opened.st_dev, opened.st_ino) != (path_stat.st_dev, path_stat.st_ino)
+            or opened.st_mtime_ns != current.st_mtime_ns
+            or opened.st_ctime_ns != current.st_ctime_ns):
+        fail("ready receipt changed while reading")
+finally:
+    os.close(descriptor)
+try:
+    ready = json.loads(raw)
+except (ValueError, UnicodeDecodeError):
+    fail("malformed ready receipt")
+if (not isinstance(ready, dict)
+        or set(ready) != {"schema", "status", "token", "supervisor_pid"}
+        or ready != {"schema": "legion.child-launch-gate.v1", "status": "ready",
+                     "token": token, "supervisor_pid": supervisor_pid}):
+    fail("unauthenticated ready receipt")
+
+with open(fifo, "rb", buffering=0) as source:
+    chunks = []
+    total = 0
+    while total <= 128:
+        chunk = source.read(129 - total)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    raw_decisions = b"".join(chunks)
+if len(raw_decisions) > 128:
+    fail("decision stream exceeded bound")
+lines = raw_decisions.decode("ascii", "strict").splitlines()
+if not lines:
+    fail("decision stream was empty")
+allowed = {"go", "cancel:1", "cancel:2", "cancel:15"}
+if any(line not in allowed for line in lines):
+    fail("invalid decision")
+# The FIFO remains open for the whole shell-side signal window. Do not expose
+# `go` until EOF proves that window closed without a cancellation; a trap that
+# interrupts immediately after the provisional go write must still win.
+cancellations = [line for line in lines if line.startswith("cancel:")]
+if cancellations:
+    cancelled = cancellations[0]
+    payload = {"schema": "legion.child-launch-gate.v1", "status": "cancel",
+               "token": token, "supervisor_pid": supervisor_pid,
+               "signal": int(cancelled.partition(":")[2])}
+elif lines == ["go"]:
+    payload = {"schema": "legion.child-launch-gate.v1", "status": "go",
+               "token": token, "supervisor_pid": supervisor_pid}
+else:
+    fail("duplicate go decision")
+
+directory = os.path.dirname(gate)
+fd, temporary = tempfile.mkstemp(prefix=".launch-gate-decision.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as destination:
+        json.dump(payload, destination, separators=(",", ":"))
+        destination.write("\n")
+        destination.flush()
+        os.fsync(destination.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, gate)
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
 }
 
 legion_adapter_complete_supervisor_launch_gate() {
   local supervisor_pid="$1" lease_path="$2" pending_name="$3"
   local gate="$LEGION_ADAPTER_LAUNCH_GATE_PATH" token="$LEGION_ADAPTER_LAUNCH_GATE_TOKEN"
-  local pending="" decision=go temp="" gate_cancelled=0 i sleep_bin=/bin/sleep
+  local pending="" decision=go fifo="" arbiter_pid="" arbiter_rc=0 i sleep_bin=/bin/sleep
   # Do not let stale publication state from an interrupted or reused shell
   # influence this handshake, including early polling failures below.
   legion_adapter_close_launch_signal_window
@@ -299,12 +368,51 @@ legion_adapter_complete_supervisor_launch_gate() {
     and .token == $token and .supervisor_pid == $pid
     and ((keys_unsorted - ["schema","status","token","supervisor_pid"]) | length == 0)
   ' "$gate" >/dev/null 2>&1 || return 0
+  # fd 9 is reserved only for the short decision window. Refuse to clobber an
+  # inherited descriptor because its semantics are outside this contract.
+  if { : >&9; } 2>/dev/null; then
+    legion_adapter_close_launch_signal_window
+    return 0
+  fi
+  fifo="$(python3 - "${gate%/*}" <<'PY'
+import os
+import secrets
+import sys
+
+directory = sys.argv[1]
+for _ in range(64):
+    candidate = os.path.join(
+        directory, ".launch-gate-decision-fifo." + secrets.token_hex(12)
+    )
+    try:
+        os.mkfifo(candidate, 0o600)
+    except FileExistsError:
+        continue
+    print(candidate)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+)" || {
+    legion_adapter_close_launch_signal_window
+    return 0
+  }
+  legion_adapter_launch_gate_decision_arbiter \
+    "$gate" "$fifo" "$token" "$supervisor_pid" &
+  arbiter_pid=$!
+  if ! exec 9>"$fifo"; then
+    kill -TERM "$arbiter_pid" 2>/dev/null || true
+    wait "$arbiter_pid" 2>/dev/null || true
+    rm -f "$fifo"
+    legion_adapter_close_launch_signal_window
+    return 0
+  fi
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE=1
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=0
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_GATE="$gate"
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_TOKEN="$token"
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_SUPERVISOR_PID="$supervisor_pid"
   LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN=1
   pending="${!pending_name:-}"
   case "$pending" in
     HUP) pending=1 ;;
@@ -312,61 +420,18 @@ legion_adapter_complete_supervisor_launch_gate() {
     TERM) pending=15 ;;
   esac
   [[ -z "$pending" ]] || decision=cancel
-  temp="$(mktemp "${gate%/*}/.launch-gate-decision.XXXXXX")" || {
-    legion_adapter_close_launch_signal_window
-    return 0
-  }
-  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP="$temp"
-  if ! jq -cn --arg status "$decision" --arg token "$token" \
-      --argjson pid "$supervisor_pid" --argjson signum "${pending:-0}" '
-      {schema:"legion.child-launch-gate.v1",status:$status,token:$token,supervisor_pid:$pid}
-      + (if $status == "cancel" then {signal:$signum} else {} end)
-    ' > "$temp"; then
-    rm -f "$temp"
-    legion_adapter_close_launch_signal_window
-    return 0
-  fi
-  chmod 600 "$temp" || {
-    rm -f "$temp"
-    legion_adapter_close_launch_signal_window
-    return 0
-  }
-  # Revalidate after temp construction. A trap that observed a signal either
-  # replaced this temp with cancel or replaced the gate itself; never overwrite
-  # that decision with a stale local `go`.
-  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED" -eq 1 ]]; then
-    rm -f "$temp"
-    legion_adapter_close_launch_signal_window
-    return 0
-  elif jq -e --arg token "$token" --argjson pid "$supervisor_pid" '
-        .schema == "legion.child-launch-gate.v1" and .status == "ready"
-        and .token == $token and .supervisor_pid == $pid
-        and ((keys_unsorted - ["schema","status","token","supervisor_pid"]) | length == 0)
-      ' "$gate" >/dev/null 2>&1; then
-    :
-  elif jq -e --arg token "$token" --argjson pid "$supervisor_pid" '
-        .schema == "legion.child-launch-gate.v1" and .status == "cancel"
-        and .token == $token and .supervisor_pid == $pid
-        and (.signal | type == "number" and (. == 1 or . == 2 or . == 15))
-        and ((keys_unsorted - ["schema","status","token","supervisor_pid","signal"]) | length == 0)
-      ' "$gate" >/dev/null 2>&1; then
-    rm -f "$temp"
-    LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
-    gate_cancelled=1
+  if [[ "$decision" == cancel ]]; then
+    printf 'cancel:%s\n' "$pending" >&9 || LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
   else
-    rm -f "$temp"
-    legion_adapter_close_launch_signal_window
-    return 0
+    printf 'go\n' >&9 || LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED=1
   fi
-  if [[ "$gate_cancelled" -eq 0 ]]; then
-    mv -f "$temp" "$gate" || {
-      rm -f "$temp"
-      legion_adapter_close_launch_signal_window
-      return 0
-    }
-    LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_DECISION_TEMP=""
-  fi
-  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED" -eq 1 ]]; then
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_ACTIVE=0
+  LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FD_OPEN=0
+  exec 9>&-
+  wait "$arbiter_pid" || arbiter_rc=$?
+  rm -f "$fifo"
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_SIGNAL_FAILED" -eq 1 || "$arbiter_rc" -ne 0 ]]; then
+    kill -TERM "$supervisor_pid" 2>/dev/null || true
     legion_adapter_close_launch_signal_window
     return 0
   fi
@@ -472,12 +537,22 @@ legion_adapter_lease_reason() {
 legion_adapter_preflight() {
   local executor="$1" art="$2" sandbox="$3" transport="$4"
   local model="${5:-}" effort="${6:-}" consent="${7:-0}" binary="${8:-}"
-  local root preflight tmp rc=0
+  local root validation_root preflight tmp alias_tmp rc=0 receipt_valid=1
   root="$(legion_adapter_contract_root)"
+  validation_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
   preflight="$root/legion-router/bin/legion-preflight"
   LEGION_ADAPTER_PREFLIGHT_PATH="$art/$executor-preflight.json"
   mkdir -p "$art"
-  tmp="$LEGION_ADAPTER_PREFLIGHT_PATH.tmp.$$"
+  [[ -d "$art" && ! -L "$art" \
+      && ! -L "$LEGION_ADAPTER_PREFLIGHT_PATH" \
+      && ! -L "$art/preflight.json" \
+      && ( ! -e "$LEGION_ADAPTER_PREFLIGHT_PATH" || -f "$LEGION_ADAPTER_PREFLIGHT_PATH" ) \
+      && ( ! -e "$art/preflight.json" || -f "$art/preflight.json" ) ]] || {
+    LEGION_ADAPTER_PREFLIGHT_STATUS=invalid
+    LEGION_ADAPTER_PREFLIGHT_REASON="unsafe preflight receipt leaf"
+    return 1
+  }
+  tmp="$(mktemp "$art/.${executor}-preflight.XXXXXX")" || return 1
   local -a args=(--json --executor "$executor" --sandbox "$sandbox"
     --read-mode provider-tools --task-transport "$transport")
   [[ -z "$model" ]] || args+=(--model "$model")
@@ -495,22 +570,70 @@ legion_adapter_preflight() {
     "$preflight" "${args[@]}" > "$tmp"
     rc=$?
     set -e
-    if ! jq -e '.schema == "legion.preflight.v1"' "$tmp" >/dev/null 2>&1; then
-      jq -cn --arg executor "$executor" --arg checked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        {schema:"legion.preflight.v1",checked_at:$checked,executor:$executor,
-         status:"unavailable",reason:"shared Legion preflight returned an invalid receipt",
-         identity:null,cache:{hit:false,key:null},compatibility:{}}' > "$tmp"
-      rc=1
+  fi
+  if ! PYTHONPATH="$validation_root/legion-observability/scripts" python3 - \
+      "$tmp" "$executor" "$model" "$sandbox" 2>/dev/null <<'PY'
+import sys
+from legion_preflight import validate_preflight_receipt_file
+
+path, executor, model, sandbox = sys.argv[1:]
+validate_preflight_receipt_file(
+    path, executor=executor, model=model or None, sandbox=sandbox or None
+)
+PY
+  then
+    receipt_valid=0
+    rc=1
+    local invalid_tmp
+    invalid_tmp="$(mktemp "$art/.invalid-preflight.XXXXXX")" || { rm -f "$tmp"; return 1; }
+    if jq -c '.status="invalid"
+        | .reason="shared Legion preflight returned malformed or incomplete evidence"' \
+        "$tmp" > "$invalid_tmp" 2>/dev/null; then
+      chmod 600 "$invalid_tmp" || { rm -f "$tmp" "$invalid_tmp"; return 1; }
+      python3 - "$invalid_tmp" "$tmp" <<'PY'
+import os
+import sys
+os.replace(sys.argv[1], sys.argv[2])
+PY
+    else
+      rm -f "$invalid_tmp"
     fi
   fi
-  chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$LEGION_ADAPTER_PREFLIGHT_PATH"
-  cp "$LEGION_ADAPTER_PREFLIGHT_PATH" "$art/preflight.json"
-  LEGION_ADAPTER_PREFLIGHT_STATUS="$(jq -r '.status' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  alias_tmp="$(mktemp "$art/.preflight-alias.XXXXXX")" || { rm -f "$tmp"; return 1; }
+  if ! cp "$tmp" "$alias_tmp" || ! chmod 600 "$alias_tmp" \
+      || ! python3 - "$tmp" "$LEGION_ADAPTER_PREFLIGHT_PATH" \
+          "$alias_tmp" "$art/preflight.json" <<'PY'
+import os
+import sys
+
+source, destination, alias_source, alias_destination = sys.argv[1:]
+os.replace(source, destination)
+os.replace(alias_source, alias_destination)
+directory = os.open(os.path.dirname(destination), os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+  then
+    rm -f "$tmp" "$alias_tmp"
+    LEGION_ADAPTER_PREFLIGHT_STATUS=invalid
+    LEGION_ADAPTER_PREFLIGHT_REASON="unable to publish preflight evidence safely"
+    return 1
+  fi
+  if [[ "$receipt_valid" -ne 1 ]]; then
+    LEGION_ADAPTER_PREFLIGHT_STATUS=invalid
+    LEGION_ADAPTER_PREFLIGHT_REASON="shared Legion preflight returned malformed or incomplete evidence"
+    LEGION_ADAPTER_CONFIG_IDENTITY=""
+    LEGION_ADAPTER_PREFLIGHT_CACHE_KEY=""
+    return 1
+  fi
+  LEGION_ADAPTER_PREFLIGHT_STATUS="$(jq -r '.status // "invalid"' "$LEGION_ADAPTER_PREFLIGHT_PATH" 2>/dev/null || printf invalid)"
   # shellcheck disable=SC2034
-  LEGION_ADAPTER_PREFLIGHT_REASON="$(jq -r '.reason' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
-  LEGION_ADAPTER_CONFIG_IDENTITY="$(jq -r '.identity.config_sha256 // empty' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
-  LEGION_ADAPTER_PREFLIGHT_CACHE_KEY="$(jq -r '.cache.key // empty' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+  LEGION_ADAPTER_PREFLIGHT_REASON="$(jq -r '.reason // "preflight evidence is invalid"' "$LEGION_ADAPTER_PREFLIGHT_PATH" 2>/dev/null || printf 'preflight evidence is invalid')"
+  LEGION_ADAPTER_CONFIG_IDENTITY="$(jq -r '.identity.config_sha256 // empty' "$LEGION_ADAPTER_PREFLIGHT_PATH" 2>/dev/null || true)"
+  LEGION_ADAPTER_PREFLIGHT_CACHE_KEY="$(jq -r '.cache.key // empty' "$LEGION_ADAPTER_PREFLIGHT_PATH" 2>/dev/null || true)"
   [[ "$rc" -eq 0 && "$LEGION_ADAPTER_PREFLIGHT_STATUS" == supported ]]
 }
 
@@ -778,18 +901,150 @@ legion_adapter_disarm_signal_receipt() {
 }
 
 legion_adapter_provider_span_is_durable() {
-  local attempt_path="$1" span_file
+  local attempt_path="$1"
   [[ -n "$attempt_path" && -d "${LEGION_TELEMETRY_DIR:-}" ]] || return 1
-  for span_file in "$LEGION_TELEMETRY_DIR"/*.jsonl; do
-    [[ -f "$span_file" ]] || continue
-    jq -R -e --arg attempt "$attempt_path" '
-      try (fromjson | select(.schema == "legion.span.v1"
-        and .artifacts.provider_attempt == true
-        and .artifacts.rollup_only != true
-        and .artifacts.attempt_receipt == $attempt)) catch empty
-    ' "$span_file" >/dev/null 2>&1 && return 0
-  done
-  return 1
+  python3 - "$attempt_path" "$LEGION_TELEMETRY_DIR" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+import tempfile
+
+attempt_path, telemetry_dir = sys.argv[1:]
+ack_path = attempt_path + ".provider-span-ack"
+limit = 1024 * 1024
+
+def open_regular(path, maximum):
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > maximum:
+        os.close(descriptor)
+        raise OSError("unsafe bounded file")
+    path_info = os.stat(path, follow_symlinks=False)
+    if (path_info.st_dev, path_info.st_ino) != (info.st_dev, info.st_ino):
+        os.close(descriptor)
+        raise OSError("file identity changed")
+    return descriptor, info
+
+def matching_span(raw):
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    artifacts = value.get("artifacts")
+    return (value.get("schema") == "legion.span.v1"
+            and isinstance(artifacts, dict)
+            and artifacts.get("provider_attempt") is True
+            and artifacts.get("rollup_only") is not True
+            and artifacts.get("attempt_receipt") == attempt_path)
+
+def validate_ack():
+    descriptor, info = open_regular(ack_path, 4096)
+    try:
+        raw = os.read(descriptor, 4097)
+    finally:
+        os.close(descriptor)
+    value = json.loads(raw)
+    if (not isinstance(value, dict) or set(value) != {
+            "schema", "attempt_receipt", "telemetry_path", "device", "inode",
+            "offset", "length", "span_sha256"} or
+            value["schema"] != "legion.provider-span-ack.v1" or
+            value["attempt_receipt"] != attempt_path or
+            type(value["device"]) is not int or type(value["inode"]) is not int or
+            type(value["offset"]) is not int or value["offset"] < 0 or
+            type(value["length"]) is not int or not 1 <= value["length"] <= limit or
+            not isinstance(value["span_sha256"], str)):
+        return False
+    descriptor = os.open(value["telemetry_path"], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        current = os.fstat(descriptor)
+        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or
+                (current.st_dev, current.st_ino) != (value["device"], value["inode"])):
+            return False
+        raw_span = os.pread(descriptor, value["length"], value["offset"])
+    finally:
+        os.close(descriptor)
+    return (len(raw_span) == value["length"]
+            and hashlib.sha256(raw_span).hexdigest() == value["span_sha256"]
+            and matching_span(raw_span))
+
+try:
+    if validate_ack():
+        raise SystemExit(0)
+except (OSError, ValueError, TypeError, UnicodeDecodeError):
+    pass
+
+# Crash recovery is bounded to the tail of the one date-derived telemetry file;
+# historical files are never globally rescanned. Once recovered, all future
+# checks use the exact indexed byte range above.
+try:
+    attempt_descriptor, attempt_info = open_regular(attempt_path, 65536)
+    try:
+        attempt = json.loads(os.read(attempt_descriptor, 65537))
+    finally:
+        os.close(attempt_descriptor)
+    ended_at = attempt.get("ended_at")
+    if not isinstance(ended_at, str) or len(ended_at) < 10:
+        raise ValueError("attempt has no date")
+    telemetry_path = os.path.join(telemetry_dir, ended_at[:10] + ".jsonl")
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(telemetry_path, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError("unsafe telemetry file")
+        start = max(0, info.st_size - limit)
+        raw = os.pread(descriptor, info.st_size - start, start)
+    finally:
+        os.close(descriptor)
+    cursor = start
+    if start:
+        first_newline = raw.find(b"\n")
+        if first_newline < 0:
+            raise ValueError("no complete bounded telemetry record")
+        cursor += first_newline + 1
+        raw = raw[first_newline + 1:]
+    found = None
+    for line in raw.splitlines(keepends=True):
+        if matching_span(line):
+            found = (cursor, line)
+        cursor += len(line)
+    if found is None:
+        raise ValueError("provider span not found in bounded tail")
+    offset, line = found
+    payload = {
+        "schema": "legion.provider-span-ack.v1",
+        "attempt_receipt": attempt_path,
+        "telemetry_path": telemetry_path,
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "offset": offset,
+        "length": len(line),
+        "span_sha256": hashlib.sha256(line).hexdigest(),
+    }
+    directory = os.path.dirname(ack_path)
+    fd, temporary = tempfile.mkstemp(prefix=".provider-span-ack.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as destination:
+            json.dump(payload, destination, separators=(",", ":"))
+            destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, ack_path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+except (OSError, ValueError, TypeError, UnicodeDecodeError):
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
 }
 
 legion_adapter_claim_provider_span() {

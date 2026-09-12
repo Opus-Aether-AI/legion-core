@@ -61,6 +61,39 @@ def test_stats_by_arch_model_success_cost_and_percentiles():
     assert got["p95_ms"] == 385.0
 
 
+def test_optimizer_downgrades_huge_cost_and_duration_without_crash():
+    huge = 10**1000
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "archetype": "huge",
+            "model": "test-model-alpha",
+            "status": "ok",
+            "cost_usd": huge,
+            "cost_status": "known",
+            "duration_ms": huge,
+        }
+    ]
+    stats = opt.stats_by_arch_model(spans)["huge"]["test-model-alpha"]
+    assert stats["cost_status"] == "unknown"
+    assert stats["mean_cost"] is None
+    assert stats["known_cost_usd"] is None
+    assert stats["p50_ms"] == 0
+    assert "mean_cost=unknown" in opt._format_stats(stats)
+    assert opt._classification_cost_text(
+        {"unclassified_cost_status": "known", "unclassified_cost_usd": huge}
+    ) == "unknown"
+
+    overflow_spans = [
+        {**spans[0], "cost_usd": 1e308, "duration_ms": 1},
+        {**spans[0], "cost_usd": 1e308, "duration_ms": 1},
+    ]
+    overflow = opt.stats_by_arch_model(overflow_spans)["huge"]["test-model-alpha"]
+    assert overflow["cost_status"] == "unknown"
+    assert overflow["known_cost_usd"] is None
+
+
 def test_propose_accepts_cheaper_equal_or_better_model():
     stats = {
         "test-model-beta": {"runs": 6, "success_rate": 0.8, "mean_cost": 1.0, "p50_ms": 100, "p95_ms": 200},

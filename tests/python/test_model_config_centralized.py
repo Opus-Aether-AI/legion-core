@@ -27,6 +27,8 @@ ACTIVE_DEFAULT_FILES = [
     "docs/benchmarking.md",
     "legion-codex-mode/README.md",
     "legion-codex-mode/SKILL.md",
+    "legion-deepseek-mode/README.md",
+    "legion-deepseek-mode/SKILL.md",
     "legion-observability/README.md",
     "legion-observability/bench/adapters/cursor-agent.sh",
     "legion-observability/bench/adapters/direct-claude.sh",
@@ -74,7 +76,14 @@ def test_active_default_guidance_uses_model_refs():
 
 def _concrete_model_pattern():
     return re.compile(
-        r"\b(?:gpt-\d+(?:\.\d+)+(?:[-_][a-z0-9.]+)*"
+        # Some GPT ids carry a minor version before the variant name, and some
+        # carry none at all. Requiring the decimal let every id of the second
+        # shape past this guard, so the version part is optional as long as a
+        # named variant follows. A bare family prefix with no variant is a
+        # FAMILY, not a concrete id, and stays allowed on purpose.
+        # (Ids stay out of this file for the same reason the rule exists — it
+        # scans itself, and it caught this comment.)
+        r"\b(?:gpt-\d+(?:\.\d+)*(?:[-_][a-z][a-z0-9.]*)+"
         r"|claude[-_][a-z0-9.-]*\d[a-z0-9.-]*"
         r"|o\d+(?:[-_][a-z0-9.]+)?"
         r"|(?:cursor[-_])?(?:composer|grok)[-_]?\d[a-z0-9._-]*"

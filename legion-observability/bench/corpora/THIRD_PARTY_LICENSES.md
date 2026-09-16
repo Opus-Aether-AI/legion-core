@@ -1,6 +1,7 @@
 # Third-party licenses for vendored benchmark content
 
-The repository as a whole is licensed under Apache-2.0 (see root `LICENSE`).
+The repository as a whole is source-available under BSL 1.1 (see root
+`LICENSE`), converting to Apache-2.0 on 2030-08-27.
 The following benchmark corpus vendors third-party content under its own license,
 reproduced here to satisfy that license's notice requirement.
 

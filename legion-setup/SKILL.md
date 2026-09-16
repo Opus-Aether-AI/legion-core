@@ -2,7 +2,7 @@
 name: legion-setup
 kind: procedure
 disable-model-invocation: true
-description: Install or update the Legion multi-model marketplace. Use when the user pastes the Legion GitHub repo link, says "install legion", "set up legion", "add legion", "update legion", "upgrade legion", or "refresh legion", or wants Legion on Codex, Cursor, opencode, Pi, or Hermes. First run installs marketplace plugins, shared skills and CLIs, plus the selected harness bridges; daily refresh is opt-in. The harness subcommands wire supported MCP, skill, agent, and delegation surfaces.
+description: Install or update the Legion model-agnostic execution-layer marketplace. Use when the user pastes the Legion GitHub repo link, says "install legion", "set up legion", "add legion", "update legion", "upgrade legion", or "refresh legion", or wants Legion on Claude, Codex, Cursor, opencode, DeepSeek, Pi, or Hermes. First run installs marketplace plugins, shared skills and CLIs, plus selected executor bridges; daily refresh is opt-in.
 ---
 
 # Legion Setup — install & update in one skill
@@ -27,7 +27,7 @@ Requires `curl`, `jq`, `git`.
 
 ## Update (every time after)
 
-Just ask Claude to **"update legion"**, or:
+Ask the active harness to **"update legion"**, or:
 
 ```bash
 legion-setup update             # pulls latest + re-syncs everything
@@ -35,11 +35,10 @@ legion-setup update             # pulls latest + re-syncs everything
 
 ## Run Legion on Codex CLI
 
-Legion is model-agnostic and runs natively on Codex CLI: both harnesses speak
-MCP, both read skills from `~/.agents/skills`, and `legion-claude` lets a
-Codex-primary session call Claude when it is worth it (with automatic configured
-Codex fallback when the Claude limit is hit). One command wires the marketplace
-into Codex:
+Legion is model-agnostic and runs natively on Codex CLI. Codex reads skills from
+`~/.agents/skills`; routing remains role-driven, including any current
+`legion-claude` fallback behavior configured by the runtime. One command wires
+the marketplace into Codex:
 
 ```bash
 legion-setup codex              # all: register MCPs + verify skill mirror + verify legion-claude
@@ -102,7 +101,9 @@ legion-setup hermes verify
 
 The installer manages only Legion-owned symlinks in `~/.agents/skills` plus that
 single Hermes discovery link; it never replaces a real user skill directory.
-Use `legion-route --list-executors` to see all registered coding families.
+Use `legion-route --list-executors` to see all registered executors. DeepSeek
+Harness needs a user-authored dsh profile before it can run; it ships no
+headless preset.
 
 ## Make Legion the repository default
 

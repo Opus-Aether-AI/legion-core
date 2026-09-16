@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.29.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.29.0...v0.29.1) (2026-09-09)
+
+
+### Fixed
+
+* **observability:** validate configured independent reviewers ([2e947e3](https://github.com/Opus-Aether-AI/legion-core/commit/2e947e398fef8581c37eaca1bed201db3487b81e))
+
+## [0.29.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.28.0...v0.29.0) (2026-09-09)
+
+
+### Added
+
+* **router:** add a Sol precision implementation lane ([#198](https://github.com/Opus-Aether-AI/legion-core/issues/198)) ([950adb7](https://github.com/Opus-Aether-AI/legion-core/commit/950adb71baf87e22a3c4f8811ffa67ed7d1c61b6))
+
+## [0.28.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.27.1...v0.28.0) (2026-09-08)
+
+
+### Added
+
+* **router:** add frontier model tier for Fable 5.1 and GPT-6 Astra ([#196](https://github.com/Opus-Aether-AI/legion-core/issues/196)) ([04b6518](https://github.com/Opus-Aether-AI/legion-core/commit/04b6518c58f859d601933c23722b6b0f709a4b3c))
+
+## [0.27.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.27.0...v0.27.1) (2026-08-28)
+
+
+### Fixed
+
+* keep exactly one licence file in the repository root ([#190](https://github.com/Opus-Aether-AI/legion-core/issues/190)) ([07d7163](https://github.com/Opus-Aether-AI/legion-core/commit/07d716375ea3b68db88424c165c067d29ed186ea))
+
+## [0.27.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.26.0...v0.27.0) (2026-08-28)
+
+
+### Added
+
+* relicense to BSL 1.1, add legion-deepseek-mode, and drop harness bias ([#188](https://github.com/Opus-Aether-AI/legion-core/issues/188)) ([c1dece8](https://github.com/Opus-Aether-AI/legion-core/commit/c1dece8c242083f7bd6d6c15903c6853acd55cb8))
+* **router:** add DeepSeek Harness as an executor ([#186](https://github.com/Opus-Aether-AI/legion-core/issues/186)) ([7cdedb6](https://github.com/Opus-Aether-AI/legion-core/commit/7cdedb672295a41b5bdb8107abe5caf33e9894df))
+
+
+### Fixed
+
+* **bench:** pin the published version in the agent image, never "latest" ([#182](https://github.com/Opus-Aether-AI/legion-core/issues/182)) ([f430352](https://github.com/Opus-Aether-AI/legion-core/commit/f4303523b87d9cba3e131fc95078abac4e5b704c))
+* **router:** diff against the worktree base in every adapter, not just codex ([#185](https://github.com/Opus-Aether-AI/legion-core/issues/185)) ([15d9e93](https://github.com/Opus-Aether-AI/legion-core/commit/15d9e9353fa0bd0179dd7a6c2809346a0f983762))
+
 ## [0.26.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.25.0...v0.26.0) (2026-08-25)
 
 

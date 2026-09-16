@@ -4,10 +4,15 @@
 # ships no slash commands or sub-agents of its own (domain agents add those), so
 # every case here is a skill. Extend with command/agent cases when you build on top.
 cases:
-  - prompt: "Use the Codex primary routing brain to decide when to call Claude from a Codex CLI session"
+  - prompt: "Under Codex CLI, map Codex-native MCPs and bridged commands, then decide whether architecture judgement, frontend polish, or independent review stays inline or uses a configured role"
     expect_type: skill
     expect: legion-codex-mode
-    why: Codex-primary routing brain is the legion-codex-mode skill
+    why: Codex-primary role-driven routing is the legion-codex-mode skill
+
+  - prompt: "DeepSeek Harness is driving Legion; explain the required dsh headless profile, no-review limitation, and usage-not-reported contract"
+    expect_type: skill
+    expect: legion-deepseek-mode
+    why: DeepSeek-primary adapter limits and routing belong to legion-deepseek-mode
 
   - prompt: "Show Legion telemetry, per-executor cost, latency, spans, doctor, and self-learning hints"
     expect_type: skill

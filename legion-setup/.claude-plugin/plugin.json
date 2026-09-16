@@ -1,7 +1,7 @@
 {
   "name": "legion-setup",
   "description": "Install and update Legion, wire Codex/Cursor/opencode bridges, verify Pi/Hermes shared-skill readiness, and make Legion the repository-default workflow without replacing existing instructions. Ships `legion-setup`, `legion-init`, and native harness setup commands; daily refresh/self-learning is opt-in.",
-  "version": "0.2.8",
+  "version": "0.2.10",
   "author": {
     "name": "legion-core"
   },

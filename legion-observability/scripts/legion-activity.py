@@ -129,11 +129,35 @@ def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
     for entry in costs.get("models", []):
         match = _string(entry.get("match")).lower()
         if match and match in model_name:
+            long_context = _dict(entry.get("long_context"))
             return {
                 "input": _num(entry.get("input")),
                 "output": _num(entry.get("output")),
                 "cache_read": _num(entry.get("cache_read")),
                 "cache_write": _num(entry.get("cache_write")),
+                # SCHEMA v3 long-context tier. A row with no `long_context` block
+                # gets threshold -1, which no token count can exceed, so v2 rows
+                # price exactly as before.
+                #
+                # -1 rather than 0, and an explicit None check rather than `or`,
+                # so this agrees with jq and TypeScript on the degenerate configs:
+                # a threshold of 0 must activate (every request exceeds it), and a
+                # multiplier of 0 must stay 0 rather than being coerced to 1.
+                "lc_threshold": (
+                    _num(long_context["threshold_input_tokens"])
+                    if long_context.get("threshold_input_tokens") is not None
+                    else -1.0
+                ),
+                "lc_input_multiplier": (
+                    _num(long_context["input_multiplier"])
+                    if long_context.get("input_multiplier") is not None
+                    else 1.0
+                ),
+                "lc_output_multiplier": (
+                    _num(long_context["output_multiplier"])
+                    if long_context.get("output_multiplier") is not None
+                    else 1.0
+                ),
             }
     default = _dict(costs.get("default"))
     return {
@@ -141,6 +165,9 @@ def _rates_for(model: Any, costs: dict[str, Any]) -> dict[str, float]:
         "output": _num(default.get("output")),
         "cache_read": _num(default.get("cache_read")),
         "cache_write": _num(default.get("cache_write")),
+        "lc_threshold": -1.0,
+        "lc_input_multiplier": 1.0,
+        "lc_output_multiplier": 1.0,
     }
 
 
@@ -154,10 +181,19 @@ def cost_for(model: Any, usage: Any, costs: dict[str, Any]) -> float:
     billed_in = max(0, input_tokens - cached_tokens)
     billed_out = output_tokens + reasoning_tokens
     rates = _rates_for(model, costs)
+    # SCHEMA v3: above the threshold the whole prompt reprices. The prompt is
+    # billed_in + cached_tokens, matching cost.sh's input + cache_read + cache_write.
+    threshold = rates["lc_threshold"]
+    # `threshold >= 0` (not `> 0`): a configured threshold of 0 means every
+    # request is over it, which is how jq and TypeScript read it too. The
+    # no-tier sentinel is -1, which nothing can exceed.
+    over = threshold >= 0 and (billed_in + cached_tokens) > threshold
+    in_mult = rates["lc_input_multiplier"] if over else 1.0
+    out_mult = rates["lc_output_multiplier"] if over else 1.0
     total = (
-        billed_in * rates["input"]
-        + billed_out * rates["output"]
-        + cached_tokens * rates["cache_read"]
+        billed_in * rates["input"] * in_mult
+        + billed_out * rates["output"] * out_mult
+        + cached_tokens * rates["cache_read"] * in_mult
     )
     return total / 1_000_000.0
 

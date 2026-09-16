@@ -37,6 +37,10 @@ cost_for_model() {
     return 0
   fi
 
+  # SCHEMA v3: an optional `long_context` block scales the rates once the whole
+  # prompt (input + cache_read + cache_write) crosses a threshold. GPT-6 Astra
+  # bills 2x input / 1.5x output above 272K. Rows without the block price as v2,
+  # because both multipliers default to 1.
   jq -n \
     --arg m "$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')" \
     --argjson in "${input:-0}" \
@@ -47,10 +51,17 @@ cost_for_model() {
       ($cfg[0]) as $c
       | ( [ $c.models[] | select(.match as $mm | $m | contains($mm)) ] | first ) as $row
       | ( $row // $c.default ) as $p
-      | ( ($in  / 1000000) * ($p.input       // 0)
-        + ($out / 1000000) * ($p.output      // 0)
-        + ($cr  / 1000000) * ($p.cache_read  // 0)
-        + ($cw  / 1000000) * ($p.cache_write // 0) )
+      | ( $in + $cr + $cw ) as $prompt
+      | ( $p.long_context // {} ) as $lc
+      | ( if ($lc.threshold_input_tokens // null) != null
+             and $prompt > $lc.threshold_input_tokens
+          then [ ($lc.input_multiplier // 1), ($lc.output_multiplier // 1) ]
+          else [ 1, 1 ]
+          end ) as $mult
+      | ( ($in  / 1000000) * ($p.input       // 0) * $mult[0]
+        + ($cr  / 1000000) * ($p.cache_read  // 0) * $mult[0]
+        + ($cw  / 1000000) * ($p.cache_write // 0) * $mult[0]
+        + ($out / 1000000) * ($p.output      // 0) * $mult[1] )
       | (. * 1000000 | round) / 1000000
     '
 }

@@ -19,7 +19,7 @@ and discard failed or regressing mutations.
 
 Legion implements that protocol locally:
 
-- normalize Claude, Codex, Cursor, opencode, and Gemini session JSONL into
+- normalize Claude, Codex, Cursor, opencode, DeepSeek, Hermes, and Pi session JSONL into
   versioned, harness-neutral events;
 - group events into sessions and episodes, classify explicit user decisions,
   and link each decision to later verification or failure evidence;

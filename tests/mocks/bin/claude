@@ -16,6 +16,26 @@ if [[ "${1:-}" == "-p" ]]; then
     if [[ "${MOCK_CLAUDE_WRITE:-0}" == "1" ]]; then
         printf 'unexpected\n' > claude-unexpected.txt
     fi
+    # MOCK_CLAUDE_DECLINE_MODELS: comma-separated model ids that should answer the
+    # way the real CLI answers for a model this account cannot run. The envelope
+    # below is copied from actual `claude -p --output-format json --model <bogus>`
+    # output, NOT invented: subtype is "success" and stop_reason is unremarkable,
+    # so a classifier keying on either would miss it. is_error + terminal_reason
+    # are the only reliable signals, which is what legion-claude checks.
+    if [[ -n "${MOCK_CLAUDE_DECLINE_MODELS:-}" ]]; then
+        _mock_model=""
+        _mock_prev=""
+        for _mock_arg in "$@"; do
+            [[ "$_mock_prev" == "--model" ]] && _mock_model="$_mock_arg"
+            _mock_prev="$_mock_arg"
+        done
+        case ",${MOCK_CLAUDE_DECLINE_MODELS}," in
+            *",${_mock_model},"*)
+                printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"terminal_reason\":\"api_error\",\"stop_reason\":\"stop_sequence\",\"result\":\"There's an issue with the selected model (${_mock_model}). It may not exist or you may not have access to it.\",\"usage\":{\"input_tokens\":100000,\"output_tokens\":0}}"
+                exit 0
+                ;;
+        esac
+    fi
     if [[ "${MOCK_CLAUDE_LIMIT:-0}" == "1" ]]; then
         printf '%s\n' '{"is_error":true,"result":"You have reached your usage limit"}'
         exit 0

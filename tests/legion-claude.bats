@@ -245,3 +245,88 @@ make_test_repo() {
     echo "$output" | jq -e '.status == "ok"'
     assert_mock_called claude "output-format json --model $CLAUDE_DEFAULT"
 }
+
+# ── same-vendor model chain (--fallback-models) ──────────────────────────
+# The chain exists because the Claude adapter's only escape used to be
+# CROSS-EXECUTOR: a model that declined handed the work to a codex model, which
+# for a frontend-craft archetype throws away the reason the archetype exists.
+
+@test "legion-claude: a declined model advances to the next in the chain" {
+    local repo; repo="$(make_test_repo chain-advance)"
+    MOCK_CLAUDE_DECLINE_MODELS="model-declines" \
+      run "$LEGION_CLAUDE" run --task x --model model-declines \
+        --fallback-models "model-answers" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    # The run succeeds, and reports the model that actually answered.
+    echo "$output" | jq -e '.status == "ok" and .model == "model-answers"'
+    # It stayed with Claude rather than crossing to codex.
+    echo "$output" | jq -e '.executor == "claude" and .fell_back == false'
+}
+
+@test "legion-claude: an exhausted chain reports failure, never ok" {
+    local repo; repo="$(make_test_repo chain-exhausted)"
+    # Every model declines. A decline is a well-formed answer, so without an
+    # explicit guard this returns rc 0 with the decline text as the "result" of a
+    # successful run -- the caller then acts on a refusal as if it were work.
+    MOCK_CLAUDE_DECLINE_MODELS="model-a,model-b" \
+      run "$LEGION_CLAUDE" run --task x --model model-a \
+        --fallback-models "model-b" --repo "$repo" --no-fallback --quiet
+    echo "$output" | jq -e '.status != "ok"'
+    echo "$output" | jq -e '.reason == "claude_declined"'
+}
+
+@test "legion-claude: a single-model chain that declines is not reported ok" {
+    local repo; repo="$(make_test_repo chain-single)"
+    # No fallback_refs at all -- the common case for most archetypes.
+    MOCK_CLAUDE_DECLINE_MODELS="model-only" \
+      run "$LEGION_CLAUDE" run --task x --model model-only \
+        --repo "$repo" --no-fallback --quiet
+    echo "$output" | jq -e '.status != "ok"'
+    echo "$output" | jq -e '.reason == "claude_declined"'
+}
+
+@test "legion-claude: an ordinary failure does NOT burn the model chain" {
+    local repo; repo="$(make_test_repo chain-not-burned)"
+    # MOCK_CLAUDE_FAIL is a real run failure, not a decline. Retrying another
+    # model would hide the cause and pay twice for the same broken task.
+    local calls="$TEST_TMPDIR/chain-calls.log"
+    MOCK_CLAUDE_FAIL=1 MOCK_CALL_LOG="$calls" \
+      run "$LEGION_CLAUDE" run --task x --model model-a \
+        --fallback-models "model-b" --repo "$repo" --no-fallback --quiet
+    echo "$output" | jq -e '.reason != "claude_declined"'
+    ! grep -q -- '--model model-b' "$calls"
+}
+
+@test "legion-claude: a task ABOUT declined models does not reroute itself" {
+    local repo; repo="$(make_test_repo chain-prose)"
+    # The classifier reads .result, which is the model's own prose. A successful
+    # run whose subject is model ids and refusals must stay a successful run.
+    local calls="$TEST_TMPDIR/prose-calls.log"
+    MOCK_CALL_LOG="$calls" \
+      run "$LEGION_CLAUDE" run --task "explain model_not_found and refusal handling" \
+        --model model-a --fallback-models "model-b" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok" and .model == "model-a"'
+    ! grep -q -- '--model model-b' "$calls"
+}
+
+@test "legion-claude: a declined attempt's spend is not lost from the total" {
+    local repo; repo="$(make_test_repo chain-metering)"
+    # out_file is overwritten each time round the chain, so without explicit
+    # banking the declined attempt's input tokens vanish from the record. They
+    # were really spent: the prompt was sent and read before the model declined.
+    # The declining model's id must match a costs.json row, or its spend prices
+    # at $0 and the test would pass for the wrong reason.
+    MOCK_CLAUDE_DECLINE_MODELS="$CLAUDE_DEFAULT" \
+      run "$LEGION_CLAUDE" run --task x --model "$CLAUDE_DEFAULT" \
+        --fallback-models "model-answers" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.model == "model-answers"'
+    # The answering model's own cost is the mock's 0.12; the declined attempt read
+    # 100k input tokens at the default role's rate, so the reported total
+    # must exceed a single call's.
+    echo "$output" | jq -e '.cost_usd > 0.12'
+    # The chain is legible in the record rather than only in the logs.
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '.artifacts.declined_models // empty'"
+    [ "$output" = "$CLAUDE_DEFAULT" ]
+}

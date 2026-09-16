@@ -1,8 +1,11 @@
 # legion-router
 
-Legion's multi-model brain. Any supported primary harness can delegate scoped
-work to configured executors and receive a reviewable, metered diff. An optional
-Anthropic-compatible sidecar keeps proxied and out-of-band spend in one stream.
+Legion's routing and delegation layer. It routes scoped units of work to
+configured executors, runs them in isolation, and records evidence and metered
+outcomes. The seven current executors are `claude`, `codex`, `cursor`,
+`opencode`, `deepseek`, `hermes`, and `pi`. They are coding executors today,
+so a delegated result is normally a reviewable diff. The routing, span,
+archetype, and evidence contracts are not limited to coding.
 
 > One orchestrator, a legion of models.
 
@@ -14,6 +17,7 @@ Anthropic-compatible sidecar keeps proxied and out-of-band spend in one stream.
 | `legion-claude` | `scripts/legion-claude.sh` | Delegate to Claude headless in an isolated worktree, capture a patch, and optionally fall back through the configured Codex route. |
 | `legion-cursor` | `scripts/legion-cursor.sh` | Delegate a task to Cursor Agent headless (`agent -p`) in an isolated worktree; capture diff + result + usage; emit a telemetry span with `executor=cursor`. |
 | `legion-opencode` | `scripts/legion-opencode.sh` | Delegate to opencode headless in an isolated worktree and normalize its event stream into the Legion result/span contract. |
+| `legion-deepseek` | `scripts/legion-deepseek.sh` | Delegate through a user-authored DeepSeek Harness profile in an isolated worktree. DeepSeek Harness ships no headless preset. |
 | `legion-pi` | `scripts/legion-pi.sh` | Delegate through Pi's official `-p --mode json --no-session` stream inside a filesystem write sandbox; validate the final settled `agent_end`, meter every `message_end` plus compaction call exactly once, and return a patch captured with parent-owned Git metadata. |
 | `legion-hermes` | `scripts/legion-hermes.sh` | Delegate through Hermes `--oneshot` inside a filesystem write sandbox; parse its complete `--usage-file` JSON document while preserving stdout as opaque final text. |
 | `legion-intake` | `scripts/legion-intake.sh` | GitHub issue intake wrapper. Runs a compatible Legion worker (`delegate`, `cursor`, or `custom`) in explore or implement mode, comments assessment results, and opens review PRs for implementation diffs. |
@@ -69,7 +73,9 @@ narrowly normalizes Codex's built-in `[P0]`–`[P3]` or explicit `No findings`
 formats; any other prose remains an invalid, fail-closed verdict. `approve` and
 `comment` cannot carry medium-or-higher findings.
 
-Requires the CLI for each executor you use, plus `jq` and `git`. Pi and Hermes
+Requires the CLI for each executor you use, plus `jq` and `git`. DeepSeek
+Harness additionally requires a user-authored dsh profile; it does not work out
+of the box. Pi and Hermes
 children also require `sandbox-exec` (included with macOS) or Bubblewrap
 (`bwrap`, install the `bubblewrap` package on Linux); their adapters fail closed
 when neither boundary exists. The proxy additionally needs `bun`, and a
@@ -77,6 +83,53 @@ when neither boundary exists. The proxy additionally needs `bun`, and a
 through `legion-route.py` rather than parsing `models.toml` a second time. If no
 interpreter resolves, the proxy still starts and warns, but every model role
 falls through to its default.
+
+## DeepSeek Harness (`deepseek`, needs a profile you author)
+
+`legion-deepseek` delegates to DeepSeek Harness the way every `contract = "diff"`
+executor works: isolated worktree in, diff out, span metered.
+
+The invocation is unusual because `dsh` is unusual. Its CLI registers only
+`plugin` and `web` -- there is no `dsh run`. Headless execution lives in the
+`@deepseek-ai/dsh-headless` bundle, which its own package describes as "a direct
+core Agent/Session runner over dsh-base with no Host, HTTP, or browser layer",
+and a bundle is reached the way every dsh app is reached:
+
+```bash
+dsh --profile <name> [args...]     # args go to the profile's app
+```
+
+So the adapter runs `dsh --profile "$LEGION_DSH_PROFILE" <task>` in the worktree.
+
+**dsh ships no headless preset.** Its presets are `code`, `cordis`, `minimal`
+and `standard`, none of which load that bundle, so this executor does not work
+out of the box: you have to author a profile that loads
+`@deepseek-ai/dsh-headless` and point `LEGION_DSH_PROFILE` at it (default:
+`legion-headless`). `legion-doctor` says so directly rather than passing on the
+presence of the binary and failing at dispatch.
+
+| variable | meaning |
+|---|---|
+| `DSH_BIN` | path to `dsh` (default: `dsh` on PATH) |
+| `LEGION_DSH_PROFILE` | profile that loads the headless bundle |
+| `DEEPSEEK_API_KEY` | provider credential; doctor warns when unset |
+
+Two capabilities are declared honestly rather than optimistically:
+
+- **`review = "none"`.** dsh publishes no structured verdict path, so it stays
+  out of `[review].order`. A reviewer that cannot emit a schema-valid verdict is
+  indistinguishable from one that rejected the change, which is how a fallback
+  turns a missing review into a blocked merge.
+- **Usage is not metered.** dsh at `0.1.1-rc.2` is a developer preview with no
+  headless output contract -- no JSON envelope, and although a `dsh-token-meter`
+  package exists it exposes nothing through this path. The adapter reports zero
+  and means "not reported"; a plausible-looking number would flow into cost
+  totals and routing decisions that are supposed to be evidence-based.
+
+`read-only` has no dsh equivalent either: there is no documented flag that
+withholds the write and bash tools. Rather than pass a flag that does not exist,
+a read-only run that changed any file is rejected after the fact. That backstop
+exists for other adapters too, but here it is the only line of defence.
 
 ## Agent Client Protocol bridge (staged, not yet wired)
 
@@ -261,7 +314,7 @@ legion-router/
   `LEGION_EXECUTOR_NAME`, `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized
   repository policy uses that context to prevent accidental recursive delegation.
   A worker can explicitly use `legion-delegate run --executor <different-harness>`
-  for one cross-harness handoff (Claude, Codex, Cursor, opencode, Pi, or Hermes). The handoff
+  for one cross-executor handoff (Claude, Codex, Cursor, opencode, DeepSeek, Pi, or Hermes). The handoff
   retains task scanning, a fresh isolated worktree, parent trace linkage, and a
   default maximum depth of `2` (`LEGION_MAX_DEPTH`). Implicit, same-harness, and
   direct-adapter nested calls remain blocked. A sandboxed Pi or Hermes worker's

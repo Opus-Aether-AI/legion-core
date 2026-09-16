@@ -1,9 +1,9 @@
 # Hermes as a symmetric Legion primary
 
-Hermes is a registered Legion coding family as well as a primary. It can work
-inline when it has the needed context, and can make a single explicit handoff to
-any **different** registered coding family for independent implementation or
-review. Every delegated run remains metered (`legion.span.v1`) instead of
+Hermes is a registered Legion executor as well as a primary. It can work inline
+when it has the needed context, and can make a single explicit handoff to any
+**different** registered executor for independent implementation or review.
+Every delegated run remains metered (`legion.span.v1`) instead of
 shelling out raw and off-book.
 
 Two pieces make this work:
@@ -73,9 +73,9 @@ What changes:
 `legion-claude` can fall back to the configured Codex workhorse on a Claude
 usage-limit. Be deliberate about that for a *coding* lane:
 
-- Both the primary Claude path and the Codex fallback run in isolated worktrees
-  and return unapplied diffs unless `--apply` is explicit. The fallback uses a
-  different configured model and effort from the primary Claude route.
+- The current `claude_default` path and its configured fallback run in isolated
+  worktrees and return unapplied diffs unless `--apply` is explicit. The
+  fallback uses a different configured role and effort.
 - So for an unattended implementation lane, prefer **`--no-fallback`**: fail loudly
   and let the next run retry, rather than silently switch models and land nothing
   while reporting success. Drop `--no-fallback` only if you genuinely want the

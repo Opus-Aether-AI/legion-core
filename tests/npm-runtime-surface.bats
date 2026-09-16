@@ -31,7 +31,10 @@ setup() {
     "legion-opencode-mode/SKILL.md" \
     "legion-opencode-mode/.claude-plugin/plugin.json" \
     "legion-hermes-mode/SKILL.md" \
-    "legion-hermes-mode/.claude-plugin/plugin.json"; do
+    "legion-hermes-mode/.claude-plugin/plugin.json" \
+    "legion-deepseek-mode/README.md" \
+    "legion-deepseek-mode/SKILL.md" \
+    "legion-deepseek-mode/.claude-plugin/plugin.json"; do
     [ -f "$EXTRACTED/package/$required" ]
   done
 

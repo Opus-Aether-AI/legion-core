@@ -2,7 +2,7 @@
 
 Legion ends a primary harness turn from evidence, not from an arbitrary wall-clock
 deadline or retry count. This applies equally when Claude, Codex, Cursor,
-opencode, Pi, or Hermes is primary.
+opencode, DeepSeek, Pi, or Hermes is primary.
 
 At a material workflow boundary, write a `legion.convergence-checkpoint.v1`
 document and run:

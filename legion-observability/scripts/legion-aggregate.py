@@ -54,7 +54,7 @@ def _num(x):
 
 
 def _is_synthetic_opus_baseline(span):
-    # Accept both the historical Claude-primary marker and the harness-generic
+    # Accept both the historical marker and the harness-generic
     # `synthetic_primary_baseline` so any primary's baseline is excluded.
     artifacts = span.get("artifacts") or {}
     if not isinstance(artifacts, dict):

@@ -5,9 +5,9 @@
   ### *we are many; we move as one*
 </div>
 
-> Synthesized by Legion's own panel — the configured **Codex workhorse ref** (the *commander* angle) and
-> **Cursor** (the *chorus* angle) delegation, fanned out in parallel and merged by the
-> Opus conductor. The raw concepts live in [`panel/`](./panel).
+> Synthesized by Legion's own panel — configured executor roles fanned out in
+> parallel and merged by the active primary. The raw concepts live in
+> [`panel/`](./panel).
 
 ## Essence
 

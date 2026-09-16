@@ -42,8 +42,8 @@ legion_require_top_level_executor() {
     # A review is the one delegation that may target the SAME harness family.
     # It is read-only and terminal -- the reviewer returns a verdict and never
     # delegates onward -- so the recursion this guard exists to prevent cannot
-    # occur. Without this, a Claude-primary session has no reviewer at all once
-    # the other executors are unavailable, which is exactly when review matters.
+    # occur. Without this, an active primary has no reviewer once the other
+    # executors are unavailable, which is exactly when review matters.
     if legion_review_handoff_allowed; then
       return 0
     fi

@@ -247,3 +247,23 @@ make_test_repo() {
     echo "$output" | jq -e '.model == "test-provider/test-model-opencode"'
     assert_mock_called opencode "-m test-provider/test-model-opencode"
 }
+
+@test "legion-opencode: an executor that commits its work is not lost" {
+    # `git diff --cached` alone compares the index to HEAD, so an executor that
+    # branches and commits produces an EMPTY patch: HEAD already holds the work,
+    # nothing is staged, and the run reports ok having lost everything it did.
+    # legion-pi-hermes already pinned a base sha for this reason; the other
+    # adapters did not, and delegate.sh only got it after a benchmark scored 0
+    # on work that had actually been done.
+    local repo; repo="$(make_test_repo commits1)"
+    MOCK_OPENCODE_COMMITS=1 run "$LEGION_OPENCODE" run \
+        --task "make a change and commit it" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    [ -s "$diff" ] || {
+        echo "diff is empty: the executor's committed work was lost" >&2
+        return 1
+    }
+    grep -q "mock-opencode-change" "$diff"
+}

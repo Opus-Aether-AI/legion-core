@@ -47,6 +47,21 @@ The proxy binds **loopback only** — that is the sole auth on `/ingest`. Secret
 
 `codex exec` is an **autonomous agent** (task → edits), not a chat endpoint, and Codex authenticates via a ChatGPT subscription (no `OPENAI_API_KEY`). So GPT work can't sit on the proxy's HTTP hot path. Legion **splits transport from accounting**: Claude/MiniMax bytes flow *through* the proxy (translation-free); GPT runs *out-of-band* via `legion-delegate`, which POSTs a usage record *to* the proxy's `/ingest` sink. `legion-report` then shows GPT spend next to Claude.
 
+The `codex_precision`, `codex_review`, and `opencode_review` roles use GPT-6.1
+Sol, configured in `config/models.toml`. Migration uses `codex_precision` with
+`codex_workhorse` as its fallback; reviewer selection follows `[review].order`
+and each executor's review role. Astra remains the frontier, Terra the workhorse
+and harness default, and Luna the cheap tier. Archetype assignments and reasoning
+efforts stay the same.
+
+`config/costs.json` retains historical prices and supplies API reference prices
+as shadow costs for subscription usage. The Sol roles cost $2 input, $10 output,
+$0.10 cache reads, and $2.50 cache writes per million tokens at standard context.
+When input + cache-read + cache-write tokens exceed 272,000, input and cache
+rates double and output rises 1.5x. Exactly 272,000 prompt tokens still use
+standard rates. These current catalog rates supersede older price comparisons
+in routing notes; routing still selects semantic roles.
+
 ## Quick start
 
 ```bash
@@ -293,7 +308,7 @@ legion-router/
 │       ├── codex-json.sh        # parse `codex exec --json` streams (single point of codex-schema knowledge)
 │       ├── cost.sh              # per-model USD cost from config/costs.json
 │       └── executor-context.sh  # recursion-proof delegated-child role signal
-├── config/costs.json            # per-model price table (GPT defaults to $0 — see SKILL.md)
+├── config/costs.json            # API reference prices, including GPT shadow costs
 ├── references/                  # routing policy + cost model docs
 └── SKILL.md                     # when/how a primary should delegate
 ```

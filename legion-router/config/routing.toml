@@ -196,7 +196,7 @@ model_ref = "codex_precision"
 sandbox = "workspace-write"
 reasoning_effort = "high"
 fallback_refs = ["codex_workhorse"]
-note = "Cross-surface dependency/API migration where a wrong first pass creates expensive rework. Sol is 2x Terra on input and 1.67x on output, so this scoped pilot observes whether its cost, executor success, and latency justify a paired acceptance evaluation; it does not by itself prove avoided rework. Routine mechanical codemods stay on bulk-mechanical-edit. Fall back to Terra when Sol is quota-limited or unavailable."
+note = "Cross-surface dependency/API migration where a wrong first pass creates expensive rework. Use the current Sol precision role and its catalogued short/long-context and cache rates; this scoped pilot observes whether cost, executor success, and latency justify a paired acceptance evaluation, without itself proving avoided rework. Routine mechanical codemods stay on bulk-mechanical-edit. Fall back to Terra when Sol is quota-limited or unavailable."
 
 # ── Cross-model judgement; max is reserved for hard execution ──────────
 [archetypes.final-review]

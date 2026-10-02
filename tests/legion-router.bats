@@ -122,8 +122,8 @@ repos_file_for_repo() {
 @test "cost: codex_review pricing comes from costs.json" {
     run "$LIB/cost.sh" "$CODEX_REVIEW" 100000 5000 0 0
     [ "$status" -eq 0 ]
-    # 100k in @ $4.00/M + 5k out @ $20.00/M
-    [ "$output" = "0.5" ]
+    # 100k in @ $2.00/M + 5k out @ $10.00/M
+    [ "$output" = "0.25" ]
 }
 
 @test "cost: codex_workhorse pricing comes from costs.json" {
@@ -2149,7 +2149,7 @@ $run_error" ]
 }
 
 @test "route --review-order: lists only executors that can review, in config order" {
-    run python3 legion-router/scripts/legion-route.py --review-order
+    run python3 "$REPO_ROOT/legion-router/scripts/legion-route.py" --review-order
     [ "$status" -eq 0 ]
     # codex leads (native verb); hermes/pi declare review="none" and are excluded
     echo "$output" | jq -e '.[0].executor == "codex" and .[0].kind == "native"'

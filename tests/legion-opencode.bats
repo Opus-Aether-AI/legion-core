@@ -28,7 +28,16 @@ make_test_repo() {
     local context="$TEST_TMPDIR/context.log"
     MOCK_CONTEXT_LOG="$context" run "$LEGION_OPENCODE" run --task "do the thing" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e --arg m "$OPENCODE_DEFAULT" '.status == "ok" and .executor == "opencode" and .model == $m'
+    echo "$output" | jq -e --arg m "$OPENCODE_DEFAULT" '
+      .status == "ok" and .executor == "opencode" and .model == $m
+      and .usage_status == "known" and (.usage | type) == "object"
+      and .cost_status == "known" and (.cost_usd | type) == "number"'
+    jq -e '.schema == "legion.preflight.v1" and .status == "supported"' \
+      "$(echo "$output" | jq -r .preflight_receipt)"
+    local attempt span
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.schema == "legion.attempt.v1" and .terminal_status == "succeeded" and .usage_status == "known" and .cost_status == "known"' \
+      "$attempt"
     local diff; diff="$(echo "$output" | jq -r .diff_path)"
     [ -s "$diff" ]
     grep -q "mock-opencode-change" "$diff"
@@ -36,7 +45,20 @@ make_test_repo() {
 
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .executor"
     [ "$output" = "opencode" ]
+    span="$(cat "$LEGION_TELEMETRY_DIR"/*.jsonl | jq -c 'select(.executor == "opencode")')"
+    jq -e --argjson attempt "$(cat "$attempt")" '
+      .tokens == $attempt.usage and .usage_status == $attempt.usage_status
+      and .cost_usd == $attempt.cost_usd and .cost_status == $attempt.cost_status
+    ' <<<"$span"
     grep -Eq '^opencode active=1 executor=1 depth=[1-9][0-9]* run=.+$' "$context"
+}
+
+@test "legion-opencode: catalog role is resolved before provider launch" {
+    local repo; repo="$(make_test_repo catalog-role)"
+    run "$LEGION_OPENCODE" run --model opencode_default --task inspect --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    assert_mock_called opencode "-m $OPENCODE_DEFAULT"
+    ! grep -q -- '-m opencode_default' "$MOCK_CALL_LOG"
 }
 
 @test "legion-opencode: adopts a preallocated run id and closes its queued lifecycle" {
@@ -112,6 +134,183 @@ make_test_repo() {
     [ "$status" -eq 0 ]
 }
 
+@test "legion-opencode: missing provider cost uses an explicit model price with honest provenance" {
+    local repo attempt
+    repo="$(make_test_repo fallback-cost)"
+    MOCK_OPENCODE_NO_COST=1 run "$LEGION_OPENCODE" run --task "edit" \
+      --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.cost_status == "known" and .cost_source == "legion-cost-table"
+      and .cost_usd > 0' "$attempt"
+    echo "$output" | jq -e --argjson receipt "$(cat "$attempt")" \
+      '.cost_status == $receipt.cost_status and .cost_usd == $receipt.cost_usd'
+}
+
+@test "legion-opencode: an explicit zero provider cost is not repriced" {
+    local repo attempt
+    repo="$(make_test_repo zero-cost)"
+    MOCK_OPENCODE_ZERO_COST=1 run "$LEGION_OPENCODE" run --task "edit" \
+      --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.cost_status == "known" and .cost_source == "opencode-jsonl"
+      and .cost_usd == 0' "$attempt"
+}
+
+@test "legion-opencode: missing cost without a priced model remains unknown" {
+    local repo attempt
+    repo="$(make_test_repo unpriced-cost)"
+    LEGION_COSTS_FILE="$TEST_TMPDIR/no-price-table.json" MOCK_OPENCODE_NO_COST=1 \
+      run "$LEGION_OPENCODE" run --task "edit" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.cost_status == "unknown" and .cost_source == null
+      and .cost_usd == null' "$attempt"
+}
+
+@test "legion-opencode: partial token counters cannot become exact priced usage" {
+    local repo attempt; repo="$(make_test_repo partial-tokens)"
+    MOCK_OPENCODE_PARTIAL_TOKENS=1 run "$LEGION_OPENCODE" run --task edit \
+      --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    jq -e '.usage_status == "unknown" and .usage == null
+      and .cost_status == "unknown" and .cost_usd == null' "$attempt"
+}
+
+@test "legion-opencode: task-file above per-argument limit still publishes a span" {
+    local repo task_file attempt
+    repo="$(make_test_repo large-task-span)"
+    task_file="$TEST_TMPDIR/large-task.txt"
+    python3 - "$task_file" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text("review " + "x" * 200_000, encoding="utf-8")
+PY
+    run "$LEGION_OPENCODE" run --task-file "$task_file" --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(printf '%s\n' "$output" | tail -n 1 | jq -r .attempt_receipt)"
+    [ -s "$attempt" ]
+    python3 - "$attempt" "$LEGION_TELEMETRY_DIR" "$task_file" <<'PY'
+import json
+from pathlib import Path
+import sys
+attempt = Path(sys.argv[1])
+spans = [json.loads(line) for path in Path(sys.argv[2]).glob("*.jsonl")
+         for line in path.read_text().splitlines()]
+assert len(spans) == 1
+task = spans[0]["task"]
+assert len(task) < 4096 and task.startswith("task artifact: ")
+assert Path(task.removeprefix("task artifact: ")).read_text() == Path(sys.argv[3]).read_text()
+assert spans[0]["artifacts"]["attempt_receipt"] == str(attempt)
+PY
+}
+
+@test "legion-opencode: oversized task stages no bytes and records authenticated no-launch" {
+    local repo task_file terminal lease art
+    repo="$(make_test_repo oversized-task)"
+    task_file="$TEST_TMPDIR/oversized-task.txt"
+    python3 - "$task_file" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(b"x" * (1048576 + 1))
+PY
+    run "$LEGION_OPENCODE" run --task-file "$task_file" \
+      --sandbox read-only --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    terminal="$(printf '%s\n' "$output" | tail -n 1)"
+    jq -e '.status == "refused" and .attempt_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"
+      and (.lease_receipt | type) == "string"' <<<"$terminal"
+    lease="$(jq -r .lease_receipt <<<"$terminal")"
+    art="${lease%/*}"
+    jq -e '.schema == "legion.child-execution-lease.v1"
+      and .status == "launch_failed" and .max_runtime_seconds > 0
+      and (.reason | contains("1 MiB artifact limit"))' "$lease"
+    [ ! -e "$art/task.txt" ]
+    [ ! -e "$art/attempt-1.json" ]
+    [ ! -e "$repo/.legion/worktrees"/"$(basename "$art")" ]
+    if compgen -G "$LEGION_TELEMETRY_DIR/*.jsonl" >/dev/null; then
+      run jq -se 'length == 0' "$LEGION_TELEMETRY_DIR"/*.jsonl
+      [ "$status" -eq 0 ]
+    fi
+    ! grep -q '^opencode run ' "$MOCK_CALL_LOG"
+}
+
+@test "legion-opencode: oversized task with blocked no-launch receipt retains containment" {
+    local repo run_id art task_file sentinel terminal
+    repo="$(make_test_repo blocked-staging-lease)"
+    run_id="queued-opencode-blocked-staging-lease"
+    art="$repo/.legion/runs/$run_id"
+    mkdir -p "$art" "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:$run,
+       parent_id:null,kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-09-12T00:00:00Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+    sentinel="$TEST_TMPDIR/sentinel"
+    printf 'unchanged\n' > "$sentinel"
+    ln -s "$sentinel" "$art/task-staging-lease.json"
+    task_file="$TEST_TMPDIR/blocked-oversized-task.txt"
+    python3 - "$task_file" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(b"x" * (1048576 + 1))
+PY
+    run "$LEGION_OPENCODE" run --task-file "$task_file" --run-id "$run_id" \
+      --sandbox read-only --repo "$repo" --quiet
+    [ "$status" -eq 70 ]
+    terminal="$(printf '%s\n' "$output" | tail -n 1)"
+    jq -e '.status == "containment_failed" and .lease_receipt == null
+      and .attempt_receipt == null and .usage_status == "unknown"
+      and .cost_status == "unknown"' <<<"$terminal"
+    [ "$(cat "$sentinel")" = unchanged ]
+    [ -L "$art/task-staging-lease.json" ]
+    [ ! -e "$art/task.txt" ]
+    jq -e '.lifecycle.phase == "containment_failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
+}
+
+@test "legion-opencode: provider token sums above 2^53 remain exact" {
+    local repo attempt
+    repo="$(make_test_repo huge-tokens)"
+    MOCK_OPENCODE_HUGE_TOKENS=1 run "$LEGION_OPENCODE" run --task inspect --repo "$repo" --quiet
+    [ "$status" -eq 0 ]
+    attempt="$(printf '%s\n' "$output" | tail -n 1 | jq -r .attempt_receipt)"
+    python3 - "$attempt" "$LEGION_TELEMETRY_DIR" "$(printf '%s\n' "$output" | tail -n 1)" <<'PY'
+import json
+from pathlib import Path
+import sys
+receipt = json.loads(Path(sys.argv[1]).read_text())
+spans = [json.loads(line) for path in Path(sys.argv[2]).glob("*.jsonl")
+         for line in path.read_text().splitlines()]
+expected = 9007199254741002
+assert receipt["usage_status"] == "known"
+assert receipt["usage"]["input_tokens"] == expected
+assert spans[0]["tokens"]["input_tokens"] == expected
+assert json.loads(sys.argv[3])["usage"]["input_tokens"] == expected
+PY
+}
+
+@test "legion-opencode: terminal metering follows canonical normalization" {
+    local repo attempt result
+    repo="$(make_test_repo negative-metering)"
+
+    MOCK_OPENCODE_NEGATIVE_METERING=1 run "$LEGION_OPENCODE" run \
+      --task "do the thing" --repo "$repo" --quiet
+
+    [ "$status" -eq 0 ]
+    result="$(printf '%s\n' "$output" | tail -n 1)"
+    echo "$result" | jq -e '.usage == null and .usage_status == "unknown"
+      and .cost_usd == null and .cost_status == "unknown"'
+    attempt="$(echo "$result" | jq -r .attempt_receipt)"
+    jq -e --argjson terminal "$result" '
+      .usage == $terminal.usage and .usage_status == $terminal.usage_status
+      and .cost_usd == $terminal.cost_usd and .cost_status == $terminal.cost_status
+    ' "$attempt"
+}
+
 @test "legion-opencode: parses OpenCode 1.3 top-level text and step events" {
     local repo; repo="$(make_test_repo current-stream)"
     MOCK_OPENCODE_CURRENT_STREAM=1 run "$LEGION_OPENCODE" run --task "inspect" \
@@ -143,8 +342,26 @@ make_test_repo() {
       and .opencode_error == "The requested model is not supported."
       and (.result | contains("opencode error: The requested model is not supported."))
     '
+    jq -e '.terminal_status == "failed" and .failure.class == "provider"' \
+      "$(echo "$output" | jq -r .attempt_receipt)"
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r .status"
     [ "$output" = "failed" ]
+}
+
+@test "legion-opencode: lease timeout remains authoritative over an earlier error event" {
+    local repo attempt failure
+    repo="$(make_test_repo timed-out-error)"
+
+    MOCK_OPENCODE_ERROR_EVENT=1 MOCK_OPENCODE_ERROR_DELAY=30 \
+      run "$LEGION_OPENCODE" run --task "inspect" --repo "$repo" \
+        --max-runtime-seconds 1 --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.status == "timed_out" and (.reason | contains("expired after 1 seconds"))'
+    attempt="$(echo "$output" | jq -r .attempt_receipt)"
+    failure="$(echo "$output" | jq -r .failure_receipt)"
+    jq -e '.terminal_status == "timed_out" and .failure.class == "timed_out"' "$attempt"
+    jq -e '.class == "timed_out" and .retryable == false' "$failure"
 }
 
 @test "legion-opencode: an empty event stream is never reported as success" {
@@ -156,6 +373,8 @@ make_test_repo() {
     echo "$output" | jq -e '
       .status == "error"
       and (.result | contains("no recognized JSONL events"))
+      and .usage == null and .usage_status == "unknown"
+      and .cost_usd == null and .cost_status == "unknown"
     '
 }
 
@@ -220,8 +439,14 @@ make_test_repo() {
     OPENCODE_BIN="$TEST_TMPDIR/missing-opencode" run "$LEGION_OPENCODE" run \
       --task "x" --repo "$repo" --run-id "$run_id" --quiet
 
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"opencode CLI not found"* ]]
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "refused" and (.reason | contains("binary not found"))
+      and .attempt_receipt == null and .failure_receipt == null
+      and .usage == null and .usage_status == "not_applicable"
+      and .cost_usd == null and .cost_status == "not_applicable"'
+    assert_mock_not_called opencode
+    [ ! -d "$repo/.legion/worktrees" ]
     jq -e '
       .run_id == "queued-opencode-missing-cli"
       and .state_version >= 2

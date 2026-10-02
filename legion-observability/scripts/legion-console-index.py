@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -27,22 +28,54 @@ DEFAULT_ROOT = legion_state.default_log_root()
 
 
 def _num(value: Any) -> float:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
-    if isinstance(value, (int, float)) and value == value:
-        return float(value)
-    return 0.0
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return 0.0
+    return numeric if math.isfinite(numeric) else 0.0
+
+
+def _nonnegative_num(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) and numeric >= 0 else None
 
 
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _positive_int(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
+
+
+def _valid_usage(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        for item in value.values()
+    )
+
+
 def _parse_epoch(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)) and value == value:
-        return float(value)
+    if isinstance(value, (int, float)):
+        try:
+            numeric = float(value)
+        except OverflowError:
+            return None
+        if math.isfinite(numeric):
+            return numeric
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -97,12 +130,87 @@ def _resolve_now(now: Any = None) -> tuple[str, float]:
 def _sum_tokens(total: dict[str, int], tokens: Any) -> None:
     data = _dict(tokens)
     for field in TOKEN_FIELDS:
-        total[field] += int(_num(data.get(field)))
+        value = data.get(field, 0)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            total[field] += value
 
 
 def _tokens_total(tokens: Any) -> int:
     data = _dict(tokens)
-    return sum(int(_num(data.get(field))) for field in TOKEN_FIELDS)
+    return sum(
+        value
+        for field in TOKEN_FIELDS
+        if isinstance((value := data.get(field, 0)), int)
+        and not isinstance(value, bool)
+        and value >= 0
+    )
+
+
+def _provenance_status(record: dict[str, Any], kind: str) -> str:
+    status = record.get(f"{kind}_status")
+    value = record.get("cost_usd" if kind == "cost" else "tokens")
+    known_value = (
+        _nonnegative_num(value) is not None
+        if kind == "cost" else _valid_usage(value)
+    )
+    if status == "known":
+        return "known" if known_value else "unknown"
+    if status == "partial":
+        lower = record.get("known_cost_usd" if kind == "cost" else "known_usage")
+        count = record.get("known_cost_attempts" if kind == "cost" else "known_usage_attempts")
+        lower_valid = (
+            _nonnegative_num(lower) is not None
+            if kind == "cost" else _valid_usage(lower)
+        )
+        return "partial" if lower_valid and _positive_int(count) is not None else "unknown"
+    if status in {"unknown", "not_applicable"}:
+        return status
+    return "known" if known_value else "unknown"
+
+
+def _merged_status(known: int, partial: int, unknown: int, not_applicable: int) -> str:
+    applicable = known + partial + unknown
+    if not applicable:
+        return "not_applicable"
+    if known == applicable + not_applicable:
+        return "known"
+    if not known and not partial:
+        return "unknown"
+    return "partial"
+
+
+def _cost_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    known = partial = unknown = not_applicable = known_count = 0
+    subtotal = 0.0
+    overflow = False
+    for record in records:
+        status = _provenance_status(record, "cost")
+        if status == "known":
+            known += 1
+            known_count += _positive_int(record.get("known_cost_attempts")) or 1
+            subtotal += _num(record.get("cost_usd"))
+            overflow = overflow or not math.isfinite(subtotal)
+        elif status == "partial":
+            partial += 1
+            known_count += _positive_int(record.get("known_cost_attempts")) or 0
+            subtotal += _num(record.get("known_cost_usd"))
+            overflow = overflow or not math.isfinite(subtotal)
+        elif status == "unknown":
+            unknown += 1
+        else:
+            not_applicable += 1
+    status = _merged_status(known, partial, unknown, not_applicable)
+    if overflow:
+        status = "unknown"
+        known_count = 0
+        subtotal = 0.0
+    subtotal = round(subtotal, 6)
+    return {
+        "cost_usd": subtotal if status == "known" else None,
+        "cost_status": status,
+        "known_cost_usd": subtotal if known_count else None,
+        "known_cost_attempts": known_count,
+    }
 
 
 def _started_at(record: dict[str, Any]) -> Any:
@@ -167,6 +275,9 @@ def load_spans(directory: str) -> dict[str, dict[str, Any]]:
                         continue
                     if not isinstance(span, dict) or span.get("schema") != SPAN_SCHEMA:
                         continue
+                    artifacts = span.get("artifacts") or {}
+                    if isinstance(artifacts, dict) and artifacts.get("rollup_only") is True:
+                        continue
                     run_id = span.get("run_id")
                     if not run_id:
                         continue
@@ -174,12 +285,31 @@ def load_spans(directory: str) -> dict[str, dict[str, Any]]:
                     totals = totals_by_run.setdefault(
                         run_id,
                         {
-                            "cost_usd": 0.0,
-                            "tokens": {field: 0 for field in TOKEN_FIELDS},
+                            "records": [],
+                            "known_usage": {field: 0 for field in TOKEN_FIELDS},
+                            "usage_known": 0,
+                            "usage_partial": 0,
+                            "usage_unknown": 0,
+                            "usage_not_applicable": 0,
+                            "known_usage_attempts": 0,
                         },
                     )
-                    totals["cost_usd"] += _num(span.get("cost_usd"))
-                    _sum_tokens(totals["tokens"], span.get("tokens"))
+                    totals["records"].append(span)
+                    usage_status = _provenance_status(span, "usage")
+                    if usage_status == "known":
+                        totals["usage_known"] += 1
+                        totals["known_usage_attempts"] += 1
+                        _sum_tokens(totals["known_usage"], span.get("tokens"))
+                    elif usage_status == "partial":
+                        totals["usage_partial"] += 1
+                        totals["known_usage_attempts"] += (
+                            _positive_int(span.get("known_usage_attempts")) or 0
+                        )
+                        _sum_tokens(totals["known_usage"], span.get("known_usage"))
+                    elif usage_status == "unknown":
+                        totals["usage_unknown"] += 1
+                    else:
+                        totals["usage_not_applicable"] += 1
 
                     current = latest_by_run.get(run_id)
                     if current is None or _ts_key(span.get("ts")) >= _ts_key(
@@ -191,8 +321,17 @@ def load_spans(directory: str) -> dict[str, dict[str, Any]]:
 
     for run_id, span in latest_by_run.items():
         totals = totals_by_run[run_id]
-        span["cost_usd"] = round(totals["cost_usd"], 6)
-        span["tokens"] = totals["tokens"]
+        span.update(_cost_summary(totals["records"]))
+        usage_status = _merged_status(
+            totals["usage_known"], totals["usage_partial"], totals["usage_unknown"],
+            totals["usage_not_applicable"],
+        )
+        span["usage_status"] = usage_status
+        span["tokens"] = totals["known_usage"] if usage_status == "known" else None
+        span["known_usage"] = (
+            totals["known_usage"] if totals["known_usage_attempts"] else None
+        )
+        span["known_usage_attempts"] = totals["known_usage_attempts"]
     return latest_by_run
 
 
@@ -218,7 +357,7 @@ def pid_alive(pid: Any) -> bool:
 
 
 def _terminal_status(status: Any, diff_exists: bool, worktree_exists: bool) -> str | None:
-    if status in ("failed", "error"):
+    if status in ("failed", "error", "refused", "timed_out", "containment_failed"):
         return "failed"
     if status in ("ok", "over_budget"):
         # awaiting_human only when there's an actionable diff AND its worktree still
@@ -305,8 +444,20 @@ def _build_run(record: dict[str, Any], span: dict[str, Any] | None, now: Any = N
         "started_at": started_at,
         "updated_at": updated_at,
         "elapsed_s": elapsed,
-        "cost_usd": round(_num((span or {}).get("cost_usd")), 6),
-        "tokens_total": _tokens_total((span or {}).get("tokens")),
+        "cost_usd": (span or {}).get("cost_usd"),
+        "cost_status": _provenance_status(span or {}, "cost") if span else "unknown",
+        "known_cost_usd": (span or {}).get("known_cost_usd"),
+        "known_cost_attempts": int(_num((span or {}).get("known_cost_attempts"))),
+        "tokens_total": (
+            _tokens_total((span or {}).get("tokens"))
+            if _provenance_status(span or {}, "usage") == "known" else None
+        ),
+        "usage_status": _provenance_status(span or {}, "usage") if span else "unknown",
+        "known_tokens_total": (
+            _tokens_total((span or {}).get("known_usage"))
+            if isinstance((span or {}).get("known_usage"), dict) else None
+        ),
+        "known_usage_attempts": int(_num((span or {}).get("known_usage_attempts"))),
         "worktree_exists": worktree_exists,
         "diff_exists": diff_exists,
         "pid": pid,
@@ -344,11 +495,12 @@ def _build_trace_group(runs: list[dict[str, Any]]) -> dict[str, Any]:
         else:
             roots.append(node)
 
+    cost = _cost_summary(ordered)
     return {
         "trace_id": ordered[0].get("trace_id"),
         "runs": [run["run_id"] for run in ordered],
         "roots": roots,
-        "cost_usd": round(sum(_num(run.get("cost_usd")) for run in ordered), 6),
+        **cost,
     }
 
 
@@ -367,21 +519,22 @@ def build_snapshot(
 
     by_status: dict[str, int] = {}
     by_model: dict[str, dict[str, Any]] = {}
-    total_cost = 0.0
     trace_groups: dict[str, list[dict[str, Any]]] = {}
 
     for run in runs:
         status = run.get("status") or "unknown"
         model = run.get("model") or "unknown"
-        cost = _num(run.get("cost_usd"))
         by_status[status] = by_status.get(status, 0) + 1
-        bucket = by_model.setdefault(model, {"runs": 0, "cost_usd": 0.0})
+        bucket = by_model.setdefault(model, {"runs": 0, "_records": []})
         bucket["runs"] += 1
-        bucket["cost_usd"] = round(bucket["cost_usd"] + cost, 6)
-        total_cost += cost
+        bucket["_records"].append(run)
         trace_id = run.get("trace_id")
         if trace_id:
             trace_groups.setdefault(str(trace_id), []).append(run)
+
+    for bucket in by_model.values():
+        records = bucket.pop("_records")
+        bucket.update(_cost_summary(records))
 
     traces = [
         _build_trace_group(group_runs)
@@ -392,13 +545,17 @@ def build_snapshot(
         )
     ]
 
+    total_cost = _cost_summary(runs)
     return {
         "generated_at": generated_at,
         "runs": runs,
         "aggregates": {
             "by_status": by_status,
             "by_model": by_model,
-            "total_cost_usd": round(total_cost, 6),
+            "total_cost_usd": total_cost["cost_usd"],
+            "total_cost_status": total_cost["cost_status"],
+            "total_known_cost_usd": total_cost["known_cost_usd"],
+            "total_known_cost_attempts": total_cost["known_cost_attempts"],
             "running": by_status.get("running", 0),
             "awaiting_human": by_status.get("awaiting_human", 0),
         },
@@ -406,8 +563,12 @@ def build_snapshot(
     }
 
 
-def _format_cost(value: Any) -> str:
-    return f"{_num(value):.4f}"
+def _format_cost(value: Any, status: Any = None, known: Any = None) -> str:
+    if status == "partial":
+        return f">={_num(known):.4f}" if _nonnegative_num(known) is not None else "unknown"
+    if status in {"unknown", "not_applicable"} or value is None:
+        return str(status or "unknown")
+    return f"{_num(value):.4f}" if _nonnegative_num(value) is not None else "unknown"
 
 
 def _format_elapsed(value: Any) -> str:
@@ -438,7 +599,10 @@ def _render_table(snapshot: dict[str, Any]) -> str:
                 _short(run.get("model"), 18),
                 _short(run.get("kind"), 12),
                 _format_elapsed(run.get("elapsed_s")),
-                _format_cost(run.get("cost_usd")),
+                _format_cost(
+                    run.get("cost_usd"), run.get("cost_status"),
+                    run.get("known_cost_usd"),
+                ),
             ]
         )
 

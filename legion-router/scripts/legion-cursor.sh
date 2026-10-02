@@ -21,6 +21,9 @@ source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/adapter-contract.sh
+source "$_self_dir/lib/adapter-contract.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -29,10 +32,93 @@ if [[ -f "$_state_lib" ]]; then
 fi
 
 CURSOR_AGENT_BIN="${CURSOR_AGENT_BIN:-}"
+CHILD_PID=""
+SIGNAL_LEASE_STATUS=""
+SIGNAL_WORKTREE=""
+SIGNAL_CHILD_PID=""
+SIGNAL_CHILD_RC=0
+SIGNAL_LAUNCH_PENDING=""
 
 die() { printf 'legion-cursor: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
+on_signal() {
+  local signum="$1" child_rc="$SIGNAL_CHILD_RC" containment_reason="" supervised_pid="${SIGNAL_CHILD_PID:-unknown}"
+  trap - INT TERM HUP
+  if [[ -n "$CHILD_PID" ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || child_rc=$?
+    CHILD_PID=""
+  fi
+  legion_adapter_write_signal_receipt "$signum" "$child_rc" "$SIGNAL_LEASE_STATUS"
+  if legion_adapter_supervisor_cleanup_failed "$SIGNAL_LEASE_STATUS" \
+      || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
+        '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
+        "$SIGNAL_LEASE_STATUS" >/dev/null 2>&1; }; then
+    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: $SIGNAL_WORKTREE)"
+  elif [[ "$child_rc" -eq 70 ]]; then
+    containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+  fi
+  if [[ -n "$containment_reason" ]]; then
+    keep=1
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" cursor \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
+    exit 70
+  fi
+  if ! legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS"; then
+    keep=1
+    containment_reason="provider attempt receipt is durable but its signal-path span publication is uncertain (evidence: $LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json; worktree retained: $SIGNAL_WORKTREE)"
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" cursor \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
+  exit $((128+signum))
+}
+begin_signal_launch() {
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 2' INT
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 15' TERM
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 1' HUP
+}
+abort_pending_signal_launch() {
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  [[ -n "$pending" ]] || return 0
+  if ! legion_adapter_write_final_gate_no_launch "$SIGNAL_LEASE_STATUS" \
+      "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" "$pending"; then
+    trap - INT TERM HUP
+    keep=1
+    note "provider launch cancelled before Popen, but no-launch evidence could not be persisted; retaining containment"
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" "$art" \
+        "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
+  finish_signal_launch
+}
+finish_signal_launch() {
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'on_signal 2' INT; trap 'on_signal 15' TERM; trap 'on_signal 1' HUP
+  [[ -z "$pending" ]] || on_signal "$pending"
+}
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit' EXIT
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
@@ -65,6 +151,7 @@ scan_task_text() {
 
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  local usage_status="${9:-known}" cost_status="${10:-known}"
   {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
@@ -74,15 +161,17 @@ emit_span() {
       --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
       --arg executor "$executor" --arg model "$model" --arg archetype "${archetype:-}" \
       --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
-      --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-      --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
+      --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-null}" \
+      --argjson usage "${usage:-null}" --arg usage_status "$usage_status" \
+      --arg cost_status "$cost_status" --arg task "$task" --argjson artifacts "$artifacts" '
       {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id,
        parent_id:(if $parent_id=="" then null else $parent_id end),
        executor:$executor, model:$model, archetype:$archetype, task:$task, status:$status,
        target_type:(if $target_type=="" then null else $target_type end),
        target_name:(if $target_name=="" then null else $target_name end),
-       duration_ms:$dur, cost_usd:$cost, tokens:$usage, artifacts:$artifacts}' \
-      >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
+       duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
+       tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
+      | legion_adapter_append_span
   } 2>/dev/null || true
 }
 
@@ -137,6 +226,7 @@ cmd_run() {
   local task="" model="${LEGION_CURSOR_MODEL:-${CURSOR_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 agent_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
+  local max_runtime_seconds=""
   local base_commit=""
 
   while [[ $# -gt 0 ]]; do
@@ -153,6 +243,7 @@ cmd_run() {
       --base) base="$2"; shift 2 ;;
       --sandbox) sandbox="$2"; shift 2 ;;
       --run-id) preset_run_id="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       --apply) do_apply=1; shift ;;
       --keep) keep=1; shift ;;
       --quiet) QUIET=1; shift ;;
@@ -183,6 +274,7 @@ cmd_run() {
   fi
   default_model="$(legion_model_ref cursor_default)" || die "could not resolve cursor_default in models.toml"
   [[ -n "$model" ]] || model="$default_model"
+  model="$(legion_provider_model cursor "$model")"
   if [[ -n "$preset_run_id" ]]; then
     legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" ""
@@ -191,10 +283,40 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
   legion_require_top_level_executor "cursor" || return $?
+  legion_adapter_resolve_lease cursor "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  agent_bin="$(resolve_cursor_bin)" || die "Cursor Agent CLI not found. Install Cursor CLI or set CURSOR_AGENT_BIN."
-  mkdir -p "$art"
+  # Resolve the documented aliases before admission so the shared preflight
+  # fingerprints the exact executable that will be launched. Passing an empty
+  # override made it check the registry's `agent` even when only the supported
+  # `cursor-agent` alias was installed.
+  if ! agent_bin="$(resolve_cursor_bin)"; then
+    agent_bin="${CURSOR_AGENT_BIN:-agent}"
+  fi
+  if ! legion_adapter_preflight cursor "$art" "$sandbox" argv "$model" "" 0 "$agent_bin"; then
+    local preflight_disposition
+    preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+    local terminal_status=refused lifecycle_status=failed
+    case "$preflight_disposition" in
+      timed_out) terminal_status=timed_out; lifecycle_status=timed_out ;;
+      containment_failed) terminal_status=containment_failed; lifecycle_status=containment_failed ;;
+      launch_failed) terminal_status=failed ;;
+    esac
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$lifecycle_status" "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+      "$base" "$archetype"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    jq -cn --arg run "$RUN_ID" --arg model "$model" --arg status "$terminal_status" \
+      --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
+      {run_id:$run,status:$status,executor:"cursor",model:$model,reason:$reason,
+       preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+       usage:null,usage_status:"not_applicable",
+       cost_usd:null,cost_status:"not_applicable"}'
+    return 1
+  fi
+  agent_bin="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   legion_write_runtime_gitignore "$repo"
 
   note "-> cursor worktree $wt (branch $branch, base $base)"
@@ -250,27 +372,94 @@ cmd_run() {
   fi
   legion_activate_executor_context "$RUN_ID" cursor
   note "-> ${cmd[*]}"
+  local started_at ended_at output_started=false
+  local lease_status="$art/lease.json" launch_gate="$art/launch-gate.json"
+  SIGNAL_LEASE_STATUS="$lease_status"
+  SIGNAL_WORKTREE="$wt"
+  legion_adapter_prepare_supervisor_launch_gate "$launch_gate" \
+    || die 'unable to prepare trusted supervisor launch gate'
+  started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
-  ( cd "$wt" && "${cmd[@]}" >"$out_file" 2>"$err_file" )
-  rc=$?
+  begin_signal_launch
+  abort_pending_signal_launch
+  ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+      --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+      --status-file "$lease_status" \
+      --admitted-binary-sha256 "$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")" \
+      --admitted-binary-path "$agent_bin" \
+      --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" \
+      -- "${cmd[@]}" ) >"$out_file" 2>"$err_file" &
+  CHILD_PID=$!
+  SIGNAL_CHILD_PID="$CHILD_PID"
+  legion_adapter_complete_supervisor_launch_gate "$CHILD_PID" "$lease_status" SIGNAL_LAUNCH_PENDING
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" == started ]]; then
+    legion_adapter_arm_signal_receipt "$art" cursor cursor 1 "$model" "" "" "" \
+      "$sandbox" "$started_at" "$start_ms" "$out_file"
+  elif [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" != launch_failed ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+    CHILD_PID=""; keep=1
+    legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" "$art" \
+      "$wt" "$branch" "$model" "$sandbox" "$base" "$archetype" "" || true
+    legion_disarm_adopted_run_guard
+    legion_adapter_terminalize_launch_gate_containment cursor "$model" "$RUN_ID" \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH" "$lease_status" "$launch_gate" "$wt" \
+      "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
+    exit 70
+  fi
+  finish_signal_launch
+  wait "$CHILD_PID"; rc=$?
+  SIGNAL_CHILD_RC="$rc"
+  CHILD_PID=""
   set -e
-  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
+  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
-  local usage cost result actual_model diff_rc=0 status="ok"
+  local usage cost result actual_model observed_model diff_rc=0 status="ok"
   usage="$(usage_json "$out_file")"
-  actual_model="$(actual_model_from_output "$out_file" "$model")"
+  observed_model="$(actual_model_from_output "$out_file" "")"
+  actual_model="$observed_model"; [[ -n "$actual_model" ]] || actual_model="$model"
   cost="$(cost_from_output "$out_file" "$actual_model" "$usage")"
   result="$(result_text "$out_file")"
-  git -C "$wt" add -A 2>/dev/null || diff_rc=1
+  local containment_failed=0 launch_failed=0 launch_timed_out=0
+  legion_adapter_supervisor_cleanup_failed "$lease_status" && containment_failed=1
+  legion_adapter_supervisor_launch_failed "$lease_status" && launch_failed=1
+  legion_adapter_supervisor_timed_out_before_launch "$lease_status" "$rc" \
+    && launch_timed_out=1
+  if [[ "$containment_failed" -ne 1 ]]; then
+    git -C "$wt" add -A 2>/dev/null || diff_rc=1
   # Diff against the worktree's STARTING commit, not HEAD. `diff --cached` alone
   # compares the index to HEAD, so an executor that COMMITS its work yields an
   # empty patch -- HEAD already holds it, nothing is staged, and the run reports
   # ok having lost everything. legion-pi-hermes already pins a base sha for this
   # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
   # had actually been done.
-  git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
-  [[ "$rc" -ne 0 ]] && status="failed"
+    git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  else
+    : > "$art/diff.patch"
+  fi
+  if [[ "$containment_failed" -eq 1 ]]; then
+    status="containment_failed"
+    keep=1
+    result="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+  elif [[ "$launch_timed_out" -eq 1 ]]; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+    usage=null
+    cost=null
+  elif [[ "$launch_failed" -eq 1 ]]; then
+    status="failed"
+    result="$(legion_adapter_supervisor_reason "$lease_status" "provider launch failed before process creation")"
+    usage=null
+    cost=null
+  elif legion_adapter_supervisor_timed_out "$lease_status"; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$rc" -ne 0 ]]; then
+    status="failed"
+  fi
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
   if [[ "$sandbox" == "read-only" && -s "$art/diff.patch" && "$status" == "ok" ]]; then
     status="error"
@@ -278,12 +467,75 @@ cmd_run() {
     result="${result}Cursor produced file changes during a read-only run; refusing to apply or report ok."
   fi
   printf '%s\n' "$result" > "$art/last-message.txt"
-
-  local artifacts
-  artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --arg stdout "$out_file" --arg stderr "$err_file" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr}')"
-  emit_span "cursor" "$actual_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+  [[ -n "$result" ]] && output_started=true
+  local usage_status=unknown usage_source="" cost_status=unknown cost_source=""
+  if jq -e '((.usage // .tokens) | type) == "object"' "$out_file" >/dev/null 2>&1; then
+    usage_status=known; usage_source=cursor-json
+    if jq -e '.total_cost_usd | numbers' "$out_file" >/dev/null 2>&1; then
+      cost_status=known; cost_source=cursor-json
+    elif cost_model_has_pricing "$actual_model"; then
+      cost_status=known; cost_source=legion-cost-table
+    fi
+  fi
+  local terminal_status=succeeded failure_class=""
+  if [[ "$status" != ok ]]; then
+    terminal_status=failed
+    if [[ "$status" == timed_out ]]; then
+      terminal_status=timed_out
+      failure_class=timed_out
+    elif [[ "$status" == containment_failed ]]; then
+      failure_class=internal
+    elif [[ "$sandbox" == read-only && -s "$art/diff.patch" ]]; then
+      failure_class=policy_refused
+    elif [[ "$rc" -ne 0 ]]; then
+      failure_class=provider
+    else
+      failure_class=internal
+    fi
+  fi
+  local terminal_usage=null terminal_cost=null
+  local terminal_usage_status=not_applicable terminal_cost_status=not_applicable
+  local publication_reason=""
+  if [[ "$launch_failed" -eq 1 ]]; then
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
+  else
+    legion_adapter_write_attempt "$art" cursor cursor 1 "$model" "$observed_model" "" "" \
+      "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
+      "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
+      "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
+    terminal_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
+    terminal_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    local artifacts
+    artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
+      --arg stdout "$out_file" --arg stderr "$err_file" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+      '{provider_attempt:true,worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
+        preflight_receipt:$preflight,attempt_receipt:$attempt,
+        failure_receipt:(if $failure=="" then null else $failure end)}')"
+    local span_usage span_cost span_usage_status span_cost_status
+    span_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
+    span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "cursor" "$actual_model" "$status" "$dur" "$span_cost" "$span_usage" "$task" "$artifacts" \
+        "$span_usage_status" "$span_cost_status"; then
+      status=containment_failed
+      rc=70
+      keep=1
+      publication_reason="provider attempt receipt is durable but its span publication is uncertain; worktree and evidence retained"
+      result="$publication_reason"
+    fi
+  fi
+  legion_adapter_disarm_signal_receipt
+  SIGNAL_CHILD_PID=""
+  SIGNAL_CHILD_RC=0
+  SIGNAL_LEASE_STATUS=""
+  SIGNAL_WORKTREE=""
 
   if [[ "$do_apply" -eq 1 && "$status" == "ok" && -s "$art/diff.patch" ]]; then
     if git -C "$repo" apply --check "$art/diff.patch" 2>/dev/null; then
@@ -311,14 +563,38 @@ cmd_run() {
   local auth_note=""
   [[ "$status" == "ok" ]] || auth_note="$cursor_auth_hint"
 
+  local receipt_reason=""
+  if [[ -n "$publication_reason" ]]; then
+    receipt_reason="$publication_reason"
+  elif [[ "$status" == timed_out ]]; then
+    receipt_reason="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$status" == containment_failed || "$launch_failed" -eq 1 ]]; then
+    receipt_reason="$(legion_adapter_supervisor_reason "$lease_status")"
+  fi
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg result "$result" --arg auth_note "$auth_note" \
-    --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg reason "$receipt_reason" \
+    --arg lease "$lease_status" \
+    --arg usage_status "$terminal_usage_status" --arg cost_status "$terminal_cost_status" \
+    --argjson usage "$terminal_usage" --argjson cost "$terminal_cost" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"cursor", model:$model, cursor_exit:$rc,
      result:$result, worktree:$wt, diff_path:$diff, last_message_path:$last,
-     usage:$usage, cost_usd:$cost}
-    + (if $auth_note == "" then {} else {auth_error:$auth_note} end)'
+     usage:$usage,usage_status:$usage_status,
+     cost_usd:$cost,cost_status:$cost_status,
+     preflight_receipt:$preflight,
+     attempt_receipt:(if $attempt=="" then null else $attempt end),
+     failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
+    + (if $reason=="" then {} else {reason:$reason} end)
+    + (if $auth_note == "" then {} else {auth_error:$auth_note} end)' | {
+      if [[ -n "$LEGION_ADAPTER_ATTEMPT_PATH" ]]; then
+        python3 "$_self_dir/lib/exact-metering.py" patch-attempt "$LEGION_ADAPTER_ATTEMPT_PATH"
+      else
+        cat
+      fi
+    }
   [[ "$status" == "ok" ]] || exit 1
 }
 
@@ -327,7 +603,7 @@ usage() {
 legion-cursor — delegate a scoped task to Cursor Agent headless.
 
 Usage:
-  legion-cursor run --task "TASK" | --task-file F [--model MODEL] [--archetype NAME] [--repo DIR] [--base REF] [--run-id ID]
+  legion-cursor run --task "TASK" | --task-file F [--model MODEL] [--archetype NAME] [--repo DIR] [--base REF] [--run-id ID] [--max-runtime-seconds N]
                     [--sandbox read-only|workspace-write] [--apply] [--keep] [--quiet]
   legion-cursor run [--repo DIR] < task.txt
 

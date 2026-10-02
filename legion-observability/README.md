@@ -75,6 +75,21 @@ unclassified runs remain visible but cannot influence per-archetype proposals.
 
 `schema/legion.span.v1.schema.json` — required `schema, ts, run_id, executor, model, status`; plus optional routing `archetype`, `cost_usd`, `duration_ms`, `tokens`, `trace_id`/`parent_id` (trace trees), `target_type`/`target_name` (self-learning attribution), `artifacts`. `legion-delegate` already emits it, while the canonical emitter accepts `--archetype` or `LEGION_ARCHETYPE`.
 
+The executor boundary also publishes `legion.preflight.v1`,
+`legion.failure.v1`, `legion.attempt.v1`, and
+`legion.child-execution-lease.v1` schemas. The lease receipt is the
+supervisor-authored source of truth that distinguishes a hard monotonic timeout
+from a provider that happens to return exit code 124. Completed leases also bind
+the normalized child exit code so a delayed shell signal cannot lose the child
+result between `wait` and receipt publication. The constructor helpers in
+`scripts/legion_receipts.py` bind failure and retry truth to a specific attempt,
+keep requested and effective model/effort distinct, retain cache lineage, and
+require explicit usage/cost status and source. Unknown values are `null`, never
+zero. Aggregate attempt receipts are mechanically derived from their children:
+all-known values sum exactly; mixed known/unknown children yield `partial`, a
+nullable headline total, and a separate exact known subtotal/count. These are
+emitted by every direct adapter and by brokered nested handoffs.
+
 ## Self-learning loop
 
 The loop follows the

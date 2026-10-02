@@ -517,7 +517,7 @@ SH
   run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"orchestrator\") | {root:(.parent_id==null), self:(.run_id==.trace_id)}'"
   [ "$output" = '{"root":true,"self":true}' ]
   # The delegate span's parent_id is the root's run_id (= the trace_id)
-  run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -ec 'select(.executor==\"codex\") | (.parent_id==.trace_id)'"
+  run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -sec '[.[] | select(.executor==\"codex\")] | length > 0 and all(.[]; .parent_id==.trace_id)'"
   [ "$output" = "true" ]
 }
 
@@ -1151,10 +1151,13 @@ SH
     > "$BATS_TEST_TMPDIR/prune-once.jsonl"
 
   PATH="$bin:$PATH" run "$FANOUT" \
-    --slices "$BATS_TEST_TMPDIR/prune-once.jsonl" --repo "$REPO"
+    --slices "$BATS_TEST_TMPDIR/prune-once.jsonl" --repo "$REPO" --max-concurrency 1
 
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.ok == 3 and .failed == 0'
+  echo "$output" | jq -e '.ok == 3 and .failed == 0' || {
+    printf 'fanout output: %s\n' "$output" >&2
+    false
+  }
   [ "$(grep -cE '^git -C .+ worktree prune$' "$FANOUT_GIT_CALL_LOG")" -eq 1 ]
 }
 

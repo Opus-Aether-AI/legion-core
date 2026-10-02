@@ -1,0 +1,8 @@
+{
+  "schema": "legion.attempt.v1",
+  "attempt_id": "attempt-invalid",
+  "run_id": "run-1",
+  "ordinal": 0,
+  "cost_usd": 0,
+  "cost_status": "unknown"
+}

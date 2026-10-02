@@ -49,6 +49,9 @@ source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/adapter-contract.sh
+source "$_self_dir/lib/adapter-contract.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -58,10 +61,93 @@ fi
 
 DSH_BIN="${DSH_BIN:-}"
 DSH_PROFILE="${LEGION_DSH_PROFILE:-${DSH_PROFILE:-legion-headless}}"
+CHILD_PID=""
+SIGNAL_LEASE_STATUS=""
+SIGNAL_WORKTREE=""
+SIGNAL_CHILD_PID=""
+SIGNAL_CHILD_RC=0
+SIGNAL_LAUNCH_PENDING=""
 
 die() { printf 'legion-deepseek: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
+on_signal() {
+  local signum="$1" child_rc="$SIGNAL_CHILD_RC" containment_reason="" supervised_pid="${SIGNAL_CHILD_PID:-unknown}"
+  trap - INT TERM HUP
+  if [[ -n "$CHILD_PID" ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || child_rc=$?
+    CHILD_PID=""
+  fi
+  legion_adapter_write_signal_receipt "$signum" "$child_rc" "$SIGNAL_LEASE_STATUS"
+  if legion_adapter_supervisor_cleanup_failed "$SIGNAL_LEASE_STATUS" \
+      || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
+        '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
+        "$SIGNAL_LEASE_STATUS" >/dev/null 2>&1; }; then
+    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: $SIGNAL_WORKTREE)"
+  elif [[ "$child_rc" -eq 70 ]]; then
+    containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+  fi
+  if [[ -n "$containment_reason" ]]; then
+    keep=1
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" deepseek \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS" || true
+    exit 70
+  fi
+  if ! legion_adapter_emit_signal_span "${task:-}" "$SIGNAL_LEASE_STATUS"; then
+    keep=1
+    containment_reason="provider attempt receipt is durable but its signal-path span publication is uncertain (evidence: $LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json; worktree retained: $SIGNAL_WORKTREE)"
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" deepseek \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
+  exit $((128+signum))
+}
+begin_signal_launch() {
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 2' INT
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 15' TERM
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 1' HUP
+}
+abort_pending_signal_launch() {
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  [[ -n "$pending" ]] || return 0
+  if ! legion_adapter_write_final_gate_no_launch "$SIGNAL_LEASE_STATUS" \
+      "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" "$pending"; then
+    trap - INT TERM HUP
+    keep=1
+    note "provider launch cancelled before Popen, but no-launch evidence could not be persisted; retaining containment"
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" "$art" \
+        "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
+  finish_signal_launch
+}
+finish_signal_launch() {
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'on_signal 2' INT; trap 'on_signal 15' TERM; trap 'on_signal 1' HUP
+  [[ -z "$pending" ]] || on_signal "$pending"
+}
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit' EXIT
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
@@ -95,6 +181,7 @@ scan_task_text() {
 
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  local usage_status="${9:-unknown}" cost_status="${10:-unknown}"
   {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
@@ -104,24 +191,29 @@ emit_span() {
       --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
       --arg executor "$executor" --arg model "$model" --arg archetype "${archetype:-}" \
       --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
-      --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-      --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
+      --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-null}" \
+      --argjson usage "${usage:-null}" --arg usage_status "$usage_status" \
+      --arg cost_status "$cost_status" --arg task "$task" --argjson artifacts "$artifacts" '
       {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id,
        parent_id:(if $parent_id=="" then null else $parent_id end),
        executor:$executor, model:$model, archetype:$archetype, task:$task, status:$status,
        target_type:(if $target_type=="" then null else $target_type end),
        target_name:(if $target_name=="" then null else $target_name end),
-       duration_ms:$dur, cost_usd:$cost, tokens:$usage, artifacts:$artifacts}' \
-      >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
+       duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
+       tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
+      | legion_adapter_append_span
   } 2>/dev/null || true
 }
 
 cmd_run() {
   local default_model=""
   local task="" model="${LEGION_DEEPSEEK_MODEL:-${DSH_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
+  local requested_model="$model"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 dsh_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
+  local max_runtime_seconds=""
   local base_commit=""
+  local reported_model="unknown"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -130,12 +222,13 @@ cmd_run() {
       --task-file)
         [[ -r "$2" ]] || die "--task-file not readable: $2"
         task="$(cat "$2")"; shift 2 ;;
-      --model) model="$2"; shift 2 ;;
+      --model) model="$2"; requested_model="$2"; shift 2 ;;
       --archetype) archetype="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
       --base) base="$2"; shift 2 ;;
       --sandbox) sandbox="$2"; shift 2 ;;
       --run-id) preset_run_id="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       --apply) do_apply=1; shift ;;
       --keep) keep=1; shift ;;
       --quiet) QUIET=1; shift ;;
@@ -162,6 +255,10 @@ cmd_run() {
   local branch="legion/deepseek-$RUN_ID"
   default_model="$(legion_model_ref deepseek_default)" || die "could not resolve deepseek_default in models.toml"
   [[ -n "$model" ]] || model="$default_model"
+  # dsh exposes no effective-model contract and this adapter does not pass a
+  # model selector to the provider. Keep lifecycle, spans, and every top-level
+  # result opaque instead of presenting the routing placeholder as observed.
+  model="$reported_model"
   if [[ -n "$preset_run_id" ]]; then
     legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" ""
@@ -170,10 +267,34 @@ cmd_run() {
   [[ -n "$task" ]] || task="$(cat)"
   [[ -n "$task" ]] || die "run: empty task"
   legion_require_top_level_executor "deepseek" || return $?
+  legion_adapter_resolve_lease deepseek "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  dsh_bin="$(resolve_dsh_bin)" || die "dsh CLI not found. Install DeepSeek Harness (npm i -g @deepseek-ai/dsh) or set DSH_BIN."
-  mkdir -p "$art"
+  if ! legion_adapter_preflight deepseek "$art" "$sandbox" argv \
+      "$requested_model" "" 0 "$DSH_BIN"; then
+    local preflight_disposition
+    preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+    local terminal_status=refused lifecycle_status=failed
+    case "$preflight_disposition" in
+      timed_out) terminal_status=timed_out; lifecycle_status=timed_out ;;
+      containment_failed) terminal_status=containment_failed; lifecycle_status=containment_failed ;;
+      launch_failed) terminal_status=failed ;;
+    esac
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$lifecycle_status" "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+      "$base" "$archetype"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    jq -cn --arg run "$RUN_ID" --arg model "$model" --arg status "$terminal_status" \
+      --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
+      {run_id:$run,executor:"deepseek",model:$model,status:$status,reason:$reason,
+       preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+       usage:null,tokens:null,usage_status:"not_applicable",
+       cost_usd:null,cost_status:"not_applicable"}'
+    return 1
+  fi
+  dsh_bin="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
   legion_write_runtime_gitignore "$repo"
 
   note "-> deepseek worktree $wt (branch $branch, base $base)"
@@ -197,31 +318,93 @@ cmd_run() {
   cmd=("$dsh_bin" --profile "$DSH_PROFILE")
   # read-only has no dsh equivalent: the headless bundle carries whatever tools
   # its profile loads, and there is no documented flag that withholds the write
-  # and bash tools. Rather than pass a flag that does not exist and report a
-  # read-only run that could still edit, the no-write guarantee is enforced
-  # below by rejecting any run that changed files -- the same backstop
-  # legion-opencode applies, here as the ONLY line of defence.
+  # and bash tools. Shared preflight therefore rejects read-only before this
+  # launch path is reachable instead of pretending a post-hoc diff check is a
+  # sandbox.
   legion_activate_executor_context "$RUN_ID" deepseek
   note "-> ${cmd[*]} (task on argv, $(printf '%s' "$task" | wc -c | tr -d ' ') bytes)"
+  local started_at ended_at output_started=false failure_class="" terminal_status=succeeded
+  local lease_status="$art/lease.json" launch_gate="$art/launch-gate.json"
+  SIGNAL_LEASE_STATUS="$lease_status"
+  SIGNAL_WORKTREE="$wt"
+  legion_adapter_prepare_supervisor_launch_gate "$launch_gate" \
+    || die 'unable to prepare trusted supervisor launch gate'
+  started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
-  ( cd "$wt" && "${cmd[@]}" "$task" ) >"$out_file" 2>"$err_file"
-  rc=$?
+  begin_signal_launch
+  abort_pending_signal_launch
+  ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+      --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+      --status-file "$lease_status" \
+      --admitted-binary-sha256 "$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")" \
+      --admitted-binary-path "$dsh_bin" \
+      --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" \
+      -- "${cmd[@]}" "$task" ) >"$out_file" 2>"$err_file" &
+  CHILD_PID=$!
+  SIGNAL_CHILD_PID="$CHILD_PID"
+  legion_adapter_complete_supervisor_launch_gate "$CHILD_PID" "$lease_status" SIGNAL_LAUNCH_PENDING
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" == started ]]; then
+    legion_adapter_arm_signal_receipt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
+      "$sandbox" "$started_at" "$start_ms" "$out_file"
+  elif [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" != launch_failed ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+    CHILD_PID=""; keep=1
+    legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" "$art" \
+      "$wt" "$branch" "$model" "$sandbox" "$base" "$archetype" "" || true
+    legion_disarm_adopted_run_guard
+    legion_adapter_terminalize_launch_gate_containment deepseek "$requested_model" "$RUN_ID" \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH" "$lease_status" "$launch_gate" "$wt" \
+      "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
+    exit 70
+  fi
+  finish_signal_launch
+  wait "$CHILD_PID"; rc=$?
+  SIGNAL_CHILD_RC="$rc"
+  CHILD_PID=""
   set -e
-  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
+  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
-  # dsh publishes no headless usage contract, so nothing is metered rather than
-  # something being guessed. A zero here means "not reported", and legion-report
-  # shows it as such; a fabricated number would silently enter cost totals and
-  # routing decisions that are supposed to be evidence-based.
-  local usage='{}' cost="0" result="" diff_rc=0 status="ok"
+  # dsh publishes no headless usage contract. Preserve that as unknown/null all
+  # the way through spans and aggregation; zero would falsely mean a measured
+  # free run.
+  local usage=null cost=null result="" diff_rc=0 status="ok"
   result="$(cat "$out_file" 2>/dev/null || true)"
 
-  git -C "$wt" add -A 2>/dev/null || diff_rc=1
+  local containment_failed=0 launch_failed=0 launch_timed_out=0
+  legion_adapter_supervisor_cleanup_failed "$lease_status" && containment_failed=1
+  legion_adapter_supervisor_launch_failed "$lease_status" && launch_failed=1
+  legion_adapter_supervisor_timed_out_before_launch "$lease_status" "$rc" \
+    && launch_timed_out=1
+  if [[ "$containment_failed" -ne 1 ]]; then
+    git -C "$wt" add -A 2>/dev/null || diff_rc=1
   # Diff against the worktree's STARTING commit, not HEAD -- an executor that
   # commits its work would otherwise produce an empty patch.
-  git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
-  [[ "$rc" -ne 0 ]] && status="failed"
+    git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  else
+    : > "$art/diff.patch"
+  fi
+  if [[ "$containment_failed" -eq 1 ]]; then
+    status="containment_failed"
+    keep=1
+    result="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+  elif [[ "$launch_timed_out" -eq 1 ]]; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+    usage=null
+    cost=null
+  elif [[ "$launch_failed" -eq 1 ]]; then
+    status="failed"
+    result="$(legion_adapter_supervisor_reason "$lease_status" "provider launch failed before process creation")"
+  elif legion_adapter_supervisor_timed_out "$lease_status"; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$rc" -ne 0 ]]; then
+    status="failed"
+  fi
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
   if [[ "$sandbox" == "read-only" && "$status" == "ok" ]] \
      && ! git -C "$wt" diff --cached --quiet 2>/dev/null; then
@@ -234,12 +417,47 @@ cmd_run() {
     result="dsh completed without a result or a captured diff; refusing to report an empty success."
   fi
   printf '%s\n' "$result" > "$art/last-message.txt"
-
-  local artifacts
-  artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --arg stdout "$out_file" --arg stderr "$err_file" --arg profile "$DSH_PROFILE" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr, dsh_profile:$profile}')"
-  emit_span "deepseek" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+  legion_adapter_output_started_file "$out_file" && output_started=true
+  if [[ "$status" != ok ]]; then
+    terminal_status=failed
+    if [[ "$status" == timed_out ]]; then
+      terminal_status=timed_out; failure_class=timed_out
+    elif [[ "$status" == containment_failed ]]; then
+      failure_class=internal
+    elif [[ "$rc" -ne 0 ]]; then failure_class=provider; else failure_class=malformed_event; fi
+  fi
+  local publication_reason=""
+  if [[ "$launch_failed" -eq 1 ]]; then
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
+  else
+    legion_adapter_write_attempt "$art" deepseek dsh 1 "$requested_model" "" "" "" \
+      "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
+      null unknown '' null unknown '' "$failure_class" false "$output_started" \
+      "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
+    local artifacts
+    artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
+      --arg stdout "$out_file" --arg stderr "$err_file" --arg profile "$DSH_PROFILE" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+      '{provider_attempt:true,worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
+        dsh_profile:$profile,preflight_receipt:$preflight,attempt_receipt:$attempt,
+        failure_receipt:(if $failure=="" then null else $failure end)}')"
+    if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "deepseek" "$reported_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts" \
+        unknown unknown; then
+      status=containment_failed
+      rc=70
+      keep=1
+      publication_reason="provider attempt receipt is durable but its span publication is uncertain; worktree and evidence retained"
+      result="$publication_reason"
+    fi
+  fi
+  legion_adapter_disarm_signal_receipt
+  SIGNAL_CHILD_PID=""
+  SIGNAL_CHILD_RC=0
+  SIGNAL_LEASE_STATUS=""
+  SIGNAL_WORKTREE=""
 
   if [[ "$do_apply" == "1" && "$status" == "ok" && -s "$art/diff.patch" ]]; then
     if git -C "$repo" apply --check "$art/diff.patch" 2>/dev/null; then
@@ -261,11 +479,31 @@ cmd_run() {
     "$base" "$archetype"
   [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
 
-  jq -cn --arg run_id "$RUN_ID" --arg executor deepseek --arg model "$model" \
+  local receipt_reason=""
+  if [[ -n "$publication_reason" ]]; then
+    receipt_reason="$publication_reason"
+  elif [[ "$status" == timed_out ]]; then
+    receipt_reason="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$status" == containment_failed || "$launch_failed" -eq 1 ]]; then
+    receipt_reason="$(legion_adapter_supervisor_reason "$lease_status")"
+  fi
+  jq -cn --arg run_id "$RUN_ID" --arg executor deepseek --arg model "$reported_model" \
     --arg status "$status" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg wt "$wt" --argjson usage "$usage" --argjson cost "$cost" \
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg reason "$receipt_reason" \
+    --arg lease "$lease_status" \
+    --argjson launch_failed "$launch_failed" \
     '{run_id:$run_id, executor:$executor, model:$model, status:$status,
-      diff_path:$diff, last_message:$last, worktree:$wt, usage:$usage, cost_usd:$cost}'
+      diff_path:$diff, last_message:$last, worktree:$wt,
+      usage:$usage,tokens:$usage,
+      usage_status:(if $launch_failed == 1 then "not_applicable" else "unknown" end),
+      cost_usd:$cost,
+      cost_status:(if $launch_failed == 1 then "not_applicable" else "unknown" end),
+      preflight_receipt:$preflight,attempt_receipt:(if $attempt=="" then null else $attempt end),
+      failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
+      + (if $reason=="" then {} else {reason:$reason} end)'
   [[ "$status" == "ok" ]]
 }
 
@@ -275,7 +513,7 @@ legion-deepseek — delegate a scoped task to DeepSeek Harness (dsh)
 
   legion-deepseek run [--task T | --task-file F] [--model M] [--repo DIR]
                       [--base REF] [--sandbox read-only|workspace-write]
-                      [--archetype A] [--apply] [--keep] [--quiet]
+                      [--archetype A] [--max-runtime-seconds N] [--apply] [--keep] [--quiet]
 
 Environment:
   DSH_BIN              path to the dsh binary (default: dsh on PATH)

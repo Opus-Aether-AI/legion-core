@@ -129,6 +129,137 @@ def test_cost_for_bills_cached_tokens_at_cache_read_and_falls_back_to_default(tm
     assert unknown == 0.00162
 
 
+def test_matched_malformed_long_context_pricing_is_not_observed(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_stream(run_dir / "stream.jsonl")
+    malformed_blocks = (
+        None,
+        [],
+        {},
+        {"threshold_input_tokens": None},
+        {"threshold_input_tokens": -1},
+        {"threshold_input_tokens": True},
+        {"threshold_input_tokens": "272000"},
+        {"threshold_input_tokens": float("inf")},
+        {"threshold_input_tokens": 10**10000},
+        {"threshold_input_tokens": 1000, "input_multiplier": -1},
+        {"threshold_input_tokens": 1000, "input_multiplier": True},
+        {"threshold_input_tokens": 1000, "input_multiplier": "2"},
+        {"threshold_input_tokens": 1000, "output_multiplier": float("nan")},
+        {"threshold_input_tokens": 1000, "output_multiplier": 10**10000},
+    )
+
+    for long_context in malformed_blocks:
+        payload = _costs_payload()
+        payload["models"][0]["long_context"] = long_context
+        costs = activity._normalize_costs(payload)
+        _rates, observed = activity._rates_for_with_evidence(
+            "test-model-alpha", costs
+        )
+        assert observed is False
+        enriched = activity.enrich_run(
+            {
+                "run_id": "malformed-pricing",
+                "model": "test-model-alpha",
+                "lifecycle": {"phase": "running"},
+            },
+            str(run_dir),
+            costs,
+        )
+        assert enriched["cost_usd"] is None
+        assert enriched["cost_status"] == "unknown"
+
+
+def test_pricing_evidence_accepts_absent_or_valid_zero_long_context_fields():
+    without_tier = activity._normalize_costs(_costs_payload())
+    _rates, observed = activity._rates_for_with_evidence(
+        "test-model-alpha", without_tier
+    )
+    assert observed is True
+
+    payload = _costs_payload()
+    payload["models"][0]["long_context"] = {
+        "threshold_input_tokens": 0,
+        "input_multiplier": 0,
+        "output_multiplier": 0,
+    }
+    with_zero_tier = activity._normalize_costs(payload)
+    rates, observed = activity._rates_for_with_evidence(
+        "test-model-alpha", with_zero_tier
+    )
+    assert observed is True
+    assert rates["lc_threshold"] == 0
+    assert rates["lc_input_multiplier"] == 0
+    assert rates["lc_output_multiplier"] == 0
+
+
+def test_malformed_base_and_default_rates_fail_closed_without_huge_int_crash():
+    for value in (-1, True, "2", float("inf"), float("nan"), 10**10000):
+        matched_payload = _costs_payload()
+        matched_payload["models"][0]["input"] = value
+        matched = activity._normalize_costs(matched_payload)
+        _rates, matched_observed = activity._rates_for_with_evidence(
+            "test-model-alpha", matched
+        )
+        assert matched_observed is False
+
+        default_payload = _costs_payload()
+        default_payload["default"]["output"] = value
+        default = activity._normalize_costs(default_payload)
+        _rates, default_observed = activity._rates_for_with_evidence(
+            "unmatched-model", default
+        )
+        assert default_observed is False
+
+
+def test_huge_stream_tokens_remain_exact_but_unrepresentable_cost_is_unknown(tmp_path):
+    huge = 10**1000
+    run_dir = tmp_path / "huge"
+    run_dir.mkdir()
+    (run_dir / "stream.jsonl").write_text(
+        json.dumps(
+            {"type": "turn.completed", "usage": {"input_tokens": huge}}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parsed = activity.parse_stream(str(run_dir / "stream.jsonl"))
+    assert parsed["usage"]["input_tokens"] == huge
+
+    enriched = activity.enrich_run(
+        {
+            "run_id": "huge",
+            "model": "test-model-alpha",
+            "lifecycle": {"phase": "running"},
+        },
+        str(run_dir),
+        activity._normalize_costs(_costs_payload()),
+    )
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+    assert activity._format_cost(huge, "known") == "unknown"
+
+
+def test_huge_durable_cost_is_downgraded_without_overflow():
+    huge = 10**1000
+    summary = activity._cost_summary(
+        [{"cost_usd": huge, "cost_status": "known"}]
+    )
+    assert summary["cost_status"] == "unknown"
+    assert summary["cost_usd"] is None
+    assert summary["known_cost_usd"] is None
+
+    summed = activity._cost_summary(
+        [
+            {"cost_usd": 1e308, "cost_status": "known"},
+            {"cost_usd": 1e308, "cost_status": "known"},
+        ]
+    )
+    assert summed["cost_status"] == "unknown"
+    assert summed["known_cost_usd"] is None
+
+
 def test_parse_stream_sums_usage_and_collects_tools_files_and_items(tmp_path):
     stream_path = tmp_path / "stream.jsonl"
     _write_stream(stream_path)
@@ -142,6 +273,64 @@ def test_parse_stream_sums_usage_and_collects_tools_files_and_items(tmp_path):
     assert parsed["items"] == 3
     assert parsed["summary"]
     assert "3 items" in parsed["summary"]
+
+
+def test_live_stream_ignores_malformed_and_noncanonical_usage(tmp_path):
+    stream_path = tmp_path / "stream.jsonl"
+    malformed = (
+        {"input_tokens": -1},
+        {"input_tokens": 1.5},
+        {"input_tokens": True},
+        {"input_tokens": "1"},
+        {"uncached_tokens": 7},
+        {"input_tokens": 7, "future_tokens": 1},
+    )
+    stream_path.write_text(
+        "".join(
+            json.dumps({"type": "turn.completed", "usage": usage}) + "\n"
+            for usage in malformed
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = activity.parse_stream(str(stream_path))
+    assert parsed["_usage_observed"] is False
+    assert parsed["usage"] == activity._zero_usage()
+
+    enriched = activity.enrich_run(
+        {
+            "run_id": "malformed",
+            "model": "test-model-alpha",
+            "lifecycle": {"phase": "running"},
+        },
+        str(tmp_path),
+        activity._normalize_costs(_costs_payload()),
+    )
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+
+
+def test_live_stream_sums_only_fully_valid_completed_usage(tmp_path):
+    stream_path = tmp_path / "stream.jsonl"
+    stream_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 100, "unexpected_tokens": 1},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    parsed = activity.parse_stream(str(stream_path))
+    assert parsed["_usage_observed"] is True
+    assert parsed["usage"]["input_tokens"] == 5
 
 
 def test_run_cost_uses_stream_and_resume_stream_usage_not_spans(tmp_path):
@@ -169,6 +358,314 @@ def test_enrich_run_falls_back_to_span_cost_when_stream_is_gone():
     rec = {"run_id": "gone", "model": "test-model-alpha", "lifecycle": {"phase": "ok"}}
     enriched = activity.enrich_run(rec, "", _costs_payload(), span_costs={"gone": 0.4242})
     assert enriched["cost_usd"] == 0.4242  # from the durable span, stream absent
+
+
+def test_activity_preserves_partial_durable_cost_as_a_lower_bound(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "2026-09-11.jsonl").write_text("\n".join([
+        json.dumps({"schema": "legion.span.v1", "run_id": "mixed",
+                    "cost_usd": 0, "cost_status": "known"}),
+        json.dumps({"schema": "legion.span.v1", "run_id": "mixed",
+                    "cost_usd": None, "cost_status": "unknown"}),
+    ]) + "\n")
+    summaries = activity.load_span_costs(str(spans))
+    assert summaries["mixed"] == {
+        "cost_usd": None,
+        "cost_status": "partial",
+        "known_cost_usd": 0,
+        "known_cost_attempts": 1,
+        "attempt_count": 2,
+    }
+    rec = {"run_id": "mixed", "model": "test-model-alpha", "lifecycle": {"phase": "ok"}}
+    enriched = activity.enrich_run(rec, "", _costs_payload(), span_costs=summaries)
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "partial"
+    assert enriched["known_cost_usd"] == 0
+    assert activity._format_cost(
+        enriched["cost_usd"], enriched["cost_status"], enriched["known_cost_usd"]
+    ) == ">=0.000000"
+    assert activity._format_cost(None, "unknown") == "unknown"
+
+
+def test_completed_multi_attempt_activity_prefers_durable_reconciliation(tmp_path):
+    run_dir = tmp_path / "runs" / "retried"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+    durable = {
+        "retried": {
+            "cost_usd": 1.25,
+            "cost_status": "known",
+            "known_cost_usd": 1.25,
+            "known_cost_attempts": 2,
+            "attempt_count": 2,
+        }
+    }
+
+    completed = activity.enrich_run(
+        {"run_id": "retried", "model": "test-model-alpha", "lifecycle": {"phase": "ok"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=durable,
+    )
+    running = activity.enrich_run(
+        {"run_id": "retried", "model": "test-model-alpha", "lifecycle": {"phase": "running"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=durable,
+    )
+
+    assert completed["cost_usd"] == 1.25
+    assert completed["known_cost_attempts"] == 2
+    assert "attempt_count" not in completed
+    assert completed["activity"]["items"] == 3
+    assert running["cost_usd"] == 0.00345
+    assert running["known_cost_attempts"] == 1
+
+
+def test_running_resumed_streams_count_each_usage_bearing_provider_attempt(tmp_path):
+    run_dir = tmp_path / "runs" / "resumed"
+    run_dir.mkdir(parents=True)
+    for name in ("stream.jsonl", "resume-stream.jsonl"):
+        (run_dir / name).write_text(
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 100}}) + "\n",
+            encoding="utf-8",
+        )
+    enriched = activity.enrich_run(
+        {"run_id": "resumed", "model": "test-model-alpha",
+         "lifecycle": {"phase": "running"}},
+        str(run_dir), _costs_payload(),
+    )
+    assert enriched["cost_status"] == "known"
+    assert enriched["known_cost_attempts"] == 2
+
+
+def test_non_span_jsonl_cannot_downgrade_durable_provider_cost(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "2026-09-11.jsonl").write_text("\n".join([
+        json.dumps({"schema": "legion.span.v1", "run_id": "valid",
+                    "cost_usd": 0.25, "cost_status": "known"}),
+        json.dumps({"schema": "unrelated.event.v1", "run_id": "valid"}),
+    ]) + "\n", encoding="utf-8")
+    assert activity.load_span_costs(str(spans))["valid"] == {
+        "cost_usd": 0.25,
+        "cost_status": "known",
+        "known_cost_usd": 0.25,
+        "known_cost_attempts": 1,
+        "attempt_count": 1,
+    }
+
+
+def test_completed_all_unknown_retries_still_prefer_durable_unknown(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "2026-09-11.jsonl").write_text("\n".join([
+        json.dumps({"schema": "legion.span.v1", "run_id": "retried",
+                    "cost_usd": None, "cost_status": "unknown"}),
+        json.dumps({"schema": "legion.span.v1", "run_id": "retried",
+                    "cost_usd": None, "cost_status": "unknown"}),
+    ]) + "\n")
+    run_dir = tmp_path / "runs" / "retried"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+
+    summaries = activity.load_span_costs(str(spans))
+    assert summaries["retried"]["attempt_count"] == 2
+    enriched = activity.enrich_run(
+        {"run_id": "retried", "model": "test-model-alpha", "lifecycle": {"phase": "failed"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=summaries,
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+
+
+def test_completed_single_attempt_prefers_durable_provenance(tmp_path):
+    run_dir = tmp_path / "runs" / "single"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+    durable = {
+        "single": {
+            "cost_usd": None,
+            "cost_status": "unknown",
+            "known_cost_usd": None,
+            "known_cost_attempts": 0,
+            "attempt_count": 1,
+        }
+    }
+
+    enriched = activity.enrich_run(
+        {"run_id": "single", "model": "test-model-alpha", "lifecycle": {"phase": "ok"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=durable,
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+    assert enriched["activity"]["items"] == 3
+
+
+def test_running_stream_cost_stays_unknown_without_usage_evidence(tmp_path):
+    run_dir = tmp_path / "runs" / "no-usage"
+    run_dir.mkdir(parents=True)
+    (run_dir / "stream.jsonl").write_text(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "still running"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    enriched = activity.enrich_run(
+        {"run_id": "no-usage", "model": "test-model-alpha", "lifecycle": {"phase": "running"}},
+        str(run_dir),
+        activity._normalize_costs(_costs_payload()),
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+    assert enriched["known_cost_attempts"] == 0
+
+
+def test_running_stream_cost_stays_unknown_without_pricing_evidence(tmp_path):
+    run_dir = tmp_path / "runs" / "no-pricing"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+
+    enriched = activity.enrich_run(
+        {"run_id": "no-pricing", "model": "unpriced", "lifecycle": {"phase": "running"}},
+        str(run_dir),
+        activity.load_costs(str(tmp_path / "missing-costs.json")),
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "unknown"
+    assert enriched["known_cost_attempts"] == 0
+
+
+def test_running_stream_accepts_observed_usage_and_explicit_zero_pricing(tmp_path):
+    run_dir = tmp_path / "runs" / "zero-priced"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+    costs = _costs_payload()
+    costs["default"] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+
+    enriched = activity.enrich_run(
+        {"run_id": "zero-priced", "model": "unpriced", "lifecycle": {"phase": "running"}},
+        str(run_dir),
+        activity._normalize_costs(costs),
+    )
+
+    assert enriched["cost_usd"] == 0
+    assert enriched["cost_status"] == "known"
+
+
+def test_refused_no_launch_run_is_terminal_and_prefers_durable_provenance(tmp_path):
+    run_dir = tmp_path / "runs" / "refused"
+    run_dir.mkdir(parents=True)
+    _write_stream(run_dir / "stream.jsonl")
+    durable = {
+        "refused": {
+            "cost_usd": None,
+            "cost_status": "not_applicable",
+            "known_cost_usd": None,
+            "known_cost_attempts": 0,
+            "attempt_count": 1,
+        }
+    }
+
+    enriched = activity.enrich_run(
+        {"run_id": "refused", "model": "test-model-alpha", "lifecycle": {"phase": "refused"}},
+        str(run_dir),
+        _costs_payload(),
+        span_costs=durable,
+    )
+
+    assert enriched["cost_usd"] is None
+    assert enriched["cost_status"] == "not_applicable"
+
+
+def test_activity_cost_loader_excludes_rollup_only_span(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    provider = {
+        "schema": "legion.span.v1", "run_id": "single", "cost_usd": 0.5,
+        "cost_status": "known", "artifacts": {"provider_attempt": True},
+    }
+    rollup = {
+        **provider, "cost_usd": None, "cost_status": "not_applicable",
+        "artifacts": {"rollup_only": True},
+    }
+    (spans / "2026-09-11.jsonl").write_text(
+        "\n".join(json.dumps(span) for span in (provider, rollup)) + "\n",
+        encoding="utf-8",
+    )
+
+    assert activity.load_span_costs(str(spans))["single"] == {
+        "cost_usd": 0.5,
+        "cost_status": "known",
+        "known_cost_usd": 0.5,
+        "known_cost_attempts": 1,
+        "attempt_count": 1,
+    }
+
+
+def test_activity_known_plus_not_applicable_cost_is_partial(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    payloads = [
+        {"schema": "legion.span.v1", "run_id": "mixed-applicability",
+         "cost_usd": 0.75, "cost_status": "known"},
+        {"schema": "legion.span.v1", "run_id": "mixed-applicability",
+         "cost_usd": None, "cost_status": "not_applicable"},
+    ]
+    (spans / "2026-09-11.jsonl").write_text(
+        "\n".join(json.dumps(span) for span in payloads) + "\n",
+        encoding="utf-8",
+    )
+
+    assert activity.load_span_costs(str(spans))["mixed-applicability"] == {
+        "cost_usd": None,
+        "cost_status": "partial",
+        "known_cost_usd": 0.75,
+        "known_cost_attempts": 1,
+        "attempt_count": 1,
+    }
+
+
+def test_activity_rejects_malformed_partial_known_attempt_counts(tmp_path):
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    invalid_counts = [True, 0, -1, 1.5, "2"]
+    payloads = [
+        {
+            "schema": "legion.span.v1",
+            "run_id": f"invalid-count-{index}",
+            "cost_usd": None,
+            "cost_status": "partial",
+            "known_cost_usd": 0.25,
+            "known_cost_attempts": count,
+        }
+        for index, count in enumerate(invalid_counts)
+    ]
+    (spans / "2026-09-11.jsonl").write_text(
+        "\n".join(json.dumps(span) for span in payloads) + "\n",
+        encoding="utf-8",
+    )
+
+    summaries = activity.load_span_costs(str(spans))
+    for index in range(len(invalid_counts)):
+        assert summaries[f"invalid-count-{index}"] == {
+            "cost_usd": None,
+            "cost_status": "unknown",
+            "known_cost_usd": None,
+            "known_cost_attempts": 0,
+            "attempt_count": 1,
+        }
 
 
 def test_group_by_session_merges_a_fanouts_agents_across_their_worktrees():

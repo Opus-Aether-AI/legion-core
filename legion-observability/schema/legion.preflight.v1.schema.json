@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/legion-observability/schema/legion.preflight.v1.schema.json",
+  "title": "legion.preflight.v1",
+  "description": "A no-spend local executor availability and compatibility decision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "checked_at", "executor", "status", "reason", "identity", "cache", "compatibility"],
+  "properties": {
+    "schema": {"const": "legion.preflight.v1"},
+    "checked_at": {"type": "string", "minLength": 1},
+    "executor": {"type": "string", "minLength": 1},
+    "status": {"enum": ["supported", "untested", "incompatible", "unavailable"]},
+    "reason": {"type": "string", "minLength": 1},
+    "identity": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["executable_path", "binary_sha256", "config_sha256", "version", "version_raw"],
+          "properties": {
+            "executable_path": {"type": "string", "minLength": 1},
+            "binary_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "config_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "version": {"type": ["string", "null"]},
+            "version_raw": {"type": ["string", "null"]}
+          }
+        }
+      ]
+    },
+    "cache": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hit", "key"],
+      "properties": {"hit": {"type": "boolean"}, "key": {"type": ["string", "null"], "minLength": 1}}
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sandbox": {
+          "type": "object", "additionalProperties": false,
+          "required": ["requested", "status"],
+          "properties": {
+            "requested": {"type": ["string", "null"]},
+            "status": {"$ref": "#/$defs/simpleStatus"},
+            "provider_sandbox": {"type": "string", "minLength": 1},
+            "wrapper": {"type": ["string", "null"], "minLength": 1}
+          },
+          "allOf": [
+            {"if": {"properties": {"requested": {"type": "string"}}, "required": ["requested"]},
+             "then": {"required": ["provider_sandbox", "wrapper"]},
+             "else": {"properties": {"status": {"const": "not_requested"}}}}
+          ]
+        },
+        "read_mode": {"$ref": "#/$defs/simpleCheck"},
+        "task_transport": {"$ref": "#/$defs/simpleCheck"},
+        "effort": {"$ref": "#/$defs/simpleCheck"},
+        "model": {
+          "type": "object", "additionalProperties": false,
+          "required": ["requested", "policy_model", "model_ref", "status"],
+          "properties": {
+            "requested": {"type": ["string", "null"], "minLength": 1},
+            "policy_model": {"type": ["string", "null"], "minLength": 1},
+            "model_ref": {"type": ["string", "null"], "minLength": 1},
+            "status": {"$ref": "#/$defs/simpleStatus"}
+          },
+          "allOf": [
+            {"if": {"properties": {"requested": {"type": "null"}}, "required": ["requested"]},
+             "then": {"properties": {"status": {"const": "not_requested"}}},
+             "else": {"properties": {"status": {"not": {"const": "not_requested"}}}}}
+          ]
+        },
+        "configuration": {
+          "type": "object", "additionalProperties": false,
+          "required": ["missing", "status"],
+          "properties": {
+            "missing": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "status": {"enum": ["supported", "unavailable", "incompatible"]}
+          }
+        },
+        "billing": {
+          "type": "object", "additionalProperties": false,
+          "required": ["class", "explicit_consent_required", "status"],
+          "properties": {
+            "class": {"type": "string", "minLength": 1},
+            "explicit_consent_required": {"type": "boolean"},
+            "status": {"enum": ["supported", "incompatible"]}
+          }
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["discovered", "status", "probe_status", "probe_reason", "probe_lease"],
+          "properties": {
+            "discovered": {"type": ["string", "null"]},
+            "status": {"enum": ["supported", "untested", "unavailable"]},
+            "probe_status": {
+              "enum": [
+                "completed", "cached", "not_requested", "launch_failed",
+                "timed_out", "cancelled", "cleanup_failed", "invalid"
+              ]
+            },
+            "probe_reason": {"type": ["string", "null"]},
+            "probe_lease": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["schema", "status", "reason", "max_runtime_seconds"],
+                  "properties": {
+                    "schema": {"const": "legion.child-execution-lease.v1"},
+                    "status": {
+                      "enum": [
+                        "completed", "cancelled", "timed_out", "cleanup_failed", "launch_failed"
+                      ]
+                    },
+                    "reason": {"type": "string", "minLength": 1},
+                    "max_runtime_seconds": {"type": "integer", "minimum": 1},
+                    "child_started": {"const": false},
+                    "child_exit_code": {"type": "integer", "minimum": 0, "maximum": 255}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "supported"}}, "required": ["status"]},
+     "then": {
+       "properties": {
+         "identity": {"type": "object"},
+         "compatibility": {
+           "required": ["sandbox", "read_mode", "task_transport", "effort", "model",
+                        "configuration", "billing", "version"]
+         }
+       }
+     }}
+  ],
+  "$defs": {
+    "simpleStatus": {"enum": ["supported", "untested", "incompatible", "unavailable", "not_requested"]},
+    "simpleCheck": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requested", "status"],
+      "properties": {
+        "requested": {"type": ["string", "null"]},
+        "status": {"$ref": "#/$defs/simpleStatus"}
+      },
+      "allOf": [
+        {"if": {"properties": {"requested": {"type": "null"}}, "required": ["requested"]},
+         "then": {"properties": {"status": {"const": "not_requested"}}},
+         "else": {"properties": {"status": {"not": {"const": "not_requested"}}}}}
+      ]
+    }
+  }
+}

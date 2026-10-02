@@ -33,6 +33,11 @@ set -euo pipefail
   "${LEGION_ROUTE_PRE_RESOLVED:-}" "${LEGION_RESOLVED_EXECUTOR:-}" \
   "${LEGION_RESOLVED_FALLBACK:-}" >> "$MOCK_ROUTE_ENV_LOG"
 
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'codex-cli 0.139.0\n'
+  exit 0
+fi
+
 args=("$@")
 cd_dir="."; out_file=""; sandbox="read-only"; model="mock"; review=0; resume=0
 i=0
@@ -92,6 +97,22 @@ if [[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_DELAY:-}" ]]; then
   wait "$delay_pid"
 fi
 
+if [[ $review -eq 0 && -n "${MOCK_CODEX_DELAY:-}" ]]; then
+  if [[ "${MOCK_CODEX_DETACH_DELAY:-0}" == 1 ]]; then
+    python3 - "$MOCK_CODEX_DELAY" <<'PY' &
+import os, signal, sys, time
+os.setsid()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+time.sleep(float(sys.argv[1]))
+PY
+  else
+    sleep "$MOCK_CODEX_DELAY" &
+  fi
+  delay_pid=$!
+  [[ -z "${MOCK_CODEX_DELAY_PID_FILE:-}" ]] || printf '%s\n' "$delay_pid" > "$MOCK_CODEX_DELAY_PID_FILE"
+  wait "$delay_pid"
+fi
+
 if [[ "${MOCK_CODEX_FAIL:-}" == "1" ]]; then
   printf '%s\n' '{"type":"thread.started","thread_id":"mock-fail"}'
   printf 'mock codex forced failure\n' >&2
@@ -103,8 +124,16 @@ fi
 # Simulate a quota/rate-limit failure for a specific model (to exercise the fallback chain).
 if [[ -n "${MOCK_CODEX_QUOTA_FAIL:-}" && "$model" == "${MOCK_CODEX_QUOTA_FAIL}" ]]; then
   printf '%s\n' '{"type":"thread.started","thread_id":"mock-quota"}'
+  if [[ "${MOCK_CODEX_OUTPUT_BEFORE_QUOTA:-0}" == 1 ]]; then
+    printf '%s\n' '{"type":"item.completed","item":{"id":"item-partial","type":"agent_message","text":"PARTIAL_CODEX_OUTPUT"}}'
+  fi
   printf 'Error: 429 rate limit exceeded — quota\n' >&2
   exit 1
+fi
+
+if [[ "${MOCK_CODEX_MALFORMED:-0}" == 1 ]]; then
+  printf '%s\n' 'not-json'
+  exit 0
 fi
 
 thread_id="mock-thread-0001"
@@ -154,7 +183,11 @@ else
   printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"'"$msg"'"}}'
 fi
 
-printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":10}}'
+if [[ $resume -eq 1 && "${MOCK_CODEX_RESUME_NEGATIVE_METERING:-0}" == 1 ]]; then
+  printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":-1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":10}}'
+else
+  printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":10}}'
+fi
 if [[ -n "$out_file" ]]; then
   if [[ $review -ne 1 || "${MOCK_CODEX_REVIEW_NO_VERDICT:-}" != "1" ]]; then
     printf '%s\n' "$msg" > "$out_file"

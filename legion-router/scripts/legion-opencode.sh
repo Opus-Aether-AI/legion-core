@@ -25,6 +25,9 @@ source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/adapter-contract.sh
+source "$_self_dir/lib/adapter-contract.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -33,13 +36,130 @@ if [[ -f "$_state_lib" ]]; then
 fi
 
 OPENCODE_BIN="${OPENCODE_BIN:-}"
+CHILD_PID=""
+SIGNAL_LEASE_STATUS=""
+SIGNAL_WORKTREE=""
+SIGNAL_CHILD_PID=""
+SIGNAL_CHILD_RC=0
+SIGNAL_LAUNCH_PENDING=""
 
 die() { printf 'legion-opencode: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
+on_signal() {
+  local signum="$1" child_rc="$SIGNAL_CHILD_RC" containment_reason="" supervised_pid="${SIGNAL_CHILD_PID:-unknown}"
+  trap - INT TERM HUP
+  if [[ -n "$CHILD_PID" ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || child_rc=$?
+    CHILD_PID=""
+  fi
+  legion_adapter_write_signal_receipt "$signum" "$child_rc" "$SIGNAL_LEASE_STATUS"
+  if legion_adapter_supervisor_cleanup_failed "$SIGNAL_LEASE_STATUS" \
+      || { [[ -f "$SIGNAL_LEASE_STATUS" ]] && jq -e \
+        '.schema == "legion.child-execution-lease.v1" and .status == "containment_failed"' \
+        "$SIGNAL_LEASE_STATUS" >/dev/null 2>&1; }; then
+    containment_reason="$(legion_adapter_supervisor_reason "$SIGNAL_LEASE_STATUS") (evidence: $SIGNAL_LEASE_STATUS; supervisor pid: $supervised_pid; worktree retained: $SIGNAL_WORKTREE)"
+  elif [[ "$child_rc" -eq 70 ]]; then
+    containment_reason="child supervisor exited 70 without a valid cleanup sidecar (evidence expected: $SIGNAL_LEASE_STATUS; worktree retained: $SIGNAL_WORKTREE)"
+  fi
+  if [[ -n "$containment_reason" ]]; then
+    keep=1
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" opencode \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    legion_adapter_emit_signal_span "${span_task:-}" "$SIGNAL_LEASE_STATUS" || true
+    exit 70
+  fi
+  if ! legion_adapter_emit_signal_span "${span_task:-}" "$SIGNAL_LEASE_STATUS"; then
+    keep=1
+    containment_reason="provider attempt receipt is durable but its signal-path span publication is uncertain (evidence: $LEGION_ADAPTER_SIGNAL_ART/attempt-$LEGION_ADAPTER_SIGNAL_ORDINAL.json; worktree retained: $SIGNAL_WORKTREE)"
+    legion_adapter_fail_recorded_attempt "$LEGION_ADAPTER_SIGNAL_ART" opencode \
+      "$LEGION_ADAPTER_SIGNAL_ORDINAL" internal 70 "$containment_reason" || true
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" \
+        "$LEGION_ADAPTER_SIGNAL_ART" "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
+  exit $((128+signum))
+}
+begin_signal_launch() {
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 2' INT
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 15' TERM
+  trap 'legion_adapter_record_launch_signal SIGNAL_LAUNCH_PENDING 1' HUP
+}
+abort_pending_signal_launch() {
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  [[ -n "$pending" ]] || return 0
+  if ! legion_adapter_write_final_gate_no_launch "$SIGNAL_LEASE_STATUS" \
+      "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" "$pending"; then
+    trap - INT TERM HUP
+    keep=1
+    note "provider launch cancelled before Popen, but no-launch evidence could not be persisted; retaining containment"
+    if [[ -n "${preset_run_id:-}" ]]; then
+      legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" "$art" \
+        "$SIGNAL_WORKTREE" "$branch" "$model" "$sandbox" "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    exit 70
+  fi
+  finish_signal_launch
+}
+finish_signal_launch() {
+  local pending="$SIGNAL_LAUNCH_PENDING"
+  SIGNAL_LAUNCH_PENDING=""
+  trap 'on_signal 2' INT; trap 'on_signal 15' TERM; trap 'on_signal 1' HUP
+  [[ -z "$pending" ]] || on_signal "$pending"
+}
 trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legion_terminalize_adopted_run_on_exit' EXIT
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
+OPENCODE_TASK_ARTIFACT_MAX_BYTES=1048576  # 1 MiB, including UTF-8 bytes.
+
+opencode_write_task_staging_no_launch() {
+  local art="$1" reason="$2" receipt temp
+  receipt="$art/task-staging-lease.json"
+  temp="$(mktemp "$art/.task-staging-lease.XXXXXX")" || return 1
+  if ! jq -cn --arg reason "$reason" \
+      --argjson runtime "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" '
+      {schema:"legion.child-execution-lease.v1",status:"launch_failed",
+       reason:$reason,max_runtime_seconds:$runtime}
+    ' > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  chmod 600 "$temp" || { rm -f "$temp"; return 1; }
+  if ! legion_adapter_durable_exclusive_link "$temp" "$receipt"; then
+    rm -f "$temp"
+    return 1
+  fi
+  legion_adapter_supervisor_launch_failed "$receipt"
+}
+
+opencode_task_staging_terminal() {
+  local status="$1" reason="$2" lease="$3" usage_status="$4"
+  jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$model" \
+    --arg reason "$reason" --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" \
+    --arg lease "$lease" --arg usage_status "$usage_status" '
+    {run_id:$run,status:$status,executor:"opencode",model:$model,reason:$reason,
+     preflight_receipt:$preflight,
+     lease_receipt:(if $lease=="" then null else $lease end),
+     attempt_receipt:null,failure_receipt:null,
+     usage:null,usage_status:$usage_status,cost_usd:null,cost_status:$usage_status}
+  '
+}
 _run_id() { legion_new_run_id; }
 
 # Resolve the opencode binary. PIN $HOME/.opencode/bin first: a stray `opencode`
@@ -72,6 +192,7 @@ scan_task_text() {
 
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  local usage_status="${9:-known}" cost_status="${10:-known}"
   {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
@@ -81,15 +202,17 @@ emit_span() {
       --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
       --arg executor "$executor" --arg model "$model" --arg archetype "${archetype:-}" \
       --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
-      --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-      --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
+      --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-null}" \
+      --argjson usage "${usage:-null}" --arg usage_status "$usage_status" \
+      --arg cost_status "$cost_status" --arg task "$task" --argjson artifacts "$artifacts" '
       {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id,
        parent_id:(if $parent_id=="" then null else $parent_id end),
        executor:$executor, model:$model, archetype:$archetype, task:$task, status:$status,
        target_type:(if $target_type=="" then null else $target_type end),
        target_name:(if $target_name=="" then null else $target_name end),
-       duration_ms:$dur, cost_usd:$cost, tokens:$usage, artifacts:$artifacts}' \
-      >> "$LEGION_TELEMETRY_DIR/$(_today).jsonl"
+       duration_ms:$dur, cost_usd:$cost, cost_status:$cost_status,
+       tokens:$usage, usage_status:$usage_status, artifacts:$artifacts}' \
+      | legion_adapter_append_span
   } 2>/dev/null || true
 }
 
@@ -102,7 +225,8 @@ emit_span() {
 # distinct assistant messages/steps so a multi-turn run is never double-counted.
 # Tolerant of stray non-JSON stdout lines (e.g. a plugin's console.log poisoning
 # the stream): each line is parsed with `fromjson?`, so one bad line costs at most
-# that event, not the whole run's cost/result/token metering.
+# that event, not the whole run's cost/result. Token counters are parsed
+# separately with integer-exact Python, never jq arithmetic.
 parse_opencode_output() {
   local file="$1" out
   out="$(jq -s -R -c '
@@ -118,16 +242,12 @@ parse_opencode_output() {
     | ([ $events[] | select(.type=="error") ] | last) as $error
     | {
         cost:  (([$msgs[].cost] | add // 0) + ([$steps[].cost] | add // 0)),
+        provider_cost_complete: (($msgs + $steps) as $priced
+          | ($priced | length) > 0
+            and all($priced[]; (.cost | type) == "number")),
         model: ($msgs | last
                  | if . == null or ((.providerID // "") == "") or ((.modelID // "") == "") then ""
                    else (.providerID + "/" + .modelID) end),
-        usage: {
-          input_tokens:                (([$msgs[].tokens.input]       | add // 0) + ([$steps[].tokens.input]       | add // 0)),
-          output_tokens:               (([$msgs[].tokens.output]      | add // 0) + ([$steps[].tokens.output]      | add // 0)),
-          reasoning_output_tokens:     (([$msgs[].tokens.reasoning]   | add // 0) + ([$steps[].tokens.reasoning]   | add // 0)),
-          cache_read_input_tokens:     (([$msgs[].tokens.cache.read]  | add // 0) + ([$steps[].tokens.cache.read]  | add // 0)),
-          cache_creation_input_tokens: (([$msgs[].tokens.cache.write] | add // 0) + ([$steps[].tokens.cache.write] | add // 0))
-        },
         result: ([$legacy_text[], $current_text[]] | map(select(. != null and . != "")) | join("\n")),
         event_count: ($events | length),
         recognized_event_count: ([ $events[] | select(.type == "message.updated"
@@ -140,14 +260,15 @@ parse_opencode_output() {
           status_code: ($error.error.data.statusCode // $error.error.statusCode // null)
         } end)
       }' "$file" 2>/dev/null)" || out=""
-  [[ -n "$out" ]] && printf '%s' "$out" || printf '{"cost":0,"model":"","usage":{},"result":"","event_count":0,"recognized_event_count":0,"has_error":false,"error":null}'
+  [[ -n "$out" ]] && printf '%s' "$out" || printf '{"cost":0,"provider_cost_complete":false,"model":"","usage":{},"result":"","event_count":0,"recognized_event_count":0,"has_error":false,"error":null}'
 }
 
 cmd_run() {
   local default_model=""
-  local task="" model="${LEGION_OPENCODE_MODEL:-${OPENCODE_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
+  local task="" span_task="" model="${LEGION_OPENCODE_MODEL:-${OPENCODE_MODEL:-}}" repo="$PWD" base="HEAD" sandbox="workspace-write"
   local archetype="${LEGION_ARCHETYPE:-}"
   local do_apply=0 keep=0 oc_bin="" start_ms=0 end_ms=0 dur=0 rc=0 preset_run_id=""
+  local max_runtime_seconds=""
   local base_commit=""
 
   while [[ $# -gt 0 ]]; do
@@ -157,13 +278,15 @@ cmd_run() {
       # --task-file carries the same value out of band; last flag wins.
       --task-file)
         [[ -r "$2" ]] || die "--task-file not readable: $2"
-        task="$(cat "$2")"; shift 2 ;;
+        task="$(head -c "$((OPENCODE_TASK_ARTIFACT_MAX_BYTES + 1))" "$2"; printf '\034')"
+        task="${task%$'\034'}"; shift 2 ;;
       --model) model="$2"; shift 2 ;;
       --archetype) archetype="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
       --base) base="$2"; shift 2 ;;
       --sandbox) sandbox="$2"; shift 2 ;;
       --run-id) preset_run_id="$2"; shift 2 ;;
+      --max-runtime-seconds) max_runtime_seconds="$2"; shift 2 ;;
       --apply) do_apply=1; shift ;;
       --keep) keep=1; shift ;;
       --quiet) QUIET=1; shift ;;
@@ -194,18 +317,106 @@ cmd_run() {
   fi
   default_model="$(legion_model_ref opencode_default)" || die "could not resolve opencode_default in models.toml"
   [[ -n "$model" ]] || model="$default_model"
+  model="$(legion_provider_model opencode "$model")"
   if [[ -n "$preset_run_id" ]]; then
     legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" ""
   fi
   require_git_repo "$repo"
-  [[ -n "$task" ]] || task="$(cat)"
+  if [[ -z "$task" ]]; then
+    task="$(head -c "$((OPENCODE_TASK_ARTIFACT_MAX_BYTES + 1))"; printf '\034')"
+    task="${task%$'\034'}"
+  fi
   [[ -n "$task" ]] || die "run: empty task"
+  # Keep the complete task out of telemetry process argv. The artifact is
+  # written before provider launch and survives a retained containment run.
+  span_task="task artifact: $art/task.txt"
   legion_require_top_level_executor "opencode" || return $?
+  legion_adapter_resolve_lease opencode "$max_runtime_seconds" || die "$LEGION_ADAPTER_LEASE_REASON"
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
-  oc_bin="$(resolve_opencode_bin)" || die "opencode CLI not found. Install opencode or set OPENCODE_BIN (expected \$HOME/.opencode/bin/opencode)."
-  mkdir -p "$art"
+  local preflight_binary="$OPENCODE_BIN"
+  [[ -n "$preflight_binary" || ! -x "$HOME/.opencode/bin/opencode" ]] \
+    || preflight_binary="$HOME/.opencode/bin/opencode"
+  if ! legion_adapter_preflight opencode "$art" "$sandbox" stdin "$model" "" 0 "$preflight_binary"; then
+    local preflight_disposition
+    preflight_disposition="$(legion_adapter_preflight_failure_disposition \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+    local terminal_status=refused lifecycle_status=failed
+    case "$preflight_disposition" in
+      timed_out) terminal_status=timed_out; lifecycle_status=timed_out ;;
+      containment_failed) terminal_status=containment_failed; lifecycle_status=containment_failed ;;
+      launch_failed) terminal_status=failed ;;
+    esac
+    [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+      "$lifecycle_status" "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+      "$base" "$archetype"
+    [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+    jq -cn --arg run "$RUN_ID" --arg model "$model" --arg status "$terminal_status" \
+      --arg reason "$LEGION_ADAPTER_PREFLIGHT_REASON" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" '
+      {run_id:$run,status:$status,executor:"opencode",model:$model,reason:$reason,
+       preflight_receipt:$preflight,attempt_receipt:null,failure_receipt:null,
+       usage:null,usage_status:"not_applicable",
+       cost_usd:null,cost_status:"not_applicable"}'
+    return 1
+  fi
+  oc_bin="$(jq -r '.identity.executable_path' "$LEGION_ADAPTER_PREFLIGHT_PATH")"
+  local staging_rc=0 staging_reason="" staging_status=refused staging_usage_status=not_applicable
+  printf '%s' "$task" | python3 -c '
+import os
+import sys
+path, limit = sys.argv[1], int(sys.argv[2])
+created = False
+try:
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    created = True
+    total = 0
+    exceeded = False
+    with os.fdopen(fd, "wb") as output:
+        while chunk := sys.stdin.buffer.read(65536):
+            total += len(chunk)
+            if total > limit:
+                exceeded = True
+            if not exceeded:
+                output.write(chunk)
+    if exceeded:
+        os.unlink(path)
+        raise SystemExit(3)
+except OSError:
+    if created:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    raise SystemExit(4)
+' "$art/task.txt" "$OPENCODE_TASK_ARTIFACT_MAX_BYTES" || staging_rc=$?
+  if [[ "$staging_rc" -ne 0 ]]; then
+    if [[ "$staging_rc" -eq 3 ]]; then
+      staging_reason="OpenCode task exceeds the 1 MiB artifact limit; no provider launched"
+    else
+      staging_reason="OpenCode task artifact could not be staged; no provider launched"
+    fi
+    local staging_lease="$art/task-staging-lease.json"
+    if ! opencode_write_task_staging_no_launch "$art" "$staging_reason"; then
+      staging_status=containment_failed
+      staging_usage_status=unknown
+      staging_reason="task staging failed and authenticated no-launch evidence could not be persisted; artifacts retained"
+      staging_lease=""
+      keep=1
+    fi
+    if [[ -n "$preset_run_id" ]]; then
+      legion_write_adapter_run_state \
+        "$([[ "$staging_status" == containment_failed ]] && printf containment_failed || printf failed)" \
+        "$RUN_ID" "$repo" "$art" "$wt" "$branch" "$model" "$sandbox" \
+        "$base" "$archetype" "" || true
+      legion_disarm_adopted_run_guard
+    fi
+    opencode_task_staging_terminal "$staging_status" "$staging_reason" \
+      "$staging_lease" "$staging_usage_status"
+    [[ "$staging_status" != containment_failed ]] || return 70
+    return 1
+  fi
   legion_write_runtime_gitignore "$repo"
 
   note "-> opencode worktree $wt (branch $branch, base $base)"
@@ -237,48 +448,130 @@ cmd_run() {
   # it back on the provider's would fix nothing.
   legion_activate_executor_context "$RUN_ID" opencode
   note "-> ${cmd[*]} (task on stdin, $(printf '%s' "$task" | wc -c | tr -d ' ') bytes)"
+  local started_at ended_at output_started=false
+  local lease_status="$art/lease.json" launch_gate="$art/launch-gate.json"
+  SIGNAL_LEASE_STATUS="$lease_status"
+  SIGNAL_WORKTREE="$wt"
+  legion_adapter_prepare_supervisor_launch_gate "$launch_gate" \
+    || die 'unable to prepare trusted supervisor launch gate'
+  started_at="$(_now)"
   start_ms="$(date +%s000)"
   set +e
-  printf '%s' "$task" | ( cd "$wt" && "${cmd[@]}" ) >"$out_file" 2>"$err_file"
-  rc=${PIPESTATUS[1]}
+  begin_signal_launch
+  abort_pending_signal_launch
+  ( cd "$wt" && exec python3 "$LEGION_ADAPTER_SUPERVISOR" --cwd "$wt" \
+    --max-runtime-seconds "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS" \
+    --status-file "$lease_status" \
+    --admitted-binary-sha256 "$(jq -r '.identity.binary_sha256' "$LEGION_ADAPTER_PREFLIGHT_PATH")" \
+    --admitted-binary-path "$oc_bin" \
+    --launch-gate-file "$launch_gate" --launch-gate-token "$LEGION_ADAPTER_LAUNCH_GATE_TOKEN" \
+    -- "${cmd[@]}" ) \
+    < <(printf '%s' "$task") >"$out_file" 2>"$err_file" &
+  CHILD_PID=$!
+  SIGNAL_CHILD_PID="$CHILD_PID"
+  legion_adapter_complete_supervisor_launch_gate "$CHILD_PID" "$lease_status" SIGNAL_LAUNCH_PENDING
+  if [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" == started ]]; then
+    legion_adapter_arm_signal_receipt "$art" opencode opencode 1 "$model" "" "" "" \
+      "$sandbox" "$started_at" "$start_ms" "$out_file"
+  elif [[ "$LEGION_ADAPTER_LAUNCH_GATE_OUTCOME" != launch_failed ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+    CHILD_PID=""; keep=1
+    legion_write_adapter_run_state containment_failed "$RUN_ID" "$repo" "$art" \
+      "$wt" "$branch" "$model" "$sandbox" "$base" "$archetype" "" || true
+    legion_disarm_adopted_run_guard
+    legion_adapter_terminalize_launch_gate_containment opencode "$model" "$RUN_ID" \
+      "$LEGION_ADAPTER_PREFLIGHT_PATH" "$lease_status" "$launch_gate" "$wt" \
+      "$LEGION_ADAPTER_MAX_RUNTIME_SECONDS"
+    exit 70
+  fi
+  finish_signal_launch
+  wait "$CHILD_PID"; rc=$?
+  SIGNAL_CHILD_RC="$rc"
+  CHILD_PID=""
   set -e
-  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms ))
+  end_ms="$(date +%s000)"; dur=$(( end_ms - start_ms )); ended_at="$(_now)"
 
-  local parsed usage cost result actual_model opencode_error has_error recognized_events diff_rc=0 status="ok"
+  local parsed usage cost result actual_model observed_model opencode_error has_error recognized_events diff_rc=0 status="ok"
+  local cost_status=unknown cost_source="" usage_status=unknown usage_source=""
   parsed="$(parse_opencode_output "$out_file")"
-  usage="$(jq -c '.usage // {}' <<<"$parsed" 2>/dev/null || printf '{}')"
+  usage="$(python3 "$_self_dir/lib/provider-usage.py" opencode "$out_file")"
   cost="$(jq -r '.cost // 0' <<<"$parsed" 2>/dev/null || printf '0')"
-  actual_model="$(jq -r '.model // ""' <<<"$parsed" 2>/dev/null || printf '')"
-  [[ -n "$actual_model" && "$actual_model" != "/" ]] || actual_model="$model"
+  observed_model="$(jq -r '.model // ""' <<<"$parsed" 2>/dev/null || printf '')"
+  [[ "$observed_model" != "/" ]] || observed_model=""
+  actual_model="$observed_model"; [[ -n "$actual_model" ]] || actual_model="$model"
   result="$(jq -r '.result // ""' <<<"$parsed" 2>/dev/null || printf '')"
   has_error="$(jq -r '.has_error // false' <<<"$parsed" 2>/dev/null || printf 'false')"
   opencode_error="$(jq -r '.error.message // ""' <<<"$parsed" 2>/dev/null || printf '')"
   recognized_events="$(jq -r '.recognized_event_count // 0' <<<"$parsed" 2>/dev/null || printf '0')"
 
-  # opencode omits `cost` for models it can't price (custom / some local providers).
-  # When the precomputed cost is 0 but tokens were used, fall back to Legion's own
-  # cost table so the span isn't metered at $0 (mirrors legion-cursor.sh).
-  if awk -v c="$cost" 'BEGIN{exit !((c+0)==0)}'; then
+  if jq -R -s -e '[splits("\n") | fromjson? | select(
+      (.type=="message.updated" and (.properties.info.role? == "assistant") and (.properties.info.tokens? | type)=="object")
+      or (.type=="step_finish" and (.part.tokens? | type)=="object"))] | length > 0' \
+      "$out_file" >/dev/null 2>&1 \
+      && jq -e 'all([.input_tokens,.output_tokens,.reasoning_output_tokens,
+                        .cache_read_input_tokens,.cache_creation_input_tokens][];
+                     type == "number" and . >= 0)' <<<"$usage" >/dev/null 2>&1; then
+    usage_status=known; usage_source=opencode-jsonl
+  fi
+
+  # A provider-reported zero is known and must not be replaced with a table
+  # estimate. If any final message/step omits cost, price the complete token
+  # usage only when Legion has an explicit model row; otherwise remain unknown.
+  if [[ "$(jq -r '.provider_cost_complete // false' <<<"$parsed")" == true ]]; then
+    cost_status=known; cost_source=opencode-jsonl
+  elif [[ "$usage_status" == known ]] && cost_model_has_pricing "$actual_model"; then
     local _in _out _cr _cw
     _in="$(jq -r '.input_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
     _out="$(jq -r '.output_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
     _cr="$(jq -r '.cache_read_input_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
     _cw="$(jq -r '.cache_creation_input_tokens // 0' <<<"$usage" 2>/dev/null || echo 0)"
-    if [[ "$_in" != "0" || "$_out" != "0" ]]; then
-      cost="$(cost_for_model "$actual_model" "$_in" "$_out" "$_cr" "$_cw" 2>/dev/null || echo 0)"
+    cost="$(cost_for_model "$actual_model" "$_in" "$_out" "$_cr" "$_cw" 2>/dev/null || printf '')"
+    if [[ -n "$cost" ]]; then
+      cost_status=known; cost_source=legion-cost-table
     fi
   fi
 
-  git -C "$wt" add -A 2>/dev/null || diff_rc=1
+  local containment_failed=0 launch_failed=0 launch_timed_out=0
+  legion_adapter_supervisor_cleanup_failed "$lease_status" && containment_failed=1
+  legion_adapter_supervisor_launch_failed "$lease_status" && launch_failed=1
+  legion_adapter_supervisor_timed_out_before_launch "$lease_status" "$rc" \
+    && launch_timed_out=1
+  if [[ "$containment_failed" -ne 1 ]]; then
+    git -C "$wt" add -A 2>/dev/null || diff_rc=1
   # Diff against the worktree's STARTING commit, not HEAD. `diff --cached` alone
   # compares the index to HEAD, so an executor that COMMITS its work yields an
   # empty patch -- HEAD already holds it, nothing is staged, and the run reports
   # ok having lost everything. legion-pi-hermes already pins a base sha for this
   # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
   # had actually been done.
-  git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
-  [[ "$rc" -ne 0 ]] && status="failed"
-  if [[ "$has_error" == "true" ]]; then
+    git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  else
+    : > "$art/diff.patch"
+  fi
+  if [[ "$containment_failed" -eq 1 ]]; then
+    status="containment_failed"
+    keep=1
+    result="$(legion_adapter_supervisor_reason "$lease_status") (evidence: $lease_status; worktree retained: $wt)"
+  elif [[ "$launch_timed_out" -eq 1 ]]; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+    usage=null
+    cost=null
+  elif [[ "$launch_failed" -eq 1 ]]; then
+    status="failed"
+    result="$(legion_adapter_supervisor_reason "$lease_status" "provider launch failed before process creation")"
+    usage=null
+    cost=null
+  elif legion_adapter_supervisor_timed_out "$lease_status"; then
+    status="timed_out"
+    keep=0
+    result="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$rc" -ne 0 ]]; then
+    status="failed"
+  fi
+  if [[ "$status" != "timed_out" && "$status" != "containment_failed" && "$has_error" == "true" ]]; then
     status="failed"
     [[ -n "$result" ]] && result="${result}"$'\n'
     result="${result}opencode error: ${opencode_error:-unknown error}"
@@ -302,12 +595,74 @@ cmd_run() {
     result="opencode completed without a result or a captured diff; refusing to report an empty success."
   fi
   printf '%s\n' "$result" > "$art/last-message.txt"
-
-  local artifacts
-  artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
-    --arg stdout "$out_file" --arg stderr "$err_file" \
-    '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr}')"
-  emit_span "opencode" "$actual_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
+  if jq -R -s -e '[splits("\n") | fromjson? | select(
+      (.type=="message.part.updated" and .properties.part.type? == "text" and ((.properties.part.text // "") | length > 0))
+      or (.type=="text" and .part.type? == "text" and ((.part.text // "") | length > 0)))] | length > 0' \
+      "$out_file" >/dev/null 2>&1; then
+    output_started=true
+  fi
+  local terminal_status=succeeded failure_class=""
+  if [[ "$status" != ok ]]; then
+    terminal_status=failed
+    if [[ "$status" == timed_out ]]; then
+      terminal_status=timed_out
+      failure_class=timed_out
+    elif [[ "$status" == containment_failed ]]; then
+      failure_class=internal
+    elif [[ "$sandbox" == read-only ]] \
+       && ! git -C "$wt" diff --cached --quiet -- . ':!.opencode/plans' 2>/dev/null; then
+      failure_class=policy_refused
+    elif [[ "$rc" -ne 0 || "$has_error" == true ]]; then
+      failure_class=provider
+    elif [[ "$recognized_events" == 0 ]]; then
+      failure_class=malformed_event
+    else
+      failure_class=internal
+    fi
+  fi
+  local terminal_usage=null terminal_cost=null
+  local terminal_usage_status=not_applicable terminal_cost_status=not_applicable
+  local publication_reason=""
+  if [[ "$launch_failed" -eq 1 ]]; then
+    LEGION_ADAPTER_ATTEMPT_PATH=""
+    LEGION_ADAPTER_FAILURE_PATH=""
+  else
+    legion_adapter_write_attempt "$art" opencode opencode 1 "$model" "$observed_model" "" "" \
+      "$sandbox" "$terminal_status" "$started_at" "$ended_at" "$dur" \
+      "$usage" "$usage_status" "$usage_source" "$cost" "$cost_status" "$cost_source" \
+      "$failure_class" false "$output_started" "$([[ "$rc" -eq 0 ]] || printf '%s' "$rc")" "$result"
+    terminal_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
+    terminal_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    terminal_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    local artifacts
+    artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
+      --arg stdout "$out_file" --arg stderr "$err_file" \
+      --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+      --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+      '{provider_attempt:true,worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr,
+        preflight_receipt:$preflight,attempt_receipt:$attempt,
+        failure_receipt:(if $failure=="" then null else $failure end)}')"
+    local span_usage span_cost span_usage_status span_cost_status
+    span_usage="$(python3 "$_self_dir/lib/exact-metering.py" get "$LEGION_ADAPTER_ATTEMPT_PATH" usage)"
+    span_cost="$(jq -c '.cost_usd' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_usage_status="$(jq -r '.usage_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    span_cost_status="$(jq -r '.cost_status' "$LEGION_ADAPTER_ATTEMPT_PATH")"
+    if ! legion_adapter_emit_normal_provider_span "$LEGION_ADAPTER_ATTEMPT_PATH" \
+        "opencode" "$actual_model" "$status" "$dur" "$span_cost" "$span_usage" "$span_task" "$artifacts" \
+        "$span_usage_status" "$span_cost_status"; then
+      status=containment_failed
+      rc=70
+      keep=1
+      publication_reason="provider attempt receipt is durable but its span publication is uncertain; worktree and evidence retained"
+      result="$publication_reason"
+    fi
+  fi
+  legion_adapter_disarm_signal_receipt
+  SIGNAL_CHILD_PID=""
+  SIGNAL_CHILD_RC=0
+  SIGNAL_LEASE_STATUS=""
+  SIGNAL_WORKTREE=""
 
   if [[ "$do_apply" -eq 1 && "$status" == "ok" && -s "$art/diff.patch" ]]; then
     if git -C "$repo" apply --check "$art/diff.patch" 2>/dev/null; then
@@ -330,14 +685,38 @@ cmd_run() {
     "$sandbox" "$base" "$archetype"
   [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
 
+  local receipt_reason=""
+  if [[ -n "$publication_reason" ]]; then
+    receipt_reason="$publication_reason"
+  elif [[ "$status" == timed_out ]]; then
+    receipt_reason="$(legion_adapter_lease_reason "$lease_status")"
+  elif [[ "$status" == containment_failed || "$launch_failed" -eq 1 ]]; then
+    receipt_reason="$(legion_adapter_supervisor_reason "$lease_status")"
+  fi
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg result "$result" --arg opencode_error "$opencode_error" \
-    --argjson usage "$usage" --argjson cost "${cost:-0}" --argjson rc "$rc" '
+    --arg preflight "$LEGION_ADAPTER_PREFLIGHT_PATH" --arg attempt "$LEGION_ADAPTER_ATTEMPT_PATH" \
+    --arg failure "$LEGION_ADAPTER_FAILURE_PATH" \
+    --arg reason "$receipt_reason" \
+    --arg lease "$lease_status" \
+    --arg usage_status "$terminal_usage_status" --arg cost_status "$terminal_cost_status" \
+    --argjson usage "$terminal_usage" --argjson cost "$terminal_cost" --argjson rc "$rc" '
     {run_id:$run, status:$status, executor:"opencode", model:$model, opencode_exit:$rc,
      result:$result, opencode_error:(if $opencode_error == "" then null else $opencode_error end),
      worktree:$wt, diff_path:$diff, last_message_path:$last,
-     usage:$usage, cost_usd:$cost}'
+     usage:$usage,usage_status:$usage_status,
+     cost_usd:$cost,cost_status:$cost_status,
+     preflight_receipt:$preflight,
+     attempt_receipt:(if $attempt=="" then null else $attempt end),
+     failure_receipt:(if $failure=="" then null else $failure end),lease_receipt:$lease}
+      + (if $reason=="" then {} else {reason:$reason} end)' | {
+        if [[ -n "$LEGION_ADAPTER_ATTEMPT_PATH" ]]; then
+          python3 "$_self_dir/lib/exact-metering.py" patch-attempt "$LEGION_ADAPTER_ATTEMPT_PATH"
+        else
+          cat
+        fi
+      }
   [[ "$status" == "ok" ]] || exit 1
 }
 
@@ -346,7 +725,9 @@ usage() {
 legion-opencode — delegate a scoped task to opencode headless.
 
 Usage:
-  legion-opencode run --task "TASK" | --task-file F [--model provider/model] [--archetype NAME] [--repo DIR] [--run-id ID]
+  legion-opencode run --task "TASK" | --task-file F [--model provider/model] [--archetype NAME] [--repo DIR] [--run-id ID] [--max-runtime-seconds N]
+
+Task artifact limit: 1 MiB of UTF-8 bytes; oversized tasks fail before provider launch.
                       [--base REF] [--sandbox read-only|workspace-write] [--apply] [--keep] [--quiet]
   legion-opencode run [--repo DIR] < task.txt
 

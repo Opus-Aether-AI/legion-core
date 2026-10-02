@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/legion-observability/schema/legion.failure.v1.schema.json",
+  "title": "legion.failure.v1",
+  "description": "A typed terminal failure associated with one actual executor attempt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "failure_id", "run_id", "attempt_id", "ts", "class", "provider_code", "retryable", "output_started", "message"],
+  "properties": {
+    "schema": {"const": "legion.failure.v1"},
+    "failure_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "attempt_id": {"type": "string", "minLength": 1},
+    "ts": {"type": "string", "minLength": 1},
+    "class": {"enum": ["auth", "quota", "capacity", "transport", "malformed_event", "cancelled", "timed_out", "incompatible", "unavailable", "policy_refused", "provider", "internal", "unknown"]},
+    "provider_code": {"type": ["string", "null"], "minLength": 1},
+    "retryable": {"type": "boolean"},
+    "output_started": {"type": "boolean"},
+    "message": {"type": ["string", "null"], "minLength": 1}
+  }
+}

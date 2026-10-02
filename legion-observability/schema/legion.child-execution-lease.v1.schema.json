@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Opus-Aether-AI/legion-core/legion-observability/schema/legion.child-execution-lease.v1.schema.json",
+  "title": "legion.child-execution-lease.v1",
+  "description": "The authoritative terminal outcome of one descendant-aware child execution lease.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "reason", "max_runtime_seconds"],
+  "properties": {
+    "schema": {"const": "legion.child-execution-lease.v1"},
+    "status": {"enum": ["completed", "cancelled", "timed_out", "cleanup_failed", "launch_failed"]},
+    "reason": {"type": "string", "minLength": 1},
+    "max_runtime_seconds": {"type": "integer", "minimum": 1},
+    "child_started": {
+      "description": "False only when a containment failure happened before Popen; omitted for legacy and ordinary outcomes.",
+      "const": false
+    },
+    "child_exit_code": {
+      "description": "The direct child's normalized exit code when status is completed. It is absent when no child launched.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "launch_failed"}},
+        "required": ["status"]
+      },
+      "then": {"not": {"required": ["child_exit_code"]}}
+    },
+    {
+      "if": {"required": ["child_started"]},
+      "then": {
+        "properties": {"status": {"const": "cleanup_failed"}},
+        "required": ["status"]
+      }
+    }
+  ]
+}

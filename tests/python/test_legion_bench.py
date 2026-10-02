@@ -895,6 +895,349 @@ def test_span_totals_roll_up_by_model(tmp_path):
     assert totals["models"]["test-model-beta"]["cost_usd"] == 0.5
 
 
+def test_span_totals_exclude_rollup_only_spans(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    provider = {
+        "schema": "legion.span.v1", "model": "test-model-beta",
+        "cost_usd": 0.5, "duration_ms": 30, "tokens": {"total_tokens": 90},
+        "artifacts": {"provider_attempt": True},
+    }
+    rollup = {
+        **provider, "duration_ms": 300, "artifacts": {"rollup_only": True},
+    }
+    (spans / "2026-06-27.jsonl").write_text(
+        "\n".join(json.dumps(span) for span in (provider, rollup)) + "\n",
+        encoding="utf-8",
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+
+    assert totals["span_count"] == 1
+    assert totals["cost_usd"] == 0.5
+    assert totals["span_duration_ms"] == 30
+    assert totals["tokens"] == 90
+
+
+def test_span_totals_preserve_partial_metering_lower_bounds(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    payloads = [
+        {
+            "model": "test-model", "cost_usd": 0, "cost_status": "known",
+            "tokens": {"input_tokens": 3}, "usage_status": "known",
+        },
+        {
+            "model": "test-model", "cost_usd": None, "cost_status": "partial",
+            "known_cost_usd": 0.25, "known_cost_attempts": 2,
+            "tokens": None, "usage_status": "partial",
+            "known_usage": {"input_tokens": 4, "output_tokens": 1},
+            "known_usage_attempts": 2,
+        },
+        {
+            "model": "test-model", "cost_usd": None, "cost_status": "unknown",
+            "tokens": None, "usage_status": "unknown",
+        },
+        {
+            "model": "no-spend", "cost_usd": None, "cost_status": "not_applicable",
+            "tokens": None, "usage_status": "not_applicable",
+        },
+    ]
+    (spans / "2026-09-11.jsonl").write_text(
+        "\n".join(json.dumps(payload) for payload in payloads) + "\n", encoding="utf-8"
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+
+    assert totals["cost_status"] == "partial"
+    assert totals["cost_usd"] is None
+    assert totals["known_cost_usd"] == 0.25
+    assert totals["known_cost_attempts"] == 3
+    assert totals["usage_status"] == "partial"
+    assert totals["tokens"] is None
+    assert totals["known_usage"] == {"total_tokens": 8}
+    assert totals["known_usage_attempts"] == 3
+    assert totals["models"]["no-spend"]["cost_status"] == "not_applicable"
+
+
+def test_span_totals_accept_legacy_numeric_metering_and_measured_zero(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    (spans / "legacy.jsonl").write_text(
+        json.dumps({"model": "legacy", "cost_usd": 0, "tokens": 0}) + "\n",
+        encoding="utf-8",
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+
+    assert totals["cost_status"] == "known"
+    assert totals["cost_usd"] == 0
+    assert totals["usage_status"] == "known"
+    assert totals["tokens"] == 0
+
+
+def test_span_totals_known_plus_not_applicable_is_partial(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    payloads = [
+        {"model": "mixed", "cost_usd": 0.5, "cost_status": "known",
+         "tokens": {"input_tokens": 4}, "usage_status": "known"},
+        {"model": "mixed", "cost_usd": None, "cost_status": "not_applicable",
+         "tokens": None, "usage_status": "not_applicable"},
+    ]
+    (spans / "mixed.jsonl").write_text(
+        "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+        encoding="utf-8",
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+    assert totals["cost_usd"] is None
+    assert totals["cost_status"] == "partial"
+    assert totals["known_cost_usd"] == 0.5
+    assert totals["known_cost_attempts"] == 1
+    assert totals["tokens"] is None
+    assert totals["usage_status"] == "partial"
+    assert totals["known_usage"] == {"total_tokens": 4}
+    assert totals["known_usage_attempts"] == 1
+
+
+def test_span_totals_do_not_classify_fractional_tokens_as_known(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    (spans / "invalid.jsonl").write_text(
+        json.dumps({
+            "model": "invalid", "cost_usd": 0, "cost_status": "known",
+            "tokens": 1.5, "usage_status": "known",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+
+    assert totals["usage_status"] == "unknown"
+    assert totals["tokens"] is None
+
+
+def test_span_totals_require_integer_values_inside_usage_maps(tmp_path):
+    malformed_values = (1.0, -1, 1.5, True, "1", None)
+    for index, value in enumerate(malformed_values):
+        spans = tmp_path / f"logs-{index}" / "spans"
+        spans.mkdir(parents=True)
+        payloads = [
+            {
+                "model": "invalid-known",
+                "cost_usd": 0,
+                "cost_status": "known",
+                "tokens": {"input_tokens": value},
+                "usage_status": "known",
+            },
+            {
+                "model": "invalid-partial",
+                "cost_usd": 0,
+                "cost_status": "known",
+                "tokens": None,
+                "usage_status": "partial",
+                "known_usage": {"input_tokens": value},
+                "known_usage_attempts": 1,
+            },
+        ]
+        (spans / "invalid.jsonl").write_text(
+            "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+            encoding="utf-8",
+        )
+
+        totals = bench._span_totals(str(spans.parent))
+        assert totals["usage_status"] == "unknown"
+        assert totals["tokens"] is None
+        assert totals["known_usage"] is None
+        assert totals["known_usage_attempts"] == 0
+
+
+def test_span_totals_preserve_integral_float_legacy_scalar_compatibility(tmp_path):
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    (spans / "legacy.jsonl").write_text(
+        json.dumps(
+            {
+                "model": "legacy",
+                "cost_usd": 0,
+                "cost_status": "known",
+                "tokens": 7.0,
+                "usage_status": "known",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    totals = bench._span_totals(str(tmp_path / "logs"))
+    assert totals["usage_status"] == "known"
+    assert totals["tokens"] == 7
+
+    huge_map_total = 10**1000
+    assert bench._usage_value({"input_tokens": huge_map_total}) == {
+        "total_tokens": huge_map_total
+    }
+    assert bench._usage_value(huge_map_total) == {"total_tokens": huge_map_total}
+
+    huge_spans = tmp_path / "huge-scalar" / "spans"
+    huge_spans.mkdir(parents=True)
+    (huge_spans / "spans.jsonl").write_text(
+        json.dumps({"model": "legacy-huge", "cost_usd": 0,
+                    "cost_status": "known", "tokens": huge_map_total,
+                    "usage_status": "known"}) + "\n",
+        encoding="utf-8",
+    )
+    huge_totals = bench._span_totals(str(huge_spans.parent))
+    assert huge_totals["usage_status"] == "known"
+    assert huge_totals["tokens"] == huge_map_total
+    assert huge_totals["models"]["legacy-huge"]["tokens"] == huge_map_total
+    assert bench._usage_text(huge_totals) == str(huge_map_total)
+    comparison = bench.compare_summaries(
+        {"run_id": "base", "suite": "huge", "metrics": huge_totals},
+        {"run_id": "candidate", "suite": "huge", "metrics": {
+            **huge_totals, "tokens": huge_map_total + 7}},
+    )
+    assert comparison["metrics"]["tokens"]["baseline_status"] == "known"
+    assert comparison["metrics"]["tokens"]["candidate_status"] == "known"
+    assert comparison["metrics"]["tokens"]["delta"] == 7
+
+
+def test_bench_downgrades_huge_cost_and_duration_but_keeps_map_tokens_exact(tmp_path):
+    huge = 10**1000
+    spans = tmp_path / "logs" / "spans"
+    spans.mkdir(parents=True)
+    (spans / "huge.jsonl").write_text(
+        json.dumps(
+            {
+                "model": "huge",
+                "cost_usd": huge,
+                "cost_status": "known",
+                "duration_ms": huge,
+                "tokens": {"total_tokens": huge},
+                "usage_status": "known",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    totals = bench._span_totals(str(tmp_path / "logs"))
+    assert totals["cost_status"] == "unknown"
+    assert totals["cost_usd"] is None
+    assert totals["span_duration_ms"] == 0
+    assert totals["usage_status"] == "known"
+    assert totals["tokens"] == huge
+
+    overflow_logs = tmp_path / "overflow" / "spans"
+    overflow_logs.mkdir(parents=True)
+    (overflow_logs / "overflow.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {"model": "overflow", "cost_usd": 1e308,
+                 "cost_status": "known", "tokens": 0, "usage_status": "known"}
+            )
+            for _ in range(2)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    overflow = bench._span_totals(str(overflow_logs.parent))
+    assert overflow["cost_status"] == "unknown"
+    assert overflow["known_cost_usd"] is None
+
+    comparison = {
+        "metrics": {
+            "cost_usd": {"delta": huge},
+            "duration_ms": {"delta": 1},
+        },
+        "quality_regressions": [],
+        "quality_improvements": [],
+    }
+    decision = bench.gate_decision(
+        comparison, {"max_cost_delta": huge, "max_duration_ms_delta": huge}
+    )
+    assert decision["status"] == "fail"
+    assert "cost_usd" in decision["failures"]
+    assert "duration_ms" in decision["failures"]
+
+
+def test_compare_and_cost_gate_fail_closed_for_partial_metering():
+    baseline = {
+        "run_id": "base", "suite": "core",
+        "metrics": {
+            "score": 1, "cost_usd": 0, "cost_status": "known",
+            "known_cost_usd": 0, "known_cost_attempts": 1,
+        },
+    }
+    candidate = {
+        "run_id": "candidate", "suite": "core",
+        "metrics": {
+            "score": 1, "cost_usd": None, "cost_status": "partial",
+            "known_cost_usd": 0.5, "known_cost_attempts": 1,
+        },
+    }
+
+    comparison = bench.compare_summaries(baseline, candidate)
+    cost = comparison["metrics"]["cost_usd"]
+    decision = bench.gate_decision(comparison, {"max_cost_delta": 1})
+
+    assert cost["delta"] is None
+    assert cost["baseline_status"] == "known"
+    assert cost["candidate_status"] == "partial"
+    assert cost["candidate_known_cost_usd"] == 0.5
+    assert decision["status"] == "fail"
+    assert "cost_usd" in decision["failures"]
+
+
+def test_compare_cost_gate_accepts_known_measured_zero():
+    baseline = {"metrics": {"score": 1, "cost_usd": 0, "cost_status": "known"}}
+    candidate = {"metrics": {"score": 1, "cost_usd": 0, "cost_status": "known"}}
+
+    comparison = bench.compare_summaries(baseline, candidate)
+
+    assert comparison["metrics"]["cost_usd"]["delta"] == 0
+    assert bench.gate_decision(comparison, {"max_cost_delta": 0})["status"] == "pass"
+
+
+def test_corpus_mode_summary_preserves_partial_metering():
+    summary = bench._summarize_corpus_mode([
+        {
+            "status": "pass", "required": True, "dimension": "quality",
+            "metrics": {
+                "duration_ms": 10, "span_count": 1,
+                "cost_usd": 0.2, "cost_status": "known",
+                "tokens": {"total_tokens": 5}, "usage_status": "known",
+                "models": {},
+            },
+        },
+        {
+            "status": "pass", "required": True, "dimension": "quality",
+            "metrics": {
+                "duration_ms": 10, "span_count": 1,
+                "cost_usd": None, "cost_status": "unknown",
+                "tokens": None, "usage_status": "partial",
+                "known_usage": {"total_tokens": 7}, "known_usage_attempts": 1,
+                "models": {},
+            },
+        },
+    ])["metrics"]
+
+    assert summary["cost_status"] == "partial"
+    assert summary["cost_usd"] is None
+    assert summary["known_cost_usd"] == 0.2
+    assert summary["usage_status"] == "partial"
+    assert summary["tokens"] is None
+    assert summary["known_usage"] == {"total_tokens": 12}
+
+
+def test_metering_renderers_do_not_present_partial_or_unknown_as_zero():
+    assert bench._cost_text({
+        "cost_usd": None, "cost_status": "partial",
+        "known_cost_usd": 0.25, "known_cost_attempts": 1,
+    }) == ">=$0.250000 (partial)"
+    assert bench._usage_text({"tokens": None, "usage_status": "unknown"}) == "unknown"
+
+
 def test_learning_lift_payload_scores_before_after_memory(tmp_path):
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
     payload = bench.learning_lift_payload(

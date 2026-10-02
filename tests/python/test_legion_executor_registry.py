@@ -5,6 +5,8 @@ from itertools import permutations
 from pathlib import Path
 import subprocess
 
+import pytest
+
 
 HERE = os.path.dirname(__file__)
 _PATH = os.path.join(
@@ -59,27 +61,16 @@ def test_loads_router_supported_top_level_registry(tmp_path):
     assert registry.load_coding_executor_families(path) == {"aider"}
 
 
-def test_fallback_parser_accepts_top_level_registry(tmp_path, monkeypatch):
+def test_missing_toml_parser_fails_closed_instead_of_partially_parsing(tmp_path, monkeypatch):
     path = tmp_path / "executors.toml"
-    path.write_text('[aider]\nkind = "primary coding"\n', encoding="utf-8")
+    path.write_text('[executors.aider]\nkind = "primary coding"\n', encoding="utf-8")
     monkeypatch.setattr(registry, "tomllib", None)
 
-    assert registry.load_coding_executor_families(path) == {"aider"}
+    with pytest.raises(registry.ExecutorRegistryError, match="TOML parser unavailable"):
+        registry.load_executor_registry(path)
 
 
-def test_fallback_parser_preserves_nested_executor_kind(tmp_path, monkeypatch):
-    path = tmp_path / "executors.toml"
-    path.write_text(
-        '[executors.codex]\nkind = "coding"\n\n'
-        '[executors.codex.capabilities]\nkind = "review"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(registry, "tomllib", None)
-
-    assert registry.load_coding_executor_families(path) == {"codex"}
-
-
-def test_fallback_parser_preserves_complete_routing_contract(tmp_path, monkeypatch):
+def test_toml_parser_preserves_complete_routing_contract(tmp_path):
     path = tmp_path / "executors.toml"
     path.write_text(
         '[executors.pi]\n'
@@ -89,7 +80,6 @@ def test_fallback_parser_preserves_complete_routing_contract(tmp_path, monkeypat
         'model_ref = "pi_default"\n',
         encoding="utf-8",
     )
-    monkeypatch.setattr(registry, "tomllib", None)
 
     assert registry.load_executor_registry(path)["pi"] == {
         "kind": "primary coding",
@@ -99,41 +89,27 @@ def test_fallback_parser_preserves_complete_routing_contract(tmp_path, monkeypat
     }
 
 
-def test_fallback_parser_does_not_promote_nested_capability_kind(tmp_path, monkeypatch):
-    path = tmp_path / "executors.toml"
-    path.write_text(
-        '[executors.aider]\nkind = "primary"\n\n'
-        '[executors.aider.capabilities]\nkind = "coding"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(registry, "tomllib", None)
-
-    assert registry.load_coding_executor_families(path) == set()
-
-
-def test_fallback_parser_ignores_root_metadata_in_nested_registry(tmp_path, monkeypatch):
+def test_toml_parser_rejects_root_metadata_in_nested_registry(tmp_path):
     path = tmp_path / "executors.toml"
     path.write_text(
         '[executors.codex]\nkind = "coding"\n\n'
         '[metadata]\nkind = "coding"\n',
         encoding="utf-8",
     )
-    monkeypatch.setattr(registry, "tomllib", None)
 
-    assert registry.load_coding_executor_families(path) == {"codex"}
+    with pytest.raises(
+        registry.ExecutorRegistryError, match="unknown top-level field.*metadata"
+    ):
+        registry.load_executor_registry(path)
 
 
-def test_valid_primary_only_registry_stays_empty(tmp_path, monkeypatch):
+def test_valid_primary_only_registry_stays_empty(tmp_path):
     path = tmp_path / "executors.toml"
     path.write_text('[hermes]\nkind = "primary"\n', encoding="utf-8")
 
     assert registry.load_coding_executor_families(path) == set()
 
-    monkeypatch.setattr(registry, "tomllib", None)
-    assert registry.load_coding_executor_families(path) == set()
-
-
-def test_malformed_executor_table_uses_builtin_fallback(tmp_path, monkeypatch):
+def test_malformed_executor_table_uses_builtin_fallback(tmp_path):
     path = tmp_path / "executors.toml"
     path.write_text("executors = []\n", encoding="utf-8")
 
@@ -144,13 +120,6 @@ def test_malformed_executor_table_uses_builtin_fallback(tmp_path, monkeypatch):
         "opencode",
     }
 
-    monkeypatch.setattr(registry, "tomllib", None)
-    assert registry.load_coding_executor_families(path) == {
-        "claude",
-        "codex",
-        "cursor",
-        "opencode",
-    }
 
 
 def test_checked_in_symmetric_registry_declares_roles_capabilities_and_adapters():
@@ -372,18 +341,15 @@ def test_symmetric_adapter_requires_a_concrete_provider_binary_before_any_worktr
     )
 
     assert result.returncode != 0
-    assert "pi CLI not found" in result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "refused"
+    assert receipt["executor"] == "pi"
+    assert receipt["reason"] == "executor binary not found: pi"
+    worktrees = repo / ".legion" / "worktrees"
+    assert not worktrees.exists() or not any(worktrees.iterdir())
 
 
-def test_fallback_loader_preserves_bare_booleans(tmp_path):
-    """Capability flags are bare booleans; the 3.9/3.10 path dropped them.
-
-    Preserving only quoted strings meant a capability declared in
-    executors.toml simply vanished on older Pythons, and the dispatcher
-    silently fell back to its pre-capability behaviour.
-    """
-    import legion_executor_registry as registry
-
+def test_toml_parser_preserves_bare_booleans(tmp_path):
     config = tmp_path / "executors.toml"
     config.write_text(
         '[executors.demo]\n'
@@ -395,9 +361,7 @@ def test_fallback_loader_preserves_bare_booleans(tmp_path):
         encoding="utf-8",
     )
 
-    table = registry._fallback_table(str(config))
-    demo = table["executors"]["demo"]
-
+    demo = registry._load_toml(str(config))["executors"]["demo"]
     assert demo["task_file"] is True
     assert demo["disabled"] is False
     assert demo["review"] == "prompt"

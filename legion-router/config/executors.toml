@@ -22,7 +22,8 @@
 #                        (--archetype/--model/--sandbox/--base/--apply/--keep)
 #               prompt — prompt executor, returns text; args: --task/--model/--repo
 #               ""     — primary-only, no coding adapter
-#   model_ref default model role (see models.toml); empty for primary-only.
+#   model_ref default model role (see models.toml); empty for primary-only or
+#             adapters whose provider profile selects the model opaquely.
 #   acp       true when this executor can be driven over the Agent Client
 #             Protocol instead of its bespoke adapter. Every executor here is in
 #             the ACP registry, so one client reaches all of them -- and the
@@ -31,10 +32,10 @@
 #             an executor has been exercised over ACP, because a protocol both
 #             sides implement is not the same as a protocol both sides implement
 #             the same way.
-#   task_file true when the adapter accepts `--task-file PATH`. The task can
-#             exceed ARG_MAX once a diff or long spec is in it, so the
-#             dispatcher hands it over out of band. Declared rather than
-#             probed: probing means executing the adapter an extra time.
+#   task_file true only when `--task-file PATH` stays out of argv end to end,
+#             including the provider launch. An adapter that reads a file and
+#             then puts the bytes back on provider argv must declare false.
+#             Declared rather than probed: probing could launch the provider.
 #   review    how this executor can produce a code review:
 #               native — has a first-class review subcommand with schema output
 #                        (codex: `codex exec review --output-schema`)
@@ -42,10 +43,39 @@
 #                        into the verdict schema by normalize-review-verdict.py
 #               none   — cannot review; skipped by the review fallback order
 #   review_model_ref  model role used when THIS executor reviews.
+schema = "legion.executor-registry.v1"
 
 [executors.claude]
 acp = false
 task_file = true
+binary = "claude"
+version_args = ["--version"]
+version_policy = "open"
+supported_version_patterns = []
+known_bad_version_patterns = []
+config_fingerprint_env = ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]
+config_fingerprint_files = []
+required_config_env = []
+supported_config_env = []
+known_bad_config_env = []
+supported_sandboxes = ["read-only", "workspace-write"]
+supported_read_modes = ["provider-tools"]
+supported_task_transports = ["stdin"]
+# Claude accepts configured aliases as well as public ids; the adapter cannot
+# prove that an arbitrary configured alias is supported without a paid call.
+# With no public pattern, only this executor's trusted models.toml roles and
+# concrete role values are supported. Other aliases remain visibly untested and
+# fail admission before spend. Premium Fable ids remain policy-gated below.
+supported_efforts = ["low", "medium", "high", "max"]
+billing_class = "metered"
+requires_explicit_consent = false
+explicit_consent_model_patterns = ["^claude-fable-"]
+usage_reliability = "provider_reported"
+usage_source = "claude-result"
+cost_reliability = "provider_reported"
+cost_source = "claude-result"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 # effort        true when the adapter accepts `--effort LEVEL`.
 # model_chain   true when it accepts `--fallback-models A,B` — the archetype's
 #               fallback_refs as SAME-VENDOR alternates, tried before the
@@ -72,6 +102,36 @@ model_ref = "claude_default"
 [executors.codex]
 acp = false
 task_file = true
+binary = "codex"
+version_args = ["--version"]
+version_policy = "open"
+supported_version_patterns = []
+known_bad_version_patterns = []
+config_fingerprint_env = ["OPENAI_BASE_URL", "CODEX_HOME"]
+config_fingerprint_files = []
+required_config_env = []
+supported_config_env = []
+known_bad_config_env = []
+supported_sandboxes = ["read-only", "workspace-write"]
+# Sandcastle modes wrap Codex rather than becoming Codex CLI sandbox values.
+# Admission therefore normalizes them to the provider's write sandbox and
+# still checks that normalized value against supported_sandboxes.
+supported_sandbox_wrappers = ["docker", "podman", "vercel"]
+sandbox_wrapper_provider_sandbox = "workspace-write"
+supported_read_modes = ["provider-tools"]
+supported_task_transports = ["stdin"]
+# Codex can resolve user-configured providers/aliases. There is no no-spend
+# model reachability probe, so model compatibility remains untested.
+supported_efforts = ["low", "medium", "high", "xhigh", "max"]
+billing_class = "metered"
+requires_explicit_consent = false
+explicit_consent_model_patterns = []
+usage_reliability = "provider_reported"
+usage_source = "codex-jsonl"
+cost_reliability = "computed"
+cost_source = "legion-cost-table"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 review = "native"
 review_model_ref = "codex_review"
 kind = "primary coding"
@@ -81,7 +141,30 @@ model_ref = "codex_workhorse"
 
 [executors.cursor]
 acp = false
-task_file = true
+task_file = false
+binary = "agent"
+version_args = ["--version"]
+version_policy = "open"
+supported_version_patterns = []
+known_bad_version_patterns = []
+config_fingerprint_env = ["CURSOR_API_KEY"]
+config_fingerprint_files = []
+required_config_env = ["CURSOR_API_KEY"]
+supported_config_env = []
+known_bad_config_env = []
+supported_sandboxes = ["read-only", "workspace-write"]
+supported_read_modes = ["provider-tools"]
+supported_task_transports = ["argv"]
+supported_efforts = []
+billing_class = "metered"
+requires_explicit_consent = false
+explicit_consent_model_patterns = []
+usage_reliability = "provider_reported"
+usage_source = "cursor-json"
+cost_reliability = "computed"
+cost_source = "legion-cost-table"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 review = "prompt"
 review_model_ref = "cursor_default"
 kind = "primary coding"
@@ -92,6 +175,29 @@ model_ref = "cursor_default"
 [executors.opencode]
 acp = false
 task_file = true
+binary = "opencode"
+version_args = ["--version"]
+version_policy = "open"
+supported_version_patterns = []
+known_bad_version_patterns = []
+config_fingerprint_env = ["OPENCODE_CONFIG", "OPENCODE_VARIANT"]
+config_fingerprint_files = []
+required_config_env = []
+supported_config_env = []
+known_bad_config_env = []
+supported_sandboxes = ["read-only", "workspace-write"]
+supported_read_modes = ["provider-tools"]
+supported_task_transports = ["stdin"]
+supported_efforts = []
+billing_class = "metered"
+requires_explicit_consent = false
+explicit_consent_model_patterns = []
+usage_reliability = "provider_reported"
+usage_source = "opencode-jsonl"
+cost_reliability = "provider_reported"
+cost_source = "opencode-jsonl"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 review = "prompt"
 review_model_ref = "opencode_review"
 kind = "primary coding"
@@ -103,7 +209,34 @@ model_ref = "opencode_default"
 # worktrees and terminal artifacts; unsupported sandbox modes fail closed.
 [executors.deepseek]
 acp = false
-task_file = true
+task_file = false
+binary = "dsh"
+version_args = ["--version"]
+version_policy = "open"
+supported_version_patterns = []
+known_bad_version_patterns = []
+config_fingerprint_env = ["LEGION_DSH_PROFILE", "DSH_PROFILE"]
+config_fingerprint_files = []
+required_config_env = []
+supported_config_env = []
+known_bad_config_env = []
+supported_sandboxes = ["workspace-write"]
+supported_read_modes = ["provider-tools"]
+supported_task_transports = ["argv"]
+# The profile chooses the model and dsh-headless exposes no observable model
+# selection contract.  An adapter-level --model would therefore be cosmetic;
+# reject every requested override until the effective selection is observable.
+supported_model_patterns = []
+supported_efforts = []
+billing_class = "metered"
+requires_explicit_consent = false
+explicit_consent_model_patterns = []
+usage_reliability = "unavailable"
+usage_source = "none"
+cost_reliability = "unavailable"
+cost_source = "none"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 # review = "none": dsh publishes no structured verdict path, so it must not sit
 # in the review fallback order where a reviewer that cannot produce a schema-
 # valid verdict looks like a reviewer that rejected the change.
@@ -112,11 +245,34 @@ review_model_ref = ""
 kind = "primary coding"
 adapter = "legion-deepseek"
 contract = "diff"
-model_ref = "deepseek_default"
+model_ref = ""
 
 [executors.hermes]
 acp = false
-task_file = true
+task_file = false
+binary = "hermes"
+version_args = ["--version"]
+version_policy = "open"
+supported_version_patterns = []
+known_bad_version_patterns = []
+config_fingerprint_env = ["HERMES_HOME"]
+config_fingerprint_files = []
+required_config_env = []
+supported_config_env = []
+known_bad_config_env = []
+supported_sandboxes = ["workspace-write"]
+supported_read_modes = ["provider-tools"]
+supported_task_transports = ["argv"]
+supported_efforts = []
+billing_class = "metered"
+requires_explicit_consent = false
+explicit_consent_model_patterns = []
+usage_reliability = "provider_reported"
+usage_source = "hermes-usage-file"
+cost_reliability = "provider_reported"
+cost_source = "hermes-usage-file"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 review = "none"
 kind = "primary coding"
 adapter = "legion-hermes"
@@ -125,7 +281,30 @@ model_ref = "hermes_default"
 
 [executors.pi]
 acp = false
-task_file = true
+task_file = false
+binary = "pi"
+version_args = ["--version"]
+version_policy = "open"
+supported_version_patterns = []
+known_bad_version_patterns = []
+config_fingerprint_env = ["PI_CODING_AGENT_DIR"]
+config_fingerprint_files = []
+required_config_env = []
+supported_config_env = []
+known_bad_config_env = []
+supported_sandboxes = ["read-only", "workspace-write"]
+supported_read_modes = ["provider-tools"]
+supported_task_transports = ["argv"]
+supported_efforts = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+billing_class = "metered"
+requires_explicit_consent = false
+explicit_consent_model_patterns = []
+usage_reliability = "provider_reported"
+usage_source = "pi-jsonl"
+cost_reliability = "provider_reported"
+cost_source = "pi-jsonl"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 review = "none"
 kind = "primary coding"
 adapter = "legion-pi"

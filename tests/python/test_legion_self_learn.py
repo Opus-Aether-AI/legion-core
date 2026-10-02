@@ -317,8 +317,16 @@ def test_build_report_scores_only_requested_day(tmp_path, monkeypatch):
         "target_type": "command",
         "target_name": "feature",
     }
+    rollup = {
+        **new,
+        "run_id": "new-rollup",
+        "status": "failed",
+        "artifacts": {"rollup_only": True},
+    }
     (spans / "2026-06-18.jsonl").write_text(json.dumps(old) + "\n", encoding="utf-8")
-    (spans / "2026-06-19.jsonl").write_text(json.dumps(new) + "\n", encoding="utf-8")
+    (spans / "2026-06-19.jsonl").write_text(
+        json.dumps(new) + "\n" + json.dumps(rollup) + "\n", encoding="utf-8"
+    )
     monkeypatch.setattr(self_learn, "build_catalog", lambda _repo: _catalog(tmp_path))
     monkeypatch.setattr(self_learn, "trigger_eval_outcomes", lambda _repo, _catalog: [])
     monkeypatch.setattr(self_learn, "routing_outcomes", lambda _repo, _logs, _spans=None: [])
@@ -733,11 +741,18 @@ def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
     spans_dir.mkdir(parents=True)
     huge = "x" * (self_learn.MAX_SPAN_TEXT_LENGTH + 100)
     valid = {
-        **_span("valid", "2026-08-16T01:00:00Z", status="failed"),
+        **_span("valid", "2026-08-16T01:00:00Z", status="timed_out"),
         "model": huge,
         "archetype": huge,
         "task": huge,
         "artifacts": {"verdict": huge, "nested": {"detail": huge}},
+    }
+    unknown_metering = {
+        **_span("unknown-metering", "2026-08-16T01:00:01Z", status="ok"),
+        "cost_usd": None,
+        "cost_status": "unknown",
+        "tokens": None,
+        "usage_status": "unknown",
     }
     malformed = [
         {key: value for key, value in valid.items() if key != "model"},
@@ -745,6 +760,10 @@ def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
         {**valid, "status": "invented"},
         {**valid, "duration_ms": -1},
         {**valid, "artifacts": "not-an-object"},
+        {**valid, "cost_usd": 0, "cost_status": "unknown"},
+        {**valid, "cost_usd": None, "cost_status": "known"},
+        {**valid, "tokens": {}, "usage_status": "unknown"},
+        {**valid, "tokens": None, "usage_status": "partial", "known_usage": {}},
     ]
     deep = (
         '{"schema":"legion.span.v1","ts":"2026-08-16T00:00:00Z",'
@@ -757,13 +776,13 @@ def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
     )
     (spans_dir / "2026-08-16.jsonl").write_text(
         deep
-        + "".join(json.dumps(record) + "\n" for record in [*malformed, valid]),
+        + "".join(json.dumps(record) + "\n" for record in [*malformed, valid, unknown_metering]),
         encoding="utf-8",
     )
 
     spans = self_learn.load_spans(str(logs))
 
-    assert [span["run_id"] for span in spans] == ["valid"]
+    assert [span["run_id"] for span in spans] == ["valid", "unknown-metering"]
     assert len(spans[0]["task"]) == self_learn.MAX_SPAN_TEXT_LENGTH
     assert len(spans[0]["model"]) == self_learn.MAX_SPAN_IDENTIFIER_LENGTH
     assert len(spans[0]["archetype"]) == self_learn.MAX_SPAN_IDENTIFIER_LENGTH
@@ -774,13 +793,120 @@ def test_span_ingestion_validates_schema_shape_and_bounds_report_text(tmp_path):
     )
 
     incremental, cursor = self_learn.load_spans_incremental(str(logs))
-    assert [span["run_id"] for span in incremental] == ["valid"]
+    assert [span["run_id"] for span in incremental] == ["valid", "unknown-metering"]
     diagnostics = {}
     unchanged, _cursor = self_learn.load_spans_incremental(
         str(logs), cursor=cursor, diagnostics=diagnostics
     )
     assert unchanged == []
     assert diagnostics["stores"][0]["spans"] == 0
+
+
+def test_containment_failed_span_is_ingested_as_high_severity_outcome(tmp_path):
+    span = _span(
+        "containment-run",
+        "2026-08-16T01:00:00Z",
+        executor="pi",
+        status="containment_failed",
+    )
+    validated = self_learn._validated_span(span)
+    assert validated is not None
+    outcomes = self_learn.span_outcomes([validated], _catalog(tmp_path))
+    assert len(outcomes) == 1
+    assert outcomes[0]["severity"] == "high"
+    assert "containment_failed" in outcomes[0]["summary"]
+
+
+def test_refused_span_is_ingested_as_no_launch_outcome(tmp_path):
+    span = _span(
+        "refused-run",
+        "2026-08-16T01:00:00Z",
+        executor="codex",
+        status="refused",
+    )
+    validated = self_learn._validated_span(span)
+    assert validated is not None
+    outcomes = self_learn.span_outcomes([validated], _catalog(tmp_path))
+    assert len(outcomes) == 1
+    assert outcomes[0]["severity"] == "medium"
+    assert "refused" in outcomes[0]["summary"]
+
+
+def test_self_learning_excludes_rollup_only_spans(tmp_path):
+    provider = _span(
+        "provider", "2026-08-16T01:00:00Z", executor="codex", status="failed"
+    )
+    rollup = _span(
+        "rollup", "2026-08-16T01:00:01Z", executor="codex", status="failed"
+    )
+    rollup["artifacts"] = {"rollup_only": True}
+    catalog = _catalog(tmp_path)
+
+    outcomes = self_learn.span_outcomes([provider, rollup], catalog)
+    contrast = self_learn.trace_contrast([provider, rollup], catalog)
+
+    assert len(outcomes) == 1
+    assert outcomes[0]["run_id"] == "provider"
+    assert sum(entity["failed"] for entity in contrast["entities"].values()) == 1
+
+
+def test_self_learning_span_validation_matches_attempt_identity_schema():
+    valid = _span("attempt", "2026-08-16T01:00:00Z")
+    assert self_learn._validated_span({**valid, "attempt_id": None}) is not None
+    assert self_learn._validated_span({**valid, "attempt_id": "attempt-1"}) is not None
+    assert self_learn._validated_span({**valid, "attempt_ordinal": None}) is not None
+    assert self_learn._validated_span({**valid, "attempt_ordinal": 1}) is not None
+    assert self_learn._validated_span({**valid, "attempt_ordinal": 1.0}) is not None
+    for invalid in (
+        {"attempt_id": ""}, {"attempt_id": 7}, {"attempt_ordinal": 0},
+        {"attempt_ordinal": 1.5}, {"attempt_ordinal": True}, {"attempt_ordinal": "1"},
+    ):
+        assert self_learn._validated_span({**valid, **invalid}) is None
+
+
+def test_self_learning_rejects_malformed_known_and_partial_usage_maps():
+    valid = _span("metered", "2026-08-16T01:00:00Z")
+    assert self_learn._validated_span(
+        {**valid, "tokens": {"input_tokens": 0}, "usage_status": "known"}
+    ) is not None
+    assert self_learn._validated_span(
+        {
+            **valid,
+            "tokens": None,
+            "usage_status": "partial",
+            "known_usage": {"input_tokens": 0},
+            "known_usage_attempts": 1,
+        }
+    ) is not None
+
+    for value in (-1, 1.5, True, "1", None):
+        assert self_learn._validated_span(
+            {**valid, "tokens": {"input_tokens": value}, "usage_status": "known"}
+        ) is None
+        assert self_learn._validated_span(
+            {
+                **valid,
+                "tokens": None,
+                "usage_status": "partial",
+                "known_usage": {"input_tokens": value},
+                "known_usage_attempts": 1,
+            }
+        ) is None
+
+
+def test_self_learning_rejects_unrepresentable_cost_but_keeps_huge_tokens_exact():
+    huge = 10**1000
+    valid = _span("huge", "2026-08-16T01:00:00Z")
+    assert self_learn._validated_span(
+        {**valid, "cost_usd": huge, "cost_status": "known"}
+    ) is None
+    assert self_learn._validated_span({**valid, "duration_ms": huge}) is None
+
+    metered = self_learn._validated_span(
+        {**valid, "tokens": {"input_tokens": huge}, "usage_status": "known"}
+    )
+    assert metered is not None
+    assert metered["tokens"]["input_tokens"] == huge
 
 
 def test_cached_sibling_requires_recorded_checkout_to_still_exist(

@@ -3,23 +3,67 @@
 import argparse
 import html
 import json
+import math
 import sys
 
 
 def _num(value):
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
-    if isinstance(value, (int, float)) and value == value:
-        return float(value)
-    return 0.0
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return 0.0
+    return numeric if math.isfinite(numeric) else 0.0
+
+
+def _nonnegative_num(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) and numeric >= 0 else None
 
 
 def _fmt_int(value):
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value:,d}"
     return f"{_num(value):,.0f}"
 
 
 def _fmt_money(value):
-    return f"${_num(value):,.4f}"
+    numeric = _nonnegative_num(value)
+    return "unknown" if numeric is None else f"${numeric:,.4f}"
+
+
+def _cost_text(record, width=0):
+    status = record.get("cost_status")
+    if status == "partial":
+        known = _fmt_money(record.get("known_cost_usd"))
+        value = "unknown" if known == "unknown" else f">={known}"
+    elif status == "unknown":
+        value = "unknown"
+    elif status == "not_applicable":
+        value = "n/a"
+    else:
+        numeric = _nonnegative_num(record.get("cost_usd"))
+        value = "unknown" if numeric is None else f"{numeric:.4f}"
+    return f"{value:>{width}}" if width else value
+
+
+def _classification_cost_text(classification):
+    status = classification.get("unclassified_cost_status")
+    if status == "partial":
+        known = _fmt_money(classification.get("unclassified_known_cost_usd"))
+        return "unknown" if known == "unknown" else f">={known}"
+    if status == "unknown":
+        return "unknown"
+    if status == "not_applicable":
+        return "n/a"
+    # Reports written before provenance fields were added remain renderable.
+    return _fmt_money(classification.get("unclassified_cost_usd"))
 
 
 def _fmt_pct(value):
@@ -32,13 +76,15 @@ def tui(d):
     out = [f"Legion — by {by}"]
     out.append(f'{by.upper():<22}{"RUNS":>6}{"USABLE":>8}{"SUCCESS":>9}{"COST$":>12}{"P50ms":>9}{"P95ms":>9}')
     for k, v in sorted(g.items()):
+        success_rate = _num(v.get("success_rate", 0))
         out.append(
-            f'{k:<22}{v.get("count",0):>6}{v.get("ok",0):>8}{v.get("success_rate",0)*100:>8.1f}%'
-            f'{v.get("cost_usd",0):>12.4f}{v.get("p50_ms",0):>9.0f}{v.get("p95_ms",0):>9.0f}'
+            f'{k:<22}{v.get("count",0):>6}{v.get("ok",0):>8}{success_rate * 100:>8.1f}%'
+            f'{_cost_text(v, 12)}{_num(v.get("p50_ms",0)):>9.0f}'
+            f'{_num(v.get("p95_ms",0)):>9.0f}'
         )
     out.append(
         f'{"TOTAL":<22}{t.get("count",0):>6}{t.get("ok",0):>8}'
-        f'{t.get("success_rate",0)*100:>8.1f}%{t.get("cost_usd",0):>12.4f}'
+        f'{_num(t.get("success_rate",0))*100:>8.1f}%{_cost_text(t, 12)}'
     )
     if classification.get("delegated_runs", 0):
         out.append(
@@ -46,7 +92,7 @@ def tui(d):
             f'{classification.get("classified_runs", 0)}/'
             f'{classification.get("delegated_runs", 0)} '
             f'({_fmt_pct(classification.get("classification_rate", 0))}); '
-            f'unclassified cost {_fmt_money(classification.get("unclassified_cost_usd", 0))}'
+            f'unclassified cost {_classification_cost_text(classification)}'
         )
     return "\n".join(out)
 
@@ -60,7 +106,7 @@ def to_html(d):
             '<div class="metric"><span>Routing classification</span><strong>'
             f'{_fmt_pct(classification.get("classification_rate", 0))}'
             '</strong></div><div class="metric"><span>Unclassified cost</span><strong>'
-            f'{_fmt_money(classification.get("unclassified_cost_usd", 0))}'
+            f'{html.escape(_classification_cost_text(classification))}'
             "</strong></div>"
         )
     rows = []
@@ -73,7 +119,7 @@ def to_html(d):
             f"<td>{_fmt_int(v.get('count', 0))}</td>"
             f"<td>{_fmt_int(v.get('ok', 0))}</td>"
             f'<td><span class="status-pill {tone}">{_fmt_pct(rate)}</span></td>'
-            f"<td>{_fmt_money(v.get('cost_usd', 0))}</td>"
+            f"<td>{html.escape(_cost_text(v))}</td>"
             f"<td>{_fmt_int(v.get('p50_ms', 0))}</td>"
             f"<td>{_fmt_int(v.get('p95_ms', 0))}</td>"
             "</tr>"
@@ -182,7 +228,7 @@ def to_html(d):
       <div class="metric"><span>Total runs</span><strong>{_fmt_int(t.get("count", 0))}</strong></div>
       <div class="metric"><span>Successful runs</span><strong>{_fmt_int(t.get("ok", 0))}</strong></div>
       <div class="metric"><span>Success rate</span><strong>{_fmt_pct(t.get("success_rate", 0))}</strong></div>
-      <div class="metric"><span>Total cost</span><strong>{_fmt_money(t.get("cost_usd", 0))}</strong></div>
+      <div class="metric"><span>Total cost</span><strong>{html.escape(_cost_text(t))}</strong></div>
       {classification_metrics}
     </section>
     <section class="panel">
@@ -197,7 +243,7 @@ def to_html(d):
           </thead>
           <tbody>{''.join(rows)}</tbody>
           <tfoot>
-            <tr><th>Total</th><th>{_fmt_int(t.get("count", 0))}</th><th>{_fmt_int(t.get("ok", 0))}</th><th>{_fmt_pct(t.get("success_rate", 0))}</th><th>{_fmt_money(t.get("cost_usd", 0))}</th><th></th><th></th></tr>
+            <tr><th>Total</th><th>{_fmt_int(t.get("count", 0))}</th><th>{_fmt_int(t.get("ok", 0))}</th><th>{_fmt_pct(t.get("success_rate", 0))}</th><th>{html.escape(_cost_text(t))}</th><th></th><th></th></tr>
           </tfoot>
         </table>
       </div>

@@ -4,4 +4,46 @@ set -euo pipefail
 
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'legion-delegate %s\n' "$*" >> "$MOCK_CALL_LOG"
 
-printf '%s\n' '{"run_id":"x","status":"ok","model":"fixture-codex","last_message":"GPT_FALLBACK","usage":{},"cost_usd":0.05}'
+mock_run_id=x
+mock_repo=""
+mock_previous=""
+for mock_arg in "$@"; do
+  case "$mock_previous" in
+    --run-id) mock_run_id="$mock_arg" ;;
+    --repo) mock_repo="$mock_arg" ;;
+  esac
+  mock_previous="$mock_arg"
+done
+
+mock_attempt=""
+mock_last_path=""
+if [[ -n "$mock_repo" ]]; then
+  mock_art="$mock_repo/.legion/runs/$mock_run_id"
+  mkdir -p "$mock_art"
+  mock_last_path="$mock_art/last-message.txt"
+  printf 'GPT_FALLBACK\n' > "$mock_last_path"
+fi
+if [[ "${MOCK_DELEGATE_WRITE_RECEIPTS:-0}" == 1 ]]; then
+  mock_attempt="$mock_art/attempt-1.json"
+  jq -cn --arg run "$mock_run_id" '
+    {schema:"legion.attempt.v1",run_id:$run,attempt_id:($run+"-codex-attempt-1"),
+     attempt_kind:"provider",parent_attempt_id:null,ordinal:1,
+     executor:"codex",provider:"openai",config_identity:"mock-config",
+     requested_model:"fixture-codex",effective_model:"fixture-codex",
+     requested_effort:"high",effective_effort:"high",
+     cache_lineage:{preflight_cache_key:"mock-cache",previous_attempt_id:null},
+     usage:{input_tokens:10,output_tokens:3},usage_status:"known",usage_source:"mock-jsonl",
+     cost_usd:0.05,cost_status:"known",cost_source:"mock-provider",
+     failure:null,output_started:true,
+     started_at:"2026-09-11T00:00:00Z",ended_at:"2026-09-11T00:00:01Z",
+     duration_ms:1000,sandbox:"workspace-write",terminal_status:"succeeded",
+     child_attempt_ids:[],reconciliation:null}
+  ' > "$mock_attempt"
+  cp "$mock_attempt" "$mock_art/attempt.json"
+fi
+
+jq -cn --arg run "$mock_run_id" --arg attempt "$mock_attempt" --arg last "$mock_last_path" '
+  {run_id:$run,status:"ok",executor:"codex",model:"fixture-codex",
+   last_message_path:(if $last=="" then null else $last end),usage:{},cost_usd:0.05,
+   attempt_receipt:(if $attempt=="" then null else $attempt end),failure_receipt:null}
+'

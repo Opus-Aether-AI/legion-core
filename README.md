@@ -109,6 +109,12 @@ use `--remove` for an exact rollback. `legion-setup init` is the same entrypoint
 | A substantial task with explicit plan, validation, and evidence | `legion-run` |
 | Health, cost, reports, or future-run hints | `legion-doctor`, `legion-report`, `legion-learn`, `legion-self-learn` |
 
+Delegated child runs have registry-backed hard execution leases. Use
+`--max-runtime-seconds N` to lower the selected executor's default. Lease expiry
+returns typed `timed_out` evidence and removes the complete tracked child tree
+and disposable Git state. Primary sessions remain governed by semantic
+convergence and have no wall-clock lease.
+
 Check a repository before work:
 
 ```bash

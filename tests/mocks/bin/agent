@@ -2,12 +2,19 @@
 # Mock Cursor Agent CLI. Supports `agent -p --output-format json [--force] TASK`.
 
 set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'cursor-agent 1.0.0\n'
+  exit 0
+fi
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'agent %s\n' "$*" >> "$MOCK_CALL_LOG"
 [[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'agent active=%s executor=%s depth=%s run=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
 [[ -n "${MOCK_CONTEXT_DETAIL_LOG:-}" ]] && printf 'agent active=%s executor=%s depth=%s run=%s name=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" \
   "${LEGION_EXECUTOR_NAME:-}" >> "$MOCK_CONTEXT_DETAIL_LOG"
+[[ -n "${MOCK_CHILD_DEADLINE_LOG:-}" ]] && printf 'child=%s\n' \
+  "${LEGION_CHILD_LEASE_DEADLINE_NS:-}" >> "$MOCK_CHILD_DEADLINE_LOG"
 if [[ -n "${MOCK_CURSOR_ENV_LOG:-}" ]]; then
   printf 'config=%s\ndata=%s\nconfig_auth=%s\ndata_auth=%s\n' \
     "${XDG_CONFIG_HOME:-}" "${CURSOR_DATA_DIR:-}" \
@@ -75,7 +82,12 @@ PY
   wait "$delay_pid"
 fi
 
-cursor_result=CURSOR_OK_OUTPUT
+cursor_result="${MOCK_CURSOR_RESULT:-CURSOR_OK_OUTPUT}"
+if [[ -n "${MOCK_CURSOR_RESULT_SEQUENCE_FILE:-}" && -s "$MOCK_CURSOR_RESULT_SEQUENCE_FILE" ]]; then
+  cursor_result="$(sed -n '1p' "$MOCK_CURSOR_RESULT_SEQUENCE_FILE")"
+  sed '1d' "$MOCK_CURSOR_RESULT_SEQUENCE_FILE" > "$MOCK_CURSOR_RESULT_SEQUENCE_FILE.tmp.$$"
+  mv -f "$MOCK_CURSOR_RESULT_SEQUENCE_FILE.tmp.$$" "$MOCK_CURSOR_RESULT_SEQUENCE_FILE"
+fi
 if [[ "${MOCK_CURSOR_FAST_DAEMON:-0}" == 1 ]]; then
   daemon_pid="$(python3 <<'PY'
 import os
@@ -106,5 +118,12 @@ if [[ "$force" -eq 1 || "${MOCK_CURSOR_WRITE_IN_PLAN:-0}" == "1" ]]; then
   printf 'mock-cursor-change by %s\n' "$model" >> MOCK_CURSOR_CHANGE.txt
 fi
 
-printf '{"result":"%s","model":"%s","total_cost_usd":0.03,"usage":{"input_tokens":500,"output_tokens":25}}\n' \
-  "$cursor_result" "$model"
+if [[ "${MOCK_CURSOR_NEGATIVE_METERING:-0}" == 1 ]]; then
+  jq -cn --arg result "$cursor_result" --arg model "$model" '
+    {result:$result,model:$model,total_cost_usd:-0.03,
+     usage:{input_tokens:-500,output_tokens:25}}'
+else
+  jq -cn --arg result "$cursor_result" --arg model "$model" '
+    {result:$result,model:$model,total_cost_usd:0.03,
+     usage:{input_tokens:500,output_tokens:25}}'
+fi

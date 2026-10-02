@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import json
 import os
 import sys
 
@@ -34,13 +35,90 @@ def test_trace_id_is_deterministic():
     assert oe.span_to_otlp(_SPAN)["traceId"] == oe.span_to_otlp(_SPAN)["traceId"]
 
 
+def test_legacy_span_id_remains_byte_compatible_without_attempt_identity():
+    expected = oe._hex(f'{_SPAN["run_id"]}{_SPAN["ts"]}{_SPAN["executor"]}', 8)
+    assert oe.span_to_otlp(_SPAN)["spanId"] == expected
+
+
+def test_provider_retries_have_unique_span_ids_for_same_second():
+    first = dict(_SPAN, attempt_id="r1-codex-attempt-1", attempt_ordinal=1)
+    second = dict(_SPAN, attempt_id="r1-codex-attempt-2", attempt_ordinal=2)
+
+    first_otlp = oe.span_to_otlp(first)
+    second_otlp = oe.span_to_otlp(second)
+    assert first_otlp["spanId"] != second_otlp["spanId"]
+    attributes = {item["key"]: item["value"] for item in second_otlp["attributes"]}
+    assert attributes["legion.attempt_id"]["stringValue"] == "r1-codex-attempt-2"
+    assert attributes["legion.attempt_ordinal"]["intValue"] == 2
+
+
+def test_current_attempt_receipt_artifacts_disambiguate_provider_retries():
+    first = dict(_SPAN, artifacts={"provider_attempt": True,
+                                   "attempt_receipt": "/run/attempt-1.json"})
+    second = dict(_SPAN, artifacts={"provider_attempt": True,
+                                    "attempt_receipt": "/run/attempt-2.json"})
+
+    first_otlp = oe.span_to_otlp(first)
+    second_otlp = oe.span_to_otlp(second)
+    assert first_otlp["spanId"] != second_otlp["spanId"]
+    attributes = {item["key"]: item["value"] for item in second_otlp["attributes"]}
+    assert attributes["legion.attempt_ordinal"]["intValue"] == 2
+
+
+def test_rollup_and_provider_with_same_receipt_never_share_span_id():
+    provider = dict(
+        _SPAN,
+        artifacts={"provider_attempt": True, "attempt_receipt": "/run/attempt-1.json"},
+    )
+    rollup = dict(
+        _SPAN,
+        artifacts={"rollup_only": True, "attempt_receipt": "/run/attempt-1.json"},
+    )
+
+    assert oe.span_to_otlp(provider)["spanId"] != oe.span_to_otlp(rollup)["spanId"]
+
+
+def test_span_schema_declares_attempt_identity_fields_and_refused_status():
+    schema_path = os.path.join(
+        HERE, "..", "..", "legion-observability", "schema", "legion.span.v1.schema.json"
+    )
+    with open(schema_path, encoding="utf-8") as handle:
+        properties = json.load(handle)["properties"]
+    assert properties["attempt_id"]["type"] == ["string", "null"]
+    assert properties["attempt_ordinal"]["minimum"] == 1
+    assert "refused" in properties["status"]["enum"]
+
+
 def test_span_to_otlp_tolerates_nonnumeric_duration_and_cost():
     o = oe.span_to_otlp({"schema": "legion.span.v1", "status": "ok",
                          "ts": "2026-06-15T00:00:00Z", "duration_ms": "oops",
                          "cost_usd": {}, "tokens": {}})
     assert o["endTimeUnixNano"] == o["startTimeUnixNano"]  # bad duration -> 0
-    cost = [x for x in o["attributes"] if x["key"] == "legion.cost_usd"][0]["value"]["doubleValue"]
-    assert cost == 0.0
+    attributes = {item["key"]: item["value"] for item in o["attributes"]}
+    assert attributes["legion.cost_status"]["stringValue"] == "unknown"
+    assert "legion.cost_usd" not in attributes
+
+
+def test_otlp_downgrades_huge_cost_and_preserves_huge_usage_as_json():
+    huge = 10**1000
+    span = oe.span_to_otlp(
+        {
+            **_SPAN,
+            "cost_usd": huge,
+            "cost_status": "known",
+            "duration_ms": huge,
+            "tokens": {"input_tokens": huge},
+            "usage_status": "known",
+            "attempt_ordinal": huge,
+        }
+    )
+    attributes = {item["key"]: item["value"] for item in span["attributes"]}
+    assert attributes["legion.cost_status"]["stringValue"] == "unknown"
+    assert "legion.cost_usd" not in attributes
+    assert "legion.attempt_ordinal" not in attributes
+    assert "legion.tokens.input_tokens" not in attributes
+    assert json.loads(attributes["legion.usage"]["stringValue"])["input_tokens"] == huge
+    assert span["endTimeUnixNano"] == span["startTimeUnixNano"]
 
 
 def test_ts_nanos_naive_is_assumed_utc():
@@ -72,6 +150,91 @@ def test_main_no_endpoint_is_noop(capsys, monkeypatch):
     assert "no-op" in capsys.readouterr().err
 
 
+def test_unknown_metering_is_not_exported_as_free_cost():
+    span = oe.span_to_otlp({
+        "schema": "legion.span.v1", "run_id": "unknown-metering", "executor": "deepseek",
+        "model": "unknown", "status": "ok", "cost_usd": None, "cost_status": "unknown",
+        "tokens": None, "usage_status": "unknown",
+    })
+    attributes = {item["key"]: item["value"] for item in span["attributes"]}
+    assert attributes["legion.cost_status"]["stringValue"] == "unknown"
+    assert attributes["legion.usage_status"]["stringValue"] == "unknown"
+    assert "legion.cost_usd" not in attributes
+
+
+def test_partial_metering_exports_lower_bound_values_and_counts():
+    span = oe.span_to_otlp({
+        "schema": "legion.span.v1", "run_id": "partial-metering", "executor": "review",
+        "model": "mixed", "status": "ok", "cost_usd": None, "cost_status": "partial",
+        "known_cost_usd": 0.25, "known_cost_attempts": 1, "tokens": None,
+        "usage_status": "partial", "known_usage": {"input_tokens": 7},
+        "known_usage_attempts": 1,
+    })
+    attributes = {item["key"]: item["value"] for item in span["attributes"]}
+    assert "legion.cost_usd" not in attributes
+    assert attributes["legion.known_cost_usd"]["doubleValue"] == 0.25
+    assert attributes["legion.known_cost_attempts"]["intValue"] == 1
+    assert attributes["legion.known_usage"]["stringValue"] == '{"input_tokens":7}'
+    assert attributes["legion.known_tokens.input_tokens"]["intValue"] == 7
+    assert attributes["legion.known_usage_attempts"]["intValue"] == 1
+
+
+def test_invalid_partial_metering_is_downgraded_and_omitted():
+    invalid_costs = [
+        (-0.1, 1),
+        (float("nan"), 1),
+        (0.1, 0),
+        (0.1, 1.5),
+    ]
+    for known_cost, attempts in invalid_costs:
+        span = oe.span_to_otlp({
+            "schema": "legion.span.v1", "run_id": "invalid-cost", "status": "ok",
+            "cost_usd": None, "cost_status": "partial",
+            "known_cost_usd": known_cost, "known_cost_attempts": attempts,
+            "tokens": None, "usage_status": "unknown",
+        })
+        attributes = {item["key"]: item["value"] for item in span["attributes"]}
+        assert attributes["legion.cost_status"]["stringValue"] == "unknown"
+        assert "legion.known_cost_usd" not in attributes
+        assert "legion.known_cost_attempts" not in attributes
+
+    invalid_usage = [
+        ({"input_tokens": -1}, 1),
+        ({"input_tokens": float("nan")}, 1),
+        ({"input_tokens": 1.5}, 1),
+        ({"input_tokens": 1}, 0),
+        ({"input_tokens": 1}, 1.5),
+    ]
+    for known_usage, attempts in invalid_usage:
+        span = oe.span_to_otlp({
+            "schema": "legion.span.v1", "run_id": "invalid-usage", "status": "ok",
+            "cost_usd": None, "cost_status": "unknown",
+            "tokens": None, "usage_status": "partial",
+            "known_usage": known_usage, "known_usage_attempts": attempts,
+        })
+        attributes = {item["key"]: item["value"] for item in span["attributes"]}
+        assert attributes["legion.usage_status"]["stringValue"] == "unknown"
+        assert "legion.known_usage" not in attributes
+        assert not any(key.startswith("legion.known_tokens.") for key in attributes)
+        assert "legion.known_usage_attempts" not in attributes
+
+
+def test_invalid_known_usage_is_downgraded_and_omitted():
+    for tokens in (
+        {"input_tokens": -1},
+        {"input_tokens": float("nan")},
+        {"input_tokens": 1.5},
+        {"input_tokens": True},
+    ):
+        span = oe.span_to_otlp({
+            "schema": "legion.span.v1", "run_id": "invalid-known-usage",
+            "status": "ok", "cost_usd": None, "cost_status": "unknown",
+            "tokens": tokens, "usage_status": "known",
+        })
+        attributes = {item["key"]: item["value"] for item in span["attributes"]}
+        assert attributes["legion.usage_status"]["stringValue"] == "unknown"
+        assert not any(key.startswith("legion.tokens.") for key in attributes)
+
+
 def _to_jsonl(d):
-    import json
     return json.dumps(d) + "\n"

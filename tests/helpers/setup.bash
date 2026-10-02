@@ -15,6 +15,7 @@ setup_test_env() {
     unset LEGION_ACTIVE LEGION_EXECUTOR LEGION_DEPTH LEGION_RUN_ID
     unset LEGION_EXECUTOR_NAME LEGION_CROSS_HARNESS_HANDOFF
     unset LEGION_TRACE_ID LEGION_PARENT_ID
+    unset LEGION_LOW_CREDIT LEGION_ALLOW_PREMIUM_CREDIT
     export TEST_TMPDIR="$BATS_TEST_TMPDIR"
     export AGENTS_HOME="$TEST_TMPDIR/agents"
     export HOME="$TEST_TMPDIR/home"
@@ -28,6 +29,10 @@ setup_test_env() {
     # deterministic no matter which harness the suite runs under (a Codex/opencode
     # session would otherwise flip the resolved primary and its baseline label).
     export LEGION_PRIMARY=claude
+    # Cursor headless admission requires an API key. Individual refusal tests
+    # unset this explicitly; the shared fixture keeps unrelated adapter tests on
+    # their intended provider path.
+    export CURSOR_API_KEY=test-cursor-key
     # Drop ambient GitHub credentials. A developer shell usually exports one and
     # CI usually does not, which silently changes which release-lookup path the
     # installer takes; tests that need a token export their own.
@@ -38,6 +43,44 @@ setup_test_env() {
     export MOCK_CURL_FIXTURE="$MOCK_GH_FIXTURE"
     export MOCK_RELEASE_TAG="${MOCK_RELEASE_TAG:-v0.0.0-test}"
     export MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE="$TEST_TMPDIR/mock-claude-marketplace-source"
+
+    # Preflight admits only models declared in the trusted semantic catalog.
+    # Extend a private per-test copy with the synthetic IDs used by adapter
+    # fixtures; production policy and the checked-in catalog remain unchanged.
+    export LEGION_MODELS_FILE="$TEST_TMPDIR/models.toml"
+    cp "$BATS_TEST_DIRNAME/../legion-router/config/models.toml" "$LEGION_MODELS_FILE"
+    cat >> "$LEGION_MODELS_FILE" <<'EOF'
+claude_test_a = "model-a"
+claude_test_b = "model-b"
+claude_test_declines = "model-declines"
+claude_test_answers = "model-answers"
+claude_test_only = "model-only"
+claude_fixture = "openai/fixture-model"
+claude_fixture_model = "fixture-model"
+claude_fixture_claude = "fixture-claude"
+claude_one_model = "one-model"
+codex_test_beta = "test-model-beta"
+codex_test_alpha = "test-model-alpha"
+codex_fixture = "openai/fixture-model"
+codex_fixture_model = "fixture-model"
+codex_fixture_codex = "fixture-codex"
+codex_fixture_review = "fixture-review"
+cursor_fixture = "openai/fixture-model"
+cursor_fixture_model = "fixture-model"
+cursor_test = "test-cursor"
+opencode_test_beta = "test-model-beta"
+opencode_fixture = "openai/fixture-model"
+opencode_fixture_model = "fixture-model"
+opencode_fixture_opencode = "fixture-opencode"
+opencode_override = "test-provider/test-model-opencode"
+pi_fixture = "openai/fixture-pi"
+pi_fixture_model = "openai/fixture-model"
+pi_plain_fixture = "fixture-pi"
+pi_generic_fixture = "fixture-model"
+hermes_fixture = "openai/fixture-hermes"
+hermes_fixture_model = "openai/fixture-model"
+hermes_generic_fixture = "fixture-model"
+EOF
 
     mkdir -p "$AGENTS_HOME" "$HOME/.codex" "$HOME/.claude/plugins/cache"
     : > "$MOCK_CALL_LOG"

@@ -55,8 +55,43 @@ def test_stats_by_arch_model_success_cost_and_percentiles():
     assert got["runs"] == 4
     assert got["success_rate"] == 0.5
     assert got["mean_cost"] == 0.25
+    assert got["cost_status"] == "known"
+    assert got["known_cost_runs"] == 4
     assert got["p50_ms"] == 250.0
     assert got["p95_ms"] == 385.0
+
+
+def test_optimizer_downgrades_huge_cost_and_duration_without_crash():
+    huge = 10**1000
+    spans = [
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "archetype": "huge",
+            "model": "test-model-alpha",
+            "status": "ok",
+            "cost_usd": huge,
+            "cost_status": "known",
+            "duration_ms": huge,
+        }
+    ]
+    stats = opt.stats_by_arch_model(spans)["huge"]["test-model-alpha"]
+    assert stats["cost_status"] == "unknown"
+    assert stats["mean_cost"] is None
+    assert stats["known_cost_usd"] is None
+    assert stats["p50_ms"] == 0
+    assert "mean_cost=unknown" in opt._format_stats(stats)
+    assert opt._classification_cost_text(
+        {"unclassified_cost_status": "known", "unclassified_cost_usd": huge}
+    ) == "unknown"
+
+    overflow_spans = [
+        {**spans[0], "cost_usd": 1e308, "duration_ms": 1},
+        {**spans[0], "cost_usd": 1e308, "duration_ms": 1},
+    ]
+    overflow = opt.stats_by_arch_model(overflow_spans)["huge"]["test-model-alpha"]
+    assert overflow["cost_status"] == "unknown"
+    assert overflow["known_cost_usd"] is None
 
 
 def test_propose_accepts_cheaper_equal_or_better_model():
@@ -102,6 +137,143 @@ def test_propose_holds_with_insufficient_samples():
     got = opt.propose(stats, "test-model-beta")
     assert got["decision"] == "hold"
     assert got["reason"] == "insufficient_samples"
+
+
+def test_unknown_partial_and_not_applicable_cost_routes_are_not_ranked():
+    stats = {
+        "known": {"runs": 5, "success_rate": 0.9, "mean_cost": 1.0,
+                  "cost_status": "known", "p50_ms": 100, "p95_ms": 100},
+        "unknown": {"runs": 5, "success_rate": 1.0, "mean_cost": None,
+                    "cost_status": "unknown", "p50_ms": 100, "p95_ms": 100},
+        "partial": {"runs": 5, "success_rate": 1.0, "mean_cost": None,
+                    "cost_status": "partial", "known_cost_usd": 0.01,
+                    "p50_ms": 100, "p95_ms": 100},
+        "free-rollup": {"runs": 5, "success_rate": 1.0, "mean_cost": None,
+                        "cost_status": "not_applicable", "p50_ms": 100, "p95_ms": 100},
+    }
+    got = opt.propose(stats, "known")
+    assert got["decision"] == "hold"
+    assert got["proposed_model"] == "known"
+
+
+def test_text_stats_render_unclassified_cost_without_numeric_none_formatting():
+    common = {"runs": 5, "success_rate": 0.8, "p50_ms": 100, "p95_ms": 200}
+
+    assert "mean_cost=unknown" in opt._format_stats({
+        **common, "mean_cost": None, "cost_status": "unknown",
+    })
+    partial = opt._format_stats({
+        **common,
+        "mean_cost": None,
+        "cost_status": "partial",
+        "known_cost_usd": 0.25,
+        "known_cost_runs": 2,
+    })
+    assert "mean_cost=partial(known_total=$0.2500, metered_runs=2/5)" in partial
+    assert "mean_cost=n/a" in opt._format_stats({
+        **common, "mean_cost": None, "cost_status": "not_applicable",
+    })
+    assert "mean_cost=$0.1250" in opt._format_stats({
+        **common, "mean_cost": 0.125, "cost_status": "known",
+    })
+
+
+def test_stats_preserve_known_zero_but_exclude_route_with_any_unknown_cost():
+    common = {"schema": "legion.span.v1", "executor": "codex",
+              "archetype": "implement-feature", "status": "ok", "duration_ms": 1}
+    spans = [
+        {**common, "model": "zero", "cost_usd": 0, "cost_status": "known"},
+        {**common, "model": "mixed", "cost_usd": 0.5, "cost_status": "known"},
+        {**common, "model": "mixed", "cost_usd": None, "cost_status": "unknown"},
+    ]
+    stats = opt.stats_by_arch_model(spans)["implement-feature"]
+    assert stats["zero"]["mean_cost"] == 0
+    assert stats["zero"]["cost_status"] == "known"
+    assert stats["mixed"]["mean_cost"] is None
+    assert stats["mixed"]["cost_status"] == "partial"
+    assert stats["mixed"]["known_cost_usd"] == 0.5
+
+
+def test_route_stats_preserve_partial_and_not_applicable_cost_provenance():
+    common = {
+        "schema": "legion.span.v1",
+        "executor": "codex",
+        "archetype": "implement-feature",
+        "status": "ok",
+        "duration_ms": 1,
+    }
+    spans = [
+        {
+            **common,
+            "model": "mixed",
+            "cost_usd": 0.2,
+            "cost_status": "known",
+        },
+        {
+            **common,
+            "model": "mixed",
+            "cost_usd": None,
+            "cost_status": "partial",
+            "known_cost_usd": 0.5,
+            "known_cost_attempts": 2,
+        },
+        {
+            **common,
+            "model": "included",
+            "cost_usd": None,
+            "cost_status": "not_applicable",
+        },
+        {
+            **common,
+            "model": "mixed-applicability",
+            "cost_usd": 0.4,
+            "cost_status": "known",
+        },
+        {
+            **common,
+            "model": "mixed-applicability",
+            "cost_usd": None,
+            "cost_status": "not_applicable",
+        },
+        {
+            **common,
+            "model": "included",
+            "cost_usd": None,
+            "cost_status": "not_applicable",
+        },
+    ]
+
+    stats = opt.stats_by_arch_model(spans)["implement-feature"]
+    assert stats["mixed"]["cost_status"] == "partial"
+    assert stats["mixed"]["mean_cost"] is None
+    assert stats["mixed"]["known_cost_usd"] == 0.7
+    assert stats["mixed"]["known_cost_runs"] == 2
+    assert stats["mixed"]["known_cost_attempts"] == 3
+    assert stats["included"]["cost_status"] == "not_applicable"
+    assert stats["included"]["known_cost_usd"] is None
+    assert stats["included"]["known_cost_runs"] == 0
+    assert stats["included"]["known_cost_attempts"] == 0
+    assert stats["mixed-applicability"]["cost_status"] == "partial"
+    assert stats["mixed-applicability"]["mean_cost"] is None
+    assert stats["mixed-applicability"]["known_cost_usd"] == 0.4
+    assert opt._eligible_routes(stats, 1) == {}
+
+
+def test_unclassified_known_plus_not_applicable_cost_is_partial():
+    common = {
+        "schema": "legion.span.v1",
+        "executor": "codex",
+        "status": "ok",
+    }
+    summary = opt.classification_summary([
+        {**common, "cost_usd": 0.4, "cost_status": "known"},
+        {**common, "cost_usd": None, "cost_status": "not_applicable"},
+    ])
+
+    assert summary["unclassified_cost_usd"] is None
+    assert summary["unclassified_cost_status"] == "partial"
+    assert summary["unclassified_known_cost_usd"] == 0.4
+    assert summary["unclassified_known_cost_runs"] == 1
 
 
 def test_propose_holds_when_current_is_already_cheapest_clearing_bar():
@@ -185,7 +357,10 @@ def test_load_spans_streams_unclassified_coverage_without_retaining_it(tmp_path)
         "classified_runs": 4,
         "unclassified_runs": 1,
         "classification_rate": 0.8,
-        "unclassified_cost_usd": 0.0,
+        "unclassified_cost_usd": None,
+        "unclassified_cost_status": "unknown",
+        "unclassified_known_cost_usd": None,
+        "unclassified_known_cost_runs": 0,
     }
 
 
@@ -224,7 +399,10 @@ def test_synthetic_primary_baselines_never_become_optimizer_routes():
         "classified_runs": 0,
         "unclassified_runs": 0,
         "classification_rate": 0,
-        "unclassified_cost_usd": 0,
+        "unclassified_cost_usd": None,
+        "unclassified_cost_status": "not_applicable",
+        "unclassified_known_cost_usd": None,
+        "unclassified_known_cost_runs": 0,
     }
 
 
@@ -252,7 +430,68 @@ def test_classification_summary_exposes_optimizer_blind_spot():
         "unclassified_runs": 1,
         "classification_rate": 0.5,
         "unclassified_cost_usd": 2.5,
+        "unclassified_cost_status": "known",
+        "unclassified_known_cost_usd": 2.5,
+        "unclassified_known_cost_runs": 1,
     }
+
+
+def test_optimizer_unclassified_cost_preserves_partial_lower_bound():
+    classification = opt.classification_summary([
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "archetype": "",
+            "status": "failed",
+            "cost_usd": 0.75,
+            "cost_status": "known",
+        },
+        {
+            "schema": "legion.span.v1",
+            "executor": "codex",
+            "archetype": "",
+            "status": "failed",
+            "cost_usd": None,
+            "cost_status": "unknown",
+        },
+    ])
+
+    assert classification["unclassified_cost_usd"] is None
+    assert classification["unclassified_cost_status"] == "partial"
+    assert classification["unclassified_known_cost_usd"] == 0.75
+    assert classification["unclassified_known_cost_runs"] == 1
+    assert opt._classification_cost_text(classification) == ">=$0.7500"
+
+
+def test_rollup_only_review_span_is_not_an_optimizer_sample(tmp_path):
+    spans_dir = tmp_path / "spans"
+    spans_dir.mkdir()
+    provider = {
+        "schema": "legion.span.v1",
+        "executor": "codex-review",
+        "archetype": "security-review",
+        "model": "test-model-review",
+        "status": "ok",
+        "cost_usd": 0.5,
+        "cost_status": "known",
+        "artifacts": {"provider_attempt": True},
+    }
+    rollup = {
+        **provider,
+        "cost_usd": None,
+        "cost_status": "not_applicable",
+        "artifacts": {"rollup_only": True},
+    }
+    (spans_dir / "2026-09-11.jsonl").write_text(
+        "\n".join(json.dumps(span) for span in (provider, rollup)) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded, classification = opt.load_spans(spans_dir, with_classification=True)
+    assert loaded == [provider]
+    assert classification["delegated_runs"] == 1
+    route = opt.stats_by_arch_route([provider, rollup])["security-review"]
+    assert route["codex:test-model-review"]["runs"] == 1
 
 
 def test_main_json_reports_unclassified_runs_and_cost(tmp_path, capsys):
@@ -281,6 +520,7 @@ def test_main_json_reports_unclassified_runs_and_cost(tmp_path, capsys):
     payload = json.loads(captured.out)
     assert payload["classification"]["unclassified_runs"] == 1
     assert payload["classification"]["unclassified_cost_usd"] == 3.5
+    assert payload["classification"]["unclassified_cost_status"] == "known"
     assert "cannot inform per-archetype routing proposals" in captured.err
 
 

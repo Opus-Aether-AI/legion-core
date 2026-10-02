@@ -9,12 +9,29 @@ set -euo pipefail
 [[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'claude active=%s executor=%s depth=%s run=%s\n' \
     "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
 
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'claude 1.0.0\n'
+    exit 0
+fi
+
 MOCK_STATE_FILE="$HOME/.mock-claude-marketplaces"
 
 if [[ "${1:-}" == "-p" ]]; then
     cat >/dev/null || true
+    if [[ "${MOCK_CLAUDE_PERMISSION_PROMPT:-0}" == "1" ]]; then
+        printf 'Permission required; approval required in non-interactive mode\n' >&2
+        printf '%s\n' '{"type":"result","is_error":true,"result":""}'
+        exit 1
+    fi
+    if [[ "${MOCK_CLAUDE_OUTPUT_THEN_FAIL:-0}" == "1" ]]; then
+        printf '%s\n' '{"type":"result","is_error":false,"result":"PARTIAL_OUTPUT","usage":{"input_tokens":10,"output_tokens":2}}'
+        exit 1
+    fi
     if [[ "${MOCK_CLAUDE_WRITE:-0}" == "1" ]]; then
         printf 'unexpected\n' > claude-unexpected.txt
+    fi
+    if [[ -n "${MOCK_CLAUDE_DELAY:-}" ]]; then
+        sleep "$MOCK_CLAUDE_DELAY"
     fi
     # MOCK_CLAUDE_DECLINE_MODELS: comma-separated model ids that should answer the
     # way the real CLI answers for a model this account cannot run. The envelope
@@ -31,6 +48,9 @@ if [[ "${1:-}" == "-p" ]]; then
         done
         case ",${MOCK_CLAUDE_DECLINE_MODELS}," in
             *",${_mock_model},"*)
+                if [[ -n "${MOCK_CLAUDE_DECLINE_DELAY:-}" ]]; then
+                    sleep "$MOCK_CLAUDE_DECLINE_DELAY"
+                fi
                 printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"terminal_reason\":\"api_error\",\"stop_reason\":\"stop_sequence\",\"result\":\"There's an issue with the selected model (${_mock_model}). It may not exist or you may not have access to it.\",\"usage\":{\"input_tokens\":100000,\"output_tokens\":0}}"
                 exit 0
                 ;;
@@ -44,7 +64,13 @@ if [[ "${1:-}" == "-p" ]]; then
         printf 'error\n' >&2
         exit 1
     fi
-    printf '%s\n' '{"type":"result","is_error":false,"result":"CLAUDE_OK_OUTPUT","total_cost_usd":0.12,"usage":{"input_tokens":1000,"output_tokens":50}}'
+    jq -cn --arg model "${MOCK_CLAUDE_EFFECTIVE_MODEL:-}" \
+      --arg omit_cost "${MOCK_CLAUDE_OMIT_COST:-0}" '
+      {type:"result",is_error:false,result:"CLAUDE_OK_OUTPUT",total_cost_usd:0.12,
+       usage:{input_tokens:1000,output_tokens:50}}
+      | if $model == "" then . else .model = $model end
+      | if $omit_cost == "1" then del(.total_cost_usd) else . end
+    '
     exit 0
 fi
 

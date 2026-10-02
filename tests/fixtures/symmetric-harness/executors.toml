@@ -3,39 +3,53 @@ kind = "primary coding"
 adapter = "legion-claude"
 contract = "diff"
 model_ref = "claude_default"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 
 [executors.codex]
 kind = "primary coding"
 adapter = "legion-delegate"
 contract = "native"
 model_ref = "codex_workhorse"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 
 [executors.cursor]
 kind = "primary coding"
 adapter = "legion-cursor"
 contract = "diff"
 model_ref = "cursor_default"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 
 [executors.opencode]
 kind = "primary coding"
 adapter = "legion-opencode"
 contract = "diff"
 model_ref = "opencode_default"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 
 [executors.deepseek]
 kind = "primary coding"
 adapter = "legion-deepseek"
 contract = "diff"
 model_ref = "deepseek_default"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 
 [executors.hermes]
 kind = "primary coding"
 adapter = "legion-hermes"
 contract = "diff"
 model_ref = "hermes_default"
+cancellation = "process_tree"
+max_runtime_seconds = 3600
 
 [executors.pi]
 kind = "primary coding"
 adapter = "legion-pi"
 contract = "diff"
 model_ref = "pi_default"
+cancellation = "process_tree"
+max_runtime_seconds = 3600

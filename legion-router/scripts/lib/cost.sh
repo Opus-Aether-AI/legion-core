@@ -19,6 +19,17 @@ set -euo pipefail
 _cost_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${LEGION_COSTS_FILE:=$_cost_lib_dir/../../config/costs.json}"
 
+# True only when the table has an explicit row for the model. The table's
+# zero-valued default preserves legacy arithmetic, but it means "unpriced", not
+# "known free", and must not be promoted to known cost in attempt receipts.
+cost_model_has_pricing() {
+  local model="${1:?cost_model_has_pricing: model required}"
+  [[ -f "$LEGION_COSTS_FILE" ]] || return 1
+  jq -e --arg m "$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')" '
+    . as $cfg | any($cfg.models[]?; .match as $match | $m | contains($match))
+  ' "$LEGION_COSTS_FILE" >/dev/null 2>&1
+}
+
 # cost_for_model <model> <input_tokens> <output_tokens> [cache_read_tokens] [cache_write_tokens]
 # Prints USD rounded to 6 decimals (plain number, no $).
 cost_for_model() {

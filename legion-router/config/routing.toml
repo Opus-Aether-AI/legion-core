@@ -50,8 +50,8 @@
 # ── Review fallback ─────────────────────────────────────────────────────
 # `legion-delegate review` walks this order and uses the first executor whose
 # `review` capability in executors.toml is not "none" AND that is actually
-# reachable. Codex leads because its native review subcommand emits the verdict
-# schema directly; the rest review by prompt and are normalized. Lineage is
+# reachable. Codex leads with native review and a schema-constrained retry for
+# clean format failures; the rest review by prompt and are normalized. Lineage is
 # deliberately mixed so a single vendor outage cannot block review entirely.
 [review]
 order = ["codex", "cursor", "opencode", "claude"]

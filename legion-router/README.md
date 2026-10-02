@@ -321,10 +321,17 @@ legion-router/
 - Delegation never auto-applies a diff unless `--apply` is given and the diff applies cleanly.
 - Reviews resolve `--base`/`--head` once to commit SHAs, retry transient
   executor failures at most twice by default, and write a durable terminal receipt.
-  Every Codex review attempt remains mechanically bound with `exec -s read-only
-  review --base <resolved-sha>`; optional bounded, scanned task guidance is
-  injected through Codex developer instructions and never replaces the base
-  argument.
+  Codex starts with `exec -s read-only review --base <resolved-sha>`; optional
+  bounded, scanned task guidance uses developer instructions. Only a clean,
+  schema-invalid result without negative signals selects the existing format
+  retry via ordinary `exec --output-schema`. That retry independently reviews
+  the full frozen patch and task guidance delivered on stdin, with the same
+  model, effort, read-only sandbox, and base/head SHAs. Transient failures still
+  retain the current mode (native until a format retry selects ordinary exec).
+  The patch uses a random, collision-checked boundary and is explicitly untrusted
+  data, not reviewer instructions. Malformed rejections and contradictory verdicts fail closed.
+  Codex's generation schema uses the supported Structured Outputs subset; the
+  canonical verdict schema and runtime semantic checks still decide acceptance.
 - Every executor receives `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`,
   `LEGION_EXECUTOR_NAME`, `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized
   repository policy uses that context to prevent accidental recursive delegation.

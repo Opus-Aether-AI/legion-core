@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.29.1...v0.29.2) (2026-10-02)
+
+
+### Documentation
+
+* define Legion v4 architecture and hybrid MVP ([#204](https://github.com/Opus-Aether-AI/legion-core/issues/204)) ([1032e40](https://github.com/Opus-Aether-AI/legion-core/commit/1032e40b5b5e8461e7e91a2d08848a55dde0a390))
+
 ## [0.29.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.29.0...v0.29.1) (2026-09-09)
 
 

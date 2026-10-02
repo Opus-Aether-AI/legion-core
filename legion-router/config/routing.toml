@@ -28,18 +28,19 @@
 # `-c model_reasoning_effort`; cursor via the model id; claude `--effort`).
 #
 # TIER POLICY. The split is a TOTAL-COST decision, not a claim that the cheapest
-# token always produces the cheapest accepted result. The frontier roles
-# (claude_frontier / codex_frontier) bill roughly 2x claude_default and 5x
-# codex_workhorse on output. The Codex precision role (Sol) sits between Terra
-# and Astra: 2x Terra on input and 1.67x on output, so it wins only when its
-# stronger pass avoids enough rework. Exactly five archetypes route to frontier —
+# token always produces the cheapest accepted result. Compare frontier roles
+# (claude_frontier / codex_frontier) with their workhorse/review roles using
+# costs.json, including context and cache rates. At standard context, Sol's
+# input matches Terra, while output and cache reads are cheaper; cache writes
+# carry a premium and long prompts raise its rates. Exactly five archetypes route to frontier —
 # frontend-polish, hard-bug, perf-optimization, security-review, and the opt-in
 # final-review-frontier — because those are low-volume and high-judgement-per-call.
 # Migration is the scoped precision pilot because cross-surface mistakes are
 # expensive; routine codemods remain bulk-mechanical-edit. Current telemetry can
 # compare cost, executor success, and latency by archetype, but it cannot prove
-# avoided rework or human acceptance. Require paired acceptance evidence before
-# moving more volume to the precision tier.
+# avoided rework or human acceptance. Lower token prices alone do not establish
+# workload quality: require paired acceptance evidence before moving more
+# volume to the precision tier.
 # Moving another archetype to a frontier role needs a measured reason recorded here.
 #
 # `self` archetypes stay with the PRIMARY harness (whoever is driving the session,
@@ -242,7 +243,7 @@ model_ref = "codex_frontier"
 sandbox = "workspace-write"
 reasoning_effort = "max"
 fallback_refs = ["codex_review"]
-note = "A deep/tricky bug needing the strongest coder — the FRONTIER codex role at max. This is where the 2.5x price over codex_review earns its keep; routine bugs belong on fix-bug."
+note = "A deep/tricky bug needing the strongest coder — the FRONTIER codex role at max. Evaluate its premium over codex_review using the current context and cache rates in costs.json; routine bugs belong on fix-bug."
 
 [archetypes.perf-optimization]
 executor = "codex"

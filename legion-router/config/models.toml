@@ -12,8 +12,8 @@
 # routes to it. Every Claude role runs on CLAUDE CODE (the `claude` executor),
 # never piped through Cursor.
 #
-# TIERS. The catalog separates capability from volume so a stronger model can
-# be selected when avoiding rework matters more than its higher per-token rate:
+# TIERS. The catalog separates capability and workload fit from token prices.
+# Evaluate each role on accepted results and total cost, including rework:
 #
 #   frontier   Fable 5.1 / GPT-6 Astra. Reserved for the hard end -- deep bugs,
 #              perf work, adversarial security review, frontend craft. Routed by

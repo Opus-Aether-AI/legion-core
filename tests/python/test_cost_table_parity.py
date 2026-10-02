@@ -204,7 +204,7 @@ def test_typescript_reader_prices_cache_writes(
 
 
 @pytest.mark.parametrize("role", SOL_ROLES)
-def test_sol_roles_match_specific_rates_including_python_cache_write_contract(role):
+def test_sol_roles_load_specific_rates_including_cache_write_rate(role):
     # The activity usage contract carries cached reads but no cache-write tokens.
     # Verify its loaded write rate; actual write billing is tested above in the
     # two readers whose usage contracts accept writes.

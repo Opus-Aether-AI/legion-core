@@ -59,8 +59,8 @@ as shadow costs for subscription usage. The Sol roles cost $2 input, $10 output,
 $0.10 cache reads, and $2.50 cache writes per million tokens at standard context.
 When input + cache-read + cache-write tokens exceed 272,000, input and cache
 rates double and output rises 1.5x. Exactly 272,000 prompt tokens still use
-standard rates. These current catalog rates supersede older price comparisons
-in routing notes; routing still selects semantic roles.
+standard rates. Routing selects semantic roles; expanding the precision pilot
+still requires paired acceptance evidence for workload quality.
 
 ## Quick start
 

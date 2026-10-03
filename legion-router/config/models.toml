@@ -21,7 +21,7 @@
 #   precision  gpt-5.6-sol. Costs 2x Terra on input and 1.67x on output, so it
 #              can be cheaper end to end when one careful pass avoids a second
 #              implementation/review cycle. Used for high-rework-risk work.
-#   workhorse  Opus 5 / gpt-5.6-terra / Grok 4.6. Carries the volume: scoped
+#   workhorse  Opus 5.5 / gpt-5.6-terra / Grok 4.6. Carries the volume: scoped
 #              implementation, tests, refactors, routine review.
 #   cheap      gpt-5.6-luna. Bounded, mechanical, reversible work only.
 #
@@ -29,7 +29,7 @@
 # frontier tier only with a measured reason, and record it in routing.toml's note.
 #
 # The frontend polish/review split is REAL again: `frontend-polish` runs on
-# claude_frontier (Fable 5.1) and `frontend-review` on claude_default (Opus 5),
+# claude_frontier (Fable 5.1) and `frontend-review` on claude_default (Opus 5.5),
 # so the reviewer is a genuinely different model from the author. Cursor hosts
 # ONLY its native non-Claude models (Grok + Composer, kept available).
 #
@@ -46,8 +46,8 @@ claude_frontier     = "claude-fable-5-1"  # frontend polish + opt-in high-stakes
 codex_frontier      = "gpt-6-astra"       # hard bugs, perf work, adversarial security review
 
 # ── Anthropic Claude on CLAUDE CODE (the `claude` executor / self) ──
-claude_orchestrator = "claude-opus-5"    # self: orchestration / architecture / deep reasoning (run at high)
-claude_default      = "claude-opus-5"    # generic Claude / reverse-delegate target / frontend review
+claude_orchestrator = "claude-opus-5-5"  # self: orchestration / architecture / deep reasoning (run at high)
+claude_default      = "claude-opus-5-5"  # generic Claude / reverse-delegate target / frontend review
 
 # ── OpenAI GPT-5.6 Sol (Codex) — precision implementation lane ─────
 codex_precision     = "gpt-5.6-sol"      # high-rework-risk implementation where fewer passes can lower total cost

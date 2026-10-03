@@ -4,4 +4,5 @@ set -euo pipefail
 
 [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'legion-delegate %s\n' "$*" >> "$MOCK_CALL_LOG"
 
-printf '%s\n' '{"run_id":"x","status":"ok","model":"fixture-codex","last_message":"GPT_FALLBACK","usage":{},"cost_usd":0.05}'
+printf '{"run_id":"x","status":"ok","model":"fixture-codex","last_message":"GPT_FALLBACK","usage":{},"cost_usd":%s}\n' \
+  "${MOCK_DELEGATE_COST:-0.05}"

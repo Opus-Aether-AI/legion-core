@@ -58,7 +58,7 @@ task_file = true
 effort = true
 model_chain = true
 review = "prompt"
-# Claude reviews on claude_default (Opus 5), which is a DIFFERENT model from the
+# Claude reviews on claude_default (Opus 5.5), which is a DIFFERENT model from the
 # frontier role that authors frontend-polish (Fable 5.1) — so a Claude-sourced
 # review is now a real second lens within the lineage rather than the same model
 # twice. It is still same-VENDOR, so claude stays LAST in [review].order: genuine

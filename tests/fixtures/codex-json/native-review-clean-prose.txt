@@ -1,0 +1,1 @@
+Both prior pricing-ratio findings are resolved with current catalog references and context/cache distinctions. The immutable diff preserves routing and fallback contracts, adds correctly ordered Sol pricing, and introduces no new blocking issues.

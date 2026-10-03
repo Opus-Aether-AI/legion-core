@@ -47,6 +47,21 @@ The proxy binds **loopback only** — that is the sole auth on `/ingest`. Secret
 
 `codex exec` is an **autonomous agent** (task → edits), not a chat endpoint, and Codex authenticates via a ChatGPT subscription (no `OPENAI_API_KEY`). So GPT work can't sit on the proxy's HTTP hot path. Legion **splits transport from accounting**: Claude/MiniMax bytes flow *through* the proxy (translation-free); GPT runs *out-of-band* via `legion-delegate`, which POSTs a usage record *to* the proxy's `/ingest` sink. `legion-report` then shows GPT spend next to Claude.
 
+The `codex_precision`, `codex_review`, and `opencode_review` roles use GPT-6.1
+Sol, configured in `config/models.toml`. Migration uses `codex_precision` with
+`codex_workhorse` as its fallback; reviewer selection follows `[review].order`
+and each executor's review role. Astra remains the frontier, Terra the workhorse
+and harness default, and Luna the cheap tier. Archetype assignments and reasoning
+efforts stay the same.
+
+`config/costs.json` retains historical prices and supplies API reference prices
+as shadow costs for subscription usage. The Sol roles cost $2 input, $10 output,
+$0.10 cache reads, and $2.50 cache writes per million tokens at standard context.
+When input + cache-read + cache-write tokens exceed 272,000, input and cache
+rates double and output rises 1.5x. Exactly 272,000 prompt tokens still use
+standard rates. Routing selects semantic roles; expanding the precision pilot
+still requires paired acceptance evidence for workload quality.
+
 ## Quick start
 
 ```bash
@@ -293,7 +308,7 @@ legion-router/
 │       ├── codex-json.sh        # parse `codex exec --json` streams (single point of codex-schema knowledge)
 │       ├── cost.sh              # per-model USD cost from config/costs.json
 │       └── executor-context.sh  # recursion-proof delegated-child role signal
-├── config/costs.json            # per-model price table (GPT defaults to $0 — see SKILL.md)
+├── config/costs.json            # API reference prices, including GPT shadow costs
 ├── references/                  # routing policy + cost model docs
 └── SKILL.md                     # when/how a primary should delegate
 ```
@@ -306,10 +321,17 @@ legion-router/
 - Delegation never auto-applies a diff unless `--apply` is given and the diff applies cleanly.
 - Reviews resolve `--base`/`--head` once to commit SHAs, retry transient
   executor failures at most twice by default, and write a durable terminal receipt.
-  Every Codex review attempt remains mechanically bound with `exec -s read-only
-  review --base <resolved-sha>`; optional bounded, scanned task guidance is
-  injected through Codex developer instructions and never replaces the base
-  argument.
+  Codex starts with `exec -s read-only review --base <resolved-sha>`; optional
+  bounded, scanned task guidance uses developer instructions. Only a clean,
+  schema-invalid result without negative signals selects the existing format
+  retry via ordinary `exec --output-schema`. That retry independently reviews
+  the full frozen patch and task guidance delivered on stdin, with the same
+  model, effort, read-only sandbox, and base/head SHAs. Transient failures still
+  retain the current mode (native until a format retry selects ordinary exec).
+  The patch uses a random, collision-checked boundary and is explicitly untrusted
+  data, not reviewer instructions. Malformed rejections and contradictory verdicts fail closed.
+  Codex's generation schema uses the supported Structured Outputs subset; the
+  canonical verdict schema and runtime semantic checks still decide acceptance.
 - Every executor receives `LEGION_ACTIVE=1`, `LEGION_EXECUTOR=1`,
   `LEGION_EXECUTOR_NAME`, `LEGION_DEPTH`, and `LEGION_RUN_ID`; initialized
   repository policy uses that context to prevent accidental recursive delegation.

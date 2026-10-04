@@ -389,6 +389,37 @@ def test_migration_uses_sol_precision_lane_with_terra_fallback():
     assert precision_fallbacks == set()
 
 
+def test_sol_generation_resolves_for_precision_review_and_review_fallbacks():
+    t, m = table(), models()
+    precision = m["codex_precision"]
+    assert precision.split("-")[1:] == ["6.1", "sol"]
+    assert m["codex_review"] == precision
+    assert m["opencode_review"] == "openai/" + precision
+
+    executors = lr.load_executors(os.path.join(HERE, "..", "..", "legion-router", "config", "executors.toml"))
+    reviewers = lr.review_order(t, executors)
+    assert [r["executor"] for r in reviewers] == ["codex", "cursor", "opencode", "claude"]
+    for executor, role in (("codex", "codex_review"), ("opencode", "opencode_review")):
+        reviewer = next(r for r in reviewers if r["executor"] == executor)
+        assert reviewer["model_ref"] == role
+        assert lr.resolve_model_ref(m, reviewer["model_ref"]) == m[role]
+    for archetype in ("hard-bug", "security-review"):
+        resolved = lr.resolve(t, archetype, m)
+        assert resolved["model"] == m["codex_frontier"]
+        assert resolved["fallback_refs"] == ["codex_review"]
+        assert resolved["fallback"] == [precision]
+
+
+def test_sol_upgrade_preserves_astra_terra_and_luna_catalog_defaults():
+    m = models()
+    assert m["codex_frontier"].split("-")[1:] == ["6", "astra"]
+    assert m["codex_workhorse"].split("-")[1:] == ["5.6", "terra"]
+    assert m["codex_cheap"].split("-")[1:] == ["5.6", "luna"]
+    for role in ("codex_default", "hermes_default", "pi_default"):
+        assert m[role] == m["codex_workhorse"]
+    assert m["opencode_default"] == "openai/" + m["codex_workhorse"]
+
+
 def test_bulk_lanes_reach_the_frontier_only_through_fallback():
     """The bulk lanes may NAME a frontier role, but only as a quota fallback.
 

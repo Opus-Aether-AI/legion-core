@@ -76,6 +76,15 @@ CASES = [
     ("claude_orchestrator", 300_000, 10_000, 1.4),
     # Exactly at the threshold is NOT over it.
     ("codex_frontier", 272_000, 0, 2.72),
+    ("codex_cheap", 300_000, 10_000, 0.072),
+]
+
+SOL_ROLES = ("codex_precision", "codex_review", "opencode_review")
+# Standard 2/10 rates at and below the boundary, then 4/15 immediately above.
+CASES += [
+    (role, inp, 10_000, expected)
+    for role in SOL_ROLES
+    for inp, expected in ((271_999, 0.643998), (272_000, 0.644), (272_001, 1.238004))
 ]
 
 # (role, input_tokens, output_tokens, cached_tokens, expected_usd)
@@ -111,6 +120,21 @@ WRITE_CASES = [
     ("claude_default", 200_000, 10_000, 100_000, 40_000, 1.22),
     ("claude_orchestrator", 200_000, 10_000, 100_000, 40_000, 1.22),
 ]
+# 40K uncached input + cached reads: cache alone pushes the prompt over the tier.
+CACHED_CASES += [
+    (role, inp, 10_000, inp - 40_000, expected)
+    for role in SOL_ROLES
+    for inp, expected in ((271_999, 0.2031999), (272_000, 0.2032), (272_001, 0.3564002))
+]
+
+# (role, uncached_input, output, cache_read, cache_write, expected_usd)
+# 40K input + 200K reads + writes. Standard: .08 + .10 + .02 + writes * 2.5/M;
+# above the boundary: .16 + .15 + .04 + writes * 5/M.
+WRITE_CASES += [
+    (role, 40_000, 10_000, 200_000, writes, expected)
+    for role in SOL_ROLES
+    for writes, expected in ((31_999, 0.2799975), (32_000, 0.28), (32_001, 0.510005))
+]
 
 
 def _sh_cost(model, inp, out, cache_read=0, cache_write=0):
@@ -138,19 +162,17 @@ def test_python_reader_matches_hand_computed(role, inp, out, expected):
 
 
 def _ts_cost(model, inp, out, tmp_path, cache_read=0, cache_write=0):
-    # router.ts binds its port at import time and Bun.serve keeps the process
-    # alive, so the probe must (a) take a port of its own, well away from the
-    # daemon's 8082, and (b) exit explicitly. Without the exit every probe lingers
-    # holding its port, and the next one dies on EADDRINUSE.
-    port = 19000 + (abs(hash((model, inp, out))) % 900)
+    # Import the real pricing function without starting the proxy's listener.
+    # Cost parity needs no socket; a stub keeps these probes portable to sandboxes.
     probe = tmp_path / "probe.ts"
     probe.write_text(
-        f'import {{ costForModel }} from "{ROUTER_TS}";\n'
+        'Bun.serve = ((options) => ({ port: options.port })) as typeof Bun.serve;\n'
+        f'const {{ costForModel }} = await import("{ROUTER_TS}");\n'
         f'console.log("COST=" + costForModel({json.dumps(model)}, '
         f'{inp}, {out}, {cache_read}, {cache_write}));\n'
         f"process.exit(0);\n"
     )
-    env = {**os.environ, "ROUTER_PORT": str(port)}
+    env = {**os.environ, "LEGION_COSTS_FILE": COSTS}
     res = subprocess.run(
         ["bun", "run", str(probe)], capture_output=True, text=True, env=env,
         timeout=60, check=False,
@@ -250,6 +272,35 @@ def test_claude_standard_price_precedence_and_historical_rates(
     else:
         got = _ts_cost(model, inp, out, tmp_path, cached, written)
     assert got == pytest.approx(rates[bucket], abs=1e-6)
+
+
+@pytest.mark.parametrize("role", SOL_ROLES)
+def test_sol_roles_load_specific_rates_including_cache_write_rate(role):
+    # The activity usage contract carries cached reads but no cache-write tokens.
+    # Verify its loaded write rate; actual write billing is tested above in the
+    # two readers whose usage contracts accept writes.
+    model = _model(role)
+    costs = activity.load_costs(COSTS)
+    row = next(row for row in costs["models"] if row["match"] in model.lower())
+    assert row["match"] == model.removeprefix("openai/")
+    assert activity._rates_for(model, costs) == {
+        "input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5,
+        "lc_threshold": 272_000, "lc_input_multiplier": 2.0, "lc_output_multiplier": 1.5,
+    }
+
+
+def test_historical_sol_prices_remain_available():
+    costs = activity.load_costs(COSTS)
+    current = _model("codex_precision")
+    historical = [row for row in costs["models"]
+                  if row["match"].endswith("-sol") and row["match"] != current]
+    assert len(historical) == 1
+    model = historical[0]["match"]
+    assert historical[0] == {
+        "match": model, "input": 4.0, "output": 20.0,
+        "cache_read": 0.4, "cache_write": 0.0,
+    }
+    assert _py_cost(model, 100_000, 5_000) == pytest.approx(0.5)
 
 
 def test_frontier_claude_cache_read_beats_its_prior_generation():

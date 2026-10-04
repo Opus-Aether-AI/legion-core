@@ -147,15 +147,83 @@ resolve_delegate_bin() {
   return 1
 }
 
+worktree_path_is_registered() {
+  local repo="$1" wt="$2"
+  git -C "$repo" worktree list --porcelain 2>/dev/null \
+    | awk -v target="$wt" '$1 == "worktree" && substr($0, 10) == target { found=1 } END { exit !found }'
+}
+
+# A failed primary must give up the canonical run path before another adapter
+# adopts the same run id. The ownership bit is set only after this process's
+# `git worktree add` succeeds, so a setup collision can never cause us to remove
+# somebody else's worktree or branch.
+release_owned_primary_worktree() {
+  local repo="$1" wt="$2" branch="$3" owned="$4"
+  [[ "$owned" == "1" ]] || return 0
+
+  if declare -F legion_with_git_worktree_lock >/dev/null 2>&1; then
+    legion_with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  else
+    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  fi
+  if [[ -e "$wt" || -L "$wt" ]] || worktree_path_is_registered "$repo" "$wt"; then
+    return 1
+  fi
+
+  git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
+  git -C "$repo" show-ref --verify --quiet "refs/heads/$branch" && return 1
+  if declare -F legion_with_git_worktree_lock >/dev/null 2>&1; then
+    legion_with_git_worktree_lock "$repo" \
+      git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  else
+    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  fi
+}
+
+claude_artifacts_json() {
+  local out_file="$1" err_file="$2" wt="$3" diff_path="$4" declined="$5"
+  jq -cn --arg stdout "$out_file" --arg stderr "$err_file" \
+    --arg wt "$wt" --arg diff "$diff_path" --arg declined "$declined" \
+    '{stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff}
+     + (if $declined == "" then {} else {declined_models:$declined} end)'
+}
+
+preserve_primary_evidence() {
+  local repo="$1" run_id="$2" out_file="$3" err_file="$4" diff_path="$5"
+  local wt="$6" declined="$7"
+  local evidence_dir="$repo/.legion/runs/$run_id/primary-claude"
+  local saved_out="$evidence_dir/stdout.json" saved_err="$evidence_dir/stderr.log"
+  local saved_diff="$evidence_dir/diff.patch"
+
+  mkdir -p "$evidence_dir" || return 1
+  cp "$out_file" "$saved_out" || return 1
+  cp "$err_file" "$saved_err" || return 1
+  if [[ -f "$diff_path" ]]; then
+    cp "$diff_path" "$saved_diff" || return 1
+  else
+    : > "$saved_diff" || return 1
+  fi
+  claude_artifacts_json "$saved_out" "$saved_err" "$wt" "$saved_diff" "$declined"
+}
+
 emit_terminal_json() {
   local executor="$1" model="$2" status="$3" result="$4" usage="$5" cost="$6" fell_back="$7" reason="${8:-}"
+  local terminal_wt terminal_diff
+  if [[ "$#" -ge 9 ]]; then
+    terminal_wt="${9-}"
+    terminal_diff="${10-}"
+  else
+    terminal_wt="${LEGION_CLAUDE_WORKTREE:-}"
+    terminal_diff="${LEGION_CLAUDE_DIFF:-}"
+  fi
   # LEGION_CLAUDE_WORKTREE / _DIFF are set by cmd_run once a worktree exists, so a caller can
   # review the run as a diff instead of diffing the operator's tree by hand.
   jq -cn \
     --arg run_id "$RUN_ID" --arg executor "$executor" --arg model "$model" \
     --arg status "$status" --arg result "$result" --argjson usage "$usage" \
     --argjson cost "${cost:-0}" --argjson fell_back "$fell_back" --arg reason "$reason" \
-    --arg wt "${LEGION_CLAUDE_WORKTREE:-}" --arg diff "${LEGION_CLAUDE_DIFF:-}" '
+    --arg wt "$terminal_wt" --arg diff "$terminal_diff" '
     {run_id:$run_id, executor:$executor, model:$model, status:$status, result:$result,
      usage:$usage, cost_usd:$cost, fell_back:$fell_back}
     + (if $reason == "" then {} else {fell_back_reason:$reason, reason:$reason} end)
@@ -165,7 +233,9 @@ emit_terminal_json() {
 
 run_fallback() {
   local reason="$1" task="$2" model="$3" repo="$4" sandbox="$5" base="$6"
+  local fallback_effort="${7:-}" fallback_apply="${8:-0}" fallback_keep="${9:-0}"
   local delegate_bin out rc fallback_status fallback_model fallback_usage fallback_cost fallback_result last_path
+  local fallback_wt_result="" fallback_diff=""
   local -a fallback_args
   local fallback_art="$repo/.legion/runs/$RUN_ID"
   local fallback_wt="$repo/.legion/worktrees/$RUN_ID"
@@ -176,7 +246,7 @@ run_fallback() {
       failed "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
       "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
     [[ -z "${preset_run_id:-}" ]] || legion_disarm_adopted_run_guard
-    emit_terminal_json "codex" "$model" "failed" "" "{}" 0 true "$reason"
+    emit_terminal_json "codex" "$model" "failed" "" "{}" 0 true "$reason" "" ""
     return 1
   }
 
@@ -192,17 +262,25 @@ run_fallback() {
   fallback_args=(run --executor codex --model "$model" --task "$task" --repo "$repo"
     --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID")
   [[ -z "${archetype:-}" ]] || fallback_args+=(--archetype "$archetype")
+  [[ -z "$fallback_effort" ]] || fallback_args+=(--reasoning-effort "$fallback_effort")
+  [[ "$fallback_apply" != "1" ]] || fallback_args+=(--apply)
+  [[ "$fallback_keep" != "1" ]] || fallback_args+=(--keep)
   [[ "${QUIET:-0}" != "1" ]] || fallback_args+=(--quiet)
   out="$("$delegate_bin" "${fallback_args[@]}")"
   rc=$?
   set -e
 
   fallback_status="$(jq -r '.status // "failed"' <<<"$out" 2>/dev/null || printf 'failed')"
+  [[ -n "$fallback_status" ]] || fallback_status="failed"
   fallback_model="$(jq -r '.model // empty' <<<"$out" 2>/dev/null || true)"
   [[ -n "$fallback_model" ]] || fallback_model="$model"
   fallback_usage="$(jq -c '.usage // {}' <<<"$out" 2>/dev/null || printf '{}')"
+  jq -e 'type == "object"' <<<"$fallback_usage" >/dev/null 2>&1 || fallback_usage="{}"
   fallback_cost="$(jq -r '.cost_usd // 0' <<<"$out" 2>/dev/null || printf '0')"
+  jq -e 'type == "number" and . >= 0' <<<"$fallback_cost" >/dev/null 2>&1 || fallback_cost=0
   fallback_result="$(jq -r '.result // .last_message // empty' <<<"$out" 2>/dev/null || true)"
+  fallback_wt_result="$(jq -r '.worktree // empty' <<<"$out" 2>/dev/null || true)"
+  fallback_diff="$(jq -r '.diff_path // empty' <<<"$out" 2>/dev/null || true)"
 
   if [[ -z "$fallback_result" ]]; then
     last_path="$(jq -r '.last_message_path // empty' <<<"$out" 2>/dev/null || true)"
@@ -215,7 +293,8 @@ run_fallback() {
     "$fallback_status" "$RUN_ID" "$repo" "$fallback_art" "$fallback_wt" "$fallback_branch" \
     "$fallback_model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
   [[ -z "${preset_run_id:-}" ]] || legion_disarm_adopted_run_guard
-  emit_terminal_json "codex" "$fallback_model" "$fallback_status" "$fallback_result" "$fallback_usage" "$fallback_cost" true "$reason"
+  emit_terminal_json "codex" "$fallback_model" "$fallback_status" "$fallback_result" "$fallback_usage" "$fallback_cost" true "$reason" \
+    "$fallback_wt_result" "$fallback_diff"
   return "$rc"
 }
 
@@ -231,7 +310,7 @@ cmd_run() {
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
   local base_commit=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
-  local read_only_violation=0
+  local read_only_violation=0 claude_worktree_owned=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -320,7 +399,8 @@ cmd_run() {
     if [[ "$allow_fallback" -eq 1 ]]; then
       [[ "$low_credit" -eq 1 ]] && note "⚠ LEGION_LOW_CREDIT=claude: skipping Claude and falling back to $fallback_model"
       [[ "$low_credit" -eq 0 ]] && note "⚠ Claude CLI unavailable: falling back to $fallback_model"
-      run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
+      run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base" \
+        "$effort" "$do_apply" "$keep"
       return $?
     fi
     emit_span "claude" "$model" "failed" 0 0 "{}" "$task" "$artifacts"
@@ -343,6 +423,7 @@ cmd_run() {
   fi
   mkdir -p "$repo/.legion/worktrees"
   if git -C "$repo" worktree add -q -b "$branch" "$wt" "$base" 2>/dev/null; then
+    claude_worktree_owned=1
     # Artifacts live under the repo's run dir, not tmpdir — the EXIT trap deletes tmpdir, and
     # the diff is the reviewable output of the run.
     mkdir -p "$repo/.legion/runs/$RUN_ID"
@@ -449,25 +530,9 @@ cmd_run() {
       read_only_violation=1
       note "⚠ Claude produced file changes during a read-only run; refusing the result"
     fi
-    if [[ "$do_apply" -eq 1 && "$read_only_violation" -eq 0 && -s "$diff_path" ]]; then
-      if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
-        git -C "$repo" apply "$diff_path" && note "diff applied to $repo"
-      else
-        note "diff did not apply cleanly; left in $diff_path"
-      fi
-    fi
     wt_report="$wt"
-    if [[ "$keep" -ne 1 ]]; then
-      # The worktree goes; the patch stays. It already lives outside the worktree.
-      git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
-      git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
-      git -C "$repo" worktree prune >/dev/null 2>&1 || true
-      wt_report="(removed; rerun with --keep to retain the worktree)"
-    fi
-    artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" \
-      --arg wt "$wt_report" --arg diff "$diff_path" --arg declined "$claude_chain_note" \
-      '{stdout:$stdout, stderr:$stderr, worktree:$wt, diff:$diff}
-       + (if $declined == "" then {} else {declined_models:$declined} end)')"
+    artifacts="$(claude_artifacts_json "$out_file" "$err_file" "$wt_report" \
+      "$diff_path" "$claude_chain_note")"
     export LEGION_CLAUDE_WORKTREE="$wt_report" LEGION_CLAUDE_DIFF="$diff_path"
   fi
   end_ms="$(date +%s000)"
@@ -503,6 +568,14 @@ cmd_run() {
     status="failed"
     [[ -n "$result" ]] && result="${result}"$'\n'
     result="${result}Claude produced file changes during a read-only run."
+    if [[ "$keep" -ne 1 ]] \
+      && release_owned_primary_worktree "$repo" "$wt" "$branch" "$claude_worktree_owned"; then
+      claude_worktree_owned=0
+      wt_report="(removed; rerun with --keep to retain the worktree)"
+      artifacts="$(claude_artifacts_json "$out_file" "$err_file" "$wt_report" \
+        "$diff_path" "$claude_chain_note")"
+      export LEGION_CLAUDE_WORKTREE="$wt_report"
+    fi
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
@@ -515,8 +588,24 @@ cmd_run() {
   # declined_final gates the success path: a refusal returns rc 0, valid JSON and
   # is_error false, so an exhausted chain would otherwise report ok and hand back
   # the refusal text as the run's result.
-  if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" && "$declined_final" -eq 0 ]]; then
+  if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" \
+    && "$declined_final" -eq 0 && "$diff_rc" -eq 0 ]]; then
     status="ok"
+    if [[ "$do_apply" -eq 1 && -s "$diff_path" ]]; then
+      if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
+        git -C "$repo" apply "$diff_path" && note "diff applied to $repo"
+      else
+        note "diff did not apply cleanly; left in $diff_path"
+      fi
+    fi
+    if [[ "$keep" -ne 1 ]] \
+      && release_owned_primary_worktree "$repo" "$wt" "$branch" "$claude_worktree_owned"; then
+      claude_worktree_owned=0
+      wt_report="(removed; rerun with --keep to retain the worktree)"
+      artifacts="$(claude_artifacts_json "$out_file" "$err_file" "$wt_report" \
+        "$diff_path" "$claude_chain_note")"
+      export LEGION_CLAUDE_WORKTREE="$wt_report"
+    fi
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
     [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
       "$status" "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
@@ -526,7 +615,9 @@ cmd_run() {
     return 0
   fi
 
-  if [[ "$declined_final" -eq 1 ]]; then
+  if [[ "$diff_rc" -ne 0 ]]; then
+    reason="diff_capture_failed"
+  elif [[ "$declined_final" -eq 1 ]]; then
     # Distinct from claude_error: nothing went wrong mechanically, every model
     # in the chain declined or was unreachable. Downstream can tell "the work
     # failed" from "this vendor would not take the work".
@@ -539,9 +630,49 @@ cmd_run() {
 
   if [[ "$allow_fallback" -eq 1 ]]; then
     status="$([[ "$reason" == "claude_limit" ]] && printf blocked || printf failed)"
+    local preserved_artifacts=""
+    if ! preserved_artifacts="$(preserve_primary_evidence "$repo" "$RUN_ID" "$out_file" "$err_file" \
+      "$diff_path" "$wt_report" "$claude_chain_note")"; then
+      note "⚠ could not preserve failed Claude evidence; refusing fallback"
+      emit_span "claude" "$model" "failed" "$dur" "$cost" "$usage" "$task" "$artifacts"
+      [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+        failed "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+        "$model" "$sandbox" "$base" "$archetype" "$effort"
+      [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+      emit_terminal_json "claude" "$model" "failed" "$result" "$usage" "$cost" false \
+        "fallback_evidence_failed"
+      return 1
+    fi
+    artifacts="$preserved_artifacts"
+    if [[ "$diff_rc" -ne 0 ]]; then
+      note "⚠ diff capture failed; retaining Claude worktree and refusing fallback"
+      emit_span "claude" "$model" "failed" "$dur" "$cost" "$usage" "$task" "$artifacts"
+      [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+        failed "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+        "$model" "$sandbox" "$base" "$archetype" "$effort"
+      [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+      emit_terminal_json "claude" "$model" "failed" "$result" "$usage" "$cost" false \
+        "$reason"
+      return 1
+    fi
+    if ! release_owned_primary_worktree "$repo" "$wt" "$branch" "$claude_worktree_owned"; then
+      note "⚠ could not release failed Claude worktree; refusing fallback"
+      emit_span "claude" "$model" "failed" "$dur" "$cost" "$usage" "$task" "$artifacts"
+      [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \
+        failed "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" "$wt_report" "$branch" \
+        "$model" "$sandbox" "$base" "$archetype" "$effort"
+      [[ -z "$preset_run_id" ]] || legion_disarm_adopted_run_guard
+      emit_terminal_json "claude" "$model" "failed" "$result" "$usage" "$cost" false \
+        "fallback_cleanup_failed"
+      return 1
+    fi
+    claude_worktree_owned=0
+    wt_report="(released before fallback)"
+    artifacts="$(jq -c --arg wt "$wt_report" '.worktree = $wt' <<<"$artifacts")"
     emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
     note "⚠ Claude failed ($reason): falling back to $fallback_model"
-    run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base"
+    run_fallback "$reason" "$task" "$fallback_model" "$repo" "$sandbox" "$base" \
+      "$effort" "$do_apply" "$keep"
     return $?
   fi
 
@@ -549,6 +680,14 @@ cmd_run() {
     status="blocked"
   else
     status="failed"
+  fi
+  if [[ "$diff_rc" -eq 0 && "$keep" -ne 1 ]] \
+    && release_owned_primary_worktree "$repo" "$wt" "$branch" "$claude_worktree_owned"; then
+    claude_worktree_owned=0
+    wt_report="(removed; rerun with --keep to retain the worktree)"
+    artifacts="$(claude_artifacts_json "$out_file" "$err_file" "$wt_report" \
+      "$diff_path" "$claude_chain_note")"
+    export LEGION_CLAUDE_WORKTREE="$wt_report"
   fi
   emit_span "claude" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
   [[ -z "$preset_run_id" ]] || legion_write_adapter_run_state \

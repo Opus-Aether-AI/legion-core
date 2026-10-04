@@ -128,7 +128,8 @@ make_test_repo() {
 @test "legion-claude: usage limit falls back to codex" {
     local repo; repo="$(make_test_repo fb1)"
     local base; base="$(git -C "$repo" rev-parse HEAD)"
-    MOCK_CLAUDE_LIMIT=1 run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+    MOCK_CLAUDE_LIMIT=1 MOCK_DELEGATE_COST=1e-05 \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
         --sandbox read-only --base "$base" --archetype final-review --quiet
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.status == "ok"'
@@ -136,6 +137,7 @@ make_test_repo() {
     echo "$output" | jq -e '.result == "GPT_FALLBACK"'
     echo "$output" | jq -e '.fell_back == true'
     echo "$output" | jq -e '.fell_back_reason == "claude_limit"'
+    echo "$output" | jq -e '.cost_usd == 1e-05'
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -s \
       '[.[] | select(.executor == \"claude\" and .status == \"blocked\")] | length'"
     [ "$status" -eq 0 ]
@@ -147,6 +149,138 @@ make_test_repo() {
     assert_mock_called legion-delegate "--base $base"
     assert_mock_called legion-delegate "--executor codex"
     assert_mock_called legion-delegate "--archetype final-review"
+}
+
+@test "legion-claude: kept failed worktree is released before the real Codex fallback" {
+    local repo; repo="$(make_test_repo fb-real-delegate)"
+    local run_id="claude-real-fallback"
+    local real_bin="$TEST_TMPDIR/real-delegate-bin"
+    mkdir -p "$real_bin"
+    ln -s "$REPO_ROOT/legion-router/bin/legion-delegate" "$real_bin/legion-delegate"
+
+    PATH="$real_bin:$PATH" MOCK_CLAUDE_LIMIT=1 \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --effort high --apply --keep --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e --arg run "$run_id" '
+      .run_id == $run
+      and .status == "ok"
+      and .executor == "codex"
+      and .fell_back == true
+      and .fell_back_reason == "claude_limit"
+      and (.worktree | endswith("/.legion/worktrees/" + $run))
+      and (.diff_path | endswith("/.legion/runs/" + $run + "/diff.patch"))
+    '
+    [ -d "$repo/.legion/worktrees/$run_id" ]
+    [ "$(git -C "$repo/.legion/worktrees/$run_id" branch --show-current)" = "legion/delegate-$run_id" ]
+    ! git -C "$repo" show-ref --verify --quiet "refs/heads/legion/claude-$run_id"
+    [ -e "$repo/MOCK_CODEX_CHANGE.txt" ]
+    assert_mock_called codex "model_reasoning_effort=high"
+    jq -e --arg run "$run_id" '
+      .run_id == $run
+      and .lifecycle.phase == "ok"
+      and .branch == ("legion/delegate-" + $run)
+      and (.worktree_dir | endswith("/.legion/worktrees/" + $run))
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
+
+    jq -e '.is_error == true' "$repo/.legion/runs/$run_id/primary-claude/stdout.json"
+    [ -f "$repo/.legion/runs/$run_id/primary-claude/stderr.log" ]
+    [ -f "$repo/.legion/runs/$run_id/primary-claude/diff.patch" ]
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e \
+      'select(.executor == \"claude\" and .run_id == \"$run_id\") \
+       | .artifacts.worktree == \"(released before fallback)\" \
+         and (.artifacts.stdout | endswith(\"/primary-claude/stdout.json\"))'"
+    [ "$status" -eq 0 ]
+}
+
+@test "legion-claude: failed primary edits stay as evidence while --apply uses the fallback diff" {
+    local repo; repo="$(make_test_repo fb-primary-edits)"
+    local run_id="claude-edit-fallback"
+    local real_bin="$TEST_TMPDIR/real-delegate-bin"
+    mkdir -p "$real_bin"
+    ln -s "$REPO_ROOT/legion-router/bin/legion-delegate" "$real_bin/legion-delegate"
+
+    PATH="$real_bin:$PATH" MOCK_CLAUDE_WRITE=1 MOCK_CLAUDE_FAIL=1 \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --apply --quiet
+
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '
+      .status == "ok"
+      and .executor == "codex"
+      and .fell_back == true
+      and .fell_back_reason == "claude_error"
+      and (.worktree | startswith("(removed;"))
+      and (.diff_path | endswith("/diff.patch"))
+    '
+    [ ! -e "$repo/claude-unexpected.txt" ]
+    [ -e "$repo/MOCK_CODEX_CHANGE.txt" ]
+    grep -q 'claude-unexpected.txt' "$repo/.legion/runs/$run_id/primary-claude/diff.patch"
+    grep -q 'MOCK_CODEX_CHANGE.txt' "$repo/.legion/runs/$run_id/diff.patch"
+    [ ! -d "$repo/.legion/worktrees/$run_id" ]
+    ! git -C "$repo" show-ref --verify --quiet "refs/heads/legion/claude-$run_id"
+    ! git -C "$repo" show-ref --verify --quiet "refs/heads/legion/delegate-$run_id"
+    jq -e --arg run "$run_id" '
+      .branch == ("legion/delegate-" + $run)
+      and (.worktree_dir | endswith("/.legion/worktrees/" + $run))
+    ' "$LEGION_REGISTRY_DIR/$run_id.json"
+}
+
+@test "legion-claude: diff capture failure retains the primary worktree and refuses fallback" {
+    local repo; repo="$(make_test_repo fb-diff-fail)"
+    local run_id="claude-diff-fail"
+    local git_bin; git_bin="$(make_failing_git_wrapper diff)"
+
+    PATH="$git_bin:$PATH" MOCK_CLAUDE_WRITE=1 \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e --arg run "$run_id" '
+      .status == "failed"
+      and .reason == "diff_capture_failed"
+      and .fell_back == false
+      and (.worktree | endswith("/.legion/worktrees/" + $run))
+    '
+    [ -e "$repo/.legion/worktrees/$run_id/claude-unexpected.txt" ]
+    [ "$(git -C "$repo/.legion/worktrees/$run_id" branch --show-current)" = "legion/claude-$run_id" ]
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: fallback cleanup failure keeps accurate primary evidence" {
+    local repo; repo="$(make_test_repo fb-cleanup-fail)"
+    local run_id="claude-cleanup-fail"
+    local wrapper="$TEST_TMPDIR/git-remove-fails" real_git
+    real_git="$(command -v git)"
+    mkdir -p "$wrapper"
+    cat > "$wrapper/git" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" worktree remove "*) exit 97 ;;
+esac
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$wrapper/git"
+
+    PATH="$wrapper:$PATH" MOCK_CLAUDE_LIMIT=1 \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+        --run-id "$run_id" --keep --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e --arg run "$run_id" '
+      .status == "failed"
+      and .reason == "fallback_cleanup_failed"
+      and .fell_back == false
+      and (.worktree | endswith("/.legion/worktrees/" + $run))
+    '
+    [ -d "$repo/.legion/worktrees/$run_id" ]
+    [ "$(git -C "$repo/.legion/worktrees/$run_id" branch --show-current)" = "legion/claude-$run_id" ]
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e --arg run '$run_id' \
+      'select(.executor == \"claude\" and .run_id == \$run) \
+       | .artifacts.worktree | endswith(\"/.legion/worktrees/\" + \$run)'"
+    [ "$status" -eq 0 ]
+    assert_mock_not_called legion-delegate
 }
 
 @test "legion-claude: environment archetype survives Codex fallback" {
@@ -203,6 +337,29 @@ make_test_repo() {
     assert_mock_not_called legion-delegate
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e 'select(.executor == \"claude\" and .status == \"failed\")'"
     [ "$status" -eq 0 ]
+}
+
+@test "legion-claude: worktree setup collision never removes an unowned worktree" {
+    local repo; repo="$(make_test_repo worktree-collision)"
+    local run_id="claude-unowned-collision"
+    local wt="$repo/.legion/worktrees/$run_id"
+    mkdir -p "$repo/.legion/worktrees"
+    git -C "$repo" worktree add -q -b external-owner "$wt" HEAD
+
+    run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" \
+      --run-id "$run_id" --keep --quiet
+
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .status == "failed"
+      and .reason == "worktree_setup_failed"
+      and .fell_back == false
+    '
+    [ -d "$wt" ]
+    [ "$(git -C "$wt" branch --show-current)" = "external-owner" ]
+    git -C "$repo" show-ref --verify --quiet refs/heads/external-owner
+    assert_mock_not_called claude
+    assert_mock_not_called legion-delegate
 }
 
 @test "legion-claude: non-git repo fails closed before invoking Claude" {

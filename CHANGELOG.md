@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.30.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.29.2...v0.30.0) (2026-10-04)
+
+
+### Added
+
+* **router:** migrate default Claude roles to Opus 5.5 ([#210](https://github.com/Opus-Aether-AI/legion-core/issues/210)) ([5d34257](https://github.com/Opus-Aether-AI/legion-core/commit/5d34257cf6aad8400196ede38cd017348144d171))
+* **router:** migrate Sol roles to GPT-6.1 Sol ([#206](https://github.com/Opus-Aether-AI/legion-core/issues/206)) ([385355d](https://github.com/Opus-Aether-AI/legion-core/commit/385355de36ef9cc069128ee7365e42cea68d1ea7))
+
+
+### Fixed
+
+* **release:** allow verified exact-SHA dispatch recovery ([#211](https://github.com/Opus-Aether-AI/legion-core/issues/211)) ([1b4e758](https://github.com/Opus-Aether-AI/legion-core/commit/1b4e7580827bc90338a462c250c08246b99a8bf3))
+* **router:** release failed Claude worktree before fallback ([#205](https://github.com/Opus-Aether-AI/legion-core/issues/205)) ([807787a](https://github.com/Opus-Aether-AI/legion-core/commit/807787a2c332acddedd696bad1e036b2757bcb99))
+
 ## [0.29.2](https://github.com/Opus-Aether-AI/legion-core/compare/v0.29.1...v0.29.2) (2026-10-02)
 
 

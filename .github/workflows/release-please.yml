@@ -98,12 +98,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: scripts/prepare-pending-release.sh
 
+      # Bot-token merges may have no push checks. Dispatch both checks at the
+      # exact historical SHA: use the published tag when available, otherwise
+      # an explicitly retained release ref pointing to this verified commit.
       - name: Require checks on the pending release commit
         if: ${{ steps.pending_release.outputs.pending == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ steps.pending_release.outputs.release_sha }}
+          CHECK_ALLOW_WORKFLOW_DISPATCH: "1"
         run: scripts/await-required-workflows.sh validate legion-ci
 
       - name: Create release bot token
@@ -360,11 +364,15 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: bash control/scripts/verify-release-recovery.sh "$RELEASE_TAG" "$GITHUB_WORKSPACE/release"
 
+      # Publication retries need the same dispatch allowance as release creation
+      # when a bot-token merge suppressed push checks. Dispatch both checks at
+      # the published tag; the verifier above binds it to this exact SHA.
       - name: Require validate + legion-ci green for release tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ steps.recovery_ref.outputs.sha }}
+          CHECK_ALLOW_WORKFLOW_DISPATCH: "1"
         run: control/scripts/await-required-workflows.sh validate legion-ci
 
       # Repair the installer before touching registries. `--clobber` makes a

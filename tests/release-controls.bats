@@ -6,11 +6,28 @@ load 'helpers/setup'
 setup() {
     setup_test_env
     unset GITHUB_WORKFLOW CHECK_TIMEOUT_SECONDS CHECK_POLL_INTERVAL_SECONDS MOCK_GH_API_FAIL
+    unset CHECK_ALLOW_WORKFLOW_DISPATCH MOCK_REQUIRED_WORKFLOW_RUNS MOCK_REQUIRED_WORKFLOW_RUNS_JSON
     export AWAIT_REQUIRED_WORKFLOWS="$REPO_ROOT/scripts/await-required-workflows.sh"
     export REPO="Opus-Aether-AI/legion-core"
     export SHA="0123456789012345678901234567890123456789"
     unset MOCK_RELEASE_EXISTS MOCK_RELEASE_PR_NUMBER MOCK_RELEASE_PR_TITLE MOCK_RELEASE_PR_SHA
     unset MOCK_PR_REMOVE_LABEL_FAIL
+}
+
+make_workflow_runs_fixture() {
+    export MOCK_REQUIRED_WORKFLOW_RUNS_JSON="$TEST_TMPDIR/workflow-runs.json"
+    jq -n --arg sha "$SHA" --argjson runs "$1" \
+        '{workflow_runs: ($runs | map({head_sha: $sha, status: "completed",
+            conclusion: "success", created_at: "2026-10-01T00:00:00Z"} + .))}' \
+        > "$MOCK_REQUIRED_WORKFLOW_RUNS_JSON"
+    export CHECK_TIMEOUT_SECONDS=0
+}
+
+release_workflow_step() {
+    awk -v name="$1" '
+        capture && (/^      - / || /^  [[:alnum:]_-]+:/) {exit}
+        $0 == "      - name: " name {capture=1}
+        capture {print}' "$REPO_ROOT/.github/workflows/release-please.yml"
 }
 
 make_pending_release_fixture() {
@@ -99,6 +116,144 @@ EOF
     run bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
     [ "$status" -eq 0 ]
     [[ "$output" == *"all required checks green"* ]]
+}
+
+@test "required workflow event filter accepts exact-SHA dispatch-only success only under opt-in" {
+    make_workflow_runs_fixture '[
+        {"name":"validate","event":"workflow_dispatch"},
+        {"name":"legion-ci","event":"workflow_dispatch"}
+    ]'
+
+    run env CHECK_ALLOW_WORKFLOW_DISPATCH=1 bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"all required checks green for ${SHA}"* ]]
+    assert_mock_called gh "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100"
+}
+
+@test "required workflow event filter rejects dispatch-only success by default and explicit zero" {
+    make_workflow_runs_fixture '[
+        {"name":"validate","event":"workflow_dispatch"},
+        {"name":"legion-ci","event":"workflow_dispatch"}
+    ]'
+
+    run bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"validate(not-started) legion-ci(not-started)"* ]]
+
+    run env CHECK_ALLOW_WORKFLOW_DISPATCH=0 bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"validate(not-started) legion-ci(not-started)"* ]]
+}
+
+@test "required workflow event filter keeps exact-SHA push success eligible in both modes" {
+    make_workflow_runs_fixture '[
+        {"name":"validate","event":"push"},
+        {"name":"legion-ci","event":"push"}
+    ]'
+    local opt_in
+    for opt_in in 0 1; do
+        run env CHECK_ALLOW_WORKFLOW_DISPATCH="$opt_in" bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+        [ "$status" -eq 0 ]
+    done
+}
+
+@test "required workflow identity filter rejects wrong-SHA push and dispatch runs in both modes" {
+    make_workflow_runs_fixture '[
+        {"name":"validate","event":"push","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        {"name":"validate","event":"workflow_dispatch","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        {"name":"legion-ci","event":"push","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        {"name":"legion-ci","event":"workflow_dispatch","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    ]'
+    local opt_in
+    for opt_in in 0 1; do
+        run env CHECK_ALLOW_WORKFLOW_DISPATCH="$opt_in" bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"validate(not-started) legion-ci(not-started)"* ]]
+    done
+}
+
+@test "required workflow event filter rejects pull-request success even under opt-in" {
+    make_workflow_runs_fixture '[
+        {"name":"validate","event":"pull_request"},
+        {"name":"legion-ci","event":"pull_request"}
+    ]'
+
+    local opt_in
+    for opt_in in 0 1; do
+        run env CHECK_ALLOW_WORKFLOW_DISPATCH="$opt_in" bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"validate(not-started) legion-ci(not-started)"* ]]
+    done
+}
+
+@test "required workflow event filter validates strict opt-in before calling GitHub" {
+    export CHECK_TIMEOUT_SECONDS=0
+    local opt_in
+    for opt_in in '' 2 01 true false -1 '1 or true'; do
+        run env CHECK_ALLOW_WORKFLOW_DISPATCH="$opt_in" bash "$AWAIT_REQUIRED_WORKFLOWS" validate
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"CHECK_ALLOW_WORKFLOW_DISPATCH must be 0 or 1"* ]]
+    done
+    assert_mock_not_called 'gh api'
+}
+
+@test "required workflow identity filter validates full lowercase SHA before calling GitHub" {
+    export CHECK_TIMEOUT_SECONDS=0
+    local sha
+    for sha in 0123456 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+        gaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa '0123456789012345678901234567890123456789&event=push'; do
+        run env SHA="$sha" bash "$AWAIT_REQUIRED_WORKFLOWS" validate
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"SHA must be a full lowercase 40-hex commit SHA"* ]]
+    done
+    assert_mock_not_called 'gh api'
+}
+
+@test "required workflow event filter uses latest eligible dispatch over older success" {
+    local latest latest_run expected
+    for latest in in_progress queued failure skipped cancelled; do
+        case "$latest" in
+            in_progress|queued)
+                latest_run="{\"status\":\"$latest\",\"conclusion\":null}"
+                expected="timed out waiting for: legion-ci($latest)"
+                ;;
+            *)
+                latest_run="{\"conclusion\":\"$latest\"}"
+                expected="legion-ci concluded '$latest' for $SHA"
+                ;;
+        esac
+        make_workflow_runs_fixture "$(jq -cn --argjson latest "$latest_run" '[
+            {name:"validate",event:"push",created_at:"2026-10-02T00:00:00Z"},
+            ({name:"legion-ci",event:"workflow_dispatch",created_at:"2026-10-03T00:00:00Z"} + $latest),
+            {name:"legion-ci",event:"workflow_dispatch"},
+            {name:"legion-ci",event:"push"}
+        ]')"
+
+        run env CHECK_ALLOW_WORKFLOW_DISPATCH=1 bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"::error::$expected — refusing to release"* ]]
+    done
+}
+
+@test "required workflow event filter ignores newer ineligible runs and keeps default push-only" {
+    make_workflow_runs_fixture '[
+        {"name":"validate","event":"workflow_dispatch","conclusion":"failure","created_at":"2026-10-02T00:00:00Z"},
+        {"name":"validate","event":"push"},
+        {"name":"legion-ci","event":"push"},
+        {"name":"legion-ci","event":"pull_request","conclusion":"failure","created_at":"2026-10-04T00:00:00Z"},
+        {"name":"legion-ci","event":"workflow_dispatch","conclusion":"failure","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2026-10-05T00:00:00Z"}
+    ]'
+
+    run bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+    [ "$status" -eq 0 ]
+
+    run env CHECK_ALLOW_WORKFLOW_DISPATCH=1 bash "$AWAIT_REQUIRED_WORKFLOWS" legion-ci
+    [ "$status" -eq 0 ]
+
+    run env CHECK_ALLOW_WORKFLOW_DISPATCH=1 bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"validate concluded 'failure'"* ]]
 }
 
 @test "required workflow gate fails closed when a required workflow is missing" {
@@ -221,6 +376,35 @@ EOF
     [ "$recovery_verify_line" -lt "$recovery_gate_line" ]
     [ "$recovery_gate_line" -lt "$recovery_asset_line" ]
     [ "$recovery_asset_line" -lt "$recovery_publish_line" ]
+}
+
+@test "release workflow opts into dispatch checks only on both verified historical gates" {
+    local release="$REPO_ROOT/.github/workflows/release-please.yml"
+    local pending_gate recovery_gate main_gate
+    pending_gate="$(release_workflow_step 'Require checks on the pending release commit')"
+    recovery_gate="$(release_workflow_step 'Require validate + legion-ci green for release tag')"
+    main_gate="$(release_workflow_step 'Require validate + legion-ci green on this commit')"
+
+    [ "$(grep -c 'CHECK_ALLOW_WORKFLOW_DISPATCH' "$release")" -eq 2 ]
+    [[ "$pending_gate" == *'CHECK_ALLOW_WORKFLOW_DISPATCH: "1"'* ]]
+    [[ "$pending_gate" == *'SHA: ${{ steps.pending_release.outputs.release_sha }}'* ]]
+    [[ "$pending_gate" == *"if: \${{ steps.pending_release.outputs.pending == 'true' }}"* ]]
+    [[ "$pending_gate" == *'run: scripts/await-required-workflows.sh validate legion-ci'* ]]
+    [[ "$recovery_gate" == *'CHECK_ALLOW_WORKFLOW_DISPATCH: "1"'* ]]
+    [[ "$recovery_gate" == *'SHA: ${{ steps.recovery_ref.outputs.sha }}'* ]]
+    [[ "$recovery_gate" == *'run: control/scripts/await-required-workflows.sh validate legion-ci'* ]]
+    [[ "$main_gate" == *'SHA: ${{ github.sha }}'* ]]
+    [[ "$main_gate" == *'run: scripts/await-required-workflows.sh validate legion-ci'* ]]
+    [[ "$main_gate" != *'CHECK_ALLOW_WORKFLOW_DISPATCH'* ]]
+    [ "$(grep -Fc "if: \${{ github.event_name == 'push' }}" "$release")" -eq 2 ]
+    grep -Fq "if: \${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' }}" "$release"
+
+    local finder_line pending_gate_line create_line
+    finder_line="$(grep -n 'run: scripts/prepare-pending-release.sh' "$release" | cut -d: -f1)"
+    pending_gate_line="$(grep -n 'name: Require checks on the pending release commit' "$release" | cut -d: -f1)"
+    create_line="$(grep -n 'name: Create the pending GitHub Release' "$release" | cut -d: -f1)"
+    [ "$finder_line" -lt "$pending_gate_line" ]
+    [ "$pending_gate_line" -lt "$create_line" ]
 }
 
 @test "pending release finder identifies the exact Release Please merge commit" {
@@ -442,11 +626,37 @@ EOF
     [ "$status" -eq 0 ]
     grep -q '^package=@opus-aether-ai/legion-core$' "$outputs"
     grep -q '^version=0.19.0$' "$outputs"
-    grep -Eq '^sha=[0-9a-f]{40}$' "$outputs"
+    grep -Fxq "sha=$(git -C "$release_dir" rev-parse 'refs/tags/v0.19.0^{commit}')" "$outputs"
 
     [ ! -e "$release_dir/scripts/await-required-workflows.sh" ]
     run bash "$release_dir/scripts/install.sh" --validate-release-tag=v0.19.0
     [ "$status" -eq 64 ]
+}
+
+@test "publication retry policy accepts dispatch checks for the verified historical tag SHA" {
+    local release_dir="$TEST_TMPDIR/retry-release"
+    local outputs="$TEST_TMPDIR/recovery-outputs"
+    local recovery_gate opt_in
+    make_legacy_release_fixture "$release_dir"
+
+    run env GITHUB_OUTPUT="$outputs" \
+        bash "$REPO_ROOT/scripts/verify-release-recovery.sh" v0.19.0 "$release_dir"
+    [ "$status" -eq 0 ]
+    export SHA="$(sed -n 's/^sha=//p' "$outputs")"
+    [ "$SHA" = "$(git -C "$release_dir" rev-parse 'refs/tags/v0.19.0^{commit}')" ]
+    recovery_gate="$(release_workflow_step 'Require validate + legion-ci green for release tag')"
+    opt_in="$(printf '%s\n' "$recovery_gate" | awk '
+        $1 == "CHECK_ALLOW_WORKFLOW_DISPATCH:" {gsub(/"/, "", $2); print $2}')"
+    [ "$opt_in" = 1 ]
+    make_workflow_runs_fixture '[
+        {"name":"validate","event":"workflow_dispatch"},
+        {"name":"legion-ci","event":"workflow_dispatch"}
+    ]'
+
+    run env CHECK_ALLOW_WORKFLOW_DISPATCH="$opt_in" bash "$AWAIT_REQUIRED_WORKFLOWS" validate legion-ci
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"all required checks green for ${SHA}"* ]]
+    assert_mock_called gh "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100"
 }
 
 @test "recovery verifier fails closed on untrusted or inconsistent release contents" {

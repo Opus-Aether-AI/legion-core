@@ -1,0 +1,24 @@
+{
+  "title": "legion.review-verdict-output.v1",
+  "description": "API-compatible generation shape only. The canonical verdict schema and runtime semantic checks remain authoritative. Include source locations in finding detail when useful.",
+  "type": "object",
+  "required": ["verdict", "summary", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {"type": "string", "enum": ["approve", "request_changes", "comment"]},
+    "summary": {"type": "string"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "title", "detail"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+          "title": {"type": "string"},
+          "detail": {"type": "string"}
+        }
+      }
+    }
+  }
+}

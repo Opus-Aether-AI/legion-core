@@ -5,22 +5,23 @@
 # tasks in one line; add roles as new tiers/providers show up. Routing should
 # reference these role keys, never a raw model ID, so a model swap lives here.
 #
-# Catalog policy: Anthropic Opus + Fable, OpenAI GPT-5.6 + GPT-6, xAI Grok,
+# Catalog policy: Anthropic Opus + Fable, OpenAI GPT-5.6 + GPT-6/6.1, xAI Grok,
 # DeepSeek. DeepSeek entered the catalog with the DeepSeek Harness executor -- an
 # executor needs a model role, so adding the harness necessarily widened this
 # allowlist. It is reachable only by asking for that executor: no archetype
 # routes to it. Every Claude role runs on CLAUDE CODE (the `claude` executor),
 # never piped through Cursor.
 #
-# TIERS. The catalog separates capability from volume so a stronger model can
-# be selected when avoiding rework matters more than its higher per-token rate:
+# TIERS. The catalog separates capability and workload fit from token prices.
+# Evaluate each role on accepted results and total cost, including rework:
 #
 #   frontier   Fable 5.1 / GPT-6 Astra. Reserved for the hard end -- deep bugs,
 #              perf work, adversarial security review, frontend craft. Routed by
 #              a small, named set of archetypes, never by the bulk lanes.
-#   precision  gpt-5.6-sol. Costs 2x Terra on input and 1.67x on output, so it
-#              can be cheaper end to end when one careful pass avoids a second
-#              implementation/review cycle. Used for high-rework-risk work.
+#   precision  GPT-6.1 Sol. Standard input matches Terra; output is $10/M
+#              versus Terra's $12/M, with $0.10/M cache reads and $2.50/M writes.
+#              Above 272K prompt tokens, input/cache rates double and output
+#              rises 1.5x. Used for high-rework-risk work and technical review.
 #   workhorse  Opus 5 / gpt-5.6-terra / Grok 4.6. Carries the volume: scoped
 #              implementation, tests, refactors, routine review.
 #   cheap      gpt-5.6-luna. Bounded, mechanical, reversible work only.
@@ -33,7 +34,7 @@
 # so the reviewer is a genuinely different model from the author. Cursor hosts
 # ONLY its native non-Claude models (Grok + Composer, kept available).
 #
-# EFFORT: Claude roles run at `high` for judgement. GPT-5.6 is tiered: low/medium
+# EFFORT: Claude roles run at `high` for judgement. Codex roles are tiered: low/medium
 # for bounded work, high for scoped implementation, max only for hard or
 # persistent slices. Astra accepts low..xhigh on Chat Completions and `max` on the
 # Responses API -- Codex CLI uses Responses, so `max` is reachable (verified
@@ -49,12 +50,12 @@ codex_frontier      = "gpt-6-astra"       # hard bugs, perf work, adversarial se
 claude_orchestrator = "claude-opus-5"    # self: orchestration / architecture / deep reasoning (run at high)
 claude_default      = "claude-opus-5"    # generic Claude / reverse-delegate target / frontend review
 
-# ── OpenAI GPT-5.6 Sol (Codex) — precision implementation lane ─────
-codex_precision     = "gpt-5.6-sol"      # high-rework-risk implementation where fewer passes can lower total cost
+# ── OpenAI GPT-6.1 Sol (Codex) — precision implementation + review ──
+codex_precision     = "gpt-6.1-sol"      # high-rework-risk implementation where fewer passes can lower total cost
+codex_review        = "gpt-6.1-sol"      # routine technical second opinion; the default codex reviewer
 
 # ── OpenAI GPT-5.6 (Codex) — the workhorse lane ────────────────────
 codex_workhorse     = "gpt-5.6-terra"    # persistent scoped implementation
-codex_review        = "gpt-5.6-sol"      # routine technical second opinion; the default codex reviewer
 codex_cheap         = "gpt-5.6-luna"     # bounded search, boilerplate, mechanical edits
 codex_default       = "gpt-5.6-terra"    # generic Codex
 
@@ -67,7 +68,7 @@ cursor_composer     = "composer-2.5"                  # Cursor in-house; kept av
 
 # ── opencode (harness kept; in-family GPT default for explicit --executor opencode) ──
 opencode_default    = "openai/gpt-5.6-terra"   # OpenCode via OpenAI oauth (modern GPT-5.6 line)
-opencode_review     = "openai/gpt-5.6-sol"     # reviewer fallback when codex has no quota
+opencode_review     = "openai/gpt-6.1-sol"     # reviewer fallback when codex has no quota
 
 # ── symmetric harness defaults (explicit targets; no default archetype routes) ──
 # DeepSeek Harness. dsh is a developer preview that publishes no headless

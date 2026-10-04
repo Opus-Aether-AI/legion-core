@@ -72,6 +72,15 @@ CASES = [
     ("claude_default", 300_000, 10_000, 1.75),
     # Exactly at the threshold is NOT over it.
     ("codex_frontier", 272_000, 0, 2.72),
+    ("codex_cheap", 300_000, 10_000, 0.072),
+]
+
+SOL_ROLES = ("codex_precision", "codex_review", "opencode_review")
+# Standard 2/10 rates at and below the boundary, then 4/15 immediately above.
+CASES += [
+    (role, inp, 10_000, expected)
+    for role in SOL_ROLES
+    for inp, expected in ((271_999, 0.643998), (272_000, 0.644), (272_001, 1.238004))
 ]
 
 # (role, input_tokens, output_tokens, cached_tokens, expected_usd)
@@ -88,6 +97,21 @@ CACHED_CASES = [
     # 300K prompt of which 100K is cached, ABOVE threshold (prompt counts cached):
     #   200K @ $10 x2 + 100K @ $1 x2 + 10K out @ $50 x1.5 = 4.0 + 0.2 + 0.75
     ("codex_frontier", 300_000, 10_000, 100_000, 4.95),
+]
+# 40K uncached input + cached reads: cache alone pushes the prompt over the tier.
+CACHED_CASES += [
+    (role, inp, 10_000, inp - 40_000, expected)
+    for role in SOL_ROLES
+    for inp, expected in ((271_999, 0.2031999), (272_000, 0.2032), (272_001, 0.3564002))
+]
+
+# (role, uncached_input, output, cache_read, cache_write, expected_usd)
+# 40K input + 200K reads + writes. Standard: .08 + .10 + .02 + writes * 2.5/M;
+# above the boundary: .16 + .15 + .04 + writes * 5/M.
+WRITE_CASES = [
+    (role, 40_000, 10_000, 200_000, writes, expected)
+    for role in SOL_ROLES
+    for writes, expected in ((31_999, 0.2799975), (32_000, 0.28), (32_001, 0.510005))
 ]
 
 
@@ -115,29 +139,30 @@ def test_python_reader_matches_hand_computed(role, inp, out, expected):
     assert _py_cost(_model(role), inp, out) == pytest.approx(expected, abs=1e-6)
 
 
-@pytest.mark.skipif(shutil.which("bun") is None, reason="bun not installed")
-@pytest.mark.parametrize("role,inp,out,expected", CASES)
-def test_typescript_reader_matches_hand_computed(role, inp, out, expected, tmp_path):
-    model = _model(role)
-    # router.ts binds its port at import time and Bun.serve keeps the process
-    # alive, so the probe must (a) take a port of its own, well away from the
-    # daemon's 8082, and (b) exit explicitly. Without the exit every probe lingers
-    # holding its port, and the next one dies on EADDRINUSE.
-    port = 19000 + (abs(hash((model, inp, out))) % 900)
+def _ts_cost(model, inp, out, tmp_path, cache_read=0, cache_write=0):
+    # Import the real pricing function without starting the proxy's listener.
+    # Cost parity needs no socket; a stub keeps these probes portable to sandboxes.
     probe = tmp_path / "probe.ts"
     probe.write_text(
-        f'import {{ costForModel }} from "{ROUTER_TS}";\n'
-        f'console.log("COST=" + costForModel("{model}", {inp}, {out}, 0, 0));\n'
+        'Bun.serve = ((options) => ({ port: options.port })) as typeof Bun.serve;\n'
+        f'const {{ costForModel }} = await import("{ROUTER_TS}");\n'
+        f'console.log("COST=" + costForModel("{model}", {inp}, {out}, {cache_read}, {cache_write}));\n'
         f"process.exit(0);\n"
     )
-    env = {**os.environ, "ROUTER_PORT": str(port)}
+    env = {**os.environ, "LEGION_COSTS_FILE": COSTS}
     res = subprocess.run(
         ["bun", "run", str(probe)], capture_output=True, text=True, env=env,
         timeout=60, check=False,
     )
     assert res.returncode == 0, f"probe failed: {res.stderr[-800:]}"
     line = next(ln for ln in res.stdout.splitlines() if ln.startswith("COST="))
-    assert float(line.split("=", 1)[1]) == pytest.approx(expected, abs=1e-6)
+    return float(line.split("=", 1)[1])
+
+
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun not installed")
+@pytest.mark.parametrize("role,inp,out,expected", CASES)
+def test_typescript_reader_matches_hand_computed(role, inp, out, expected, tmp_path):
+    assert _ts_cost(_model(role), inp, out, tmp_path) == pytest.approx(expected, abs=1e-6)
 
 
 @pytest.mark.parametrize("role,inp,out,cached,expected", CACHED_CASES)
@@ -154,6 +179,57 @@ def test_python_reader_prices_cached_tokens(role, inp, out, cached, expected):
     # readers disagree about what "prompt size" means.
     got = _py_cost(_model(role), inp, out, cached)
     assert got == pytest.approx(expected, abs=1e-6)
+
+
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun not installed")
+@pytest.mark.parametrize("role,inp,out,cached,expected", CACHED_CASES)
+def test_typescript_reader_prices_cached_tokens(role, inp, out, cached, expected, tmp_path):
+    got = _ts_cost(_model(role), inp - cached, out, tmp_path, cached)
+    assert got == pytest.approx(expected, abs=1e-6)
+
+
+@pytest.mark.parametrize("role,inp,out,cache_read,cache_write,expected", WRITE_CASES)
+def test_bash_reader_prices_cache_writes(role, inp, out, cache_read, cache_write, expected):
+    got = _sh_cost(_model(role), inp, out, cache_read, cache_write)
+    assert got == pytest.approx(expected, abs=1e-6)
+
+
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun not installed")
+@pytest.mark.parametrize("role,inp,out,cache_read,cache_write,expected", WRITE_CASES)
+def test_typescript_reader_prices_cache_writes(
+    role, inp, out, cache_read, cache_write, expected, tmp_path
+):
+    got = _ts_cost(_model(role), inp, out, tmp_path, cache_read, cache_write)
+    assert got == pytest.approx(expected, abs=1e-6)
+
+
+@pytest.mark.parametrize("role", SOL_ROLES)
+def test_sol_roles_load_specific_rates_including_cache_write_rate(role):
+    # The activity usage contract carries cached reads but no cache-write tokens.
+    # Verify its loaded write rate; actual write billing is tested above in the
+    # two readers whose usage contracts accept writes.
+    model = _model(role)
+    costs = activity.load_costs(COSTS)
+    row = next(row for row in costs["models"] if row["match"] in model.lower())
+    assert row["match"] == model.removeprefix("openai/")
+    assert activity._rates_for(model, costs) == {
+        "input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5,
+        "lc_threshold": 272_000, "lc_input_multiplier": 2.0, "lc_output_multiplier": 1.5,
+    }
+
+
+def test_historical_sol_prices_remain_available():
+    costs = activity.load_costs(COSTS)
+    current = _model("codex_precision")
+    historical = [row for row in costs["models"]
+                  if row["match"].endswith("-sol") and row["match"] != current]
+    assert len(historical) == 1
+    model = historical[0]["match"]
+    assert historical[0] == {
+        "match": model, "input": 4.0, "output": 20.0,
+        "cache_read": 0.4, "cache_write": 0.0,
+    }
+    assert _py_cost(model, 100_000, 5_000) == pytest.approx(0.5)
 
 
 def test_frontier_claude_cache_read_beats_its_prior_generation():

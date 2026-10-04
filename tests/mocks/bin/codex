@@ -20,6 +20,11 @@
 #     finding that is schema-invalid only because the finding omits `title`
 #   MOCK_CODEX_REVIEW_PRIORITY_PROSE=1 -> codex's prose review format with a [P1] marker
 #   MOCK_CODEX_REVIEW_DELAY=N -> keep a review alive for signal-handling tests
+#   MOCK_CODEX_NATIVE_REVIEW_PROSE=PATH -> native review always returns this prose;
+#     ordinary schema-constrained review still uses the verdict controls above
+#   MOCK_CODEX_REVIEW_PROMPT_LOG=PATH -> capture ordinary review's stdin prompt
+#   MOCK_CODEX_SCHEMA_REVIEW_EXIT=N -> only ordinary review exits N
+#   MOCK_CODEX_SCHEMA_REVIEW_DELAY=N -> only ordinary review waits (signal tests)
 #
 # Emits the codex-cli 0.139.x --json event shape. For `exec` with a writable
 # sandbox it creates a real file change in the -C worktree so `git diff` is
@@ -35,18 +40,30 @@ set -euo pipefail
 
 args=("$@")
 cd_dir="."; out_file=""; sandbox="read-only"; model="mock"; review=0; resume=0
+native_review=0; output_schema=""
 i=0
 while [[ $i -lt ${#args[@]} ]]; do
   case "${args[$i]}" in
-    review)                     review=1 ;;
+    review)                     review=1; native_review=1 ;;
     resume)                     resume=1 ;;
     -C|--cd)                    i=$((i+1)); cd_dir="${args[$i]:-.}" ;;
     -o|--output-last-message)   i=$((i+1)); out_file="${args[$i]:-}" ;;
     -s|--sandbox)               i=$((i+1)); sandbox="${args[$i]:-read-only}" ;;
     -m|--model)                 i=$((i+1)); model="${args[$i]:-mock}" ;;
+    --output-schema)           i=$((i+1)); output_schema="${args[$i]:-}" ;;
   esac
   i=$((i+1))
 done
+
+# Ordinary review is identified by the review schema, never by sandbox alone:
+# implementation runs (including read-only ones) retain their existing behavior.
+if [[ $native_review -eq 0 && ( "$output_schema" == */review-verdict.schema.json \
+    || "$output_schema" == */review-verdict-output.schema.json ) ]]; then
+  review=1
+  if [[ -n "${MOCK_CODEX_REVIEW_PROMPT_LOG:-}" ]]; then
+    cat > "$MOCK_CODEX_REVIEW_PROMPT_LOG"
+  fi
+fi
 
 review_invalid_attempt=0
 if [[ $review -eq 1 && "${MOCK_CODEX_REVIEW_INVALID_VERDICTS:-0}" =~ ^[0-9]+$ ]] &&
@@ -84,8 +101,12 @@ if [[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_CONTEXT_LOG:-}" ]]; then
     >> "$MOCK_CODEX_REVIEW_CONTEXT_LOG"
 fi
 
-if [[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_DELAY:-}" ]]; then
-  sleep "$MOCK_CODEX_REVIEW_DELAY" &
+review_delay="${MOCK_CODEX_REVIEW_DELAY:-}"
+if [[ $review -eq 1 && $native_review -eq 0 ]]; then
+  review_delay="${MOCK_CODEX_SCHEMA_REVIEW_DELAY:-$review_delay}"
+fi
+if [[ $review -eq 1 && -n "$review_delay" ]]; then
+  sleep "$review_delay" &
   delay_pid=$!
   [[ -n "${MOCK_CODEX_REVIEW_CHILD_PID_FILE:-}" ]] &&
     printf '%s\n' "$delay_pid" > "$MOCK_CODEX_REVIEW_CHILD_PID_FILE"
@@ -112,7 +133,9 @@ printf '%s\n' '{"type":"thread.started","thread_id":"'"$thread_id"'"}'
 printf '%s\n' '{"type":"turn.started"}'
 
 if [[ $review -eq 1 ]]; then
-  if [[ "${MOCK_CODEX_REVIEW_INVALID_VERDICT:-}" == "1" ]] ||
+  if [[ $native_review -eq 1 && -n "${MOCK_CODEX_NATIVE_REVIEW_PROSE:-}" ]]; then
+    msg="$(cat "$MOCK_CODEX_NATIVE_REVIEW_PROSE")"
+  elif [[ "${MOCK_CODEX_REVIEW_INVALID_VERDICT:-}" == "1" ]] ||
      [[ "$review_invalid_attempt" -le "${MOCK_CODEX_REVIEW_INVALID_VERDICTS:-0}" && "$review_invalid_attempt" -gt 0 ]]; then
     msg='{"verdict":"approve","summary":"mock invalid review","findings":[{}]}'
   elif [[ "${MOCK_CODEX_REVIEW_CONTRADICTORY:-}" == "1" ]]; then
@@ -162,5 +185,8 @@ if [[ -n "$out_file" ]]; then
 fi
 if [[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_EXIT:-}" ]]; then
   exit "$MOCK_CODEX_REVIEW_EXIT"
+fi
+if [[ $review -eq 1 && $native_review -eq 0 && -n "${MOCK_CODEX_SCHEMA_REVIEW_EXIT:-}" ]]; then
+  exit "$MOCK_CODEX_SCHEMA_REVIEW_EXIT"
 fi
 exit 0

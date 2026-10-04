@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+from pathlib import Path
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -10,6 +11,29 @@ PATH = os.path.join(
 SPEC = importlib.util.spec_from_file_location("legion_review_normalizer", PATH)
 normalizer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(normalizer)
+
+
+def test_generation_schema_uses_supported_subset_without_weakening_validation(tmp_path):
+    output = json.loads(Path(ROOT, "legion-router", "schema", "review-verdict-output.schema.json").read_text())
+
+    def check_supported(schema):
+        assert not {"allOf", "if", "then", "else", "not"} & set(schema)
+        if schema.get("type") == "object":
+            assert set(schema["required"]) == set(schema["properties"])
+            assert schema["additionalProperties"] is False
+            for child in schema["properties"].values():
+                check_supported(child)
+        if "items" in schema:
+            check_supported(schema["items"])
+
+    check_supported(output)
+    sample = {"verdict": "request_changes", "summary": "Blocking finding.",
+              "findings": [{"severity": "high", "title": "Unsafe path", "detail": "engine.py:12"}]}
+    assert normalizer.normalize(json.dumps(sample), tmp_path) == sample
+    sample["verdict"] = "approve"
+    assert normalizer.normalize(json.dumps(sample), tmp_path) is None
+    canonical = json.loads(Path(ROOT, "legion-router", "schema", "review-verdict.schema.json").read_text())
+    assert "allOf" in canonical
 
 
 def test_normalizes_builtin_review_findings_and_repo_relative_paths(tmp_path):
@@ -68,6 +92,12 @@ def test_normalizer_preserves_schema_valid_json(tmp_path):
     }
 
     assert normalizer.normalize(json.dumps(expected), tmp_path) == expected
+
+
+def test_captured_clean_native_review_prose_remains_unrecognized(tmp_path):
+    prose = (Path(ROOT) / "tests/fixtures/codex-json/native-review-clean-prose.txt").read_text()
+
+    assert normalizer.normalize(prose, tmp_path) is None
 
 
 def test_normalizer_rejects_nonblocking_decisions_with_blocking_findings(tmp_path):

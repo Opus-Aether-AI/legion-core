@@ -105,8 +105,8 @@ repos_file_for_repo() {
 @test "cost: claude_default pricing comes from costs.json" {
     run "$LIB/cost.sh" "$CLAUDE_DEFAULT" 1000000 500000 0 0
     [ "$status" -eq 0 ]
-    # 1M in @ $5.00/M + 500k out @ $25.00/M
-    [ "$output" = "17.5" ]
+    # 1M in @ $4.00/M + 500k out @ $20.00/M
+    [ "$output" = "14" ]
 }
 
 @test "cost: the frontier Claude role is priced above the default one" {

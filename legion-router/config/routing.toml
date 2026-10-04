@@ -92,7 +92,7 @@ model_ref = "codex_workhorse"
 sandbox = "workspace-write"
 reasoning_effort = "high"
 fallback_refs = ["codex_frontier"]
-note = "A fully-specced, bounded feature slice. The bulk lane stays on the workhorse: the frontier role is 5x its output price and Terra already completes this shape. Escalate only hard or persistent work to max, or to hard-bug."
+note = "A fully-specced, bounded feature slice. The bulk lane stays on the workhorse: the frontier role is roughly 4.17x its output price and Terra already completes this shape. Escalate only hard or persistent work to max, or to hard-bug."
 
 [archetypes.scout]
 executor = "codex"
@@ -125,7 +125,7 @@ executor = "claude"
 model_ref = "claude_default"
 sandbox = "read-only"
 reasoning_effort = "high"
-note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Signed off on Claude Code. This is a DIFFERENT model from the one that did the polish (claude_default = Opus 5 vs claude_frontier = Fable 5.1), so it is a genuine second lens within the Claude lineage; route to the Cursor or Codex review roles when cross-VENDOR independence matters."
+note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Signed off on Claude Code. This is a DIFFERENT model from the one that did the polish (claude_default = Opus 5.5 vs claude_frontier = Fable 5.1), so it is a genuine second lens within the Claude lineage; route to the Cursor or Codex review roles when cross-VENDOR independence matters."
 
 [archetypes.write-tests]
 executor = "codex"

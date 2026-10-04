@@ -69,7 +69,11 @@ CASES = [
     ("codex_frontier", 300_000, 10_000, 6.75),
     # v2 rows at the same shape must be untouched by the v3 tier logic.
     ("codex_workhorse", 300_000, 10_000, 0.72),
-    ("claude_default", 300_000, 10_000, 1.75),
+    # Standard Claude prices stay 4/20 on both sides of the threshold.
+    ("claude_default", 100_000, 10_000, 0.6),
+    ("claude_default", 300_000, 10_000, 1.4),
+    ("claude_orchestrator", 100_000, 10_000, 0.6),
+    ("claude_orchestrator", 300_000, 10_000, 1.4),
     # Exactly at the threshold is NOT over it.
     ("codex_frontier", 272_000, 0, 2.72),
     ("codex_cheap", 300_000, 10_000, 0.072),
@@ -97,6 +101,24 @@ CACHED_CASES = [
     # 300K prompt of which 100K is cached, ABOVE threshold (prompt counts cached):
     #   200K @ $10 x2 + 100K @ $1 x2 + 10K out @ $50 x1.5 = 4.0 + 0.2 + 0.75
     ("codex_frontier", 300_000, 10_000, 100_000, 4.95),
+    # Standard Claude: 40K @ $4 + 60K @ $0.20 + 10K @ $20 = $0.372.
+    ("claude_default", 100_000, 10_000, 60_000, 0.372),
+    ("claude_orchestrator", 100_000, 10_000, 60_000, 0.372),
+    # Above 272K: 200K @ $4 + 100K @ $0.20 + 10K @ $20 = $1.02.
+    ("claude_default", 300_000, 10_000, 100_000, 1.02),
+    ("claude_orchestrator", 300_000, 10_000, 100_000, 1.02),
+]
+
+# (role, uncached_input, output, cache_read, cache_write, expected_usd)
+# Python's activity reader has no cache-write usage contract; only bash and
+# TypeScript can price these requests. The standard row covers five-minute writes.
+WRITE_CASES = [
+    # 40K @ $4 + 60K @ $0.20 + 20K @ $5 + 10K @ $20 = $0.472.
+    ("claude_default", 40_000, 10_000, 60_000, 20_000, 0.472),
+    ("claude_orchestrator", 40_000, 10_000, 60_000, 20_000, 0.472),
+    # 200K @ $4 + 100K @ $0.20 + 40K @ $5 + 10K @ $20 = $1.22.
+    ("claude_default", 200_000, 10_000, 100_000, 40_000, 1.22),
+    ("claude_orchestrator", 200_000, 10_000, 100_000, 40_000, 1.22),
 ]
 # 40K uncached input + cached reads: cache alone pushes the prompt over the tier.
 CACHED_CASES += [
@@ -108,7 +130,7 @@ CACHED_CASES += [
 # (role, uncached_input, output, cache_read, cache_write, expected_usd)
 # 40K input + 200K reads + writes. Standard: .08 + .10 + .02 + writes * 2.5/M;
 # above the boundary: .16 + .15 + .04 + writes * 5/M.
-WRITE_CASES = [
+WRITE_CASES += [
     (role, 40_000, 10_000, 200_000, writes, expected)
     for role in SOL_ROLES
     for writes, expected in ((31_999, 0.2799975), (32_000, 0.28), (32_001, 0.510005))
@@ -146,7 +168,8 @@ def _ts_cost(model, inp, out, tmp_path, cache_read=0, cache_write=0):
     probe.write_text(
         'Bun.serve = ((options) => ({ port: options.port })) as typeof Bun.serve;\n'
         f'const {{ costForModel }} = await import("{ROUTER_TS}");\n'
-        f'console.log("COST=" + costForModel("{model}", {inp}, {out}, {cache_read}, {cache_write}));\n'
+        f'console.log("COST=" + costForModel({json.dumps(model)}, '
+        f'{inp}, {out}, {cache_read}, {cache_write}));\n'
         f"process.exit(0);\n"
     )
     env = {**os.environ, "LEGION_COSTS_FILE": COSTS}
@@ -197,10 +220,58 @@ def test_bash_reader_prices_cache_writes(role, inp, out, cache_read, cache_write
 @pytest.mark.skipif(shutil.which("bun") is None, reason="bun not installed")
 @pytest.mark.parametrize("role,inp,out,cache_read,cache_write,expected", WRITE_CASES)
 def test_typescript_reader_prices_cache_writes(
-    role, inp, out, cache_read, cache_write, expected, tmp_path
+    role, inp, out, cache_read, cache_write, expected, tmp_path,
 ):
     got = _ts_cost(_model(role), inp, out, tmp_path, cache_read, cache_write)
     assert got == pytest.approx(expected, abs=1e-6)
+
+
+@pytest.mark.parametrize("spelling", ["full", "prefixed", "short", "uppercase-prefixed"])
+@pytest.mark.parametrize("generation", ["current", "prior", "family"])
+@pytest.mark.parametrize("reader,bucket", [
+    (reader, bucket)
+    for reader in ("bash", "python", "typescript")
+    for bucket in ("input", "output", "cache_read", "cache_write")
+    if reader != "python" or bucket != "cache_write"
+])
+def test_claude_standard_price_precedence_and_historical_rates(
+    spelling, generation, reader, bucket, tmp_path,
+):
+    """Every rate must hit the specific row before the preserved family rows.
+
+    Derive historical and short IDs from the role to keep concrete IDs in the
+    catalogs. A million tokens also proves input-side standard rates stay flat
+    above the long-context threshold used by other models.
+    """
+    if reader == "typescript" and shutil.which("bun") is None:
+        pytest.skip("bun not installed")
+    model = _model("claude_default")
+    if generation == "prior":
+        model = model.rsplit("-", 1)[0]
+    elif generation == "family":
+        model = model.rsplit("-", 2)[0]
+    if spelling == "short":
+        model = model.removeprefix("claude-")
+    elif spelling in ("prefixed", "uppercase-prefixed"):
+        model = f"anthropic/{model}"
+        if spelling == "uppercase-prefixed":
+            model = model.upper()
+
+    rates = (
+        {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 5.0}
+        if generation == "current" else
+        {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25}
+    )
+    usage = {key: 1_000_000 if key == bucket else 0 for key in rates}
+    inp, out = usage["input"], usage["output"]
+    cached, written = usage["cache_read"], usage["cache_write"]
+    if reader == "bash":
+        got = _sh_cost(model, inp, out, cached, written)
+    elif reader == "python":
+        got = _py_cost(model, inp + cached, out, cached)
+    else:
+        got = _ts_cost(model, inp, out, tmp_path, cached, written)
+    assert got == pytest.approx(rates[bucket], abs=1e-6)
 
 
 @pytest.mark.parametrize("role", SOL_ROLES)

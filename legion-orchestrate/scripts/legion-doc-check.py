@@ -94,8 +94,8 @@ def validate_config(config: dict[str, Any], require_targets: bool = True) -> Non
     deny = config["deny"]
     if not isinstance(deny, list) or not all(
             isinstance(item, dict) and set(item) <= {"category", "pattern"} and isinstance(item.get("pattern"), str)
-            and isinstance(item.get("category", "deny"), str) for item in deny):
-        raise ValueError("deny must be a list of {category, pattern} tables")
+            and isinstance(item.get("category", "deny"), str) and item.get("category", "deny") for item in deny):
+        raise ValueError("deny must be a list of {category, pattern} tables with a non-empty category")
     for key in ("superseded_pattern", "successor_pattern"):
         if not isinstance(config[key], str):
             raise ValueError(f"{key} must be a string")
@@ -113,6 +113,8 @@ def validate_config(config: dict[str, Any], require_targets: bool = True) -> Non
             raise ValueError(f"invalid pattern {pattern!r}: {error}") from error
     if require_targets and not config["publish"] and not config["records"]:
         raise ValueError("nothing to check: give --publish and/or --records (or a config)")
+    if require_targets and config["publish"] and not (config["markers"] or config["tokens"] or deny):
+        raise ValueError("--publish needs at least one check: markers, tokens or deny are all empty")
 
 
 def expand(repo: Path, patterns: list[str]) -> tuple[list[Path], list[str]]:
@@ -140,7 +142,10 @@ def read_text(path: Path) -> tuple[str | None, str | None]:
             return None, "pdftotext found no text (a scanned or outlined PDF), so this PDF was not checked"
         return done.stdout, None
     if suffix in TEXT_SUFFIXES or not suffix:
-        return path.read_text(encoding="utf-8", errors="replace"), None
+        try:
+            return path.read_text(encoding="utf-8", errors="replace"), None
+        except OSError as error:
+            return None, f"cannot read: {error.strerror or error}"
     return None, f"unsupported file type {suffix}"
 
 

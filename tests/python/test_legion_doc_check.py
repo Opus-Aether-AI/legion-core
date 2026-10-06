@@ -85,6 +85,13 @@ def test_unreadable_records_and_textless_pdfs_are_unchecked(tmp_path, monkeypatc
     write(tmp_path, "records/old.docx", "binary")
     report = run(tmp_path, ("records", ["records/*"]))
     assert not report["ok"] and "unsupported file type .docx" in report["unchecked"][0]
+    locked = write(tmp_path, "records/locked.md", "> Superseded.\n")
+    locked.chmod(0)
+    try:
+        report = run(tmp_path, ("records", ["records/locked.md"]))
+    finally:
+        locked.chmod(0o644)
+    assert not report["ok"] and "cannot read" in report["unchecked"][0]
     write(tmp_path, "out/scan.pdf", "%PDF-1.4 image only")
     monkeypatch.setattr(dc.shutil, "which", lambda name: "/usr/bin/pdftotext")
     monkeypatch.setattr(dc.subprocess, "run", lambda *a, **k: dc.subprocess.CompletedProcess(a, 0, stdout="  \n", stderr=""))
@@ -102,12 +109,15 @@ def test_the_successor_must_be_named_near_the_superseded_line(tmp_path):
 def test_config_values_are_type_checked_and_patterns_compiled(tmp_path):
     bad = [{"publish": "out/deck.md"}, {"publish": ["out/*.md"], "markers": ["[unclosed"]},
            {"publish": ["out/*.md"], "head_lines": "15"}, {"publish": ["out/*.md"], "deny": ["salary"]},
-           {"publish": ["out/*.md"], "advisory": ["spelling"]}, {"publish": ["out/*.md"], "allow_empty": "yes"}]
+           {"publish": ["out/*.md"], "advisory": ["spelling"]}, {"publish": ["out/*.md"], "allow_empty": "yes"},
+           {"publish": ["out/*.md"], "markers": [], "tokens": []}, {"publish": ["out/*.md"], "deny": [{"category": "", "pattern": "x"}]}]
     command = [os.path.join(ROOT, "legion-orchestrate", "bin", "legion-doc-check"), "--repo", str(tmp_path)]
     for index, config in enumerate(bad):
         path = write(tmp_path, f"bad-{index}.json", json.dumps(config))
         done = subprocess.run(command + ["--config", str(path)], capture_output=True, text=True, check=False)
         assert done.returncode == 2 and json.loads(done.stderr)["ok"] is False, config
+    empty_category = subprocess.run(command + ["--publish", "out/*.md", "--deny", "=(?i)salary"], capture_output=True, text=True, check=False)
+    assert empty_category.returncode == 2
 
 
 def test_config_rejects_unknown_keys(tmp_path):

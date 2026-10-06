@@ -29,12 +29,12 @@ def test_clean_outward_documents_pass(tmp_path):
 
 
 def test_open_markers_and_unresolved_tokens_block(tmp_path):
-    write(tmp_path, "out/plan.md", "Proof: [PROOF NEEDED: signed letter]\nRun-rate {=run_rate.m36}M; owner TBD\n")
+    write(tmp_path, "out/plan.md", "Proof: [PROOF NEEDED: signed letter]\nTotal {=totals.y3}; owner TBD\n")
     report = run(tmp_path, ("publish", ["out/*.md"]))
     assert not report["ok"]
     found = {(f["check"], f["line"], f["match"]) for f in report["findings"]}
     assert ("markers", 1, "[PROOF NEEDED: signed letter]") in found
-    assert ("tokens", 2, "{=run_rate.m36}") in found
+    assert ("tokens", 2, "{=totals.y3}") in found
     assert ("markers", 2, "TBD") in found
     ids = {item["id"] for item in report["learning_feedback"]}
     assert ids == {"doc-check-markers", "doc-check-tokens"}
@@ -69,6 +69,45 @@ def test_an_unreadable_outward_file_is_never_reported_clean(tmp_path, monkeypatc
     monkeypatch.setattr(dc.shutil, "which", lambda name: None)
     report = run(tmp_path, ("publish", ["out/*.pdf"]))
     assert not report["ok"] and "pdftotext is not installed" in report["unchecked"][0]
+
+
+def test_a_glob_that_matches_nothing_is_never_reported_clean(tmp_path):
+    write(tmp_path, "content/plan.md", "All sourced.\n")
+    report = run(tmp_path, ("publish", ["content/*.md", "dist/**/*.pdf"]))
+    assert not report["ok"] and report["empty_globs"] == ["--publish 'dist/**/*.pdf'"]
+    assert "matched no files" in report["unchecked"][0]
+    assert any(item["id"] == "doc-check-unchecked" for item in report["learning_feedback"])
+    allowed = run(tmp_path, ("publish", ["content/*.md", "dist/**/*.pdf"]), ("allow_empty", True))
+    assert allowed["ok"] and allowed["empty_globs"] == ["--publish 'dist/**/*.pdf'"]
+
+
+def test_unreadable_records_and_textless_pdfs_are_unchecked(tmp_path, monkeypatch):
+    write(tmp_path, "records/old.docx", "binary")
+    report = run(tmp_path, ("records", ["records/*"]))
+    assert not report["ok"] and "unsupported file type .docx" in report["unchecked"][0]
+    write(tmp_path, "out/scan.pdf", "%PDF-1.4 image only")
+    monkeypatch.setattr(dc.shutil, "which", lambda name: "/usr/bin/pdftotext")
+    monkeypatch.setattr(dc.subprocess, "run", lambda *a, **k: dc.subprocess.CompletedProcess(a, 0, stdout="  \n", stderr=""))
+    report = run(tmp_path, ("publish", ["out/*.pdf"]))
+    assert not report["ok"] and "no text" in report["unchecked"][0]
+
+
+def test_the_successor_must_be_named_near_the_superseded_line(tmp_path):
+    write(tmp_path, "records/a.md", "# A\n\n> Superseded on 5 October.\n\n\nSee [sources](sources.md).\n")
+    write(tmp_path, "records/b.md", "# B\n\n> Superseded on 5 October,\n> by [the new plan](plan.md).\n")
+    report = run(tmp_path, ("records", ["records/*.md"]))
+    assert [(f["file"], f["line"]) for f in report["findings"]] == [("records/a.md", 3)]
+
+
+def test_config_values_are_type_checked_and_patterns_compiled(tmp_path):
+    bad = [{"publish": "out/deck.md"}, {"publish": ["out/*.md"], "markers": ["[unclosed"]},
+           {"publish": ["out/*.md"], "head_lines": "15"}, {"publish": ["out/*.md"], "deny": ["salary"]},
+           {"publish": ["out/*.md"], "advisory": ["spelling"]}, {"publish": ["out/*.md"], "allow_empty": "yes"}]
+    command = [os.path.join(ROOT, "legion-orchestrate", "bin", "legion-doc-check"), "--repo", str(tmp_path)]
+    for index, config in enumerate(bad):
+        path = write(tmp_path, f"bad-{index}.json", json.dumps(config))
+        done = subprocess.run(command + ["--config", str(path)], capture_output=True, text=True, check=False)
+        assert done.returncode == 2 and json.loads(done.stderr)["ok"] is False, config
 
 
 def test_config_rejects_unknown_keys(tmp_path):

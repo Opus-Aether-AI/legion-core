@@ -136,12 +136,14 @@ markers are listed.
 ### 5. Deterministic gates
 
 Run these as part of the `--validate-command`, so every run proves them on the
-current tree. `legion-doc-check` provides the generic ones; a domain plugin
-adds its own.
+current tree. `legion-doc-check` implements four of them (open markers,
+unresolved tokens, confidentiality and supersession); number provenance,
+wording fidelity, render and look, and freshness depend on the document's
+sources of truth, so a domain plugin supplies them.
 
 | Gate | Fails when |
 | --- | --- |
-| Open markers | An outward artifact still carries `[PROOF NEEDED]`, `[DETAIL NEEDED]`, `TODO` or `TBD` |
+| Open markers | An outward artifact still carries `[PROOF NEEDED]`, `[DETAIL NEEDED]`, `[SOURCE NEEDED]`, `[CITATION NEEDED]`, `TODO`, `TBD` or `FIXME` |
 | Unresolved tokens | A rendered artifact still shows a template token such as `{=key}` or `{{key}}` |
 | Number provenance | A displayed figure disagrees with its model key after normalising scale, units and display rounding (the vertical check), or two displays of one figure disagree (the horizontal check) |
 | Wording fidelity | A rendered string is not in the copy source: layout reworded, added or dropped copy |
@@ -150,8 +152,9 @@ adds its own.
 | Supersession | A record marked superseded does not name what superseded it |
 | Freshness | A dated claim is past its review-by date, or a record cites an output that changed after it was written |
 
-A validator that exits zero while reporting errors is not a gate. Read the
-report, not only the exit code.
+A validator that exits zero while reporting errors is not a gate, and neither
+is one that checked nothing: a file it could not read or a glob that matched
+no files is unchecked, not clean. Read the report, not only the exit code.
 
 ### 6. Verify claims
 
@@ -253,20 +256,21 @@ Write explicit slices, as for code:
 
 ## Lessons from long document engagements
 
-- **The pitch can be right while the records around it rot.** Generated
-  artifacts stayed correct because their checks ran on every change, while
-  hand-written records (handoffs, prep notes, assumption files, an index that
-  pointed at a retired model) drifted within days. Put supersession and
+- **The outward document can be right while the records around it rot.**
+  Generated artifacts stayed correct because their checks ran on every change,
+  while hand-written records (handoffs, meeting notes, assumption files, an
+  index that still pointed at a retired model) drifted within days. Put supersession and
   freshness checks on the records too, and keep a short "current state" block
   in the decision log.
-- **Inputs, not arithmetic, inflate numbers.** Independent audits found model
-  arithmetic correct and the plan still over-ambitious: volumes without
-  precedent, a headline crossing that depended on one lumpy order landing in
-  one month, revenue booked at gross value without saying so. Review the
-  inputs against benchmarks and state the basis of every headline.
-- **Dates chosen to fit a revenue start look like plans.** Ask who owns each
+- **Inputs, not arithmetic, inflate numbers.** Independent audits can find a
+  model's arithmetic correct and the plan still over-ambitious: volumes with
+  no precedent, a headline milestone that depends on one large event landing
+  in one month, a total reported gross without saying so. Review the inputs
+  against benchmarks and state the basis of every headline.
+- **Dates chosen to fit a desired outcome look like plans.** Ask who owns each
   date and whether they confirmed it; keep unconfirmed dates as targets and
-  give base cases their own.
+  give conservative cases their own. When capacity (people, money, machines)
+  changes, recheck every date that depended on it.
 - **Ask the author decisions, not facts,** and ask them as a frontier with a
   recommended answer each. Authors answer fast when every question changes a
   number they care about.

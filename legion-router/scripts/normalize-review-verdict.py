@@ -108,11 +108,13 @@ def _fold_extra_finding_fields(payload: Any) -> Any:
         kept = {key: finding[key] for key in FINDING_KEYS if key in finding}
         if "detail" in kept and not isinstance(kept["detail"], str):
             return payload
-        notes = [kept.get("detail", "")] + [
+        # the reviewer's own detail is kept whole; only the folded fields are capped
+        added = "\n".join(
             f"{key}: {finding[key] if isinstance(finding[key], str) else json.dumps(finding[key], sort_keys=True)}"
             for key in extra
-        ]
-        kept["detail"] = "\n".join(note for note in notes if note)[:MAX_DETAIL]
+        )[:MAX_DETAIL]
+        original = kept.get("detail", "")
+        kept["detail"] = f"{original}\n{added}" if original else added
         folded.append(kept)
     return dict(payload, findings=folded)
 

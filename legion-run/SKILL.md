@@ -128,12 +128,17 @@ adjudication, then version and record.
   `docs-edit`).
 - Add `legion-doc-check` to the `--validate-command` so open markers,
   unresolved tokens, confidentiality deny patterns and unmarked supersessions
-  fail the run on the current tree, for example:
+  fail the run on the current tree. Point it at what exists while the run
+  validates (the copy source and any outward text), for example:
 
   ```bash
-  legion-doc-check --repo . --publish 'dist/**/*.pdf' --records 'records/**/*.md' \
+  legion-doc-check --repo . --publish 'content/**/*.md' --records 'records/**/*.md' \
     --deny 'pay=(?i)\bsalar(y|ies)\b' --name requested-change
   ```
+
+  A glob that matches no files fails the check (pass `--allow-empty` only when
+  that is expected). Run it again on the rendered files (`--publish
+  'dist/**/*.pdf'`) after the primary renders them.
 
 - Keep rendered binaries out of slice diffs; the primary renders them, looks at
   every page and commits them after the run.

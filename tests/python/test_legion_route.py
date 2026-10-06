@@ -534,3 +534,19 @@ def test_no_default_role_resolves_to_a_premium_model():
             f"by named archetypes only; putting it on a default role makes every "
             f"unclassified task pay premium rates silently."
         )
+
+
+def test_document_archetypes_follow_the_document_workflow():
+    """docs/document-workflows.md: drafting writes, every check reads; the verifier is a different lineage from the
+    writer; none of them climbs to a frontier role."""
+    t, m = table(), models()
+    writer = lr.resolve(t, "write-document", m)
+    assert writer["executor"] == "claude" and writer["sandbox"] == "workspace-write" and writer["reasoning_effort"] == "high"
+    for a in ("research", "claim-verify", "reader-test", "document-review"):
+        r = lr.resolve(t, a, m)
+        assert r["resolved"] and r["sandbox"] == "read-only", (a, r)
+    assert lr.resolve(t, "claim-verify", m)["executor"] != writer["executor"]
+    guide = open(os.path.join(HERE, "..", "..", "docs", "document-workflows.md"), encoding="utf-8").read()
+    for a in ("research", "write-document", "claim-verify", "reader-test", "document-review"):
+        assert not lr.resolve(t, a, m)["model_ref"].endswith("_frontier"), a
+        assert f"`{a}`" in guide, f"{a} is not documented in docs/document-workflows.md"

@@ -147,3 +147,27 @@ def test_normalizer_never_approves_on_a_conversational_pleasantry(tmp_path):
         "   ",
     ):
         assert normalizer.normalize(text, tmp_path) is None, text
+
+
+def test_extra_finding_fields_fold_into_detail_and_never_soften_the_verdict(tmp_path):
+    """A reviewer's extra per-finding field (seen in practice: failure_scenario) used to fail the whole run."""
+    raw = {"verdict": "request_changes", "summary": "One blocking issue.",
+           "findings": [{"severity": "high", "title": "Figure disagrees with the model", "file": "plan.md", "line": 12,
+                         "detail": "Shows 105M.", "failure_scenario": "Reader quotes 105M; model says 99M.",
+                         "quote": "USD 105M run-rate"}]}
+    out = normalizer.normalize(json.dumps(raw), tmp_path)
+    finding = out["findings"][0]
+    assert out["verdict"] == "request_changes" and finding["severity"] == "high" and set(finding) == {
+        "severity", "title", "file", "line", "detail"}
+    assert finding["detail"].startswith("Shows 105M.")
+    assert "failure_scenario: Reader quotes 105M; model says 99M." in finding["detail"]
+    assert "quote: USD 105M run-rate" in finding["detail"]
+    # an approval that carries a blocking finding stays invalid after folding
+    raw["verdict"] = "approve"
+    assert normalizer.normalize(json.dumps(raw), tmp_path) is None
+    # extra top-level fields are not repaired
+    raw["verdict"], raw["confidence"] = "request_changes", "high"
+    assert normalizer.normalize(json.dumps(raw), tmp_path) is None
+    # a non-string detail is not repaired either
+    bad = {"verdict": "comment", "summary": "s", "findings": [{"severity": "low", "title": "t", "detail": 3, "note": "n"}]}
+    assert normalizer.normalize(json.dumps(bad), tmp_path) is None

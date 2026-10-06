@@ -1,0 +1,94 @@
+import importlib.util
+import json
+import os
+import subprocess
+
+HERE = os.path.dirname(__file__)
+ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+_PATH = os.path.join(ROOT, "legion-orchestrate", "scripts", "legion-doc-check.py")
+_spec = importlib.util.spec_from_file_location("legion_doc_check", _PATH)
+dc = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(dc)
+
+
+def write(root, rel, text):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def run(root, *args):
+    return dc.check(root, dict(dc.DEFAULTS, **dict(args)))
+
+
+def test_clean_outward_documents_pass(tmp_path):
+    write(tmp_path, "out/plan.md", "# Plan\n\nRevenue reaches USD 12M in year 3 (target).\n")
+    report = run(tmp_path, ("publish", ["out/**/*.md"]))
+    assert report["ok"] and report["findings"] == [] and report["checks"]["markers"]["files"] == 1
+
+
+def test_open_markers_and_unresolved_tokens_block(tmp_path):
+    write(tmp_path, "out/plan.md", "Proof: [PROOF NEEDED: signed letter]\nRun-rate {=run_rate.m36}M; owner TBD\n")
+    report = run(tmp_path, ("publish", ["out/*.md"]))
+    assert not report["ok"]
+    found = {(f["check"], f["line"], f["match"]) for f in report["findings"]}
+    assert ("markers", 1, "[PROOF NEEDED: signed letter]") in found
+    assert ("tokens", 2, "{=run_rate.m36}") in found
+    assert ("markers", 2, "TBD") in found
+    ids = {item["id"] for item in report["learning_feedback"]}
+    assert ids == {"doc-check-markers", "doc-check-tokens"}
+
+
+def test_deny_patterns_catch_confidential_terms_in_outward_files_only(tmp_path):
+    write(tmp_path, "out/pitch.md", "Our founders' salaries are not shown here.\n")
+    write(tmp_path, "internal/pay.md", "Founder salary: confidential.\n")
+    deny = [{"category": "pay", "pattern": r"(?i)\bsalar(y|ies)\b"}]
+    report = run(tmp_path, ("publish", ["out/*.md"]), ("deny", deny))
+    assert not report["ok"]
+    assert [(f["check"], f["file"], f["pattern"]) for f in report["findings"]] == [("deny", "out/pitch.md", "pay")]
+
+
+def test_superseded_records_must_name_their_successor(tmp_path):
+    write(tmp_path, "records/old-plan.md", "# Old plan\n\n> Superseded on 5 October.\n\nBody.\n")
+    write(tmp_path, "records/old-model.md", "# Model v3\n\n> Superseded by [the v5 model](../v5/README.md).\n")
+    write(tmp_path, "records/notes.md", "# Notes\n\nIntro.\n\nMore.\n\nA later section mentions a superseded idea.\n")
+    report = run(tmp_path, ("records", ["records/*.md"]), ("head_lines", 4))
+    assert [(f["file"], f["line"]) for f in report["findings"]] == [("records/old-plan.md", 3)]
+    assert report["checks"]["supersession"]["files"] == 3
+
+
+def test_advisory_checks_report_without_failing(tmp_path):
+    write(tmp_path, "records/old.md", "> Superseded.\n")
+    report = run(tmp_path, ("records", ["records/*.md"]), ("advisory", ["supersession"]))
+    assert report["ok"] and len(report["findings"]) == 1 and report["findings"][0]["blocking"] is False
+
+
+def test_an_unreadable_outward_file_is_never_reported_clean(tmp_path, monkeypatch):
+    write(tmp_path, "out/deck.pdf", "%PDF-1.4 not really a pdf")
+    monkeypatch.setattr(dc.shutil, "which", lambda name: None)
+    report = run(tmp_path, ("publish", ["out/*.pdf"]))
+    assert not report["ok"] and "pdftotext is not installed" in report["unchecked"][0]
+
+
+def test_config_rejects_unknown_keys(tmp_path):
+    config = write(tmp_path, "doc-check.json", json.dumps({"publsh": ["out/*.md"]}))
+    try:
+        dc.load_config(str(config))
+    except ValueError as error:
+        assert "publsh" in str(error)
+    else:
+        raise AssertionError("a misspelled key must be an error")
+
+
+def test_cli_exit_codes_and_json_report(tmp_path):
+    write(tmp_path, "out/a.md", "All sourced.\n")
+    command = [os.path.join(ROOT, "legion-orchestrate", "bin", "legion-doc-check"), "--repo", str(tmp_path)]
+    clean = subprocess.run(command + ["--publish", "out/*.md"], capture_output=True, text=True, check=False)
+    assert clean.returncode == 0 and json.loads(clean.stdout)["ok"] is True
+    write(tmp_path, "out/b.md", "[DETAIL NEEDED: owner]\n")
+    dirty = subprocess.run(command + ["--publish", "out/*.md", "--name", "pitch"], capture_output=True, text=True, check=False)
+    report = json.loads(dirty.stdout)
+    assert dirty.returncode == 1 and report["learning_feedback"][0]["target_name"] == "pitch"
+    usage = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert usage.returncode == 2

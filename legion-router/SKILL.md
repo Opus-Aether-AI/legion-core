@@ -121,6 +121,7 @@ Run `legion-route --list` for the full set. Grouped by role:
 | **Frontier tier (low volume, high judgement)** | `hard-bug`, `perf-optimization`, `security-review` | `codex_frontier` |
 | **Frontend craft** | `frontend-polish` → `frontend-review` | `claude_frontier` then `claude_default` — author and reviewer are different models |
 | **Independent merge judgement** | `final-review`, opt-in `final-review-frontier` | `claude_default` / `claude_frontier` |
+| **Documents** | `research`, `write-document`, `reader-test`, `document-review`; `claim-verify` | `claude_default`; `codex_workhorse` so the verifier is a different lineage from the writer (see `docs/document-workflows.md`) |
 
 The listed archetype-to-role mappings are current configuration facts. The
 active primary remains responsible for orchestration; delegation does not imply

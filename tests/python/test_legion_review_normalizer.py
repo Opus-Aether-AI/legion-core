@@ -147,3 +147,35 @@ def test_normalizer_never_approves_on_a_conversational_pleasantry(tmp_path):
         "   ",
     ):
         assert normalizer.normalize(text, tmp_path) is None, text
+
+
+def test_extra_finding_fields_fold_into_detail_and_never_soften_the_verdict(tmp_path):
+    """A reviewer's extra per-finding field (seen in practice: failure_scenario) used to fail the whole run."""
+    raw = {"verdict": "request_changes", "summary": "One blocking issue.",
+           "findings": [{"severity": "high", "title": "Figure disagrees with the model", "file": "plan.md", "line": 12,
+                         "detail": "Shows 42 units.", "failure_scenario": "A reader quotes 42; the model says 40.",
+                         "quote": "42 units a month"}]}
+    out = normalizer.normalize(json.dumps(raw), tmp_path)
+    finding = out["findings"][0]
+    assert out["verdict"] == "request_changes" and finding["severity"] == "high" and set(finding) == {
+        "severity", "title", "file", "line", "detail"}
+    assert finding["detail"].startswith("Shows 42 units.")
+    assert "failure_scenario: A reader quotes 42; the model says 40." in finding["detail"]
+    assert "quote: 42 units a month" in finding["detail"]
+    # an approval that carries a blocking finding stays invalid after folding
+    raw["verdict"] = "approve"
+    assert normalizer.normalize(json.dumps(raw), tmp_path) is None
+    # extra top-level fields are not repaired
+    raw["verdict"], raw["confidence"] = "request_changes", "high"
+    assert normalizer.normalize(json.dumps(raw), tmp_path) is None
+    # a non-string detail is not repaired either
+    bad = {"verdict": "comment", "summary": "s", "findings": [{"severity": "low", "title": "t", "detail": 3, "note": "n"}]}
+    assert normalizer.normalize(json.dumps(bad), tmp_path) is None
+
+
+def test_a_fold_never_truncates_the_reviewers_own_detail(tmp_path):
+    long_detail = "x" * (normalizer.MAX_DETAIL + 500)
+    raw = {"verdict": "request_changes", "summary": "s",
+           "findings": [{"severity": "low", "title": "t", "detail": long_detail, "quote": "q" * (normalizer.MAX_DETAIL * 2)}]}
+    detail = normalizer.normalize(json.dumps(raw), tmp_path)["findings"][0]["detail"]
+    assert detail.startswith(long_detail + "\nquote: ") and len(detail) == len(long_detail) + 1 + normalizer.MAX_DETAIL

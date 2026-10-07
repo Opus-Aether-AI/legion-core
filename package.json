@@ -50,6 +50,7 @@
     "legion-cursor-setup": "legion-setup/bin/legion-cursor-setup",
     "legion-deepseek": "legion-router/bin/legion-deepseek",
     "legion-delegate": "legion-router/bin/legion-delegate",
+    "legion-doc-check": "legion-orchestrate/bin/legion-doc-check",
     "legion-doctor": "legion-observability/bin/legion-doctor",
     "legion-eval": "legion-observability/bin/legion-eval",
     "legion-fanout": "legion-orchestrate/bin/legion-fanout",

@@ -111,6 +111,38 @@ Node, or private company CLIs. The plan command writes `plan.json` and
 `slices.jsonl` for the explicit work queue. Use `--stage-timeout-seconds` to
 bound external stages; Core records a terminal receipt on timeout or cancellation.
 
+## Document work
+
+When the deliverable is a document (a report, plan, investor or policy
+document, budget or decision record) rather than code, follow
+`docs/document-workflows.md`: brief, research, sources of truth, draft,
+deterministic gates, claim verification, a reader test, review with
+adjudication, then version and record.
+
+- Put the brief, the author's decisions, the model's inputs and the copy source
+  in inline slices committed before the run; give research, layout, rendering
+  and verifiers to executor slices with named paths. Layout slices never
+  reword copy; they report the strings that do not fit.
+- Route by the document archetypes: `research`, `write-document`,
+  `claim-verify`, `reader-test`, `document-review` (small wording fixes stay on
+  `docs-edit`).
+- Add `legion-doc-check` to the `--validate-command` so open markers,
+  unresolved tokens, confidentiality deny patterns and unmarked supersessions
+  fail the run on the current tree. Point it at what exists while the run
+  validates (the copy source and any outward text), for example:
+
+  ```bash
+  legion-doc-check --repo . --publish 'content/**/*.md' --records 'records/**/*.md' \
+    --deny 'pay=(?i)\bsalar(y|ies)\b' --name requested-change
+  ```
+
+  A glob that matches no files fails the check (pass `--allow-empty` only when
+  that is expected). Run it again on the rendered files (`--publish
+  'dist/**/*.pdf'`) after the primary renders them.
+
+- Keep rendered binaries out of slice diffs; the primary renders them, looks at
+  every page and commits them after the run.
+
 ## Completion criteria
 
 A successful `legion-run` answer should give the user:

@@ -3,7 +3,8 @@
 
 Codex may ignore ``--output-schema`` for ``codex exec review`` and emit its
 stable human review format. This parser is intentionally narrow and fail-closed:
-it accepts schema-valid JSON, recognized ``[P0]``–``[P3]`` findings, or an
+it accepts schema-valid JSON (after folding any extra per-finding fields into
+that finding's ``detail``), recognized ``[P0]``–``[P3]`` findings, or an
 explicit no-findings statement. Everything else remains invalid.
 """
 
@@ -79,6 +80,45 @@ def _valid(payload: Any) -> bool:
     return True
 
 
+FINDING_KEYS = ("severity", "title", "file", "line", "detail")
+MAX_DETAIL = 4000
+
+
+def _fold_extra_finding_fields(payload: Any) -> Any:
+    """Fold fields a reviewer added to a finding into that finding's ``detail``.
+
+    Prompt reviewers often attach a helpful extra field to a finding (a quote, a
+    failure scenario, a suggested fix). The schema has no place for it, so the
+    whole verdict used to be rejected and a run failed on format rather than
+    substance. Folding keeps the information, and is deliberately the only
+    repair: the verdict, the summary, every severity and title are left exactly
+    as written, so a fold can never turn a finding into an approval, and
+    anything else malformed still fails closed in ``_valid``.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("findings"), list):
+        return payload
+    folded = []
+    for finding in payload["findings"]:
+        if not isinstance(finding, dict):
+            return payload
+        extra = sorted(set(finding) - set(FINDING_KEYS))
+        if not extra:
+            folded.append(finding)
+            continue
+        kept = {key: finding[key] for key in FINDING_KEYS if key in finding}
+        if "detail" in kept and not isinstance(kept["detail"], str):
+            return payload
+        # the reviewer's own detail is kept whole; only the folded fields are capped
+        added = "\n".join(
+            f"{key}: {finding[key] if isinstance(finding[key], str) else json.dumps(finding[key], sort_keys=True)}"
+            for key in extra
+        )[:MAX_DETAIL]
+        original = kept.get("detail", "")
+        kept["detail"] = f"{original}\n{added}" if original else added
+        folded.append(kept)
+    return dict(payload, findings=folded)
+
+
 def _json_payload(text: str) -> dict[str, Any] | None:
     stripped = text.strip()
     if stripped.startswith("```") and stripped.endswith("```"):
@@ -88,7 +128,10 @@ def _json_payload(text: str) -> dict[str, Any] | None:
         payload = json.loads(stripped)
     except (TypeError, ValueError):
         return None
-    return payload if _valid(payload) else None
+    if _valid(payload):
+        return payload
+    folded = _fold_extra_finding_fields(payload)
+    return folded if _valid(folded) else None
 
 
 def _safe_file(value: str, repo: Path) -> str:

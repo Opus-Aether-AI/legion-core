@@ -76,3 +76,9 @@ kept source experiment resolves them.
 ## Cost
 
 Per-model cost is computed upstream (by the router / `legion-delegate` from `legion-router/config/costs.json`) and carried in each span's `cost_usd`, so this plugin only aggregates — one price table, no divergence.
+
+<!-- legion-improve:5d66f9a0bfc00867:start -->
+## Learned Guardrail
+
+- Constrain changes to the requested version and preserve unrelated user work.
+<!-- legion-improve:5d66f9a0bfc00867:end -->

@@ -588,7 +588,9 @@ cmd_run() {
     # ok having lost everything. legion-pi-hermes already pins a base sha for this
     # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
     # had actually been done.
-    git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
+    # --binary: without it a changed PDF, image, font or spreadsheet becomes a
+    # "Binary files differ" line that `git apply` rejects.
+    git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
     [[ "$diff_rc" -ne 0 ]] && note "⚠ could not capture a diff from $wt"
     if [[ "$sandbox" == "read-only" && -s "$diff_path" ]]; then
       read_only_violation=1
@@ -774,9 +776,10 @@ Usage:
                     [--quiet] [--no-fallback] [--fallback-model MODEL]
   legion-claude run [--model MODEL] [--repo DIR] [...] < task.txt
 
-The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a diff at
-<repo>/.legion/runs/<run-id>/diff.patch, so it never edits the caller's working tree.
---keep retains the worktree; --apply applies the diff to the repo.
+The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a
+binary-safe diff at <repo>/.legion/runs/<run-id>/diff.patch, so it never edits the
+caller's working tree. --keep retains the worktree; --apply applies the diff to the
+repo.
 Read-only runs use Claude plan mode and fail if the worktree still changes.
 
 When Claude fails or is unavailable, the run falls back to the Codex workhorse

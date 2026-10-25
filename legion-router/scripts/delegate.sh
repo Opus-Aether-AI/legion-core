@@ -650,8 +650,8 @@ require_git_repo() {
 
 cleanup_generated_diff_noise() {
   local target="$1"
-  # Test runs often create Python bytecode. Those files are generated artifacts,
-  # and plain `git diff` records .pyc additions as non-applicable binary entries.
+  # Test runs often create Python bytecode. Those files are generated artifacts
+  # and must not ride along in the patch (which is binary-safe, so they would).
   find "$target" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
   find "$target" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
 }
@@ -1222,11 +1222,14 @@ cmd_run() {
     # Compare against the pinned starting commit. Using "$base" here would be a
     # no-op in the common case: it defaults to the NAME "HEAD", so an executor
     # that commits moves HEAD and the diff compares the work to itself.
+    # --binary: without it a changed PDF, image, font or spreadsheet becomes a
+    # "Binary files differ" line that `git apply` rejects, so the slice cannot
+    # land. --no-ext-diff/--no-textconv keep user diff drivers out of the patch.
     local diff_from="$base_commit"
     if [[ "${#scopes[@]}" -gt 0 ]]; then
-      git -C "$wt" diff --cached ${diff_from:+"$diff_from"} -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
+      git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${diff_from:+"$diff_from"} -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
     else
-      git -C "$wt" diff --cached ${diff_from:+"$diff_from"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
+      git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${diff_from:+"$diff_from"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
     fi
     if [[ "$diff_rc" -eq 0 ]]; then
       if [[ "${#scopes[@]}" -gt 0 ]]; then
@@ -1242,7 +1245,7 @@ cmd_run() {
     if [[ -n "$sandcastle_branch" ]]; then
       sandcastle_range="$base...$sandcastle_branch"
       if [[ "${#scopes[@]}" -gt 0 ]]; then
-        git -C "$wt" diff "$sandcastle_range" -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
+        git -C "$wt" diff --binary --no-ext-diff --no-textconv "$sandcastle_range" -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
       fi
       if [[ "$diff_rc" -eq 0 ]]; then
         if [[ "${#scopes[@]}" -gt 0 ]]; then
@@ -2150,7 +2153,7 @@ cmd_resume() {
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
   cleanup_generated_diff_noise "$wt"
   git -C "$wt" add -A 2>/dev/null || diff_rc=1
-  git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv >"$art/diff.patch" 2>/dev/null || diff_rc=1
   [[ "$rc" -ne 0 ]] && status="failed"
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
 

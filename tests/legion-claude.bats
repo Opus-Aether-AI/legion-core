@@ -630,3 +630,15 @@ SH
       and .reason == "claude_error" and .fell_back == false'
     assert_mock_not_called legion-delegate
 }
+
+@test "legion-claude: a binary file in the run applies byte for byte" {
+    local repo; repo="$(make_test_repo claude-binary)"
+    MOCK_CLAUDE_WRITE_BINARY=1 \
+      run "$LEGION_CLAUDE" run --task "add an image" --repo "$repo" --apply --quiet
+    [ "$status" -eq 0 ]
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    grep -q 'GIT binary patch' "$diff"
+    [ -f "$repo/claude-image.png" ]
+    printf '\x89PNG\r\n\x1a\n\x00\x01\x02\x03binary\x00\xff' > "$TEST_TMPDIR/expected.png"
+    cmp "$repo/claude-image.png" "$TEST_TMPDIR/expected.png"
+}

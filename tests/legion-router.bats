@@ -2852,3 +2852,16 @@ PY
     [ -n "$output" ]                      # what the fix sees: the work
     echo "$output" | grep -q changed
 }
+
+# ── binary-safe patches and large payloads ─────────────────────────────────
+
+@test "delegate run: a binary file in the slice patch applies byte for byte" {
+    local repo; repo="$(make_test_repo binary-slice)"
+    MOCK_CODEX_BINARY=1 run "$DELEGATE" run --model test-model-beta --task "add a report" \
+      --repo "$repo" --apply --quiet
+    [ "$status" -eq 0 ]
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    grep -q 'GIT binary patch' "$diff"
+    printf '%%PDF-1.7\n\x00\x01\x02\xffbinary\x00\n' > "$TEST_TMPDIR/expected.pdf"
+    cmp "$repo/MOCK_CODEX_REPORT.pdf" "$TEST_TMPDIR/expected.pdf"
+}

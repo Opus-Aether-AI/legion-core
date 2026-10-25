@@ -16,8 +16,10 @@ const readStdin = async () => {
   return Buffer.concat(chunks).toString("utf8");
 };
 
+// maxBuffer: execFileSync caps output at 1 MiB by default, and a binary-safe
+// patch of a few PDFs or images passes that easily.
 const git = (cwd, args) =>
-  execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 1024 * 1024 * 1024 });
 
 const sandboxImport = {
   docker: "@ai-hero/sandcastle/sandboxes/docker",
@@ -187,7 +189,7 @@ const result = await run({
 });
 
 const resultBranch = result?.branch || branch;
-const diff = git(cwd, ["diff", `${baseSha}...${resultBranch}`]);
+const diff = git(cwd, ["diff", "--binary", "--no-ext-diff", "--no-textconv", `${baseSha}...${resultBranch}`]);
 
 if (diffPath) {
   writeFileSync(diffPath, diff);

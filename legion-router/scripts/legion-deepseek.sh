@@ -220,7 +220,7 @@ cmd_run() {
   git -C "$wt" add -A 2>/dev/null || diff_rc=1
   # Diff against the worktree's STARTING commit, not HEAD -- an executor that
   # commits its work would otherwise produce an empty patch.
-  git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
   [[ "$rc" -ne 0 ]] && status="failed"
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
   if [[ "$sandbox" == "read-only" && "$status" == "ok" ]] \

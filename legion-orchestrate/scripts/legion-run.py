@@ -928,12 +928,54 @@ def require_clean_review_source(repo: Path, *, timeout_seconds: int) -> None:
         )
 
 
+def _default_branch_merge_base(repo: Path, *, timeout_seconds: int) -> tuple[str, str]:
+    """Where HEAD forked from the default branch, and that branch's ref.
+
+    ``origin/HEAD`` names the default branch when a remote is set; otherwise
+    ``main``, then ``master``. Returns ("", "") when none of them resolves.
+    """
+    refs: list[str] = []
+    try:
+        refs.append(
+            _git_output(
+                repo,
+                ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                timeout_seconds=timeout_seconds,
+            )
+        )
+    except LegionRunError as exc:
+        if exc.code == 124:
+            raise
+    refs += ["refs/heads/main", "refs/heads/master", "refs/remotes/origin/main", "refs/remotes/origin/master"]
+    for ref in refs:
+        try:
+            return _git_output(repo, ["merge-base", "HEAD", ref], timeout_seconds=timeout_seconds), ref
+        except LegionRunError as exc:
+            if exc.code == 124:
+                raise
+    return "", ""
+
+
+def _all_slices_inline(fanout_payload: Any) -> bool:
+    """True when fan-out delegated nothing: every slice was the primary's inline work."""
+    if not isinstance(fanout_payload, dict):
+        return False
+    slices = fanout_payload.get("slices")
+    return (
+        isinstance(slices, int)
+        and not isinstance(slices, bool)
+        and slices > 0
+        and fanout_payload.get("inline") == slices
+    )
+
+
 def create_review_snapshot(
     repo: Path,
     run_dir: Path,
     *,
     timeout_seconds: int,
     learning_context: dict[str, Any] | None = None,
+    inline_only: bool = False,
 ) -> dict[str, Any]:
     """Write the current worktree to a detached commit without changing its index.
 
@@ -941,6 +983,12 @@ def create_review_snapshot(
     them. Reviewers need those exact bytes, but symbolic ``HEAD`` can move and a
     fresh executor worktree otherwise loses dirty/untracked changes. A temporary
     index gives us an immutable, locally-addressable snapshot commit.
+
+    ``inline_only`` is a run whose every slice was the primary's own inline work,
+    committed before the run. Against ``HEAD`` that work is invisible and the
+    reviewer approves an empty range, so the review starts where ``HEAD`` forked
+    from the default branch instead; if even that range is empty there is
+    nothing to review, and the run says so rather than approving nothing.
     """
 
     base_sha = _git_output(
@@ -1025,14 +1073,33 @@ def create_review_snapshot(
         temp_index.unlink(missing_ok=True)
         Path(f"{temp_index}.lock").unlink(missing_ok=True)
 
+    review_base = base_sha
+    base_ref = ""
+    if inline_only:
+        merge_base, base_ref = _default_branch_merge_base(repo, timeout_seconds=timeout_seconds)
+        review_base = merge_base or base_sha
+        review_base_tree = _git_output(
+            repo, ["rev-parse", f"{review_base}^{{tree}}"], timeout_seconds=timeout_seconds
+        )
+        if review_base_tree == tree_sha:
+            against = f"{base_ref} (merge-base {review_base[:12]})" if base_ref else f"HEAD {review_base[:12]}"
+            raise LegionRunError(
+                "nothing to review: every slice ran inline and the worktree is identical to "
+                f"{against}. Commit the inline work on a branch off the default branch "
+                "and run from that branch.",
+                1,
+            )
+
     payload = {
         "schema": "legion.review-input.v1",
-        "base_sha": base_sha,
+        "base_sha": review_base,
         "head_sha": head_sha,
         "tree_sha": tree_sha,
         "dirty": tree_sha != base_tree,
         "created_at": _iso_utc(),
     }
+    if base_ref:
+        payload["base_ref"] = base_ref
     if learning_context is not None:
         payload["learning_context"] = learning_context
     _write_json(run_dir / "review-input.json", payload)
@@ -3043,6 +3110,7 @@ def execute(
             run_dir,
             timeout_seconds=stage_timeout_seconds,
             learning_context=review_bundle["descriptor"],
+            inline_only=_all_slices_inline(fanout_payload),
         )
         review_route = run_process(
             [_cmd("legion-route"), "final-review", "--task", "independent final review"],

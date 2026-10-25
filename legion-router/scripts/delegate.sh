@@ -972,6 +972,16 @@ cmd_run() {
       --_detached-worker) detached_worker=1; shift ;;
       --_sandbox-dev-pid) sandbox_dev_pid_from_parent="$2"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
+      # The receipt on stdout is always JSON. Accepting --json keeps callers that
+      # pass it to every Legion command (legion-share, legion-doctor and
+      # legion-run take it) from failing on a flag that would change nothing.
+      --json) shift ;;
+      -h|--help)
+        printf 'legion-delegate run — run a scoped task in an isolated worktree and return a patch\n\n'
+        usage_run
+        printf '\n'
+        usage_run_notes
+        exit 0 ;;
       *) die "run: unknown arg '$1'" ;;
     esac
   done
@@ -1760,6 +1770,8 @@ cmd_review() {
         [[ -r "$2" ]] || die "--task-file not readable: $2"
         task="$(cat "$2")"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
+      --json) shift ;;   # the verdict receipt is always JSON
+      -h|--help) usage; exit 0 ;;
       *) die "review: unknown arg '$1'" ;;
     esac
   done
@@ -2393,26 +2405,40 @@ cmd_cleanup() {
   fi
 }
 
-main() {
-  local cmd="${1:-}"; shift || true
-  case "$cmd" in
-    run)     cmd_run "$@" ;;
-    review)  cmd_review "$@" ;;
-    resume)  cmd_resume "$@" ;;
-    apply)   cmd_apply "$@" ;;
-    status)  cmd_status "$@" ;;
-    cleanup) cmd_cleanup "$@" ;;
-    -h|--help|help|"") cat >&2 <<'EOF'
+usage_run() {
+  cat <<'EOF'
+  run      [--archetype A | --model M] [--executor claude|codex|cursor|opencode|pi|hermes]
+           [--sandbox read-only|workspace-write|docker|podman|vercel]
+           [--reasoning-effort low|medium|high|xhigh] [--task T | --task-file F | stdin]
+           [--repo DIR] [--base REF] [--budget-tokens N] [--scope PATHSPEC ...]
+           [--detach] [--apply] [--keep] [--no-dirty-warn] [--untrusted] [--json]
+           -> JSON receipt on stdout (--json is accepted and changes nothing)
+EOF
+}
+
+usage_run_notes() {
+  cat <<'EOF'
+--archetype resolves model/sandbox/effort from routing.toml + models.toml. List them: legion-route --list
+--executor forces a specific harness (symmetric reverse-delegate). List them: legion-route --list-executors
+--scope may be repeated; it limits the captured diff to those git pathspecs. Supported by codex
+  and by executors that declare scope = true in executors.toml (claude).
+--detach returns after setup and leaves the worker running in a new session; use status --run RUN_ID
+  to poll it. Native codex only.
+Patches are binary-safe (git diff --binary), so PDFs, images, fonts and spreadsheets apply.
+--executor claude falls back to Codex when Claude fails; LEGION_CLAUDE_FALLBACK=off turns that off.
+EOF
+}
+
+usage() {
+  cat <<'EOF'
 legion-delegate — delegate a scoped task to an external model agent (Codex by
 default; any registered executor via --executor)
 
-  run      [--archetype A | --model M] [--executor claude|codex|cursor|opencode|pi|hermes]
-           [--sandbox read-only|workspace-write|docker|podman|vercel]
-           [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
-           [--base REF] [--budget-tokens N] [--scope PATHSPEC ...] [--detach] [--apply] [--keep]
-           [--no-dirty-warn] [--untrusted]
+EOF
+  usage_run
+  cat <<'EOF'
   review   [--archetype A | --model M] --base REF [--head REF] [--max-attempts N]
-           [--repo DIR] [--reasoning-effort E] [--task T]
+           [--repo DIR] [--reasoning-effort E] [--task T] [--json]
            -> immutable-SHA structured verdict + terminal receipt
   resume   --run RUN_ID [--task T|stdin] [--model M] [--repo DIR] [--reasoning-effort E]
            -> continue a kept codex session (original run needs --keep)
@@ -2422,11 +2448,21 @@ default; any registered executor via --executor)
            (run auto-deletes its own worktree on completion unless --keep; this
             reclaims --keep'd/resume worktrees + branches; --purge also drops run artifacts)
 
---archetype resolves model/sandbox/effort from routing.toml + models.toml. List them: legion-route --list
---executor forces a specific harness (symmetric reverse-delegate). List them: legion-route --list-executors
---scope may be repeated; it limits the captured diff to those git pathspecs.
---detach returns after setup and leaves the worker running in a new session; use status --run RUN_ID to poll it.
 EOF
+  usage_run_notes
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    run)     cmd_run "$@" ;;
+    review)  cmd_review "$@" ;;
+    resume)  cmd_resume "$@" ;;
+    apply)   cmd_apply "$@" ;;
+    status)  cmd_status "$@" ;;
+    cleanup) cmd_cleanup "$@" ;;
+    -h|--help|help|"")
+      usage >&2
       [[ "$cmd" == "" ]] && exit 2 || exit 0 ;;
     *) die "unknown command '$cmd' (run|review|resume|apply|status|cleanup)" ;;
   esac

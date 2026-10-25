@@ -2853,6 +2853,30 @@ PY
     echo "$output" | grep -q changed
 }
 
+# ── run --help / --json ────────────────────────────────────────────────────
+
+@test "delegate run: --help and -h print run usage and exit 0" {
+    run "$DELEGATE" run --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"legion-delegate run"* ]]
+    [[ "$output" == *"--scope PATHSPEC"* ]]
+    [[ "$output" == *"LEGION_CLAUDE_FALLBACK=off"* ]]
+    [[ "$output" != *"unknown arg"* ]]
+    run "$DELEGATE" run -h
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--executor"* ]]
+    run "$DELEGATE" review --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"review"* ]]
+}
+
+@test "delegate run: --json is accepted because the receipt is already JSON" {
+    local repo; repo="$(make_test_repo json-flag)"
+    run "$DELEGATE" run --model test-model-beta --task "add a guard" --repo "$repo" --json --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok" and .executor == "codex"'
+}
+
 # ── --scope / --detach for adapter executors ───────────────────────────────
 
 @test "delegate run: --scope reaches the Claude adapter, which declares it" {

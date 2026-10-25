@@ -48,5 +48,9 @@ legion_terminate_process_tree() {
     sleep 0.1
     ticks=$(( ticks - 1 ))
   done
-  kill -KILL "${pids[@]}" 2>/dev/null || true
+  # KILL only what is still running: a pid that exited during the grace period
+  # may already belong to an unrelated process.
+  for pid in "${pids[@]}"; do
+    if legion_process_alive "$pid"; then kill -KILL "$pid" 2>/dev/null || true; fi
+  done
 }

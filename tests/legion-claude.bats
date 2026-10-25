@@ -678,3 +678,19 @@ SH
     printf '\x89PNG\r\n\x1a\n\x00\x01\x02\x03binary\x00\xff' > "$TEST_TMPDIR/expected.png"
     cmp "$repo/claude-image.png" "$TEST_TMPDIR/expected.png"
 }
+
+@test "legion-claude: an invalid LEGION_CLAUDE_FALLBACK still terminalizes a queued run" {
+    local repo; repo="$(make_test_repo fallback-typo-queued)"
+    local run_id="queued-claude-fallback-typo"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+    LEGION_CLAUDE_FALLBACK=maybe run "$LEGION_CLAUDE" run --task x --repo "$repo" \
+      --run-id "$run_id" --quiet
+    [ "$status" -eq 2 ]
+    jq -e '.lifecycle.phase == "failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
+    assert_mock_not_called claude
+}

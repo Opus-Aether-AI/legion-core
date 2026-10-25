@@ -369,7 +369,6 @@ cmd_run() {
   local read_only_violation=0 claude_worktree_owned=0 task_file=""
   local -a scopes=()
 
-  claude_fallback_enabled || allow_fallback=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --task) task="$2"; shift 2 ;;
@@ -420,6 +419,9 @@ cmd_run() {
     legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" \
       "$wt" "$branch" "$model" "${sandbox:-workspace-write}" "$base" "$archetype" "$effort"
   fi
+  # Checked once the adopted-run guard is armed, so an invalid value still
+  # terminalizes a run that fanout queued.
+  claude_fallback_enabled || allow_fallback=0
   default_model="$(legion_model_ref claude_default)" || die "could not resolve claude_default in models.toml"
   [[ -n "$model" ]] || model="$default_model"
   # A models file with no Codex role (LEGION_MODELS_FILE pinned to a Claude-only

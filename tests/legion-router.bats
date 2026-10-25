@@ -2885,10 +2885,12 @@ PY
     mkdir -p "$bin"
     ln -s "$REPO_ROOT/legion-router/bin/legion-claude" "$bin/legion-claude"
     MOCK_CLAUDE_WRITE=1 PATH="$bin:$PATH" run "$DELEGATE" run --executor claude \
-      --task "edit" --repo "$repo" --scope foo.ts --no-dirty-warn --quiet
+      --task "edit" --repo "$repo" --scope foo.ts --no-dirty-warn
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e '.executor == "claude" and .status == "ok"'
-    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    [[ "$output" == *"1 changed path(s) outside --scope were not captured"* ]]
+    echo "$output" | tail -n 1 | jq -e '.executor == "claude" and .status == "ok"'
+    local diff; diff="$(echo "$output" | tail -n 1 | jq -r '.diff_path // empty')"
+    [ -n "$diff" ] && [ -f "$diff" ]
     [ ! -s "$diff" ]   # claude-unexpected.txt is outside the scope
 }
 

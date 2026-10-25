@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # legion-claude — delegate a scoped task to Claude headless, with automatic
-# fallback to legion-delegate / Codex when Claude is unavailable or rate-limited.
+# fallback to legion-delegate / Codex when Claude is unavailable or rate-limited
+# (off with --no-fallback or LEGION_CLAUDE_FALLBACK=off).
 
 set -euo pipefail
 
@@ -17,6 +18,9 @@ source "$_self_dir/lib/executor-context.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/run-id.sh
 source "$_self_dir/lib/run-id.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/process-tree.sh
+source "$_self_dir/lib/process-tree.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -26,6 +30,12 @@ fi
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 LEGION_CLAUDE_TMPDIR=""
+# The running `claude -p` (or Codex fallback) child. It runs in the background
+# and is waited on, so a terminating signal interrupts the `wait` and the trap
+# below takes the child's whole tree down with this process. In the
+# foreground, a TERM killed only this wrapper and left `claude` running with no
+# parent: hung runs outlived their timed-out callers by hours.
+CLAUDE_CHILD_PID=""
 
 die() { printf 'legion-claude: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -35,6 +45,20 @@ cleanup_claude_on_exit() {
   [[ -z "$LEGION_CLAUDE_TMPDIR" ]] || rm -rf "$LEGION_CLAUDE_TMPDIR"
 }
 trap cleanup_claude_on_exit EXIT
+on_claude_terminating_signal() {
+  local signum="$1"
+  trap - INT TERM HUP
+  if [[ -n "$CLAUDE_CHILD_PID" ]]; then
+    legion_terminate_process_tree "$CLAUDE_CHILD_PID"
+    wait "$CLAUDE_CHILD_PID" 2>/dev/null || true
+    CLAUDE_CHILD_PID=""
+  fi
+  exit $(( 128 + signum ))   # the EXIT trap still runs
+}
+trap 'on_claude_terminating_signal 1' HUP
+trap 'on_claude_terminating_signal 2' INT
+trap 'on_claude_terminating_signal 15' TERM
+
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
@@ -46,14 +70,17 @@ emit_span() {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
     local parent_id="${LEGION_PARENT_ID:-}"
-    jq -cn \
+    # The task travels on stdin: on argv a task past ARG_MAX made this jq fail
+    # with "Argument list too long", and the run's span was silently lost.
+    printf '%s' "$task" | jq -cRs \
       --arg schema "legion.span.v1" --arg ts "$(_now)" \
       --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
       --arg executor "$executor" --arg model "$model" \
       --arg archetype "${archetype:-${LEGION_ARCHETYPE:-}}" \
       --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
       --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-      --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
+      --argjson usage "$usage" --argjson artifacts "$artifacts" '
+      . as $task |
       {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id,
        parent_id:(if $parent_id=="" then null else $parent_id end),
        executor:$executor, model:$model, archetype:$archetype, task:$task, status:$status,
@@ -82,6 +109,19 @@ cost_from_usage() {
     [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '%s' 0
   done
   cost_for_model "$model" "$input" "$output" "$cache_read" "$cache_write"
+}
+
+# LEGION_CLAUDE_FALLBACK=off keeps a failed Claude run a Claude failure: the
+# receipt reports Claude's own status and reason instead of handing the task to
+# Codex (the same as --no-fallback, but settable once for a whole repository,
+# including the runs legion-delegate and legion-fanout start for it). Strict on
+# purpose: a repository that bans Codex must not have a typo re-enable it.
+claude_fallback_enabled() {
+  case "${LEGION_CLAUDE_FALLBACK:-on}" in
+    on|1|true|yes) return 0 ;;
+    off|0|false|no) return 1 ;;
+    *) die "invalid LEGION_CLAUDE_FALLBACK '${LEGION_CLAUDE_FALLBACK}' (on|off)" ;;
+  esac
 }
 
 has_low_claude_credit() {
@@ -259,15 +299,31 @@ run_fallback() {
       "$fallback_branch" "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
   fi
   set +e
-  fallback_args=(run --executor codex --model "$model" --task "$task" --repo "$repo"
+  # The task goes by file when the delegate is this install's own: on argv, a
+  # task the size of a large review prompt fails with "Argument list too long".
+  # A delegate substituted on PATH has not agreed to --task-file, so it keeps
+  # argv, exactly as dispatch_adapter does for adapters.
+  local -a task_args=(--task "$task")
+  if [[ -n "${task_file:-}" && -r "$task_file" && -x "$_self_dir/../bin/legion-delegate" ]] \
+    && [[ "$delegate_bin" -ef "$_self_dir/../bin/legion-delegate" ]]; then
+    task_args=(--task-file "$task_file")
+  fi
+  fallback_args=(run --executor codex --model "$model" "${task_args[@]}" --repo "$repo"
     --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID")
   [[ -z "${archetype:-}" ]] || fallback_args+=(--archetype "$archetype")
   [[ -z "$fallback_effort" ]] || fallback_args+=(--reasoning-effort "$fallback_effort")
   [[ "$fallback_apply" != "1" ]] || fallback_args+=(--apply)
   [[ "$fallback_keep" != "1" ]] || fallback_args+=(--keep)
   [[ "${QUIET:-0}" != "1" ]] || fallback_args+=(--quiet)
-  out="$("$delegate_bin" "${fallback_args[@]}")"
+  local fallback_out="${LEGION_CLAUDE_TMPDIR:-${TMPDIR:-/tmp}}/fallback.out.json"
+  # Backgrounded + waited like the Claude child, so a terminating signal also
+  # reaps a fallback run instead of orphaning it.
+  "$delegate_bin" "${fallback_args[@]}" </dev/null >"$fallback_out" &
+  CLAUDE_CHILD_PID=$!
+  wait "$CLAUDE_CHILD_PID"
   rc=$?
+  CLAUDE_CHILD_PID=""
+  out="$(cat "$fallback_out" 2>/dev/null || true)"
   set -e
 
   fallback_status="$(jq -r '.status // "failed"' <<<"$out" 2>/dev/null || printf 'failed')"
@@ -310,7 +366,8 @@ cmd_run() {
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
   local base_commit=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
-  local read_only_violation=0 claude_worktree_owned=0
+  local read_only_violation=0 claude_worktree_owned=0 task_file=""
+  local -a scopes=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -338,6 +395,7 @@ cmd_run() {
       --sandbox) sandbox="$2"; shift 2 ;;                     # accepted for diff-contract parity
       --archetype) archetype="$2"; shift 2 ;;                 # accepted for diff-contract parity
       --run-id) preset_run_id="$2"; shift 2 ;;                # adopt fanout's queued identity
+      --scope) scopes+=("$2"); shift 2 ;;                     # limit the captured diff (repeatable)
       *) die "run: unknown arg '$1'" ;;
     esac
   done
@@ -361,10 +419,23 @@ cmd_run() {
     legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$repo/.legion/runs/$RUN_ID" \
       "$wt" "$branch" "$model" "${sandbox:-workspace-write}" "$base" "$archetype" "$effort"
   fi
+  # Checked once the adopted-run guard is armed, so an invalid value still
+  # terminalizes a run that fanout queued.
+  claude_fallback_enabled || allow_fallback=0
   default_model="$(legion_model_ref claude_default)" || die "could not resolve claude_default in models.toml"
-  default_fallback_model="$(legion_model_ref codex_workhorse)" || die "could not resolve codex_workhorse in models.toml"
   [[ -n "$model" ]] || model="$default_model"
-  [[ -n "$fallback_model" ]] || fallback_model="$default_fallback_model"
+  # A models file with no Codex role (LEGION_MODELS_FILE pinned to a Claude-only
+  # catalog) has nothing to fall back to. That is a policy, not a broken config:
+  # run Claude and report its own result rather than refusing to start.
+  if [[ "$allow_fallback" -eq 1 && -z "$fallback_model" ]]; then
+    if default_fallback_model="$(legion_model_ref codex_workhorse 2>/dev/null)" \
+      && [[ -n "$default_fallback_model" ]]; then
+      fallback_model="$default_fallback_model"
+    else
+      allow_fallback=0
+      note "→ the models file has no codex_workhorse role; Codex fallback is off"
+    fi
+  fi
   [[ -n "$sandbox" ]] || sandbox="workspace-write"
   case "$sandbox" in
     read-only|workspace-write) ;;
@@ -388,6 +459,10 @@ cmd_run() {
   LEGION_CLAUDE_TMPDIR="$tmpdir"
   out_file="$tmpdir/claude.out.json"
   err_file="$tmpdir/claude.err"
+  # One copy of the task on disk feeds both `claude -p` (stdin) and a Codex
+  # fallback (--task-file), so neither puts it on argv.
+  task_file="$tmpdir/task.txt"
+  printf '%s' "$task" > "$task_file"
   artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" '{stdout:$stdout, stderr:$stderr}')"
 
   if has_low_claude_credit; then
@@ -477,12 +552,17 @@ cmd_run() {
     [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
     note "→ ${claude_cmd[*]}"
     set +e
-    printf '%s' "$task" | (
+    # Backgrounded + waited (see CLAUDE_CHILD_PID). The explicit stdin
+    # redirection matters: a background job's stdin is otherwise /dev/null.
+    (
       legion_activate_executor_context "$RUN_ID" claude
       cd "${wt:-$repo}"
-      "${claude_cmd[@]}"
-    ) >"$out_file" 2>"$err_file"
-    rc=${PIPESTATUS[1]}
+      exec "${claude_cmd[@]}"
+    ) <"$task_file" >"$out_file" 2>"$err_file" &
+    CLAUDE_CHILD_PID=$!
+    wait "$CLAUDE_CHILD_PID"
+    rc=$?
+    CLAUDE_CHILD_PID=""
     set -e
     if ! claude_model_declined "$out_file" "$err_file"; then
       declined_final=0
@@ -524,9 +604,29 @@ cmd_run() {
     # ok having lost everything. legion-pi-hermes already pins a base sha for this
     # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
     # had actually been done.
-    git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
+    # --binary: without it a changed PDF, image, font or spreadsheet becomes a
+    # "Binary files differ" line that `git apply` rejects.
+    if [[ "${#scopes[@]}" -gt 0 ]]; then
+      git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${base_commit:+"$base_commit"} \
+        -- "${scopes[@]}" >"$diff_path" 2>/dev/null || diff_rc=1
+    else
+      git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
+    fi
     [[ "$diff_rc" -ne 0 ]] && note "⚠ could not capture a diff from $wt"
-    if [[ "$sandbox" == "read-only" && -s "$diff_path" ]]; then
+    # --scope narrows the PATCH, never the read-only check: a write anywhere in
+    # the worktree is a violation, whether or not the scope would capture it.
+    local all_changes="" n_all=0 n_scoped=0
+    if [[ "$diff_rc" -eq 0 ]]; then
+      all_changes="$(git -C "$wt" diff --cached --name-only ${base_commit:+"$base_commit"} 2>/dev/null || true)"
+    fi
+    if [[ "${#scopes[@]}" -gt 0 && -n "$all_changes" ]]; then
+      n_all="$(printf '%s\n' "$all_changes" | grep -c . || true)"
+      n_scoped="$(git -C "$wt" diff --cached --name-only ${base_commit:+"$base_commit"} \
+        -- "${scopes[@]}" 2>/dev/null | grep -c . || true)"
+      [[ "$n_scoped" -ge "$n_all" ]] \
+        || note "⚠ $(( n_all - n_scoped )) changed path(s) outside --scope were not captured"
+    fi
+    if [[ "$sandbox" == "read-only" ]] && [[ -s "$diff_path" || -n "$all_changes" ]]; then
       read_only_violation=1
       note "⚠ Claude produced file changes during a read-only run; refusing the result"
     fi
@@ -707,13 +807,24 @@ Usage:
                     [--base REF] [--run-id ID] [--apply] [--keep]
                     [--sandbox read-only|workspace-write] [--archetype NAME]
                     [--append-system-prompt TEXT] [--dangerously-skip-permissions]
+                    [--scope PATHSPEC ...] [--fallback-models A,B]
                     [--quiet] [--no-fallback] [--fallback-model MODEL]
   legion-claude run [--model MODEL] [--repo DIR] [...] < task.txt
 
-The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a diff at
-<repo>/.legion/runs/<run-id>/diff.patch, so it never edits the caller's working tree.
---keep retains the worktree; --apply applies the diff to the repo.
+The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a
+binary-safe diff at <repo>/.legion/runs/<run-id>/diff.patch, so it never edits the
+caller's working tree. --keep retains the worktree; --apply applies the diff to the
+repo; --scope (repeatable) limits the captured diff to those git pathspecs.
 Read-only runs use Claude plan mode and fail if the worktree still changes.
+
+When Claude fails or is unavailable, the run falls back to the Codex workhorse
+role. --no-fallback, LEGION_CLAUDE_FALLBACK=off, or a models file with no
+codex_workhorse role turns that off: the result then reports Claude's own failure
+(status failed, or blocked on a usage limit, with its reason).
+
+On SIGTERM, SIGINT or SIGHUP the adapter terminates its claude (or fallback) child
+and every process under it (TERM, then KILL after LEGION_KILL_GRACE_SECONDS,
+default 5) before it exits.
 
 --effort / --append-system-prompt / --dangerously-skip-permissions pass through to
 `claude -p` (skip-permissions is for autonomous headless/cron runs — opt-in).

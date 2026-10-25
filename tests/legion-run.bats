@@ -975,6 +975,34 @@ SH
   grep -Fq -- "--sandbox read-only" "$run_dir/claude-review.args"
 }
 
+@test "legion-run: accepts a Claude verdict given in a fence after prose" {
+  # 25 Oct 2026: a valid approval inside a ```json block that followed a
+  # paragraph failed the gate as "expected a structured verdict object".
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  final-review) printf '{"executor":"claude","model":"test-model-claude","reasoning_effort":"high","resolved":true}\n' ;;
+  *) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
+esac
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-claude" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+result="$(printf 'I checked the range, so here is the verdict.\n\n```json\n%s\n```' \
+  '{"verdict":"approve","summary":"checked","findings":[{"severity":"low","title":"Note","detail":"minor"}]}')"
+jq -cn --arg result "$result" '{status:"ok",model:"test-model-claude",result:$result}'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-route" "$BATS_TEST_TMPDIR/bin/legion-claude"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  echo "$json" | jq -e '.ok == true'
+}
+
 @test "legion-run: fails closed when Claude omits the terminal review verdict" {
   install_fake_pipeline_bins
   cat > "$BATS_TEST_TMPDIR/bin/legion-route" <<'SH'
@@ -1074,6 +1102,79 @@ SH
   grep -Fq -- "--base $base_sha --head $head_sha" "$run_dir/review-args.txt"
   grep -Fq -- "--trace outer-trace --json" "$run_dir/report-args.txt"
   jq -e '.env_trace == "outer-trace"' "$run_dir/legion-report.json"
+}
+
+install_all_inline_fanout() {
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+ledger="$LEGION_RUN_DIR/fanout-task-ledger.json"
+printf '{"schema":"legion.task-ledger.v1","status":"completed","tasks":[]}\n' > "$ledger"
+jq -cn --arg ledger "$ledger" \
+  '{ok:0,slices:1,inline:1,failed:0,applied:0,results:[{status:"inline"}],task_ledger_path:$ledger}'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$LEGION_RUN_DIR/review-args.txt"
+printf '{"status":"ok","model":"test-model-beta","verdict":{"verdict":"approve","summary":"inline work reviewed","findings":[]}}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-fanout" "$BATS_TEST_TMPDIR/bin/legion-delegate"
+}
+
+@test "legion-run: an all-inline run reviews from where HEAD forked from the default branch" {
+  # Inline slices are committed before the run, so a review based on HEAD saw
+  # an empty range and approved nothing (25 Oct 2026: "8eec118...HEAD is empty").
+  install_fake_pipeline_bins
+  install_all_inline_fanout
+  git -C "$REPO" branch -M main
+  main_sha="$(git -C "$REPO" rev-parse HEAD)"
+  git -C "$REPO" checkout -q -b inline-work
+  printf 'inline work\n' > "$REPO/inline.txt"
+  git -C "$REPO" add inline.txt
+  git -C "$REPO" commit -qm "inline slice"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  jq -e --arg main "$main_sha" '.base_sha == $main and .base_ref == "refs/heads/main"' "$run_dir/review-input.json"
+  head_sha="$(jq -r .head_sha "$run_dir/review-input.json")"
+  git -C "$REPO" diff --name-only "$main_sha" "$head_sha" | grep -qx inline.txt
+  grep -Fq -- "--base $main_sha --head $head_sha" "$run_dir/review-args.txt"
+}
+
+@test "legion-run: an all-inline run with nothing to review fails instead of approving" {
+  install_fake_pipeline_bins
+  install_all_inline_fanout
+  git -C "$REPO" branch -M main
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  echo "$json" | jq -e '.ok == false and .failed_stage == "review"'
+  jq -e '(.message | contains("nothing to review: every slice ran inline"))' "$run_dir/failure.json"
+  [ ! -e "$run_dir/review-args.txt" ]
+}
+
+@test "legion-run: a delegated run still reviews against HEAD" {
+  install_fake_pipeline_bins
+  git -C "$REPO" branch -M main
+  git -C "$REPO" checkout -q -b feature
+  printf 'earlier\n' > "$REPO/earlier.txt"
+  git -C "$REPO" add earlier.txt
+  git -C "$REPO" commit -qm "earlier work"
+  head_before="$(git -C "$REPO" rev-parse HEAD)"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  jq -e --arg head "$head_before" '.base_sha == $head and (has("base_ref") | not)' "$run_dir/review-input.json"
 }
 
 @test "legion-run: a successful fanout must return its task ledger" {

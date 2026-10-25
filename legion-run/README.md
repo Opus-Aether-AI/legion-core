@@ -36,6 +36,11 @@ That is why it is useful for businesses: different developers or agents can
 start from the same task, but the run is judged through the same validation
 contract and the same shared memory.
 
+The final review covers an immutable snapshot of the worktree against `HEAD`.
+When every slice is the primary's inline work, committed before the run, it
+covers the range from where `HEAD` forked from the default branch instead, and
+a run with nothing in that range fails rather than approving an empty diff.
+
 ## Direct Mode
 
 Use direct mode when you have a plan and validation command:

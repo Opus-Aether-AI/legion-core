@@ -276,7 +276,7 @@ cmd_run() {
   # ok having lost everything. legion-pi-hermes already pins a base sha for this
   # reason; delegate.sh was fixed in #182 after a benchmark scored 0 on work that
   # had actually been done.
-  git -C "$wt" diff --cached ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${base_commit:+"$base_commit"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
   [[ "$rc" -ne 0 ]] && status="failed"
   if [[ "$has_error" == "true" ]]; then
     status="failed"

@@ -2852,3 +2852,121 @@ PY
     [ -n "$output" ]                      # what the fix sees: the work
     echo "$output" | grep -q changed
 }
+
+# ── run --help / --json ────────────────────────────────────────────────────
+
+@test "delegate run: --help and -h print run usage and exit 0" {
+    run "$DELEGATE" run --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"legion-delegate run"* ]]
+    [[ "$output" == *"--scope PATHSPEC"* ]]
+    [[ "$output" == *"LEGION_CLAUDE_FALLBACK=off"* ]]
+    [[ "$output" != *"unknown arg"* ]]
+    run "$DELEGATE" run -h
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--executor"* ]]
+    run "$DELEGATE" review --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"review"* ]]
+}
+
+@test "delegate run: --json is accepted because the receipt is already JSON" {
+    local repo; repo="$(make_test_repo json-flag)"
+    run "$DELEGATE" run --model test-model-beta --task "add a guard" --repo "$repo" --json --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.status == "ok" and .executor == "codex"'
+}
+
+# ── --scope / --detach for adapter executors ───────────────────────────────
+
+@test "delegate run: --scope reaches the Claude adapter, which declares it" {
+    local repo; repo="$(make_test_repo claude-scope-dispatch)"
+    local bin="$TEST_TMPDIR/own-claude-bin"
+    mkdir -p "$bin"
+    ln -s "$REPO_ROOT/legion-router/bin/legion-claude" "$bin/legion-claude"
+    MOCK_CLAUDE_WRITE=1 PATH="$bin:$PATH" run "$DELEGATE" run --executor claude \
+      --task "edit" --repo "$repo" --scope foo.ts --no-dirty-warn
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 changed path(s) outside --scope were not captured"* ]]
+    echo "$output" | tail -n 1 | jq -e '.executor == "claude" and .status == "ok"'
+    local diff; diff="$(echo "$output" | tail -n 1 | jq -r '.diff_path // empty')"
+    [ -n "$diff" ] && [ -f "$diff" ]
+    [ ! -s "$diff" ]   # claude-unexpected.txt is outside the scope
+}
+
+@test "delegate run: --scope and --detach errors name the executors that support them" {
+    local repo; repo="$(make_test_repo adapter-flag-errors)"
+    run "$DELEGATE" run --executor cursor --task x --repo "$repo" --scope foo.ts --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--scope is not supported by executor 'cursor'"* ]]
+    [[ "$output" == *"codex (native)"* ]]
+    [[ "$output" == *"claude"* ]]
+    assert_mock_not_called agent
+
+    run "$DELEGATE" run --executor claude --task x --repo "$repo" --detach --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--detach is supported only by the native codex executor"* ]]
+    [[ "$output" == *"'claude' runs in the foreground"* ]]
+    assert_mock_not_called claude
+}
+
+@test "delegate run: a run without --scope reports nothing as excluded by it" {
+    # The base commit used to be passed as a separate argument and read as the
+    # first scope, so every unscoped run listed all of its changes as excluded.
+    local repo; repo="$(make_test_repo unscoped-summary)"
+    run "$DELEGATE" run --model test-model-beta --task x --repo "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"MOCK_CODEX_CHANGE.txt"* ]]
+    [[ "$output" != *"excluded by --scope"* ]]
+}
+
+# ── binary-safe patches and large payloads ─────────────────────────────────
+
+@test "delegate run: a binary file in the slice patch applies byte for byte" {
+    local repo; repo="$(make_test_repo binary-slice)"
+    MOCK_CODEX_BINARY=1 run "$DELEGATE" run --model test-model-beta --task "add a report" \
+      --repo "$repo" --apply --quiet
+    [ "$status" -eq 0 ]
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    grep -q 'GIT binary patch' "$diff"
+    printf '%%PDF-1.7\n\x00\x01\x02\xffbinary\x00\n' > "$TEST_TMPDIR/expected.pdf"
+    cmp "$repo/MOCK_CODEX_REPORT.pdf" "$TEST_TMPDIR/expected.pdf"
+}
+
+@test "delegate run: a native codex task past ARG_MAX finishes and records its span" {
+    local repo; repo="$(make_test_repo native-big-task)"
+    local big="$BATS_TEST_TMPDIR/native-big.txt"
+    python3 -c "print('x' * 1100000)" > "$big"
+    run "$DELEGATE" run --model test-model-beta --task-file "$big" --repo "$repo" --quiet
+    [[ "$output" != *"Argument list too long"* ]]
+    [ "$status" -eq 0 ]
+    local run_id; run_id="$(echo "$output" | jq -r .run_id)"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e --arg run '$run_id' \
+      'select(.run_id == \$run and .executor == \"codex\") | (.task | length) > 1000000'"
+    [ "$status" -eq 0 ]
+}
+
+@test "delegate review: a prompt reviewer gets binary files summarised, not inlined" {
+    local repo; repo="$(make_test_repo review-binary)"
+    local base; base="$(git -C "$repo" rev-parse HEAD)"
+    printf '\x89PNG\r\n\x1a\n\x00\x01binary\x00' > "$repo/image.png"
+    printf 'export const y = 2\n' >> "$repo/foo.ts"
+    git -C "$repo" add -A
+    git -C "$repo" -c user.email=t@t.c -c user.name=t commit -qm binary
+    local bin="$TEST_TMPDIR/own-claude-review"
+    mkdir -p "$bin"
+    ln -s "$REPO_ROOT/legion-router/bin/legion-claude" "$bin/legion-claude"
+    local routing="$TEST_TMPDIR/claude-review-routing.toml"
+    printf '[review]\norder = ["claude"]\n' > "$routing"
+    local prompt="$TEST_TMPDIR/review-prompt.txt"
+
+    PATH="$bin:$PATH" LEGION_ROUTING_FILE="$routing" MOCK_CLAUDE_PROMPT_LOG="$prompt" \
+      run "$DELEGATE" review --base "$base" --repo "$repo" --max-attempts 1 --quiet
+
+    [ -s "$prompt" ]
+    grep -q 'Binary files /dev/null and b/image.png differ' "$prompt"
+    ! grep -q 'GIT binary patch' "$prompt"
+    grep -q 'export const y = 2' "$prompt"
+    local patch; patch="$(echo "$output" | tail -n 1 | jq -r .review_patch)"
+    grep -q 'GIT binary patch' "$patch"
+}

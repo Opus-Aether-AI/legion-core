@@ -487,3 +487,210 @@ EOF
     run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -r '.artifacts.declined_models // empty'"
     [ "$output" = "$CLAUDE_DEFAULT" ]
 }
+
+# ── termination: a killed adapter must not orphan its claude child ─────────
+
+wait_for_file() {
+    local f="$1" _
+    for _ in $(seq 1 250); do
+        [[ -s "$f" ]] && return 0
+        sleep 0.02
+    done
+    return 1
+}
+
+# Gone, or a zombie waiting to be reaped (it has already exited).
+process_gone() {
+    local pid="$1" state _
+    for _ in $(seq 1 100); do
+        state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')" || true
+        [[ -z "$state" || "$state" == Z* ]] && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+@test "legion-claude: SIGTERM takes the claude child and its children down with the adapter" {
+    local repo; repo="$(make_test_repo sigterm-tree)"
+    local pidfile="$TEST_TMPDIR/claude-hang.pid"
+    MOCK_CLAUDE_HANG=1 MOCK_CLAUDE_PIDFILE="$pidfile" \
+      "$LEGION_CLAUDE" run --task "hang" --repo "$repo" --quiet \
+        >"$TEST_TMPDIR/sigterm.out" 2>"$TEST_TMPDIR/sigterm.err" 3>&- &
+    local adapter=$!
+    wait_for_file "$pidfile"
+    local claude_pid child_pid
+    claude_pid="$(cat "$pidfile")"
+    child_pid="$(cat "$pidfile.child")"
+
+    kill -TERM "$adapter"
+    local rc=0
+    wait "$adapter" || rc=$?
+
+    [ "$rc" -eq 143 ]
+    process_gone "$claude_pid"
+    process_gone "$child_pid"
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: a child that ignores SIGTERM is killed after the grace period" {
+    local repo; repo="$(make_test_repo sigterm-stubborn)"
+    local bin="$TEST_TMPDIR/stubborn-bin" pidfile="$TEST_TMPDIR/stubborn.pid"
+    mkdir -p "$bin"
+    cat > "$bin/claude" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+printf '%s\n' "$$" > "$STUBBORN_PIDFILE"
+while :; do sleep 1; done
+SH
+    chmod +x "$bin/claude"
+    STUBBORN_PIDFILE="$pidfile" LEGION_KILL_GRACE_SECONDS=1 PATH="$bin:$PATH" \
+      "$LEGION_CLAUDE" run --task "hang" --repo "$repo" --quiet \
+        >/dev/null 2>&1 3>&- &
+    local adapter=$!
+    wait_for_file "$pidfile"
+    kill -TERM "$adapter"
+    local rc=0
+    wait "$adapter" || rc=$?
+    [ "$rc" -eq 143 ]
+    process_gone "$(cat "$pidfile")"
+}
+
+@test "legion-claude: legion-delegate run --executor claude reaps claude on SIGTERM" {
+    # The reported path: legion-delegate execs the adapter, so a caller's
+    # timeout TERMs the adapter itself. Pin this install's adapter on PATH.
+    local repo; repo="$(make_test_repo sigterm-delegate)"
+    local bin="$TEST_TMPDIR/own-adapter-bin" pidfile="$TEST_TMPDIR/delegate-hang.pid"
+    mkdir -p "$bin"
+    ln -s "$REPO_ROOT/legion-router/bin/legion-claude" "$bin/legion-claude"
+    MOCK_CLAUDE_HANG=1 MOCK_CLAUDE_PIDFILE="$pidfile" PATH="$bin:$PATH" \
+      "$REPO_ROOT/legion-router/bin/legion-delegate" run --executor claude \
+        --task "hang" --repo "$repo" --no-dirty-warn --quiet \
+        >"$TEST_TMPDIR/delegate.out" 2>"$TEST_TMPDIR/delegate.err" 3>&- &
+    local delegate=$!
+    wait_for_file "$pidfile"
+    local claude_pid child_pid
+    claude_pid="$(cat "$pidfile")"
+    child_pid="$(cat "$pidfile.child")"
+
+    kill -TERM "$delegate"
+    local rc=0
+    wait "$delegate" || rc=$?
+
+    [ "$rc" -eq 143 ]
+    process_gone "$claude_pid"
+    process_gone "$child_pid"
+}
+
+# ── no silent Codex fallback ───────────────────────────────────────────────
+
+@test "legion-claude: LEGION_CLAUDE_FALLBACK=off reports the Claude failure, not a Codex run" {
+    local repo; repo="$(make_test_repo fallback-off)"
+    MOCK_CLAUDE_FAIL=1 LEGION_CLAUDE_FALLBACK=off \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .executor == "claude" and .status == "failed"
+      and .reason == "claude_error" and .fell_back == false'
+    assert_mock_not_called legion-delegate
+
+    MOCK_CLAUDE_LIMIT=1 LEGION_CLAUDE_FALLBACK=off \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .executor == "claude" and .status == "blocked"
+      and .reason == "claude_limit" and .fell_back == false'
+
+    PATH="$(path_without claude)" LEGION_CLAUDE_FALLBACK=off \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.executor == "claude" and .reason == "claude_unavailable"'
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: an unknown LEGION_CLAUDE_FALLBACK value fails instead of falling back" {
+    local repo; repo="$(make_test_repo fallback-typo)"
+    MOCK_CLAUDE_FAIL=1 LEGION_CLAUDE_FALLBACK=of \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"invalid LEGION_CLAUDE_FALLBACK 'of'"* ]]
+    assert_mock_not_called claude
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: a models file with no Codex role runs Claude and never falls back" {
+    local repo; repo="$(make_test_repo claude-only-models)"
+    local models="$TEST_TMPDIR/claude-only-models.toml"
+    printf '[models]\nclaude_default = "%s"\n' "$CLAUDE_DEFAULT" > "$models"
+    MOCK_CLAUDE_FAIL=1 LEGION_MODELS_FILE="$models" \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no codex_workhorse role"* ]]
+    echo "$output" | tail -n 1 | jq -e '
+      .executor == "claude" and .status == "failed"
+      and .reason == "claude_error" and .fell_back == false'
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: a large task reaches the Codex fallback by file, not argv" {
+    local repo; repo="$(make_test_repo fallback-big-task)"
+    local real_bin="$TEST_TMPDIR/real-delegate-bin" big="$TEST_TMPDIR/big-task.txt"
+    mkdir -p "$real_bin"
+    ln -s "$REPO_ROOT/legion-router/bin/legion-delegate" "$real_bin/legion-delegate"
+    # Larger than ARG_MAX on macOS (1 MiB) and Linux's per-argument limit.
+    python3 -c "print('review this: ' + 'x' * 1100000)" > "$big"
+
+    PATH="$real_bin:$PATH" MOCK_CLAUDE_FAIL=1 \
+      run "$LEGION_CLAUDE" run --task-file "$big" --repo "$repo" --quiet
+    [[ "$output" != *"Argument list too long"* ]]
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.executor == "codex" and .status == "ok" and .fell_back == true'
+}
+
+# ── scope and binary-safe patches ──────────────────────────────────────────
+
+@test "legion-claude: --scope limits the captured diff" {
+    local repo; repo="$(make_test_repo claude-scope)"
+    MOCK_CLAUDE_WRITE=1 MOCK_CLAUDE_WRITE_BINARY=1 \
+      run "$LEGION_CLAUDE" run --task "edit" --repo "$repo" --scope claude-image.png
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 changed path(s) outside --scope were not captured"* ]]
+    local diff; diff="$(echo "$output" | tail -n 1 | jq -r .diff_path)"
+    grep -q 'claude-image.png' "$diff"
+    ! grep -q 'claude-unexpected.txt' "$diff"
+}
+
+@test "legion-claude: --scope never hides a read-only violation" {
+    local repo; repo="$(make_test_repo claude-scope-readonly)"
+    MOCK_CLAUDE_WRITE=1 run "$LEGION_CLAUDE" run --task "inspect" --repo "$repo" \
+      --sandbox read-only --scope foo.ts --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.reason == "read_only_violation"'
+}
+
+@test "legion-claude: a binary file in the run applies byte for byte" {
+    local repo; repo="$(make_test_repo claude-binary)"
+    MOCK_CLAUDE_WRITE_BINARY=1 \
+      run "$LEGION_CLAUDE" run --task "add an image" --repo "$repo" --apply --quiet
+    [ "$status" -eq 0 ]
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    grep -q 'GIT binary patch' "$diff"
+    [ -f "$repo/claude-image.png" ]
+    printf '\x89PNG\r\n\x1a\n\x00\x01\x02\x03binary\x00\xff' > "$TEST_TMPDIR/expected.png"
+    cmp "$repo/claude-image.png" "$TEST_TMPDIR/expected.png"
+}
+
+@test "legion-claude: an invalid LEGION_CLAUDE_FALLBACK still terminalizes a queued run" {
+    local repo; repo="$(make_test_repo fallback-typo-queued)"
+    local run_id="queued-claude-fallback-typo"
+    mkdir -p "$LEGION_REGISTRY_DIR"
+    jq -cn --arg run "$run_id" --arg repo "$repo" '
+      {schema:"legion.run-state.v1",run_id:$run,trace_id:"fanout-trace",
+       parent_id:"fanout-root",kind:"run",state_version:1,repo_root:$repo,
+       lifecycle:{phase:"queued",started_at:"",updated_at:"2026-07-31T10:25:17Z"}}
+    ' > "$LEGION_REGISTRY_DIR/$run_id.json"
+    LEGION_CLAUDE_FALLBACK=maybe run "$LEGION_CLAUDE" run --task x --repo "$repo" \
+      --run-id "$run_id" --quiet
+    [ "$status" -eq 2 ]
+    jq -e '.lifecycle.phase == "failed"' "$LEGION_REGISTRY_DIR/$run_id.json"
+    assert_mock_not_called claude
+}

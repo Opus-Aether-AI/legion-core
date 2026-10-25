@@ -25,6 +25,7 @@
 #   MOCK_CODEX_REVIEW_PROMPT_LOG=PATH -> capture ordinary review's stdin prompt
 #   MOCK_CODEX_SCHEMA_REVIEW_EXIT=N -> only ordinary review exits N
 #   MOCK_CODEX_SCHEMA_REVIEW_DELAY=N -> only ordinary review waits (signal tests)
+#   MOCK_CODEX_BINARY=1 -> a writable run also adds a binary file (MOCK_CODEX_REPORT.pdf)
 #
 # Emits the codex-cli 0.139.x --json event shape. For `exec` with a writable
 # sandbox it creates a real file change in the -C worktree so `git diff` is
@@ -63,6 +64,16 @@ if [[ $native_review -eq 0 && ( "$output_schema" == */review-verdict.schema.json
   if [[ -n "${MOCK_CODEX_REVIEW_PROMPT_LOG:-}" ]]; then
     cat > "$MOCK_CODEX_REVIEW_PROMPT_LOG"
   fi
+fi
+
+# `-` means "read the prompt from stdin", which real codex consumes in full.
+# Drain it the same way, or a large piped task dies on EPIPE in the writer.
+prompt_read=0
+[[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_PROMPT_LOG:-}" ]] && prompt_read=1
+if [[ $prompt_read -eq 0 ]]; then
+  for arg in "${args[@]}"; do
+    if [[ "$arg" == "-" ]]; then cat >/dev/null || true; break; fi
+  done
 fi
 
 review_invalid_attempt=0
@@ -167,6 +178,10 @@ else
       git -C "$cd_dir" add -A 2>/dev/null || true
       git -C "$cd_dir" -c user.email=mock@example.com -c user.name=mock \
         commit -q -m "mock agent commit" 2>/dev/null || true
+    fi
+    # MOCK_CODEX_BINARY=1 adds a file git treats as binary (NUL bytes).
+    if [[ "${MOCK_CODEX_BINARY:-}" == "1" ]]; then
+      printf '%%PDF-1.7\n\x00\x01\x02\xffbinary\x00\n' > "$cd_dir/MOCK_CODEX_REPORT.pdf"
     fi
     if [[ "${MOCK_CODEX_PYCACHE:-}" == "1" ]]; then
       mkdir -p "$cd_dir/__pycache__" "$cd_dir/nested/__pycache__"

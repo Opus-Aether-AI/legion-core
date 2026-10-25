@@ -4,7 +4,10 @@
 Reads legion.span.v1 telemetry (both codex delegations AND the primary's self-work,
 logged via `legion-trace emit` / the synthetic primary baseline), computes codex's
 share, and compares it to the target (routing.toml [targets].codex_share, or
-$LEGION_TARGET_CODEX_SHARE, default 0.5).
+$LEGION_TARGET_CODEX_SHARE, default 0.5). The routing policy is the one
+legion-route uses: $LEGION_ROUTING_FILE when set, else the shipped routing.toml.
+A policy that routes no archetype to codex has a target of 0, so `gate` stays
+quiet in a repository that does not use Codex.
 
 Framing note: this controller is codex-vs-primary (the primary is whoever drives
 the session; historically Opus). It stays valid for a non-codex primary; a full
@@ -36,7 +39,10 @@ except ModuleNotFoundError:  # pragma: no cover
 
 _STATE = legion_state.resolve_state(os.getcwd())
 _DEF_SPANS = os.environ.get("LEGION_TELEMETRY_DIR", _STATE["telemetry_dir"])
-_DEF_ROUTING = os.path.join(os.path.dirname(__file__), "..", "..", "legion-router", "config", "routing.toml")
+# The same policy legion-route resolves: a repository that pins its own routing
+# with LEGION_ROUTING_FILE must be measured against that policy, not the default.
+_DEF_ROUTING = os.environ.get("LEGION_ROUTING_FILE") or os.path.join(
+    os.path.dirname(__file__), "..", "..", "legion-router", "config", "routing.toml")
 
 
 def is_codex(executor):
@@ -103,6 +109,27 @@ def load_spans(d, since=None):
     return spans
 
 
+def routes_to_codex(routing=_DEF_ROUTING):
+    """Whether the routing policy sends any work to codex.
+
+    True when [defaults] or any archetype names executor "codex"; False when the
+    policy reads cleanly and none does; None when it cannot be read, so callers
+    keep their ordinary default instead of guessing.
+    """
+    if not (tomllib and routing and os.path.exists(routing)):
+        return None
+    try:
+        with open(routing, "rb") as fh:
+            table = tomllib.load(fh)
+    except (OSError, ValueError, TypeError):
+        return None
+    routes = [table.get("defaults") or {}]
+    archetypes = table.get("archetypes") or {}
+    if isinstance(archetypes, dict):
+        routes.extend(archetypes.values())
+    return any(isinstance(route, dict) and route.get("executor") == "codex" for route in routes)
+
+
 def target_share(explicit=None, routing=_DEF_ROUTING):
     val = None
     if explicit is not None:
@@ -114,6 +141,13 @@ def target_share(explicit=None, routing=_DEF_ROUTING):
                 val = float(env)
             except ValueError:
                 val = None
+        # Routing cannot raise a codex share in a policy that routes nothing to
+        # codex, so any positive target there is a standing false alarm: the
+        # gate would tell every turn to "route the next slice to codex" in a
+        # repository that has banned it. The routes are the operative policy,
+        # and they win over a [targets] value copied from the default file.
+        if val is None and routes_to_codex(routing) is False:
+            val = 0.0
         if val is None and tomllib and routing and os.path.exists(routing):
             try:
                 with open(routing, "rb") as fh:
@@ -182,6 +216,9 @@ def gate(c, tgt):
     """
     runs, share = c["total_runs"], c["codex_share_runs"]
     pct, tpct = round(share * 100), round(tgt * 100)
+    if tgt <= 0:
+        return ("legion-share: the codex share target is 0% (the routing policy sends no "
+                "work to codex, or the target is set to 0) — nothing to balance.", 0)
     if c["codex_runs"] > 0 and c["opus_runs"] == 0:
         return ("legion-share: only codex work is logged — Opus self-work isn't being "
                 "recorded, so the share is unmeasurable.", 0)

@@ -56,6 +56,9 @@ source "$_self_dir/lib/primary.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/sandbox-setup.sh
 source "$_self_dir/lib/sandbox-setup.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/process-tree.sh
+source "$_self_dir/lib/process-tree.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -119,8 +122,10 @@ trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legio
 # codex is launched in the background and immediately waited on, so a terminating
 # signal to this wrapper interrupts the `wait` and runs this handler — otherwise a
 # `kill`/hangup of the wrapper would leave codex orphaned (still billing, its
-# stream.jsonl still growing). Best-effort: TERM the tracked child plus any codex
-# grandchild (review/resume wrap it in a `( cd … && codex )` subshell).
+# stream.jsonl still growing). The handler TERMs the tracked child plus every
+# descendant (review/resume wrap codex in a `( cd … && codex )` subshell, and a
+# prompt reviewer is a whole adapter tree), then KILLs whatever outlives the
+# grace period, so the `wait` below it cannot hang on a child that ignores TERM.
 CODEX_CHILD_PID=""
 REVIEW_RECEIPT_PATH=""
 REVIEW_RECEIPT_RUN_ID=""
@@ -137,14 +142,7 @@ REVIEW_START_MS=0
 kill_codex_child() {
   local pid="${CODEX_CHILD_PID:-}"
   [[ -n "$pid" ]] || return 0
-  terminate_process_tree "$pid"
-}
-terminate_process_tree() {
-  local pid="$1" child
-  while IFS= read -r child; do
-    [[ -n "$child" ]] && terminate_process_tree "$child"
-  done < <(pgrep -P "$pid" 2>/dev/null || true)
-  kill -TERM "$pid" 2>/dev/null || true
+  legion_terminate_process_tree "$pid"
 }
 write_interrupted_review_receipt() {
   [[ -n "$REVIEW_RECEIPT_PATH" ]] || return 0
@@ -358,16 +356,17 @@ run_sandcastle() {
   sandcastle_script="$_self_dir/sandcastle-run.mjs"
   : > "$art/stream.jsonl"
   set +e
-  jq -cn \
-    --arg task "$task" --arg model "$1" --arg sandbox "$sandbox" \
+  printf '%s' "$task" | jq -cRs \
+    --arg model "$1" --arg sandbox "$sandbox" \
     --arg cwd "$wt" --arg main_repo "$repo" --arg base "$base" --arg branch "$branch" \
     --arg diff "$art/diff.patch" --arg artifact_dir "$art" \
     --arg effort "$effort" --argjson untrusted "$untrusted" \
-    '{task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
+    '. as $task
+     | {task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
       main_repo:$main_repo, artifact_dir:$artifact_dir, untrusted:$untrusted,
       effort:(if $effort=="" then null else $effort end)}' \
     | "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
-  rc=${PIPESTATUS[1]}
+  rc=${PIPESTATUS[2]}   # printf | jq | node: node's status
   set -e
   # Surface the wrapper's stderr (e.g. the @ai-hero/sandcastle install hint on
   # exit 3) — it lands in codex.err, which cmd_run never prints otherwise.
@@ -431,17 +430,17 @@ emit_primary_baseline_span() {
   mkdir -p "$LEGION_TELEMETRY_DIR"
   local baseline_run="${RUN_ID}-${label}"
   local trace_id="${LEGION_TRACE_ID:-$RUN_ID}"
-  jq -cn \
+  printf '%s' "$delegated_task" | jq -cRs \
     --arg schema "legion.span.v1" --arg ts "$(_now)" \
     --arg run_id "$baseline_run" --arg trace_id "$trace_id" \
     --arg executor "$label" --arg model "$label" --arg archetype "${archetype:-}" \
     --arg primary "$primary" \
     --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
     --arg task "legion-delegate orchestration baseline" \
-    --arg delegated_task "$delegated_task" \
     --arg delegated_run_id "$RUN_ID" \
     --arg delegated_executor "$delegated_executor" \
     --arg delegated_model "$delegated_model" '
+    . as $delegated_task |
     {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id, parent_id:null,
      executor:$executor, model:$model, archetype:$archetype, task:$task, status:"ok",
      target_type:(if $target_type=="" then null else $target_type end),
@@ -474,13 +473,17 @@ emit_span() {
   local parent_id="${LEGION_PARENT_ID:-}"
   # archetype comes from the caller's scope (cmd_run sets it; empty for review/resume).
   # Recording it lets the routing optimizer score per-archetype executor outcomes.
-  jq -cn \
+  # The task travels on stdin, not argv: a task past ARG_MAX failed this jq with
+  # "Argument list too long", and under errexit that ended a run whose executor
+  # had already finished the work.
+  printf '%s' "$task" | jq -cRs \
     --arg schema "legion.span.v1" --arg ts "$(_now)" \
     --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
     --arg executor "$executor" --arg model "$model" --arg archetype "${archetype:-}" \
     --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
     --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-    --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
+    --argjson usage "$usage" --argjson artifacts "$artifacts" '
+    . as $task |
     {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id,
      parent_id:(if $parent_id=="" then null else $parent_id end),
      executor:$executor, model:$model, archetype:$archetype, task:$task, status:$status,
@@ -652,8 +655,8 @@ require_git_repo() {
 
 cleanup_generated_diff_noise() {
   local target="$1"
-  # Test runs often create Python bytecode. Those files are generated artifacts,
-  # and plain `git diff` records .pyc additions as non-applicable binary entries.
+  # Test runs often create Python bytecode. Those files are generated artifacts
+  # and must not ride along in the patch (which is binary-safe, so they would).
   find "$target" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
   find "$target" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
 }
@@ -716,15 +719,21 @@ write_run_artifact_status() {
 
 # Show every changed path grouped by top-level directory. When scopes are
 # present, save the selected list too and make exclusions visible.
+# DIFF_RANGE is a revision range, `--cached`, or `--cached=<commit>` (the index
+# against that commit). The base rides inside the one argument: passed as its
+# own argument it was read as the first scope, so every run without --scope
+# reported all of its changes as "excluded by --scope".
 summarize_changed_paths() {
   local target="$1" run_art="$2" diff_range="$3"; shift 3
   local all_paths="$run_art/changed-paths.txt" scoped_paths="$run_art/scoped-changed-paths.txt"
   local path excluded=0
-  if [[ "$diff_range" == "--cached" ]]; then
-    git -C "$target" diff --cached --name-only > "$all_paths"
-  else
-    git -C "$target" diff --name-only "$diff_range" > "$all_paths"
-  fi
+  local -a range_args
+  case "$diff_range" in
+    --cached) range_args=(--cached) ;;
+    --cached=*) range_args=(--cached "${diff_range#--cached=}") ;;
+    *) range_args=("$diff_range") ;;
+  esac
+  git -C "$target" diff --name-only "${range_args[@]}" > "$all_paths"
   [[ -s "$all_paths" ]] || return 0
   note "→ changed paths:"
   while IFS= read -r path; do
@@ -739,11 +748,7 @@ summarize_changed_paths() {
   ' "$all_paths")
 
   [[ "$#" -gt 0 ]] || return 0
-  if [[ "$diff_range" == "--cached" ]]; then
-    git -C "$target" diff --cached --name-only -- "$@" > "$scoped_paths"
-  else
-    git -C "$target" diff --name-only "$diff_range" -- "$@" > "$scoped_paths"
-  fi
+  git -C "$target" diff --name-only "${range_args[@]}" -- "$@" > "$scoped_paths"
   while IFS= read -r path; do
     grep -Fqx -- "$path" "$scoped_paths" >/dev/null 2>&1 && continue
     if [[ "$excluded" -eq 0 ]]; then
@@ -788,6 +793,20 @@ write_task_payload() {
   printf '%s' "$dest"
 }
 
+# Executors whose executors.toml entry sets capability FLAG = true, comma
+# separated. One registry read per executor, so keep it to error messages.
+executors_declaring() {
+  local flag="$1" name found=""
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    if python3 "$ROUTE_BIN" --executor-info "$name" 2>/dev/null \
+      | jq -e --arg flag "$flag" '.[$flag] == true' >/dev/null 2>&1; then
+      found="${found:+$found, }$name"
+    fi
+  done < <(python3 "$ROUTE_BIN" --list-executors 2>/dev/null | jq -r '.[]' 2>/dev/null)
+  printf '%s' "${found:-none}"
+}
+
 # Dispatch a scoped run to a non-codex executor's adapter (the Legion runner
 # contract: `<adapter> run --repo … --task … [--model …] …`). Reads the adapter
 # and its I/O contract from executors.toml via legion-route, builds the right
@@ -813,6 +832,14 @@ dispatch_adapter() {
     adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
   fi
   [[ -x "$adapter_bin" ]] || die "executor '$ex' adapter '$adapter' not found on PATH or in bin/ — build/install it first."
+  # --scope is a declared adapter capability, like effort and model_chain. Check
+  # it before anything is staged, so an unsupported request fails cleanly.
+  if [[ "${#scopes[@]}" -gt 0 ]]; then
+    [[ "$(jq -r '.scope // false' <<<"$info")" == "true" ]] \
+      || die "run: --scope is not supported by executor '$ex'; it is supported by codex (native) and by executors that declare scope = true in executors.toml: $(executors_declaring scope)"
+    [[ -x "$_self_dir/../bin/$adapter" && "$adapter_bin" -ef "$_self_dir/../bin/$adapter" ]] \
+      || die "run: --scope needs this install's $adapter; the one on PATH ($adapter_bin) may not support it"
+  fi
   # Model priority: explicit --model  >  the archetype's resolved model (ONLY when
   # the archetype routed here — not a forced --executor, whose archetype model may
   # name a model this harness can't run)  >  the executor's own default role. This
@@ -905,6 +932,10 @@ dispatch_adapter() {
       note "⚠ adapter for '$ex' predates --fallback-models; the same-vendor model chain is skipped"
     fi
   fi
+  if [[ "${#scopes[@]}" -gt 0 ]]; then
+    local scope_path
+    for scope_path in "${scopes[@]}"; do aargs+=(--scope "$scope_path"); done
+  fi
   note "→ dispatch to $ex via $adapter${use_model:+ -m $use_model}"
   exec "$adapter_bin" "${aargs[@]}"
 }
@@ -941,6 +972,16 @@ cmd_run() {
       --_detached-worker) detached_worker=1; shift ;;
       --_sandbox-dev-pid) sandbox_dev_pid_from_parent="$2"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
+      # The receipt on stdout is always JSON. Accepting --json keeps callers that
+      # pass it to every Legion command (legion-share, legion-doctor and
+      # legion-run take it) from failing on a flag that would change nothing.
+      --json) shift ;;
+      -h|--help)
+        printf 'legion-delegate run — run a scoped task in an isolated worktree and return a patch\n\n'
+        usage_run
+        printf '\n'
+        usage_run_notes
+        exit 0 ;;
       *) die "run: unknown arg '$1'" ;;
     esac
   done
@@ -1044,10 +1085,11 @@ cmd_run() {
       die "internal error: executor=self passed route preflight" ;;
     ""|codex) : ;;
     *)
+      # Detach re-runs this script as a worker that drives codex in a worktree
+      # the parent prepared; an adapter owns its own worktree and lifecycle, so
+      # it cannot be handed over that way.
       [[ "$detach" -eq 0 && "$detached_worker" -eq 0 ]] || \
-        die "run: --detach is supported only by native codex execution"
-      [[ "${#scopes[@]}" -eq 0 ]] || \
-        die "run: --scope is supported only by native codex execution"
+        die "run: --detach is supported only by the native codex executor (--executor codex); executor '$r_exec' runs in the foreground"
       dispatch_adapter "$r_exec" ;;   # execs the adapter and never returns
   esac
   [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
@@ -1224,17 +1266,20 @@ cmd_run() {
     # Compare against the pinned starting commit. Using "$base" here would be a
     # no-op in the common case: it defaults to the NAME "HEAD", so an executor
     # that commits moves HEAD and the diff compares the work to itself.
+    # --binary: without it a changed PDF, image, font or spreadsheet becomes a
+    # "Binary files differ" line that `git apply` rejects, so the slice cannot
+    # land. --no-ext-diff/--no-textconv keep user diff drivers out of the patch.
     local diff_from="$base_commit"
     if [[ "${#scopes[@]}" -gt 0 ]]; then
-      git -C "$wt" diff --cached ${diff_from:+"$diff_from"} -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
+      git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${diff_from:+"$diff_from"} -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
     else
-      git -C "$wt" diff --cached ${diff_from:+"$diff_from"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
+      git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${diff_from:+"$diff_from"} >"$art/diff.patch" 2>/dev/null || diff_rc=1
     fi
     if [[ "$diff_rc" -eq 0 ]]; then
       if [[ "${#scopes[@]}" -gt 0 ]]; then
-        summarize_changed_paths "$wt" "$art" --cached ${diff_from:+"$diff_from"} "${scopes[@]}" || note "⚠ could not summarize changed paths"
+        summarize_changed_paths "$wt" "$art" "--cached${diff_from:+=$diff_from}" "${scopes[@]}" || note "⚠ could not summarize changed paths"
       else
-        summarize_changed_paths "$wt" "$art" --cached ${diff_from:+"$diff_from"} || note "⚠ could not summarize changed paths"
+        summarize_changed_paths "$wt" "$art" "--cached${diff_from:+=$diff_from}" || note "⚠ could not summarize changed paths"
       fi
     fi
   else
@@ -1244,7 +1289,7 @@ cmd_run() {
     if [[ -n "$sandcastle_branch" ]]; then
       sandcastle_range="$base...$sandcastle_branch"
       if [[ "${#scopes[@]}" -gt 0 ]]; then
-        git -C "$wt" diff "$sandcastle_range" -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
+        git -C "$wt" diff --binary --no-ext-diff --no-textconv "$sandcastle_range" -- "${scopes[@]}" >"$art/diff.patch" 2>/dev/null || diff_rc=1
       fi
       if [[ "$diff_rc" -eq 0 ]]; then
         if [[ "${#scopes[@]}" -gt 0 ]]; then
@@ -1492,9 +1537,15 @@ $(cat "$patch")
   local errexit_was_set=0
   case "$-" in *e*) errexit_was_set=1 ;; esac
   set +e
+  # Backgrounded + waited, like codex, so a terminating signal reaps the whole
+  # reviewer tree. In the foreground, bash would defer the TERM trap until the
+  # reviewer finished, and a hung reviewer would outlive this wrapper.
   ( cd "$wt" && LEGION_REVIEW_HANDOFF=1 "$adapter_bin" run --repo "$wt" "${task_args[@]}" ${model:+--model "$model"} --quiet ) \
-    </dev/null >"$stream" 2>"$err"
+    </dev/null >"$stream" 2>"$err" &
+  CODEX_CHILD_PID=$!
+  wait "$CODEX_CHILD_PID"
   rc=$?
+  CODEX_CHILD_PID=""
   [[ "$errexit_was_set" -eq 0 ]] || set -e
   # Adapters return a JSON envelope; the reviewer's answer is .result (or the
   # last-message file it points at). Either becomes the verdict candidate.
@@ -1719,6 +1770,8 @@ cmd_review() {
         [[ -r "$2" ]] || die "--task-file not readable: $2"
         task="$(cat "$2")"; shift 2 ;;
       --quiet) QUIET=1; shift ;;
+      --json) shift ;;   # the verdict receipt is always JSON
+      -h|--help) usage; exit 0 ;;
       *) die "review: unknown arg '$1'" ;;
     esac
   done
@@ -1770,6 +1823,14 @@ cmd_review() {
 
   git -C "$repo" diff --binary "$base_sha...$head_sha" > "$patch_path" \
     || die "review: could not capture immutable review patch"
+  # Prompt reviewers read the patch as text. A binary hunk (the base85 body of a
+  # PDF, image, font or spreadsheet) tells a reviewer nothing, yet it can push
+  # the prompt past ARG_MAX or the model's context: a 3.9 MB range of PDFs did
+  # exactly that. They get git's one-line "Binary files ... differ" instead; the
+  # binary-safe patch above stays the review's evidence.
+  local prompt_patch_path="$art/review.prompt.patch"
+  git -C "$repo" diff --no-ext-diff --no-textconv "$base_sha...$head_sha" > "$prompt_patch_path" \
+    || die "review: could not capture the reviewer-facing patch"
   note "→ review worktree $wt (head $head_sha, base $base_sha)"
   with_git_worktree_lock "$repo" \
     git -C "$repo" worktree add -q --detach "$wt" "$head_sha" \
@@ -1908,7 +1969,7 @@ cmd_review() {
       set -e
     else
       set +e
-      review_invoke_prompt "$review_executor" "$model" "$wt" "$patch_path" \
+      review_invoke_prompt "$review_executor" "$model" "$wt" "$prompt_patch_path" \
         "$attempt_verdict" "$attempt_stream" "$attempt_err" "$review_prompt"
       rc=$?
       set -e
@@ -2146,7 +2207,7 @@ cmd_resume() {
   cost="$(cost_from_usage "$model" "$usage" 2>/dev/null || echo 0)"
   cleanup_generated_diff_noise "$wt"
   git -C "$wt" add -A 2>/dev/null || diff_rc=1
-  git -C "$wt" diff --cached >"$art/diff.patch" 2>/dev/null || diff_rc=1
+  git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv >"$art/diff.patch" 2>/dev/null || diff_rc=1
   [[ "$rc" -ne 0 ]] && status="failed"
   [[ "$diff_rc" -ne 0 && "$status" == "ok" ]] && status="error"
 
@@ -2344,26 +2405,40 @@ cmd_cleanup() {
   fi
 }
 
-main() {
-  local cmd="${1:-}"; shift || true
-  case "$cmd" in
-    run)     cmd_run "$@" ;;
-    review)  cmd_review "$@" ;;
-    resume)  cmd_resume "$@" ;;
-    apply)   cmd_apply "$@" ;;
-    status)  cmd_status "$@" ;;
-    cleanup) cmd_cleanup "$@" ;;
-    -h|--help|help|"") cat >&2 <<'EOF'
+usage_run() {
+  cat <<'EOF'
+  run      [--archetype A | --model M] [--executor claude|codex|cursor|opencode|pi|hermes]
+           [--sandbox read-only|workspace-write|docker|podman|vercel]
+           [--reasoning-effort low|medium|high|xhigh] [--task T | --task-file F | stdin]
+           [--repo DIR] [--base REF] [--budget-tokens N] [--scope PATHSPEC ...]
+           [--detach] [--apply] [--keep] [--no-dirty-warn] [--untrusted] [--json]
+           -> JSON receipt on stdout (--json is accepted and changes nothing)
+EOF
+}
+
+usage_run_notes() {
+  cat <<'EOF'
+--archetype resolves model/sandbox/effort from routing.toml + models.toml. List them: legion-route --list
+--executor forces a specific harness (symmetric reverse-delegate). List them: legion-route --list-executors
+--scope may be repeated; it limits the captured diff to those git pathspecs. Supported by codex
+  and by executors that declare scope = true in executors.toml (claude).
+--detach returns after setup and leaves the worker running in a new session; use status --run RUN_ID
+  to poll it. Native codex only.
+Patches are binary-safe (git diff --binary), so PDFs, images, fonts and spreadsheets apply.
+--executor claude falls back to Codex when Claude fails; LEGION_CLAUDE_FALLBACK=off turns that off.
+EOF
+}
+
+usage() {
+  cat <<'EOF'
 legion-delegate — delegate a scoped task to an external model agent (Codex by
 default; any registered executor via --executor)
 
-  run      [--archetype A | --model M] [--executor claude|codex|cursor|opencode|pi|hermes]
-           [--sandbox read-only|workspace-write|docker|podman|vercel]
-           [--reasoning-effort low|medium|high|xhigh] [--task T|stdin] [--repo DIR]
-           [--base REF] [--budget-tokens N] [--scope PATHSPEC ...] [--detach] [--apply] [--keep]
-           [--no-dirty-warn] [--untrusted]
+EOF
+  usage_run
+  cat <<'EOF'
   review   [--archetype A | --model M] --base REF [--head REF] [--max-attempts N]
-           [--repo DIR] [--reasoning-effort E] [--task T]
+           [--repo DIR] [--reasoning-effort E] [--task T] [--json]
            -> immutable-SHA structured verdict + terminal receipt
   resume   --run RUN_ID [--task T|stdin] [--model M] [--repo DIR] [--reasoning-effort E]
            -> continue a kept codex session (original run needs --keep)
@@ -2373,11 +2448,21 @@ default; any registered executor via --executor)
            (run auto-deletes its own worktree on completion unless --keep; this
             reclaims --keep'd/resume worktrees + branches; --purge also drops run artifacts)
 
---archetype resolves model/sandbox/effort from routing.toml + models.toml. List them: legion-route --list
---executor forces a specific harness (symmetric reverse-delegate). List them: legion-route --list-executors
---scope may be repeated; it limits the captured diff to those git pathspecs.
---detach returns after setup and leaves the worker running in a new session; use status --run RUN_ID to poll it.
 EOF
+  usage_run_notes
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    run)     cmd_run "$@" ;;
+    review)  cmd_review "$@" ;;
+    resume)  cmd_resume "$@" ;;
+    apply)   cmd_apply "$@" ;;
+    status)  cmd_status "$@" ;;
+    cleanup) cmd_cleanup "$@" ;;
+    -h|--help|help|"")
+      usage >&2
       [[ "$cmd" == "" ]] && exit 2 || exit 0 ;;
     *) die "unknown command '$cmd' (run|review|resume|apply|status|cleanup)" ;;
   esac

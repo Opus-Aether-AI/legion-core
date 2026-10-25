@@ -80,6 +80,10 @@ usage-limit. Be deliberate about that for a *coding* lane:
   and let the next run retry, rather than silently switch models and land nothing
   while reporting success. Drop `--no-fallback` only if you genuinely want the
   cross-model *unapplied* result (e.g. a review/plan lane).
+- A repository that never wants Codex sets `LEGION_CLAUDE_FALLBACK=off` once
+  instead; it also covers the Claude runs `legion-delegate` and `legion-fanout`
+  start, where no flag can be passed. A models file without a `codex_workhorse`
+  role has the same effect.
 
 ### A note on worktree isolation
 

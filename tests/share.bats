@@ -78,3 +78,17 @@ JSON
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.total_runs == 1 and .codex_runs == 0 and .opus_runs == 1'
 }
+
+@test "share: gate is quiet for a LEGION_ROUTING_FILE that routes nothing to codex" {
+  "$TRACE" emit --executor opus --model fixture-claude --status ok >/dev/null
+  "$TRACE" emit --executor opus --model fixture-claude --status ok >/dev/null
+  routing="$BATS_TEST_TMPDIR/claude-only-routing.toml"
+  printf '[targets]\ncodex_share = 0.5\n\n[archetypes.implement-feature]\nexecutor = "claude"\n' > "$routing"
+
+  run "$SHARE" gate
+  [ "$status" -eq 1 ]   # the shipped policy routes to codex: under target
+
+  LEGION_ROUTING_FILE="$routing" run "$SHARE" gate
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to balance"* ]]
+}

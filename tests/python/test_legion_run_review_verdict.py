@@ -114,3 +114,71 @@ def test_rejects_a_fenced_json_array():
 
 def test_strip_code_fence_is_a_noop_for_plain_text():
     assert legion_run._strip_code_fence("  hello  ") == "hello"
+
+
+# ── 25 Oct 2026: prose, then the verdict in a fence ────────────────────────
+# A Claude reviewer explained its check in a paragraph and then gave a valid
+# approval in a ```json block. The gate only unwrapped a fence that was the
+# whole answer, so it reported "expected a structured verdict object".
+PROSE_THEN_FENCE = (
+    "I checked the range: the diff is empty, so here is the verdict.\n\n"
+    + _fenced(
+        {
+            "verdict": "approve",
+            "summary": "The range is empty.",
+            "findings": [
+                {"severity": "low", "title": "The diff under review is empty", "detail": "Check the run."}
+            ],
+        }
+    )
+)
+
+
+def test_reads_the_one_fenced_verdict_that_follows_prose():
+    value = legion_run._review_verdict_value({"result": PROSE_THEN_FENCE})
+    assert isinstance(value, dict) and value["verdict"] == "approve"
+    assert legion_run._review_failure_reason({"status": "ok", "result": PROSE_THEN_FENCE}) == ""
+
+
+def test_a_blocking_finding_in_a_fenced_verdict_after_prose_still_blocks():
+    payload = {
+        "verdict": "approve",
+        "summary": "Fine apart from one thing.",
+        "findings": [{"severity": "high", "title": "Drops the last event"}],
+    }
+    text = "Here is my review.\n\n" + _fenced(payload)
+    assert "blocking finding" in legion_run._review_failure_reason({"status": "ok", "result": text})
+
+
+def test_two_fenced_verdicts_are_not_a_verdict():
+    """Picking one of two would let a quoted example stand in for the answer."""
+    text = (
+        "The diff adds this example:\n\n" + _fenced(APPROVE)
+        + "\n\nMy verdict:\n\n" + _fenced(dict(APPROVE, verdict="request_changes"))
+    )
+    assert legion_run._review_verdict_value({"result": text}) == text
+
+
+def test_prose_priority_findings_are_not_overruled_by_a_fenced_approval():
+    text = "- [P1] Missing authorization check — auth.py:42\n\n" + _fenced(APPROVE)
+    assert legion_run._review_verdict_value({"result": text}) == text
+
+
+def test_extra_finding_fields_fold_into_detail():
+    """The fold the router's normaliser makes, so legion-run's gate accepts the same verdicts."""
+    payload = {
+        "verdict": "approve",
+        "summary": "One note.",
+        "findings": [
+            {"severity": "low", "title": "Naming", "detail": "Rename it.", "failure_scenario": "none"}
+        ],
+    }
+    value = legion_run._review_verdict_value({"result": _fenced(payload)})
+    assert legion_run._review_verdict_schema_error(value) == ""
+    assert value["findings"][0]["detail"] == "Rename it.\nfailure_scenario: none"
+    assert value["verdict"] == "approve" and value["findings"][0]["severity"] == "low"
+    # an extra field at the top level is still a schema error
+    top = dict(payload, confidence="high")
+    assert legion_run._review_verdict_schema_error(
+        legion_run._review_verdict_value({"result": json.dumps(top)})
+    ) != ""

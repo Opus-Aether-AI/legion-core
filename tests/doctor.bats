@@ -280,6 +280,55 @@ EOF
   [[ "$output" == *"same executor and model"* ]]
 }
 
+_claude_only_route_fixture() {
+  fake="$BATS_TEST_TMPDIR/fake-claude-only-route"
+  mkdir -p "$fake"
+  export TEST_IMPLEMENT_EXECUTOR=claude TEST_IMPLEMENT_SANDBOX=workspace-write
+  cat > "$fake/legion-route" <<'EOF'
+#!/bin/sh
+case "$1" in
+  implement-feature)
+    jq -n --arg executor "$TEST_IMPLEMENT_EXECUTOR" --arg sandbox "$TEST_IMPLEMENT_SANDBOX" \
+      '{executor:$executor,model:"test-model-implement",sandbox:$sandbox,resolved:true}' ;;
+  final-review)
+    printf '%s\n' '{"executor":"claude","model_ref":"claude_default","model":"test-model-review","sandbox":"read-only","resolved":true}' ;;
+  --executor-info)
+    case "$2" in
+      claude) printf '%s\n' '{"kind":"primary coding","adapter":"legion-claude","contract":"diff","review":"prompt","review_model_ref":"claude_default"}' ;;
+      lead) printf '%s\n' '{"kind":"primary","adapter":"","contract":""}' ;;
+      *) echo "unknown executor '$2'" >&2; exit 2 ;;
+    esac ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "$fake/legion-route"
+}
+
+@test "doctor: route-smoke accepts implementation routed to a delegatable non-codex executor" {
+  # A repository may pin a Claude-only routing policy. Doctor must check that
+  # implementation is delegated with a write sandbox, not that Codex does it.
+  _claude_only_route_fixture
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS"* ]]
+}
+
+@test "doctor: route-smoke still rejects implementation that is not delegated" {
+  _claude_only_route_fixture
+  export TEST_IMPLEMENT_EXECUTOR=self
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must route to codex or another delegatable coding executor"* ]]
+  export TEST_IMPLEMENT_EXECUTOR=lead
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must route to codex or another delegatable coding executor"* ]]
+  export TEST_IMPLEMENT_EXECUTOR=claude TEST_IMPLEMENT_SANDBOX=read-only
+  PATH="$fake:$PATH" LEGION_ROOT="$GOOD" run "$DOCTOR" --repo "$GOOD" --only route-smoke
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"implement-feature resolved to unexpected route"* ]]
+}
+
 @test "doctor: state-root auto-resolves when LEGION_STATE_ROOT is missing" {
   HOME="$BATS_TEST_TMPDIR/home" \
     LEGION_STATE_ROOT= LEGION_TELEMETRY_DIR= LEGION_REGISTRY_DIR= \

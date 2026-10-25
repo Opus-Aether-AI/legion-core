@@ -555,7 +555,7 @@ PY
 check_route_smoke() {
   local route; route="$(resolve_legion_cmd legion-route "$LEGION_ROOT/legion-router/bin/legion-route")" || {
     fail "legion-route not found" "plugin:legion-router"; return; }
-  local arch out err rc reviewer executor model model_ref review_model_ref
+  local arch out err rc reviewer implementer executor model model_ref review_model_ref
   local implement_executor="" implement_model="" bad=0
   for arch in implement-feature final-review; do
     err="$(mktemp)"
@@ -576,10 +576,31 @@ check_route_smoke() {
       implement-feature)
         implement_executor="$(jq -r '.executor' <<<"$out")"
         implement_model="$(jq -r '.model' <<<"$out")"
-        jq -e '.executor == "codex" and .sandbox == "workspace-write"' <<<"$out" >/dev/null 2>&1 || {
+        # The shipped policy sends bulk implementation to codex, but a repository
+        # that pins its own routing (a Claude-only one, say) may send it to any
+        # executor Legion can delegate a coding task to. What must hold is that
+        # the work is delegated with a write sandbox, not which vendor does it.
+        if ! jq -e '.sandbox == "workspace-write"' <<<"$out" >/dev/null 2>&1; then
           fail "legion-route implement-feature resolved to unexpected route: $out" "plugin:legion-router"
           bad=1
-        }
+        elif [[ "$implement_executor" != "codex" ]]; then
+          if ! implementer="$("$route" --executor-info "$implement_executor" 2>"$err")" \
+            || ! jq -e '
+              def executor_capabilities:
+                if (.capabilities | type == "array") and all(.capabilities[]; type == "string" and length > 0)
+                then .capabilities
+                elif (.kind | type == "string")
+                then (.kind | split(" ") | map(select(length > 0)))
+                else []
+                end;
+              (executor_capabilities | index("coding") != null)
+              and ((.adapter // "") | length > 0)
+              and ((.contract // "") | . != "" and . != "native")
+            ' <<<"$implementer" >/dev/null 2>&1; then
+            fail "legion-route implement-feature must route to codex or another delegatable coding executor: $out" "plugin:legion-router"
+            bad=1
+          fi
+        fi
         ;;
       final-review)
         if ! jq -e '.executor != "self" and (.executor | length > 0) and (.model | length > 0) and .sandbox == "read-only"' <<<"$out" >/dev/null 2>&1; then

@@ -3,9 +3,10 @@
 
 Codex may ignore ``--output-schema`` for ``codex exec review`` and emit its
 stable human review format. This parser is intentionally narrow and fail-closed:
-it accepts schema-valid JSON (after folding any extra per-finding fields into
-that finding's ``detail``), recognized ``[P0]``–``[P3]`` findings, or an
-explicit no-findings statement. Everything else remains invalid.
+it accepts schema-valid JSON (bare, fenced, or the one fenced verdict in a
+reviewer's prose; extra per-finding fields are folded into that finding's
+``detail``), recognized ``[P0]``–``[P3]`` findings, or an explicit
+no-findings statement. Everything else remains invalid.
 """
 
 from __future__ import annotations
@@ -119,6 +120,32 @@ def _fold_extra_finding_fields(payload: Any) -> Any:
     return dict(payload, findings=folded)
 
 
+FENCED_BLOCK = re.compile(r"```[A-Za-z0-9_-]*[ \t]*\n(.*?)\n[ \t]*```", re.DOTALL)
+
+
+def _single_fenced_verdict(text: str) -> Any:
+    """The one fenced JSON object in prose that carries a ``verdict`` key.
+
+    Prompt reviewers often explain before they answer: a paragraph, then the
+    verdict in a ```json fence. Exactly one such block is accepted; none, or
+    several, is not a verdict, because choosing one of several would let a
+    quoted example stand in for the reviewer's own answer.
+    """
+    # Prose that carries its own [P0]-[P3] findings is not explained away by a
+    # fenced approval: fail closed rather than pick one of two answers.
+    if re.search(r"\[P[0-3]\]", FENCED_BLOCK.sub("", text), re.I):
+        return None
+    found = []
+    for block in FENCED_BLOCK.findall(text):
+        try:
+            decoded = json.loads(block.strip())
+        except (TypeError, ValueError):
+            continue
+        if isinstance(decoded, dict) and "verdict" in decoded:
+            found.append(decoded)
+    return found[0] if len(found) == 1 else None
+
+
 def _json_payload(text: str) -> dict[str, Any] | None:
     stripped = text.strip()
     if stripped.startswith("```") and stripped.endswith("```"):
@@ -127,7 +154,9 @@ def _json_payload(text: str) -> dict[str, Any] | None:
     try:
         payload = json.loads(stripped)
     except (TypeError, ValueError):
-        return None
+        payload = _single_fenced_verdict(text)
+        if payload is None:
+            return None
     if _valid(payload):
         return payload
     folded = _fold_extra_finding_fields(payload)

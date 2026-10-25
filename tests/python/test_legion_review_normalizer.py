@@ -179,3 +179,26 @@ def test_a_fold_never_truncates_the_reviewers_own_detail(tmp_path):
            "findings": [{"severity": "low", "title": "t", "detail": long_detail, "quote": "q" * (normalizer.MAX_DETAIL * 2)}]}
     detail = normalizer.normalize(json.dumps(raw), tmp_path)["findings"][0]["detail"]
     assert detail.startswith(long_detail + "\nquote: ") and len(detail) == len(long_detail) + 1 + normalizer.MAX_DETAIL
+
+
+def test_reads_the_one_fenced_verdict_that_follows_prose(tmp_path):
+    verdict = {"verdict": "approve", "summary": "Empty range.",
+               "findings": [{"severity": "low", "title": "Nothing changed", "detail": "Check the run."}]}
+    text = "I checked the range.\n\n```json\n" + json.dumps(verdict) + "\n```\n"
+    assert normalizer.normalize(text, tmp_path) == verdict
+
+
+def test_two_fenced_verdicts_in_prose_are_not_a_verdict(tmp_path):
+    first = {"verdict": "approve", "summary": "quoted", "findings": []}
+    second = {"verdict": "request_changes", "summary": "mine",
+              "findings": [{"severity": "high", "title": "Bug"}]}
+    text = ("Example:\n```json\n" + json.dumps(first) + "\n```\nVerdict:\n```json\n"
+            + json.dumps(second) + "\n```")
+    assert normalizer.normalize(text, tmp_path) is None
+
+
+def test_prose_priority_findings_beat_a_fenced_approval(tmp_path):
+    approve = {"verdict": "approve", "summary": "fine", "findings": []}
+    text = "- [P1] Missing authorization check — auth.py:42\n\n```json\n" + json.dumps(approve) + "\n```"
+    result = normalizer.normalize(text, tmp_path)
+    assert result is not None and result["verdict"] == "request_changes"

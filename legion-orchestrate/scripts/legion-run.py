@@ -1148,18 +1148,78 @@ def _strip_code_fence(text: str) -> str:
     return stripped
 
 
+_FENCED_BLOCK = re.compile(r"```[A-Za-z0-9_-]*[ \t]*\n(.*?)\n[ \t]*```", re.DOTALL)
+
+
+def _single_fenced_verdict(text: str) -> dict[str, Any] | None:
+    """The one fenced JSON object in prose that carries a ``verdict`` key.
+
+    Reviewers often explain before they answer: a paragraph, then the verdict in a
+    ```json fence. Exactly one such block is accepted. None, or several, is not a
+    verdict: choosing one of several would let a quoted example stand in for the
+    reviewer's own answer.
+    """
+    # Prose that carries its own [P0]-[P3] findings is not explained away by a
+    # fenced approval: fail closed rather than pick one of two answers.
+    if re.search(r"\[P[0-3]\]", _FENCED_BLOCK.sub("", text), re.I):
+        return None
+    found = []
+    for block in _FENCED_BLOCK.findall(text):
+        try:
+            decoded = json.loads(block.strip())
+        except ValueError:
+            continue
+        if isinstance(decoded, dict) and "verdict" in decoded:
+            found.append(decoded)
+    return found[0] if len(found) == 1 else None
+
+
+def _fold_extra_finding_fields(verdict: Any) -> Any:
+    """Fold fields a reviewer added to a finding into that finding's ``detail``.
+
+    The same repair legion-router's normalize-review-verdict.py makes, so a
+    reviewer that attaches, say, ``failure_scenario`` to a finding fails neither
+    gate on format. Only extra finding keys move; the verdict, summary, every
+    severity and title stay exactly as written, and anything else malformed
+    still fails the schema check.
+    """
+    if not isinstance(verdict, dict) or not isinstance(verdict.get("findings"), list):
+        return verdict
+    folded = []
+    for finding in verdict["findings"]:
+        if not isinstance(finding, dict):
+            return verdict
+        extra = sorted(set(finding) - _REVIEW_FINDING_KEYS)
+        if not extra:
+            folded.append(finding)
+            continue
+        kept = {key: finding[key] for key in finding if key in _REVIEW_FINDING_KEYS}
+        if "detail" in kept and not isinstance(kept["detail"], str):
+            return verdict
+        added = "\n".join(
+            f"{key}: {finding[key] if isinstance(finding[key], str) else json.dumps(finding[key], sort_keys=True)}"
+            for key in extra
+        )[:4000]
+        original = kept.get("detail", "")
+        kept["detail"] = f"{original}\n{added}" if original else added
+        folded.append(kept)
+    return dict(verdict, findings=folded)
+
+
 def _review_verdict_value(payload: dict[str, Any]) -> Any:
     verdict = payload.get("verdict", payload.get("result"))
     if not isinstance(verdict, str):
-        return verdict
+        return _fold_extra_finding_fields(verdict)
     text = _strip_code_fence(verdict)
-    if not (text.startswith("{") and text.endswith("}")):
-        return verdict
-    try:
-        decoded = json.loads(text)
-    except ValueError:
-        return verdict
-    return decoded if isinstance(decoded, dict) else verdict
+    decoded: Any = None
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            decoded = json.loads(text)
+        except ValueError:
+            decoded = None
+    if not isinstance(decoded, dict):
+        decoded = _single_fenced_verdict(verdict)
+    return _fold_extra_finding_fields(decoded) if isinstance(decoded, dict) else verdict
 
 
 def _blocking_review_findings(verdict: Any) -> list[dict[str, Any]]:

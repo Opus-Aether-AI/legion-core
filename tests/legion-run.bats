@@ -975,6 +975,34 @@ SH
   grep -Fq -- "--sandbox read-only" "$run_dir/claude-review.args"
 }
 
+@test "legion-run: accepts a Claude verdict given in a fence after prose" {
+  # 25 Oct 2026: a valid approval inside a ```json block that followed a
+  # paragraph failed the gate as "expected a structured verdict object".
+  install_fake_pipeline_bins
+  cat > "$BATS_TEST_TMPDIR/bin/legion-route" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  final-review) printf '{"executor":"claude","model":"test-model-claude","reasoning_effort":"high","resolved":true}\n' ;;
+  *) printf '{"executor":"codex","model":"test-model-beta","sandbox":"workspace-write","resolved":true}\n' ;;
+esac
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-claude" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+result="$(printf 'I checked the range, so here is the verdict.\n\n```json\n%s\n```' \
+  '{"verdict":"approve","summary":"checked","findings":[{"severity":"low","title":"Note","detail":"minor"}]}')"
+jq -cn --arg result "$result" '{status:"ok",model:"test-model-claude",result:$result}'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-route" "$BATS_TEST_TMPDIR/bin/legion-claude"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  echo "$json" | jq -e '.ok == true'
+}
+
 @test "legion-run: fails closed when Claude omits the terminal review verdict" {
   install_fake_pipeline_bins
   cat > "$BATS_TEST_TMPDIR/bin/legion-route" <<'SH'

@@ -127,7 +127,7 @@ For heavy work, `legion-run` records doctor results, prior hints, plan/slices, r
 legion-claude run --repo . --task "Review the current implementation for correctness"
 ```
 
-For a git repository, `legion-claude` creates `<repo>/.legion/worktrees/<run-id>` and preserves the patch at `<repo>/.legion/runs/<run-id>/diff.patch`. It removes the temporary worktree by default; use `--keep` to retain it or `--apply` only after reviewing the patch. When Claude is unavailable or rate-limited, it can fall back to the configured Codex executor unless `--no-fallback` is supplied.
+For a git repository, `legion-claude` creates `<repo>/.legion/worktrees/<run-id>` and preserves the patch at `<repo>/.legion/runs/<run-id>/diff.patch`. It removes the temporary worktree by default; use `--keep` to retain it or `--apply` only after reviewing the patch. When Claude is unavailable or rate-limited, it can fall back to the configured Codex executor unless `--no-fallback` is supplied. On SIGTERM, SIGINT or SIGHUP the adapter terminates its `claude` child and everything under it before it exits.
 
 ## State and artifacts
 

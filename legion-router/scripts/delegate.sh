@@ -56,6 +56,9 @@ source "$_self_dir/lib/primary.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/sandbox-setup.sh
 source "$_self_dir/lib/sandbox-setup.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/process-tree.sh
+source "$_self_dir/lib/process-tree.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -119,8 +122,10 @@ trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legio
 # codex is launched in the background and immediately waited on, so a terminating
 # signal to this wrapper interrupts the `wait` and runs this handler — otherwise a
 # `kill`/hangup of the wrapper would leave codex orphaned (still billing, its
-# stream.jsonl still growing). Best-effort: TERM the tracked child plus any codex
-# grandchild (review/resume wrap it in a `( cd … && codex )` subshell).
+# stream.jsonl still growing). The handler TERMs the tracked child plus every
+# descendant (review/resume wrap codex in a `( cd … && codex )` subshell, and a
+# prompt reviewer is a whole adapter tree), then KILLs whatever outlives the
+# grace period, so the `wait` below it cannot hang on a child that ignores TERM.
 CODEX_CHILD_PID=""
 REVIEW_RECEIPT_PATH=""
 REVIEW_RECEIPT_RUN_ID=""
@@ -137,14 +142,7 @@ REVIEW_START_MS=0
 kill_codex_child() {
   local pid="${CODEX_CHILD_PID:-}"
   [[ -n "$pid" ]] || return 0
-  terminate_process_tree "$pid"
-}
-terminate_process_tree() {
-  local pid="$1" child
-  while IFS= read -r child; do
-    [[ -n "$child" ]] && terminate_process_tree "$child"
-  done < <(pgrep -P "$pid" 2>/dev/null || true)
-  kill -TERM "$pid" 2>/dev/null || true
+  legion_terminate_process_tree "$pid"
 }
 write_interrupted_review_receipt() {
   [[ -n "$REVIEW_RECEIPT_PATH" ]] || return 0
@@ -1492,9 +1490,15 @@ $(cat "$patch")
   local errexit_was_set=0
   case "$-" in *e*) errexit_was_set=1 ;; esac
   set +e
+  # Backgrounded + waited, like codex, so a terminating signal reaps the whole
+  # reviewer tree. In the foreground, bash would defer the TERM trap until the
+  # reviewer finished, and a hung reviewer would outlive this wrapper.
   ( cd "$wt" && LEGION_REVIEW_HANDOFF=1 "$adapter_bin" run --repo "$wt" "${task_args[@]}" ${model:+--model "$model"} --quiet ) \
-    </dev/null >"$stream" 2>"$err"
+    </dev/null >"$stream" 2>"$err" &
+  CODEX_CHILD_PID=$!
+  wait "$CODEX_CHILD_PID"
   rc=$?
+  CODEX_CHILD_PID=""
   [[ "$errexit_was_set" -eq 0 ]] || set -e
   # Adapters return a JSON envelope; the reviewer's answer is .result (or the
   # last-message file it points at). Either becomes the verdict candidate.

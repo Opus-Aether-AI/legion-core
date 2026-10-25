@@ -17,6 +17,9 @@ source "$_self_dir/lib/executor-context.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/run-id.sh
 source "$_self_dir/lib/run-id.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/process-tree.sh
+source "$_self_dir/lib/process-tree.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -26,6 +29,12 @@ fi
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 LEGION_CLAUDE_TMPDIR=""
+# The running `claude -p` (or Codex fallback) child. It runs in the background
+# and is waited on, so a terminating signal interrupts the `wait` and the trap
+# below takes the child's whole tree down with this process. In the
+# foreground, a TERM killed only this wrapper and left `claude` running with no
+# parent: hung runs outlived their timed-out callers by hours.
+CLAUDE_CHILD_PID=""
 
 die() { printf 'legion-claude: %s\n' "$*" >&2; exit 2; }
 note() { [[ "${QUIET:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
@@ -35,6 +44,20 @@ cleanup_claude_on_exit() {
   [[ -z "$LEGION_CLAUDE_TMPDIR" ]] || rm -rf "$LEGION_CLAUDE_TMPDIR"
 }
 trap cleanup_claude_on_exit EXIT
+on_claude_terminating_signal() {
+  local signum="$1"
+  trap - INT TERM HUP
+  if [[ -n "$CLAUDE_CHILD_PID" ]]; then
+    legion_terminate_process_tree "$CLAUDE_CHILD_PID"
+    wait "$CLAUDE_CHILD_PID" 2>/dev/null || true
+    CLAUDE_CHILD_PID=""
+  fi
+  exit $(( 128 + signum ))   # the EXIT trap still runs
+}
+trap 'on_claude_terminating_signal 1' HUP
+trap 'on_claude_terminating_signal 2' INT
+trap 'on_claude_terminating_signal 15' TERM
+
 
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
@@ -266,8 +289,15 @@ run_fallback() {
   [[ "$fallback_apply" != "1" ]] || fallback_args+=(--apply)
   [[ "$fallback_keep" != "1" ]] || fallback_args+=(--keep)
   [[ "${QUIET:-0}" != "1" ]] || fallback_args+=(--quiet)
-  out="$("$delegate_bin" "${fallback_args[@]}")"
+  local fallback_out="${LEGION_CLAUDE_TMPDIR:-${TMPDIR:-/tmp}}/fallback.out.json"
+  # Backgrounded + waited like the Claude child, so a terminating signal also
+  # reaps a fallback run instead of orphaning it.
+  "$delegate_bin" "${fallback_args[@]}" </dev/null >"$fallback_out" &
+  CLAUDE_CHILD_PID=$!
+  wait "$CLAUDE_CHILD_PID"
   rc=$?
+  CLAUDE_CHILD_PID=""
+  out="$(cat "$fallback_out" 2>/dev/null || true)"
   set -e
 
   fallback_status="$(jq -r '.status // "failed"' <<<"$out" 2>/dev/null || printf 'failed')"
@@ -310,7 +340,7 @@ cmd_run() {
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
   local base_commit=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
-  local read_only_violation=0 claude_worktree_owned=0
+  local read_only_violation=0 claude_worktree_owned=0 task_file=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -388,6 +418,10 @@ cmd_run() {
   LEGION_CLAUDE_TMPDIR="$tmpdir"
   out_file="$tmpdir/claude.out.json"
   err_file="$tmpdir/claude.err"
+  # One copy of the task on disk feeds both `claude -p` (stdin) and a Codex
+  # fallback (--task-file), so neither puts it on argv.
+  task_file="$tmpdir/task.txt"
+  printf '%s' "$task" > "$task_file"
   artifacts="$(jq -cn --arg stdout "$out_file" --arg stderr "$err_file" '{stdout:$stdout, stderr:$stderr}')"
 
   if has_low_claude_credit; then
@@ -477,12 +511,17 @@ cmd_run() {
     [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
     note "→ ${claude_cmd[*]}"
     set +e
-    printf '%s' "$task" | (
+    # Backgrounded + waited (see CLAUDE_CHILD_PID). The explicit stdin
+    # redirection matters: a background job's stdin is otherwise /dev/null.
+    (
       legion_activate_executor_context "$RUN_ID" claude
       cd "${wt:-$repo}"
-      "${claude_cmd[@]}"
-    ) >"$out_file" 2>"$err_file"
-    rc=${PIPESTATUS[1]}
+      exec "${claude_cmd[@]}"
+    ) <"$task_file" >"$out_file" 2>"$err_file" &
+    CLAUDE_CHILD_PID=$!
+    wait "$CLAUDE_CHILD_PID"
+    rc=$?
+    CLAUDE_CHILD_PID=""
     set -e
     if ! claude_model_declined "$out_file" "$err_file"; then
       declined_final=0
@@ -714,6 +753,10 @@ The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a 
 <repo>/.legion/runs/<run-id>/diff.patch, so it never edits the caller's working tree.
 --keep retains the worktree; --apply applies the diff to the repo.
 Read-only runs use Claude plan mode and fail if the worktree still changes.
+
+On SIGTERM, SIGINT or SIGHUP the adapter terminates its claude (or fallback) child
+and every process under it (TERM, then KILL after LEGION_KILL_GRACE_SECONDS,
+default 5) before it exits.
 
 --effort / --append-system-prompt / --dangerously-skip-permissions pass through to
 `claude -p` (skip-permissions is for autonomous headless/cron runs — opt-in).

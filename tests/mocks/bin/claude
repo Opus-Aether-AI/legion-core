@@ -12,9 +12,24 @@ set -euo pipefail
 MOCK_STATE_FILE="$HOME/.mock-claude-marketplaces"
 
 if [[ "${1:-}" == "-p" ]]; then
-    cat >/dev/null || true
+    # MOCK_CLAUDE_PROMPT_LOG captures the prompt Legion sent on stdin.
+    cat >"${MOCK_CLAUDE_PROMPT_LOG:-/dev/null}" || true
     if [[ "${MOCK_CLAUDE_WRITE:-0}" == "1" ]]; then
         printf 'unexpected\n' > claude-unexpected.txt
+    fi
+    # MOCK_CLAUDE_WRITE_BINARY=1 adds a file git treats as binary (NUL bytes).
+    if [[ "${MOCK_CLAUDE_WRITE_BINARY:-0}" == "1" ]]; then
+        printf '\x89PNG\r\n\x1a\n\x00\x01\x02\x03binary\x00\xff' > claude-image.png
+    fi
+    # MOCK_CLAUDE_HANG=1 never answers, like a hung `claude -p`: it records its
+    # own pid in MOCK_CLAUDE_PIDFILE and a child's in MOCK_CLAUDE_PIDFILE.child,
+    # so a test can check that terminating the adapter takes the tree down.
+    if [[ "${MOCK_CLAUDE_HANG:-0}" == "1" ]]; then
+        sleep 30 &
+        printf '%s\n' "$!" > "$MOCK_CLAUDE_PIDFILE.child"
+        printf '%s\n' "$$" > "$MOCK_CLAUDE_PIDFILE"
+        wait
+        exit 0
     fi
     # MOCK_CLAUDE_DECLINE_MODELS: comma-separated model ids that should answer the
     # way the real CLI answers for a model this account cannot run. The envelope

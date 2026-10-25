@@ -356,16 +356,17 @@ run_sandcastle() {
   sandcastle_script="$_self_dir/sandcastle-run.mjs"
   : > "$art/stream.jsonl"
   set +e
-  jq -cn \
-    --arg task "$task" --arg model "$1" --arg sandbox "$sandbox" \
+  printf '%s' "$task" | jq -cRs \
+    --arg model "$1" --arg sandbox "$sandbox" \
     --arg cwd "$wt" --arg main_repo "$repo" --arg base "$base" --arg branch "$branch" \
     --arg diff "$art/diff.patch" --arg artifact_dir "$art" \
     --arg effort "$effort" --argjson untrusted "$untrusted" \
-    '{task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
+    '. as $task
+     | {task:$task, model:$model, sandbox:$sandbox, cwd:$cwd, base:$base, branch:$branch, diff_path:$diff,
       main_repo:$main_repo, artifact_dir:$artifact_dir, untrusted:$untrusted,
       effort:(if $effort=="" then null else $effort end)}' \
     | "$node_bin" "$sandcastle_script" >"$art/sandcastle-result.json" 2>"$art/codex.err"
-  rc=${PIPESTATUS[1]}
+  rc=${PIPESTATUS[2]}   # printf | jq | node: node's status
   set -e
   # Surface the wrapper's stderr (e.g. the @ai-hero/sandcastle install hint on
   # exit 3) — it lands in codex.err, which cmd_run never prints otherwise.
@@ -429,17 +430,17 @@ emit_primary_baseline_span() {
   mkdir -p "$LEGION_TELEMETRY_DIR"
   local baseline_run="${RUN_ID}-${label}"
   local trace_id="${LEGION_TRACE_ID:-$RUN_ID}"
-  jq -cn \
+  printf '%s' "$delegated_task" | jq -cRs \
     --arg schema "legion.span.v1" --arg ts "$(_now)" \
     --arg run_id "$baseline_run" --arg trace_id "$trace_id" \
     --arg executor "$label" --arg model "$label" --arg archetype "${archetype:-}" \
     --arg primary "$primary" \
     --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
     --arg task "legion-delegate orchestration baseline" \
-    --arg delegated_task "$delegated_task" \
     --arg delegated_run_id "$RUN_ID" \
     --arg delegated_executor "$delegated_executor" \
     --arg delegated_model "$delegated_model" '
+    . as $delegated_task |
     {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id, parent_id:null,
      executor:$executor, model:$model, archetype:$archetype, task:$task, status:"ok",
      target_type:(if $target_type=="" then null else $target_type end),
@@ -472,13 +473,17 @@ emit_span() {
   local parent_id="${LEGION_PARENT_ID:-}"
   # archetype comes from the caller's scope (cmd_run sets it; empty for review/resume).
   # Recording it lets the routing optimizer score per-archetype executor outcomes.
-  jq -cn \
+  # The task travels on stdin, not argv: a task past ARG_MAX failed this jq with
+  # "Argument list too long", and under errexit that ended a run whose executor
+  # had already finished the work.
+  printf '%s' "$task" | jq -cRs \
     --arg schema "legion.span.v1" --arg ts "$(_now)" \
     --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
     --arg executor "$executor" --arg model "$model" --arg archetype "${archetype:-}" \
     --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
     --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-    --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
+    --argjson usage "$usage" --argjson artifacts "$artifacts" '
+    . as $task |
     {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id,
      parent_id:(if $parent_id=="" then null else $parent_id end),
      executor:$executor, model:$model, archetype:$archetype, task:$task, status:$status,
@@ -1777,6 +1782,14 @@ cmd_review() {
 
   git -C "$repo" diff --binary "$base_sha...$head_sha" > "$patch_path" \
     || die "review: could not capture immutable review patch"
+  # Prompt reviewers read the patch as text. A binary hunk (the base85 body of a
+  # PDF, image, font or spreadsheet) tells a reviewer nothing, yet it can push
+  # the prompt past ARG_MAX or the model's context: a 3.9 MB range of PDFs did
+  # exactly that. They get git's one-line "Binary files ... differ" instead; the
+  # binary-safe patch above stays the review's evidence.
+  local prompt_patch_path="$art/review.prompt.patch"
+  git -C "$repo" diff --no-ext-diff --no-textconv "$base_sha...$head_sha" > "$prompt_patch_path" \
+    || die "review: could not capture the reviewer-facing patch"
   note "→ review worktree $wt (head $head_sha, base $base_sha)"
   with_git_worktree_lock "$repo" \
     git -C "$repo" worktree add -q --detach "$wt" "$head_sha" \
@@ -1915,7 +1928,7 @@ cmd_review() {
       set -e
     else
       set +e
-      review_invoke_prompt "$review_executor" "$model" "$wt" "$patch_path" \
+      review_invoke_prompt "$review_executor" "$model" "$wt" "$prompt_patch_path" \
         "$attempt_verdict" "$attempt_stream" "$attempt_err" "$review_prompt"
       rc=$?
       set -e

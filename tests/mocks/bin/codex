@@ -66,6 +66,16 @@ if [[ $native_review -eq 0 && ( "$output_schema" == */review-verdict.schema.json
   fi
 fi
 
+# `-` means "read the prompt from stdin", which real codex consumes in full.
+# Drain it the same way, or a large piped task dies on EPIPE in the writer.
+prompt_read=0
+[[ $review -eq 1 && -n "${MOCK_CODEX_REVIEW_PROMPT_LOG:-}" ]] && prompt_read=1
+if [[ $prompt_read -eq 0 ]]; then
+  for arg in "${args[@]}"; do
+    if [[ "$arg" == "-" ]]; then cat >/dev/null || true; break; fi
+  done
+fi
+
 review_invalid_attempt=0
 if [[ $review -eq 1 && "${MOCK_CODEX_REVIEW_INVALID_VERDICTS:-0}" =~ ^[0-9]+$ ]] &&
    [[ "${MOCK_CODEX_REVIEW_INVALID_VERDICTS:-0}" -gt 0 ]]; then

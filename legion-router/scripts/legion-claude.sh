@@ -70,14 +70,17 @@ emit_span() {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
     local parent_id="${LEGION_PARENT_ID:-}"
-    jq -cn \
+    # The task travels on stdin: on argv a task past ARG_MAX made this jq fail
+    # with "Argument list too long", and the run's span was silently lost.
+    printf '%s' "$task" | jq -cRs \
       --arg schema "legion.span.v1" --arg ts "$(_now)" \
       --arg run_id "${RUN_ID:-}" --arg trace_id "$trace_id" --arg parent_id "$parent_id" \
       --arg executor "$executor" --arg model "$model" \
       --arg archetype "${archetype:-${LEGION_ARCHETYPE:-}}" \
       --arg target_type "${LEGION_TARGET_TYPE:-}" --arg target_name "${LEGION_TARGET_NAME:-}" \
       --arg status "$status" --argjson dur "${dur:-0}" --argjson cost "${cost:-0}" \
-      --argjson usage "$usage" --arg task "$task" --argjson artifacts "$artifacts" '
+      --argjson usage "$usage" --argjson artifacts "$artifacts" '
+      . as $task |
       {schema:$schema, ts:$ts, run_id:$run_id, trace_id:$trace_id,
        parent_id:(if $parent_id=="" then null else $parent_id end),
        executor:$executor, model:$model, archetype:$archetype, task:$task, status:$status,
@@ -296,7 +299,16 @@ run_fallback() {
       "$fallback_branch" "$model" "$sandbox" "$base" "${archetype:-}" "${effort:-}"
   fi
   set +e
-  fallback_args=(run --executor codex --model "$model" --task "$task" --repo "$repo"
+  # The task goes by file when the delegate is this install's own: on argv, a
+  # task the size of a large review prompt fails with "Argument list too long".
+  # A delegate substituted on PATH has not agreed to --task-file, so it keeps
+  # argv, exactly as dispatch_adapter does for adapters.
+  local -a task_args=(--task "$task")
+  if [[ -n "${task_file:-}" && -r "$task_file" && -x "$_self_dir/../bin/legion-delegate" ]] \
+    && [[ "$delegate_bin" -ef "$_self_dir/../bin/legion-delegate" ]]; then
+    task_args=(--task-file "$task_file")
+  fi
+  fallback_args=(run --executor codex --model "$model" "${task_args[@]}" --repo "$repo"
     --sandbox "$sandbox" --base "$base" --run-id "$RUN_ID")
   [[ -z "${archetype:-}" ]] || fallback_args+=(--archetype "$archetype")
   [[ -z "$fallback_effort" ]] || fallback_args+=(--reasoning-effort "$fallback_effort")

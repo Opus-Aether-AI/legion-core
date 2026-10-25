@@ -631,6 +631,21 @@ SH
     assert_mock_not_called legion-delegate
 }
 
+@test "legion-claude: a large task reaches the Codex fallback by file, not argv" {
+    local repo; repo="$(make_test_repo fallback-big-task)"
+    local real_bin="$TEST_TMPDIR/real-delegate-bin" big="$TEST_TMPDIR/big-task.txt"
+    mkdir -p "$real_bin"
+    ln -s "$REPO_ROOT/legion-router/bin/legion-delegate" "$real_bin/legion-delegate"
+    # Larger than ARG_MAX on macOS (1 MiB) and Linux's per-argument limit.
+    python3 -c "print('review this: ' + 'x' * 1100000)" > "$big"
+
+    PATH="$real_bin:$PATH" MOCK_CLAUDE_FAIL=1 \
+      run "$LEGION_CLAUDE" run --task-file "$big" --repo "$repo" --quiet
+    [[ "$output" != *"Argument list too long"* ]]
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.executor == "codex" and .status == "ok" and .fell_back == true'
+}
+
 @test "legion-claude: a binary file in the run applies byte for byte" {
     local repo; repo="$(make_test_repo claude-binary)"
     MOCK_CLAUDE_WRITE_BINARY=1 \

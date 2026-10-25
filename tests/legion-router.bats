@@ -2865,3 +2865,41 @@ PY
     printf '%%PDF-1.7\n\x00\x01\x02\xffbinary\x00\n' > "$TEST_TMPDIR/expected.pdf"
     cmp "$repo/MOCK_CODEX_REPORT.pdf" "$TEST_TMPDIR/expected.pdf"
 }
+
+@test "delegate run: a native codex task past ARG_MAX finishes and records its span" {
+    local repo; repo="$(make_test_repo native-big-task)"
+    local big="$BATS_TEST_TMPDIR/native-big.txt"
+    python3 -c "print('x' * 1100000)" > "$big"
+    run "$DELEGATE" run --model test-model-beta --task-file "$big" --repo "$repo" --quiet
+    [[ "$output" != *"Argument list too long"* ]]
+    [ "$status" -eq 0 ]
+    local run_id; run_id="$(echo "$output" | jq -r .run_id)"
+    run bash -c "cat '$LEGION_TELEMETRY_DIR'/*.jsonl | jq -e --arg run '$run_id' \
+      'select(.run_id == \$run and .executor == \"codex\") | (.task | length) > 1000000'"
+    [ "$status" -eq 0 ]
+}
+
+@test "delegate review: a prompt reviewer gets binary files summarised, not inlined" {
+    local repo; repo="$(make_test_repo review-binary)"
+    local base; base="$(git -C "$repo" rev-parse HEAD)"
+    printf '\x89PNG\r\n\x1a\n\x00\x01binary\x00' > "$repo/image.png"
+    printf 'export const y = 2\n' >> "$repo/foo.ts"
+    git -C "$repo" add -A
+    git -C "$repo" -c user.email=t@t.c -c user.name=t commit -qm binary
+    local bin="$TEST_TMPDIR/own-claude-review"
+    mkdir -p "$bin"
+    ln -s "$REPO_ROOT/legion-router/bin/legion-claude" "$bin/legion-claude"
+    local routing="$TEST_TMPDIR/claude-review-routing.toml"
+    printf '[review]\norder = ["claude"]\n' > "$routing"
+    local prompt="$TEST_TMPDIR/review-prompt.txt"
+
+    PATH="$bin:$PATH" LEGION_ROUTING_FILE="$routing" MOCK_CLAUDE_PROMPT_LOG="$prompt" \
+      run "$DELEGATE" review --base "$base" --repo "$repo" --max-attempts 1 --quiet
+
+    [ -s "$prompt" ]
+    grep -q 'Binary files /dev/null and b/image.png differ' "$prompt"
+    ! grep -q 'GIT binary patch' "$prompt"
+    grep -q 'export const y = 2' "$prompt"
+    local patch; patch="$(echo "$output" | tail -n 1 | jq -r .review_patch)"
+    grep -q 'GIT binary patch' "$patch"
+}

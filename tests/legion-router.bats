@@ -2853,6 +2853,47 @@ PY
     echo "$output" | grep -q changed
 }
 
+# ── --scope / --detach for adapter executors ───────────────────────────────
+
+@test "delegate run: --scope reaches the Claude adapter, which declares it" {
+    local repo; repo="$(make_test_repo claude-scope-dispatch)"
+    local bin="$TEST_TMPDIR/own-claude-bin"
+    mkdir -p "$bin"
+    ln -s "$REPO_ROOT/legion-router/bin/legion-claude" "$bin/legion-claude"
+    MOCK_CLAUDE_WRITE=1 PATH="$bin:$PATH" run "$DELEGATE" run --executor claude \
+      --task "edit" --repo "$repo" --scope foo.ts --no-dirty-warn --quiet
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.executor == "claude" and .status == "ok"'
+    local diff; diff="$(echo "$output" | jq -r .diff_path)"
+    [ ! -s "$diff" ]   # claude-unexpected.txt is outside the scope
+}
+
+@test "delegate run: --scope and --detach errors name the executors that support them" {
+    local repo; repo="$(make_test_repo adapter-flag-errors)"
+    run "$DELEGATE" run --executor cursor --task x --repo "$repo" --scope foo.ts --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--scope is not supported by executor 'cursor'"* ]]
+    [[ "$output" == *"codex (native)"* ]]
+    [[ "$output" == *"claude"* ]]
+    assert_mock_not_called agent
+
+    run "$DELEGATE" run --executor claude --task x --repo "$repo" --detach --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--detach is supported only by the native codex executor"* ]]
+    [[ "$output" == *"'claude' runs in the foreground"* ]]
+    assert_mock_not_called claude
+}
+
+@test "delegate run: a run without --scope reports nothing as excluded by it" {
+    # The base commit used to be passed as a separate argument and read as the
+    # first scope, so every unscoped run listed all of its changes as excluded.
+    local repo; repo="$(make_test_repo unscoped-summary)"
+    run "$DELEGATE" run --model test-model-beta --task x --repo "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"MOCK_CODEX_CHANGE.txt"* ]]
+    [[ "$output" != *"excluded by --scope"* ]]
+}
+
 # ── binary-safe patches and large payloads ─────────────────────────────────
 
 @test "delegate run: a binary file in the slice patch applies byte for byte" {

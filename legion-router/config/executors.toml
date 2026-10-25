@@ -57,6 +57,9 @@ task_file = true
 # all. Capability belongs to the ADAPTER, not to its I/O shape.
 effort = true
 model_chain = true
+# scope         true when it accepts `--scope PATHSPEC` (repeatable), which limits
+#               the captured diff the way legion-delegate's native codex path does.
+scope = true
 review = "prompt"
 # Claude reviews on claude_default (Opus 5.5), which is a DIFFERENT model from the
 # frontier role that authors frontend-polish (Fable 5.1) — so a Claude-sourced

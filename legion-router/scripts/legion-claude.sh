@@ -367,6 +367,7 @@ cmd_run() {
   local base_commit=""
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
   local read_only_violation=0 claude_worktree_owned=0 task_file=""
+  local -a scopes=()
 
   claude_fallback_enabled || allow_fallback=0
   while [[ $# -gt 0 ]]; do
@@ -395,6 +396,7 @@ cmd_run() {
       --sandbox) sandbox="$2"; shift 2 ;;                     # accepted for diff-contract parity
       --archetype) archetype="$2"; shift 2 ;;                 # accepted for diff-contract parity
       --run-id) preset_run_id="$2"; shift 2 ;;                # adopt fanout's queued identity
+      --scope) scopes+=("$2"); shift 2 ;;                     # limit the captured diff (repeatable)
       *) die "run: unknown arg '$1'" ;;
     esac
   done
@@ -602,9 +604,27 @@ cmd_run() {
     # had actually been done.
     # --binary: without it a changed PDF, image, font or spreadsheet becomes a
     # "Binary files differ" line that `git apply` rejects.
-    git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
+    if [[ "${#scopes[@]}" -gt 0 ]]; then
+      git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${base_commit:+"$base_commit"} \
+        -- "${scopes[@]}" >"$diff_path" 2>/dev/null || diff_rc=1
+    else
+      git -C "$wt" diff --cached --binary --no-ext-diff --no-textconv ${base_commit:+"$base_commit"} >"$diff_path" 2>/dev/null || diff_rc=1
+    fi
     [[ "$diff_rc" -ne 0 ]] && note "⚠ could not capture a diff from $wt"
-    if [[ "$sandbox" == "read-only" && -s "$diff_path" ]]; then
+    # --scope narrows the PATCH, never the read-only check: a write anywhere in
+    # the worktree is a violation, whether or not the scope would capture it.
+    local all_changes="" n_all=0 n_scoped=0
+    if [[ "$diff_rc" -eq 0 ]]; then
+      all_changes="$(git -C "$wt" diff --cached --name-only ${base_commit:+"$base_commit"} 2>/dev/null || true)"
+    fi
+    if [[ "${#scopes[@]}" -gt 0 && -n "$all_changes" ]]; then
+      n_all="$(printf '%s\n' "$all_changes" | grep -c . || true)"
+      n_scoped="$(git -C "$wt" diff --cached --name-only ${base_commit:+"$base_commit"} \
+        -- "${scopes[@]}" 2>/dev/null | grep -c . || true)"
+      [[ "$n_scoped" -ge "$n_all" ]] \
+        || note "⚠ $(( n_all - n_scoped )) changed path(s) outside --scope were not captured"
+    fi
+    if [[ "$sandbox" == "read-only" ]] && [[ -s "$diff_path" || -n "$all_changes" ]]; then
       read_only_violation=1
       note "⚠ Claude produced file changes during a read-only run; refusing the result"
     fi
@@ -785,13 +805,14 @@ Usage:
                     [--base REF] [--run-id ID] [--apply] [--keep]
                     [--sandbox read-only|workspace-write] [--archetype NAME]
                     [--append-system-prompt TEXT] [--dangerously-skip-permissions]
+                    [--scope PATHSPEC ...] [--fallback-models A,B]
                     [--quiet] [--no-fallback] [--fallback-model MODEL]
   legion-claude run [--model MODEL] [--repo DIR] [...] < task.txt
 
 The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a
 binary-safe diff at <repo>/.legion/runs/<run-id>/diff.patch, so it never edits the
 caller's working tree. --keep retains the worktree; --apply applies the diff to the
-repo.
+repo; --scope (repeatable) limits the captured diff to those git pathspecs.
 Read-only runs use Claude plan mode and fail if the worktree still changes.
 
 When Claude fails or is unavailable, the run falls back to the Codex workhorse

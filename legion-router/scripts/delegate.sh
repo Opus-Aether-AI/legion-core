@@ -719,15 +719,21 @@ write_run_artifact_status() {
 
 # Show every changed path grouped by top-level directory. When scopes are
 # present, save the selected list too and make exclusions visible.
+# DIFF_RANGE is a revision range, `--cached`, or `--cached=<commit>` (the index
+# against that commit). The base rides inside the one argument: passed as its
+# own argument it was read as the first scope, so every run without --scope
+# reported all of its changes as "excluded by --scope".
 summarize_changed_paths() {
   local target="$1" run_art="$2" diff_range="$3"; shift 3
   local all_paths="$run_art/changed-paths.txt" scoped_paths="$run_art/scoped-changed-paths.txt"
   local path excluded=0
-  if [[ "$diff_range" == "--cached" ]]; then
-    git -C "$target" diff --cached --name-only > "$all_paths"
-  else
-    git -C "$target" diff --name-only "$diff_range" > "$all_paths"
-  fi
+  local -a range_args
+  case "$diff_range" in
+    --cached) range_args=(--cached) ;;
+    --cached=*) range_args=(--cached "${diff_range#--cached=}") ;;
+    *) range_args=("$diff_range") ;;
+  esac
+  git -C "$target" diff --name-only "${range_args[@]}" > "$all_paths"
   [[ -s "$all_paths" ]] || return 0
   note "→ changed paths:"
   while IFS= read -r path; do
@@ -742,11 +748,7 @@ summarize_changed_paths() {
   ' "$all_paths")
 
   [[ "$#" -gt 0 ]] || return 0
-  if [[ "$diff_range" == "--cached" ]]; then
-    git -C "$target" diff --cached --name-only -- "$@" > "$scoped_paths"
-  else
-    git -C "$target" diff --name-only "$diff_range" -- "$@" > "$scoped_paths"
-  fi
+  git -C "$target" diff --name-only "${range_args[@]}" -- "$@" > "$scoped_paths"
   while IFS= read -r path; do
     grep -Fqx -- "$path" "$scoped_paths" >/dev/null 2>&1 && continue
     if [[ "$excluded" -eq 0 ]]; then
@@ -791,6 +793,20 @@ write_task_payload() {
   printf '%s' "$dest"
 }
 
+# Executors whose executors.toml entry sets capability FLAG = true, comma
+# separated. One registry read per executor, so keep it to error messages.
+executors_declaring() {
+  local flag="$1" name found=""
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    if python3 "$ROUTE_BIN" --executor-info "$name" 2>/dev/null \
+      | jq -e --arg flag "$flag" '.[$flag] == true' >/dev/null 2>&1; then
+      found="${found:+$found, }$name"
+    fi
+  done < <(python3 "$ROUTE_BIN" --list-executors 2>/dev/null | jq -r '.[]' 2>/dev/null)
+  printf '%s' "${found:-none}"
+}
+
 # Dispatch a scoped run to a non-codex executor's adapter (the Legion runner
 # contract: `<adapter> run --repo … --task … [--model …] …`). Reads the adapter
 # and its I/O contract from executors.toml via legion-route, builds the right
@@ -816,6 +832,14 @@ dispatch_adapter() {
     adapter_bin="$(command -v "$adapter" 2>/dev/null || echo "$_self_dir/../bin/$adapter")"
   fi
   [[ -x "$adapter_bin" ]] || die "executor '$ex' adapter '$adapter' not found on PATH or in bin/ — build/install it first."
+  # --scope is a declared adapter capability, like effort and model_chain. Check
+  # it before anything is staged, so an unsupported request fails cleanly.
+  if [[ "${#scopes[@]}" -gt 0 ]]; then
+    [[ "$(jq -r '.scope // false' <<<"$info")" == "true" ]] \
+      || die "run: --scope is not supported by executor '$ex'; it is supported by codex (native) and by executors that declare scope = true in executors.toml: $(executors_declaring scope)"
+    [[ -x "$_self_dir/../bin/$adapter" && "$adapter_bin" -ef "$_self_dir/../bin/$adapter" ]] \
+      || die "run: --scope needs this install's $adapter; the one on PATH ($adapter_bin) may not support it"
+  fi
   # Model priority: explicit --model  >  the archetype's resolved model (ONLY when
   # the archetype routed here — not a forced --executor, whose archetype model may
   # name a model this harness can't run)  >  the executor's own default role. This
@@ -907,6 +931,10 @@ dispatch_adapter() {
     else
       note "⚠ adapter for '$ex' predates --fallback-models; the same-vendor model chain is skipped"
     fi
+  fi
+  if [[ "${#scopes[@]}" -gt 0 ]]; then
+    local scope_path
+    for scope_path in "${scopes[@]}"; do aargs+=(--scope "$scope_path"); done
   fi
   note "→ dispatch to $ex via $adapter${use_model:+ -m $use_model}"
   exec "$adapter_bin" "${aargs[@]}"
@@ -1047,10 +1075,11 @@ cmd_run() {
       die "internal error: executor=self passed route preflight" ;;
     ""|codex) : ;;
     *)
+      # Detach re-runs this script as a worker that drives codex in a worktree
+      # the parent prepared; an adapter owns its own worktree and lifecycle, so
+      # it cannot be handed over that way.
       [[ "$detach" -eq 0 && "$detached_worker" -eq 0 ]] || \
-        die "run: --detach is supported only by native codex execution"
-      [[ "${#scopes[@]}" -eq 0 ]] || \
-        die "run: --scope is supported only by native codex execution"
+        die "run: --detach is supported only by the native codex executor (--executor codex); executor '$r_exec' runs in the foreground"
       dispatch_adapter "$r_exec" ;;   # execs the adapter and never returns
   esac
   [[ -n "$effort" ]] || effort="xhigh"   # codex always runs at xhigh unless explicitly overridden
@@ -1238,9 +1267,9 @@ cmd_run() {
     fi
     if [[ "$diff_rc" -eq 0 ]]; then
       if [[ "${#scopes[@]}" -gt 0 ]]; then
-        summarize_changed_paths "$wt" "$art" --cached ${diff_from:+"$diff_from"} "${scopes[@]}" || note "⚠ could not summarize changed paths"
+        summarize_changed_paths "$wt" "$art" "--cached${diff_from:+=$diff_from}" "${scopes[@]}" || note "⚠ could not summarize changed paths"
       else
-        summarize_changed_paths "$wt" "$art" --cached ${diff_from:+"$diff_from"} || note "⚠ could not summarize changed paths"
+        summarize_changed_paths "$wt" "$art" "--cached${diff_from:+=$diff_from}" || note "⚠ could not summarize changed paths"
       fi
     fi
   else

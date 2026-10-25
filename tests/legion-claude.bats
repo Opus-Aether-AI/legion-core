@@ -646,6 +646,27 @@ SH
     echo "$output" | jq -e '.executor == "codex" and .status == "ok" and .fell_back == true'
 }
 
+# ── scope and binary-safe patches ──────────────────────────────────────────
+
+@test "legion-claude: --scope limits the captured diff" {
+    local repo; repo="$(make_test_repo claude-scope)"
+    MOCK_CLAUDE_WRITE=1 MOCK_CLAUDE_WRITE_BINARY=1 \
+      run "$LEGION_CLAUDE" run --task "edit" --repo "$repo" --scope claude-image.png
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 changed path(s) outside --scope were not captured"* ]]
+    local diff; diff="$(echo "$output" | tail -n 1 | jq -r .diff_path)"
+    grep -q 'claude-image.png' "$diff"
+    ! grep -q 'claude-unexpected.txt' "$diff"
+}
+
+@test "legion-claude: --scope never hides a read-only violation" {
+    local repo; repo="$(make_test_repo claude-scope-readonly)"
+    MOCK_CLAUDE_WRITE=1 run "$LEGION_CLAUDE" run --task "inspect" --repo "$repo" \
+      --sandbox read-only --scope foo.ts --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.reason == "read_only_violation"'
+}
+
 @test "legion-claude: a binary file in the run applies byte for byte" {
     local repo; repo="$(make_test_repo claude-binary)"
     MOCK_CLAUDE_WRITE_BINARY=1 \

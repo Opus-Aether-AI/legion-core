@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.31.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.30.0...v0.31.0) (2026-10-25)
+
+
+### Added
+
+* **docs:** document workflows: archetypes, legion-doc-check and a forgiving review normaliser ([#215](https://github.com/Opus-Aether-AI/legion-core/issues/215)) ([f8c3fc2](https://github.com/Opus-Aether-AI/legion-core/commit/f8c3fc20905d7b6cde594c64a1c37fdd130b5274))
+
+
+### Fixed
+
+* **router:** Claude executor reliability: child cleanup, no silent Codex fallback, binary-safe patches ([#216](https://github.com/Opus-Aether-AI/legion-core/issues/216)) ([f612b04](https://github.com/Opus-Aether-AI/legion-core/commit/f612b047d0b4db3a482c6b8e82f6195fad1ed56a))
+
 ## [0.30.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.29.2...v0.30.0) (2026-10-04)
 
 

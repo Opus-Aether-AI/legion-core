@@ -164,3 +164,48 @@ def test_gate_cli_exit_code(capsys):
         code = ls.main(["gate", "--dir", d, "--routing", "/nope", "--target", "0.5"])
     assert code == 1
     assert "legion-delegate" in capsys.readouterr().out
+
+
+def _write_routing(tmp_path, executors, targets="[targets]\ncodex_share = 0.5\n"):
+    lines = [targets, '[defaults]\nexecutor = "self"\n']
+    for name, executor in executors.items():
+        lines.append(f'[archetypes.{name}]\nexecutor = "{executor}"\n')
+    path = tmp_path / "routing.toml"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return str(path)
+
+
+def test_routes_to_codex_reads_the_policy(tmp_path):
+    shipped = os.path.join(HERE, "..", "..", "legion-router", "config", "routing.toml")
+    assert ls.routes_to_codex(shipped) is True
+    claude_only = _write_routing(tmp_path, {"implement-feature": "claude", "scout": "self"})
+    assert ls.routes_to_codex(claude_only) is False
+    assert ls.routes_to_codex("/does/not/exist") is None
+
+
+def test_policy_without_codex_routes_has_no_codex_target(tmp_path, monkeypatch):
+    # A repository whose routing sends nothing to codex must not be told, on
+    # every prompt, to route its next slice to codex -- even when its routing
+    # file still carries the default [targets].codex_share = 0.5.
+    monkeypatch.delenv("LEGION_TARGET_CODEX_SHARE", raising=False)
+    routing = _write_routing(tmp_path, {"implement-feature": "claude", "final-review": "claude"})
+    assert ls.target_share(None, routing=routing) == 0.0
+    c = ls.compute([_span("opus", "fixture-claude", 100), _span("codex", "fixture-codex", 10),
+                    _span("opus", "fixture-claude", 100)])
+    line, code = ls.gate(c, ls.target_share(None, routing=routing))
+    assert code == 0 and "nothing to balance" in line
+    # An explicit operator choice still wins over the derived target.
+    assert ls.target_share(0.4, routing=routing) == 0.4
+    monkeypatch.setenv("LEGION_TARGET_CODEX_SHARE", "0.3")
+    assert ls.target_share(None, routing=routing) == 0.3
+
+
+def test_gate_cli_quiet_for_codex_free_policy(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("LEGION_TARGET_CODEX_SHARE", raising=False)
+    routing = _write_routing(tmp_path, {"implement-feature": "claude"})
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    (spans / "s.jsonl").write_text(json.dumps(_span("opus", "fixture-claude", 100)) + "\n",
+                                   encoding="utf-8")
+    assert ls.main(["gate", "--dir", str(spans), "--routing", routing]) == 0
+    assert "nothing to balance" in capsys.readouterr().out

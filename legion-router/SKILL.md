@@ -36,9 +36,11 @@ Legion is a team. Play each configured role to its strength:
 The share target is an advisory routing preference, not a hard workflow rule.
 It defaults to `0.5` in `routing.toml [targets].codex_share` and can be changed
 in that config, with `LEGION_TARGET_CODEX_SHARE`, or per command with
-`legion-share --target <0..1>`. Route by task fit even when that differs from
-the target; use an explicit `legion-share gate` only when a repository chooses
-to enforce its configured preference.
+`legion-share --target <0..1>`. A routing policy that sends no archetype to
+codex (a repository's own `LEGION_ROUTING_FILE`, say) has a target of `0`, so
+the gate stays quiet there. Route by task fit even when that differs from the
+target; use an explicit `legion-share gate` only when a repository chooses to
+enforce its configured preference.
 
 **Make it measurable (the controller loop):**
 1. When you do a task **yourself**, log it: `legion-trace emit --executor opus --model "$(legion-route --model-ref claude_orchestrator)" --status ok` (so the split has a denominator).

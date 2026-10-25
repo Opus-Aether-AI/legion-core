@@ -580,3 +580,53 @@ SH
     process_gone "$claude_pid"
     process_gone "$child_pid"
 }
+
+# ── no silent Codex fallback ───────────────────────────────────────────────
+
+@test "legion-claude: LEGION_CLAUDE_FALLBACK=off reports the Claude failure, not a Codex run" {
+    local repo; repo="$(make_test_repo fallback-off)"
+    MOCK_CLAUDE_FAIL=1 LEGION_CLAUDE_FALLBACK=off \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .executor == "claude" and .status == "failed"
+      and .reason == "claude_error" and .fell_back == false'
+    assert_mock_not_called legion-delegate
+
+    MOCK_CLAUDE_LIMIT=1 LEGION_CLAUDE_FALLBACK=off \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '
+      .executor == "claude" and .status == "blocked"
+      and .reason == "claude_limit" and .fell_back == false'
+
+    PATH="$(path_without claude)" LEGION_CLAUDE_FALLBACK=off \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.executor == "claude" and .reason == "claude_unavailable"'
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: an unknown LEGION_CLAUDE_FALLBACK value fails instead of falling back" {
+    local repo; repo="$(make_test_repo fallback-typo)"
+    MOCK_CLAUDE_FAIL=1 LEGION_CLAUDE_FALLBACK=of \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo" --quiet
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"invalid LEGION_CLAUDE_FALLBACK 'of'"* ]]
+    assert_mock_not_called claude
+    assert_mock_not_called legion-delegate
+}
+
+@test "legion-claude: a models file with no Codex role runs Claude and never falls back" {
+    local repo; repo="$(make_test_repo claude-only-models)"
+    local models="$TEST_TMPDIR/claude-only-models.toml"
+    printf '[models]\nclaude_default = "%s"\n' "$CLAUDE_DEFAULT" > "$models"
+    MOCK_CLAUDE_FAIL=1 LEGION_MODELS_FILE="$models" \
+      run "$LEGION_CLAUDE" run --task "do the thing" --repo "$repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no codex_workhorse role"* ]]
+    echo "$output" | tail -n 1 | jq -e '
+      .executor == "claude" and .status == "failed"
+      and .reason == "claude_error" and .fell_back == false'
+    assert_mock_not_called legion-delegate
+}

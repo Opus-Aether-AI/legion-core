@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # legion-claude — delegate a scoped task to Claude headless, with automatic
-# fallback to legion-delegate / Codex when Claude is unavailable or rate-limited.
+# fallback to legion-delegate / Codex when Claude is unavailable or rate-limited
+# (off with --no-fallback or LEGION_CLAUDE_FALLBACK=off).
 
 set -euo pipefail
 
@@ -105,6 +106,19 @@ cost_from_usage() {
     [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '%s' 0
   done
   cost_for_model "$model" "$input" "$output" "$cache_read" "$cache_write"
+}
+
+# LEGION_CLAUDE_FALLBACK=off keeps a failed Claude run a Claude failure: the
+# receipt reports Claude's own status and reason instead of handing the task to
+# Codex (the same as --no-fallback, but settable once for a whole repository,
+# including the runs legion-delegate and legion-fanout start for it). Strict on
+# purpose: a repository that bans Codex must not have a typo re-enable it.
+claude_fallback_enabled() {
+  case "${LEGION_CLAUDE_FALLBACK:-on}" in
+    on|1|true|yes) return 0 ;;
+    off|0|false|no) return 1 ;;
+    *) die "invalid LEGION_CLAUDE_FALLBACK '${LEGION_CLAUDE_FALLBACK}' (on|off)" ;;
+  esac
 }
 
 has_low_claude_credit() {
@@ -342,6 +356,7 @@ cmd_run() {
   local wt="" branch="" wt_report="" diff_path="" diff_rc=0
   local read_only_violation=0 claude_worktree_owned=0 task_file=""
 
+  claude_fallback_enabled || allow_fallback=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --task) task="$2"; shift 2 ;;
@@ -392,9 +407,19 @@ cmd_run() {
       "$wt" "$branch" "$model" "${sandbox:-workspace-write}" "$base" "$archetype" "$effort"
   fi
   default_model="$(legion_model_ref claude_default)" || die "could not resolve claude_default in models.toml"
-  default_fallback_model="$(legion_model_ref codex_workhorse)" || die "could not resolve codex_workhorse in models.toml"
   [[ -n "$model" ]] || model="$default_model"
-  [[ -n "$fallback_model" ]] || fallback_model="$default_fallback_model"
+  # A models file with no Codex role (LEGION_MODELS_FILE pinned to a Claude-only
+  # catalog) has nothing to fall back to. That is a policy, not a broken config:
+  # run Claude and report its own result rather than refusing to start.
+  if [[ "$allow_fallback" -eq 1 && -z "$fallback_model" ]]; then
+    if default_fallback_model="$(legion_model_ref codex_workhorse 2>/dev/null)" \
+      && [[ -n "$default_fallback_model" ]]; then
+      fallback_model="$default_fallback_model"
+    else
+      allow_fallback=0
+      note "→ the models file has no codex_workhorse role; Codex fallback is off"
+    fi
+  fi
   [[ -n "$sandbox" ]] || sandbox="workspace-write"
   case "$sandbox" in
     read-only|workspace-write) ;;
@@ -753,6 +778,11 @@ The run happens in a git worktree under <repo>/.legion/worktrees/ and returns a 
 <repo>/.legion/runs/<run-id>/diff.patch, so it never edits the caller's working tree.
 --keep retains the worktree; --apply applies the diff to the repo.
 Read-only runs use Claude plan mode and fail if the worktree still changes.
+
+When Claude fails or is unavailable, the run falls back to the Codex workhorse
+role. --no-fallback, LEGION_CLAUDE_FALLBACK=off, or a models file with no
+codex_workhorse role turns that off: the result then reports Claude's own failure
+(status failed, or blocked on a usage limit, with its reason).
 
 On SIGTERM, SIGINT or SIGHUP the adapter terminates its claude (or fallback) child
 and every process under it (TERM, then KILL after LEGION_KILL_GRACE_SECONDS,

@@ -574,3 +574,71 @@ SH
     [ "$status" -eq 2 ]
     [[ "$output" == *"git fetch failed"* ]] || [[ "$stderr" == *"git fetch failed"* ]] || true
 }
+
+# ── daily model-table currency check (issue #218, step 4) ──────────────
+
+# A legion-models stand-in: logs its argv, prints $MODELS_REPORT, exits $MODELS_RC.
+fake_models_check() {
+    local bin="$TEST_TMPDIR/fake-legion-models"
+    cat > "$bin" <<'SH'
+#!/usr/bin/env bash
+printf 'models %s\n' "$*" >> "$MOCK_CALL_LOG"
+printf '%s\n' "${MODELS_REPORT:-{\"missing\":[]\}}"
+exit "${MODELS_RC:-0}"
+SH
+    chmod +x "$bin"
+    printf '%s\n' "$bin"
+}
+
+fake_self_learn_recorder() {
+    local bin="$TEST_TMPDIR/fake-self-learn"
+    cat > "$bin" <<'SH'
+#!/usr/bin/env bash
+printf 'self-learn %s\n' "$*" >> "$MOCK_CALL_LOG"
+SH
+    chmod +x "$bin"
+    printf '%s\n' "$bin"
+}
+
+@test "refresh.sh fetches the providers' model lists and stays quiet when every id is current" {
+    make_source_clone marketplace-minimal.json
+    LEGION_MODELS_BIN="$(fake_models_check)" LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    grep -qx 'models check --fetch --json' "$MOCK_CALL_LOG"
+    if grep -qE 'model ids are missing|model-list check failed' <<<"$output"; then
+        echo "refresh reported a model-table problem that does not exist" >&2
+        return 1
+    fi
+}
+
+@test "refresh.sh reports and records configured model ids that providers no longer list" {
+    make_source_clone marketplace-minimal.json
+    MODELS_RC=1 \
+      MODELS_REPORT='{"missing":[{"role":"claude_frontier","model":"test-model-retired","provider":"anthropic"}]}' \
+      LEGION_SELF_LEARN_BIN="$(fake_self_learn_recorder)" LEGION_MODELS_BIN="$(fake_models_check)" \
+      LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
+    # Best-effort: a stale model table is reported, never a failed refresh.
+    [ "$status" -eq 0 ]
+    grep -qF "configured model ids are missing from provider lists: claude_frontier=test-model-retired" <<<"$output"
+    grep -q "self-learn record --entity plugin:legion-setup --summary Configured model ids are missing" "$MOCK_CALL_LOG"
+    grep -q -- "--evidence claude_frontier=test-model-retired" "$MOCK_CALL_LOG"
+}
+
+@test "refresh.sh reports a model-list check that could not run, without failing the refresh" {
+    make_source_clone marketplace-minimal.json
+    MODELS_RC=2 MODELS_REPORT='' LEGION_MODELS_BIN="$(fake_models_check)" \
+      LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    grep -qF "model-list check failed (exit 2)" <<<"$output"
+}
+
+@test "refresh.sh skips the model-list check when LEGION_MODELS_CHECK=0" {
+    make_source_clone marketplace-minimal.json
+    LEGION_MODELS_CHECK=0 LEGION_MODELS_BIN="$(fake_models_check)" \
+      LEGION_UPDATE_REF=main run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    if grep -q '^models ' "$MOCK_CALL_LOG"; then
+        echo "legion-models ran although LEGION_MODELS_CHECK=0" >&2
+        return 1
+    fi
+}

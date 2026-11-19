@@ -627,6 +627,39 @@ SH
   done
 }
 
+@test "state lock waits, not fails, when mkdir reports success for a directory a rival created" {
+  # The Rust coreutils on Ubuntu 26.04 can report success for `mkdir` when a
+  # racing writer created the directory first. The lock then failed that
+  # writer outright (its noclobber pid write lost to the creator), so fewer
+  # than all contenders completed. Emulate the behaviour deterministically:
+  # this mkdir "succeeds" for any directory that already exists.
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-lenient-mkdir"
+  local record="$root/state.json" completed="$root/completed"
+  local guard="$root/critical-section" overlap="$root/overlap" i
+  mkdir -p "$root"
+  : > "$record"
+  mkdir "$record.lock"
+  printf '99999999\n' > "$record.lock/pid"
+
+  for ((i = 0; i < 12; i++)); do
+    bash -c '
+      mkdir() { command mkdir "$@" 2>/dev/null && return 0; [[ -d "${!#}" ]]; }
+      source "$1"
+      lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+      if ! command mkdir "$3" 2>/dev/null; then : > "$4"; fi
+      sleep 0.02
+      rmdir "$3" 2>/dev/null || true
+      printf "%s\n" "$5" >> "$6"
+      legion_release_run_state_lock "$lock"
+    ' _ "$state_lib" "$record" "$guard" "$overlap" "$i" "$completed" &
+  done
+  wait
+
+  [ ! -e "$overlap" ]
+  [ "$(wc -l < "$completed" | tr -d ' ')" = "12" ]
+}
+
 @test "state lock recovery cannot delete a replacement owner generation" {
   local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
   local root="$BATS_TEST_TMPDIR/lock-recovery-race"

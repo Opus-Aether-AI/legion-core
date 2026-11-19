@@ -59,6 +59,9 @@ source "$_self_dir/lib/sandbox-setup.sh"
 # shellcheck disable=SC1091
 # shellcheck source=lib/process-tree.sh
 source "$_self_dir/lib/process-tree.sh"
+# shellcheck disable=SC1091
+# shellcheck source=lib/run-guards.sh
+source "$_self_dir/lib/run-guards.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 if [[ -f "$_state_lib" ]]; then
   # shellcheck disable=SC1090
@@ -457,6 +460,9 @@ emit_primary_baseline_span() {
 # emit_span <executor> <model> <status> <duration_ms> <cost_usd> <usage_json> <task> <artifacts_json>
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  # Per-run cap, health fallback note, and the executor's health record.
+  legion_guard_span "$executor" "$status" "$cost" "$artifacts"
+  status="$LEGION_GUARD_STATUS"; artifacts="$LEGION_GUARD_ARTIFACTS"
   mkdir -p "$LEGION_TELEMETRY_DIR"
   case "$executor" in
     codex*)
@@ -579,6 +585,101 @@ route_preflight() {
     "route blocked: $reason" "$artifacts"
   printf '%s\n' "$payload"
   return 2
+}
+
+# Write a blocked-route receipt and span for a guard that stopped the run before
+# dispatch (an unavailable executor, a spent daily cap). Same receipt schema as
+# route_preflight, so callers read one shape for every refusal.
+# guard_block <reason> <executor> <model> <message> <extra_json>
+guard_block() {
+  local reason="$1" target_executor="$2" target_model="$3" message="$4" extra="${5:-}"
+  local art receipt payload artifacts
+  [[ -n "$extra" ]] || extra='{}'
+  if [[ -L "$repo/.legion" || ( -e "$repo/.legion" && ! -d "$repo/.legion" ) ||
+        -L "$repo/.legion/runs" || ( -e "$repo/.legion/runs" && ! -d "$repo/.legion/runs" ) ]]; then
+    art="$LEGION_STATE_ROOT/blocked-routes/$RUN_ID"
+  else
+    art="$repo/.legion/runs/$RUN_ID"
+  fi
+  receipt="$art/route-preflight.json"
+  mkdir -p "$art"
+  [[ "$art" != "$repo/"* ]] || legion_write_runtime_gitignore "$repo"
+  payload="$(jq -cn \
+    --arg schema "legion.route-preflight.v1" --arg run "$RUN_ID" \
+    --arg reason "$reason" --arg primary "$(legion_primary)" \
+    --arg executor "$target_executor" --arg model "$target_model" \
+    --arg archetype "${archetype:-}" --arg receipt "$receipt" --arg message "$message" \
+    --argjson extra "$extra" '
+    {schema:$schema, run_id:$run, status:"blocked", reason:$reason,
+     primary:$primary, executor:$executor,
+     model:(if $model=="" then null else $model end),
+     archetype:(if $archetype=="" then null else $archetype end),
+     receipt:$receipt, message:$message} + $extra')"
+  printf '%s\n' "$payload" > "$receipt.tmp.$$"
+  mv -f "$receipt.tmp.$$" "$receipt"
+  artifacts="$(jq -cn --arg receipt "$receipt" --arg reason "$reason" \
+    --arg executor "$target_executor" --argjson extra "$extra" \
+    '{preflight_receipt:$receipt, reason:$reason, target_executor:$executor} + $extra')"
+  emit_span "legion-route" "${target_model:-unresolved}" "blocked" 0 0 '{}' \
+    "route blocked: $reason" "$artifacts"
+  printf '%s\n' "$payload"
+  printf 'legion-delegate: %s\n' "$message" >&2
+  return 2
+}
+
+# Health-aware routing and the daily spending cap, decided before dispatch.
+#   * The day cap (legion-budget) stops every new delegated run once today's
+#     delegated spend reaches it.
+#   * An executor that is logged out, out of quota, or failed its last health
+#     probe (legion-health) never receives work. A ROUTED run falls back to the
+#     first healthy executor in routing.toml [health].fallback_order whose model
+#     role resolves, and the run's span records the fallback. An EXPLICIT
+#     --executor is the caller's choice, so it is refused with the healthy
+#     alternatives named instead of being silently moved to another vendor.
+# Reads and may rewrite cmd_run's r_exec/forced_executor/model/explicit_model/
+# r_fallback (bash dynamic scope).
+route_guards() {
+  local explicit_target="${1:-0}" target="${r_exec:-codex}" verdict reason detail choice budget_json
+  unset LEGION_HEALTH_FALLBACK_FROM LEGION_HEALTH_FALLBACK_REASON LEGION_HEALTH_FALLBACK_RUN
+  [[ "$target" == "self" ]] && return 0
+  if ! budget_json="$(legion_budget_day_check)"; then
+    guard_block "daily_budget_exhausted" "$target" "$model" \
+      "today's delegated spend reached the daily cap (\$$(jq -r '.spent_usd' <<<"$budget_json") of \$$(jq -r '.day_usd_cap' <<<"$budget_json")); raise LEGION_DAY_BUDGET_USD or routing.toml [budget].day_usd, or run this inline" \
+      "$(jq -c '{budget:{day_usd_cap:.day_usd_cap, spent_usd:.spent_usd, day:.day}}' <<<"$budget_json" 2>/dev/null || printf '{}')"
+    return 2
+  fi
+  # Adapters read the resolved per-run cap (legion-claude passes it on as a hard stop).
+  LEGION_RUN_BUDGET_USD="$(legion_budget_run_cap)"
+  export LEGION_RUN_BUDGET_USD
+  if verdict="$(legion_health_check "$target")"; then
+    return 0
+  fi
+  reason="$(jq -r '.reason // "unavailable"' <<<"$verdict" 2>/dev/null || printf unavailable)"
+  detail="$(jq -r '.detail // ""' <<<"$verdict" 2>/dev/null || true)"
+  choice="$(legion_health_pick "$target")"
+  if [[ "$explicit_target" == "1" || -z "$choice" ]]; then
+    local why="executor_unavailable" hint=""
+    [[ -n "$choice" ]] && hint=" Healthy alternative: $choice (rerun with --executor $choice)."
+    [[ -n "$choice" ]] || { why="no_healthy_executor"; hint=" No healthy fallback executor is configured; see legion-health status."; }
+    guard_block "$why" "$target" "$model" \
+      "executor '$target' is unavailable ($reason)${detail:+: $detail}.$hint Re-check with 'legion-health probe $target'." \
+      "$(jq -cn --arg reason "$reason" --arg detail "$detail" --arg alt "$choice" \
+        '{health:{reason:$reason, detail:$detail}, alternatives:(if $alt=="" then [] else [$alt] end)}')"
+    return 2
+  fi
+  note "⚠ executor '$target' is unavailable ($reason); routing this run to '$choice' instead"
+  LEGION_HEALTH_FALLBACK_FROM="$target"
+  LEGION_HEALTH_FALLBACK_REASON="$reason"
+  LEGION_HEALTH_FALLBACK_RUN="$RUN_ID"
+  export LEGION_HEALTH_FALLBACK_FROM LEGION_HEALTH_FALLBACK_REASON LEGION_HEALTH_FALLBACK_RUN
+  # The archetype's model and same-vendor chain belong to the executor that is
+  # down; the fallback runs its own default role.
+  r_exec="$choice"; forced_executor="$choice"; explicit_model=""; r_fallback=""
+  model=""
+  if [[ "$choice" == "codex" ]]; then
+    model="$(legion_model_ref codex_workhorse)" || die "could not resolve codex_workhorse in models.toml"
+  fi
+  return 0
 }
 
 # write/update the per-run state record (legion.run-state.v1) — the Console + handoff
@@ -1004,7 +1105,9 @@ cmd_run() {
   require_git_repo "$repo"
   # Archetype fills model/sandbox/effort/fallback from routing + model config; explicit flags win.
   local r_exec="" r_fallback=""
+  local route_pre_resolved=0
   if [[ -n "$archetype" && "${LEGION_ROUTE_PRE_RESOLVED:-0}" == "1" ]]; then
+    route_pre_resolved=1
     r_exec="${LEGION_RESOLVED_EXECUTOR:-$forced_executor}"
     r_fallback="${LEGION_RESOLVED_FALLBACK:-}"
   elif [[ -n "$archetype" ]]; then
@@ -1075,8 +1178,24 @@ cmd_run() {
     legion_arm_adopted_run_guard "$RUN_ID" "$repo" "$art" "$wt" "$branch" \
       "$model" "$sandbox" "$base" "$archetype" "$effort"
   fi
+  # Explicit means the CALLER chose the executor: --executor, or a --model
+  # with no archetype (which pins the native codex path). A route legion-fanout
+  # resolved from an archetype and passed back as --executor/--model is still
+  # a route, and may fall back.
+  local explicit_target=0
+  if [[ -n "$forced_executor" ]] && ! [[ "$route_pre_resolved" -eq 1 && "$forced_executor" == "$r_exec" ]]; then
+    explicit_target=1
+  elif [[ -n "$explicit_model" && -z "$archetype" ]]; then
+    explicit_target=1
+  fi
+  # The nesting policy judges what the CALLER asked for. A health fallback sets
+  # forced_executor, and must not turn an implicit nested route into an
+  # explicit cross-harness handoff that route_preflight would let through.
+  local preflight_explicit=0
+  [[ -z "$forced_executor" ]] || preflight_explicit=1
+  route_guards "$explicit_target" || return $?
   route_preflight "${r_exec:-codex}" "$model" "$task" "$archetype" \
-    "$([[ -n "$forced_executor" ]] && printf 1 || printf 0)" || return $?
+    "$preflight_explicit" || return $?
   # Dispatch by executor. `self` is the primary's own inline work (never delegated);
   # codex (or an unclassified task) uses the native codex path below; any other
   # registered coding executor runs through its adapter.
@@ -1226,6 +1345,16 @@ cmd_run() {
   local thread_id usage cost filtered_err error_log
   filtered_err="$art/codex.filtered.err"
   filter_codex_stderr "$art/codex.err" "$filtered_err"
+  # Executor health reads codex's own error channels only: filtered stderr, and
+  # error EVENTS in the stream. Never the stream's prose -- below, matching
+  # "rate limit" text is appended to the error log for humans, and a task that
+  # is ABOUT rate limiting would otherwise mark codex out of quota.
+  local health_err_text=""
+  if [[ "$rc" -ne 0 ]]; then
+    health_err_text="$(tail -c 4000 "$filtered_err" 2>/dev/null || true)"
+    health_err_text+=$'\n'"$(jq -R -r 'fromjson? | select(.type? == "error" or .type? == "turn.failed")
+      | (.message? // .error.message? // empty)' "$art/stream.jsonl" 2>/dev/null | tail -n 5 || true)"
+  fi
   # A reviewer's real failure reason may only exist on stdout (codex prints
   # quota exhaustion there). Append it so error_log points at the cause rather
   # than at unrelated MCP noise.
@@ -1314,7 +1443,16 @@ cmd_run() {
   elif [[ "$budget" -gt 0 && "$total_tokens" -gt "$budget" ]]; then
     status="over_budget"
     note "⚠ budget exceeded: $total_tokens > $budget tokens (advisory — codex cannot be pre-empted mid-run)"
+  else
+    local run_cap; run_cap="$(legion_budget_run_cap)"
+    if _legion_over_cap "$cost" "$run_cap"; then
+      status="over_budget"
+      note "⚠ spending cap exceeded: \$$cost > \$$run_cap per run (LEGION_RUN_BUDGET_USD or routing.toml [budget].run_usd); the diff is kept but not applied"
+    fi
   fi
+  # A failed run's provider error (quota, login) feeds the executor's health.
+  # shellcheck disable=SC2034 # read by legion_guard_span (lib/run-guards.sh)
+  LEGION_GUARD_ERROR_TEXT="$health_err_text"
 
   local artifacts copied_secret_names
   copied_secret_names="[]"
@@ -1802,6 +1940,10 @@ cmd_review() {
   local explicit_review_model="$model"
   [[ -n "$effort" ]] || effort="xhigh"
   [[ -n "$base" ]] || die "review: --base REF required"
+  local review_budget_json
+  if ! review_budget_json="$(legion_budget_day_check)"; then
+    die "review: today's delegated spend reached the daily cap (\$$(jq -r '.spent_usd' <<<"$review_budget_json") of \$$(jq -r '.day_usd_cap' <<<"$review_budget_json")); raise LEGION_DAY_BUDGET_USD or routing.toml [budget].day_usd"
+  fi
   [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || die "review: --max-attempts must be a positive integer"
   [[ "${#task}" -le 16384 ]] || die "review: --task exceeds 16384 characters"
   [[ -z "$task" ]] || scan_task_text "$task"
@@ -1885,6 +2027,11 @@ cmd_review() {
     fi
     if [[ -z "$model" ]]; then
       note "⚠ reviewer '$review_executor' has no resolvable model ($review_model_ref); trying the next candidate"
+      continue
+    fi
+    if ! legion_health_check "$review_executor" >/dev/null; then
+      note "⚠ reviewer '$review_executor' is unavailable (legion-health); trying the next candidate"
+      reason="reviewer-unavailable"
       continue
     fi
     [[ "$_cand_n" -eq 1 ]] || note "→ falling back to reviewer '$review_executor'"
@@ -2055,6 +2202,7 @@ cmd_review() {
     fi
     if review_executor_unavailable "$rc" "$attempt_err" "$attempt_stream"; then
       note "⚠ reviewer '$review_executor' is unavailable (exit $rc); trying the next candidate"
+      legion_health_mark_unavailable "$review_executor" "$attempt_err"
       reason="reviewer-unavailable"
       continue
     fi

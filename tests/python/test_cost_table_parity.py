@@ -79,7 +79,7 @@ CASES = [
     ("codex_cheap", 300_000, 10_000, 0.072),
 ]
 
-SOL_ROLES = ("codex_precision", "codex_review", "opencode_review")
+SOL_ROLES = ("codex_precision", "codex_review")
 # Standard 2/10 rates at and below the boundary, then 4/15 immediately above.
 CASES += [
     (role, inp, 10_000, expected)

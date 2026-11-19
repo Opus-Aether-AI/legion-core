@@ -5,6 +5,11 @@
 # so it does NOT affect the installer kcov coverage gate.
 
 setup() {
+  # Legion's machine-wide state (executor health, day spend, model lists) must
+  # come from the test, never from the developer's ~/.legion.
+  export LEGION_HOME="$BATS_TEST_TMPDIR/legion-home/.legion"
+  unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+  unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
   command -v bun >/dev/null 2>&1 || skip "bun not installed"
   command -v jq  >/dev/null 2>&1 || skip "jq not installed"
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"

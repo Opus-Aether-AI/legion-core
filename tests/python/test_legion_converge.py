@@ -362,3 +362,104 @@ def test_checkpoint_rejects_an_oversized_persisted_decision(tmp_path):
         assert "exceeds the 65536-byte limit" in str(error)
     else:
         raise AssertionError("checkpoint trusted an oversized persisted decision")
+
+
+# ── review-and-fix stop rule (issue #218 step 5) ──────────────────────
+
+
+def _failed(evidence, source):
+    return checkpoint(
+        source=source,
+        checks=[{"id": "tests", "scope": "local", "status": "failed", "evidence_fingerprint": evidence}],
+    )
+
+
+def _review(findings, source, head="b"):
+    return checkpoint(
+        source=source,
+        review={
+            "head_sha": head * 40,
+            "source_fingerprint": source,
+            "blocking_findings": [{"fingerprint": item} for item in findings],
+            "suggestions": [],
+        },
+    )
+
+
+def test_review_fix_loop_stops_after_the_round_limit(tmp_path):
+    converge = load_module()
+    decisions = [
+        converge.checkpoint(_failed(f"failure-{n}", f"tree-{n}"), state_root=tmp_path, max_rounds=2)
+        for n in range(3)
+    ]
+
+    assert [d["state"] for d in decisions] == ["actionable", "actionable", "blocked"]
+    assert decisions[1]["review_round"] == 2
+    assert decisions[2]["reason"] == "round_limit"
+    assert decisions[2]["action"] == "yield"
+
+
+def test_a_review_that_raises_nothing_new_ends_the_loop(tmp_path):
+    converge = load_module()
+    first = converge.checkpoint(_review(["race-in-cache"], "tree-a", "a"), state_root=tmp_path)
+    plateau = converge.checkpoint(_review(["race-in-cache"], "tree-b", "b"), state_root=tmp_path)
+
+    assert first["state"] == "actionable"
+    assert plateau["state"] == "blocked"
+    assert plateau["reason"] == "no_new_findings"
+
+
+def test_a_review_with_a_new_finding_continues(tmp_path):
+    converge = load_module()
+    converge.checkpoint(_review(["race-in-cache"], "tree-a", "a"), state_root=tmp_path)
+    decision = converge.checkpoint(
+        _review(["race-in-cache", "unbounded-retry"], "tree-b", "b"), state_root=tmp_path
+    )
+
+    assert decision["state"] == "actionable"
+    assert decision["review_round"] == 2
+
+
+def test_completion_resets_the_loop(tmp_path):
+    converge = load_module()
+    converge.checkpoint(_review(["race-in-cache"], "tree-a", "a"), state_root=tmp_path)
+    done = converge.checkpoint(checkpoint(source="tree-b"), state_root=tmp_path)
+    again = converge.checkpoint(_review(["race-in-cache"], "tree-c", "c"), state_root=tmp_path)
+
+    assert done["state"] == "complete" and done["review_round"] == 0
+    assert again["state"] == "actionable" and again["review_round"] == 1
+
+
+def test_a_zero_round_limit_turns_the_limit_off(tmp_path, monkeypatch):
+    converge = load_module()
+    monkeypatch.setenv("LEGION_REVIEW_FIX_MAX_ROUNDS", "0")
+    states = [
+        converge.checkpoint(_failed(f"failure-{n}", f"tree-{n}"), state_root=tmp_path)["state"]
+        for n in range(6)
+    ]
+
+    assert states == ["actionable"] * 6
+
+
+def test_the_default_round_limit_comes_from_routing_policy(monkeypatch):
+    converge = load_module()
+    monkeypatch.delenv("LEGION_REVIEW_FIX_MAX_ROUNDS", raising=False)
+    assert converge.resolve_max_rounds() == 3
+    monkeypatch.setenv("LEGION_REVIEW_FIX_MAX_ROUNDS", "5")
+    assert converge.resolve_max_rounds() == 5
+    assert converge.resolve_max_rounds(1) == 1
+
+
+def test_history_written_before_the_stop_rule_is_still_read(tmp_path):
+    converge = load_module()
+    converge.checkpoint(_failed("failure-a", "tree-a"), state_root=tmp_path)
+    history = next((tmp_path / "convergence").glob("*.jsonl"))
+    legacy = json.loads(history.read_text(encoding="utf-8"))
+    for key in ("review_round", "seen_finding_hashes"):
+        legacy.pop(key)
+    history.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+
+    decision = converge.checkpoint(_failed("failure-b", "tree-b"), state_root=tmp_path)
+
+    assert decision["state"] == "actionable"
+    assert decision["review_round"] == 1

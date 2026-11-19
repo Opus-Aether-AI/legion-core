@@ -2,6 +2,11 @@
 # legion-fanout — parallel multi-model fan-out across executors (mock codex on PATH).
 
 setup() {
+  # Legion's machine-wide state (executor health, day spend, model lists) must
+  # come from the test, never from the developer's ~/.legion.
+  export LEGION_HOME="$BATS_TEST_TMPDIR/legion-home/.legion"
+  unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+  unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
   # Fanout's root-span tests must be independent of whichever Legion worker
   # launched Bats. Nested-span tests set their own context explicitly.
   unset LEGION_ACTIVE LEGION_EXECUTOR LEGION_DEPTH LEGION_RUN_ID
@@ -1297,4 +1302,19 @@ SH
   echo "$output" | jq -e '.results[0].id == "setup" and .results[0].status == "failed"'
   echo "$output" | jq -e '.results[1].id == "dependent" and .results[1].status == "blocked"'
   echo "$output" | jq -e '.results[1].blocked_by == ["setup"]'
+}
+
+@test "fanout: a binary file a slice adds reaches the repository byte for byte" {
+  # Issue #218 listed binary files as silently dropped by fan-out. Every slice
+  # patch is now captured with --binary (#216); this pins the whole path, from
+  # the executor's worktree through fan-out's apply into the caller's tree.
+  printf '%s\n' '{"id":"report","archetype":"implement-feature","task":"add the report"}' \
+    > "$BATS_TEST_TMPDIR/binary.jsonl"
+
+  MOCK_CODEX_BINARY=1 run "$FANOUT" --slices "$BATS_TEST_TMPDIR/binary.jsonl" --repo "$REPO" --apply --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 1 and .failed == 0 and .applied == 1'
+  [ -f "$REPO/MOCK_CODEX_REPORT.pdf" ]
+  printf '%%PDF-1.7\n\x00\x01\x02\xffbinary\x00\n' > "$BATS_TEST_TMPDIR/expected.pdf"
+  cmp "$BATS_TEST_TMPDIR/expected.pdf" "$REPO/MOCK_CODEX_REPORT.pdf"
 }

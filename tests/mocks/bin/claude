@@ -51,6 +51,13 @@ if [[ "${1:-}" == "-p" ]]; then
                 ;;
         esac
     fi
+    # MOCK_CLAUDE_BUDGET_STOP=1 answers the way Claude Code does when
+    # --max-budget-usd ends a run. MOCK_CLAUDE_ARGS_LOG captures argv.
+    [[ -n "${MOCK_CLAUDE_ARGS_LOG:-}" ]] && printf '%s\n' "$*" >> "$MOCK_CLAUDE_ARGS_LOG"
+    if [[ "${MOCK_CLAUDE_BUDGET_STOP:-0}" == "1" ]]; then
+        printf '%s\n' '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"result":"Reached the maximum budget; the usage limit was exceeded","total_cost_usd":0.5,"usage":{"input_tokens":1000,"output_tokens":50}}'
+        exit 0
+    fi
     if [[ "${MOCK_CLAUDE_LIMIT:-0}" == "1" ]]; then
         printf '%s\n' '{"is_error":true,"result":"You have reached your usage limit"}'
         exit 0

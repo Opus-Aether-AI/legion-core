@@ -969,6 +969,26 @@ def _all_slices_inline(fanout_payload: Any) -> bool:
     )
 
 
+def _nothing_applied(fanout_payload: Any) -> bool:
+    """True when fan-out ran delegated slices but applied no change to the tree.
+
+    The usual cause is work that is already committed: the executors found
+    nothing left to do, so their patches were empty.
+    """
+    if not isinstance(fanout_payload, dict):
+        return False
+    applied = fanout_payload.get("applied")
+    slices = fanout_payload.get("slices")
+    return (
+        isinstance(applied, int)
+        and not isinstance(applied, bool)
+        and applied == 0
+        and isinstance(slices, int)
+        and not isinstance(slices, bool)
+        and slices > 0
+    )
+
+
 def create_review_snapshot(
     repo: Path,
     run_dir: Path,
@@ -976,6 +996,8 @@ def create_review_snapshot(
     timeout_seconds: int,
     learning_context: dict[str, Any] | None = None,
     inline_only: bool = False,
+    nothing_applied: bool = False,
+    review_base_ref: str = "",
 ) -> dict[str, Any]:
     """Write the current worktree to a detached commit without changing its index.
 
@@ -989,6 +1011,11 @@ def create_review_snapshot(
     reviewer approves an empty range, so the review starts where ``HEAD`` forked
     from the default branch instead; if even that range is empty there is
     nothing to review, and the run says so rather than approving nothing.
+
+    ``nothing_applied`` is the same situation reached through delegation: the
+    slices ran but fan-out applied nothing, so the reviewable work is what the
+    branch already committed. ``review_base_ref`` (``--review-base``) names the
+    starting point explicitly and wins over both.
     """
 
     base_sha = _git_output(
@@ -1075,20 +1102,40 @@ def create_review_snapshot(
 
     review_base = base_sha
     base_ref = ""
-    if inline_only:
+    committed_only = inline_only or (nothing_applied and tree_sha == base_tree)
+    if review_base_ref:
+        try:
+            review_base = _git_output(
+                repo, ["merge-base", "HEAD", review_base_ref], timeout_seconds=timeout_seconds
+            )
+        except LegionRunError as exc:
+            if exc.code == 124:
+                raise
+            raise LegionRunError(
+                f"--review-base {review_base_ref!r} does not share history with HEAD", 2
+            ) from exc
+        base_ref = review_base_ref
+    elif committed_only:
         merge_base, base_ref = _default_branch_merge_base(repo, timeout_seconds=timeout_seconds)
         review_base = merge_base or base_sha
+    if review_base_ref or committed_only:
         review_base_tree = _git_output(
             repo, ["rev-parse", f"{review_base}^{{tree}}"], timeout_seconds=timeout_seconds
         )
         if review_base_tree == tree_sha:
             against = f"{base_ref} (merge-base {review_base[:12]})" if base_ref else f"HEAD {review_base[:12]}"
-            raise LegionRunError(
-                "nothing to review: every slice ran inline and the worktree is identical to "
-                f"{against}. Commit the inline work on a branch off the default branch "
-                "and run from that branch.",
-                1,
-            )
+            if review_base_ref:
+                why = f"the worktree is identical to {against}"
+                remedy = "Pass a --review-base that the committed work branched from."
+            elif inline_only:
+                why = f"every slice ran inline and the worktree is identical to {against}"
+                remedy = ("Commit the inline work on a branch off the default branch "
+                          "and run from that branch.")
+            else:
+                why = f"fan-out applied no changes and the worktree is identical to {against}"
+                remedy = ("If the work is already committed, run from its branch or pass "
+                          "--review-base REF.")
+            raise LegionRunError(f"nothing to review: {why}. {remedy}", 1)
 
     payload = {
         "schema": "legion.review-input.v1",
@@ -2395,6 +2442,7 @@ def execute(
     stage_timeout_seconds: int,
     allow_generated_slices: bool,
     learning_context_mode: str,
+    review_base_ref: str = "",
 ) -> int:
     os.umask(0o077)
     require_clean_review_source(repo, timeout_seconds=stage_timeout_seconds)
@@ -3111,6 +3159,8 @@ def execute(
             timeout_seconds=stage_timeout_seconds,
             learning_context=review_bundle["descriptor"],
             inline_only=_all_slices_inline(fanout_payload),
+            nothing_applied=_nothing_applied(fanout_payload),
+            review_base_ref=review_base_ref,
         )
         review_route = run_process(
             [_cmd("legion-route"), "final-review", "--task", "independent final review"],
@@ -3209,6 +3259,12 @@ def main(argv: list[str] | None = None) -> int:
         help="trusted learning compatibility mode: off, observe, advisory, or required (default: advisory)",
     )
     parser.add_argument("--repo", default=os.getcwd())
+    parser.add_argument(
+        "--review-base",
+        default="",
+        help="review from where HEAD forked from REF (for work already committed); "
+        "by default a run that applied nothing reviews from the default branch's merge-base",
+    )
     parser.add_argument("--task", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -3259,6 +3315,7 @@ def main(argv: list[str] | None = None) -> int:
             stage_timeout_seconds=args.stage_timeout_seconds,
             allow_generated_slices=args.allow_generated_slices,
             learning_context_mode=args.learning_context_mode,
+            review_base_ref=args.review_base,
         )
     except LegionRunError as exc:
         print(f"legion-run: {exc}", file=sys.stderr)

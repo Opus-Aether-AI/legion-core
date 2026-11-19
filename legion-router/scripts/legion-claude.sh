@@ -19,6 +19,9 @@ source "$_self_dir/lib/executor-context.sh"
 # shellcheck source=lib/run-id.sh
 source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
+# shellcheck source=lib/run-guards.sh
+source "$_self_dir/lib/run-guards.sh"
+# shellcheck disable=SC1091
 # shellcheck source=lib/process-tree.sh
 source "$_self_dir/lib/process-tree.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
@@ -66,6 +69,9 @@ _run_id() { legion_new_run_id; }
 
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  # Per-run cap, health fallback note, and the executor's health record.
+  legion_guard_span "$executor" "$status" "$cost" "$artifacts"
+  status="$LEGION_GUARD_STATUS"; artifacts="$LEGION_GUARD_ARTIFACTS"
   {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
@@ -361,7 +367,7 @@ cmd_run() {
   local fallback_models="${LEGION_CLAUDE_FALLBACK_MODELS:-}"
   local allow_fallback=1 tmpdir="" out_file="" err_file="" artifacts="{}"
   local start_ms=0 end_ms=0 dur=0 rc=0 is_error="false" result="" usage="{}" cost="0"
-  local reason="" status="failed" low_credit=0 json_ok=0 combined_text=""
+  local reason="" status="failed" low_credit=0 json_ok=0 combined_text="" result_subtype=""
   local effort="" append_sys="" skip_perms=0
   local base="HEAD" do_apply=0 keep=0 sandbox="" archetype="${LEGION_ARCHETYPE:-}" preset_run_id=""
   local base_commit=""
@@ -541,6 +547,9 @@ cmd_run() {
   fi
 
   start_ms="$(date +%s000)"
+  local run_budget_usd=""
+  run_budget_usd="$(legion_budget_run_cap 2>/dev/null || true)"
+  awk -v k="${run_budget_usd:-0}" 'BEGIN { exit !((k + 0) > 0) }' || run_budget_usd=""
   local chain_len="${#claude_model_chain[@]}" chain_idx=0 declined_final=0 chain_cost=0
   for attempt_model in "${claude_model_chain[@]}"; do
     chain_idx=$(( chain_idx + 1 ))
@@ -550,6 +559,9 @@ cmd_run() {
     [[ -n "$effort" ]] && claude_cmd+=(--effort "$effort")
     [[ -n "$append_sys" ]] && claude_cmd+=(--append-system-prompt "$append_sys")
     [[ "$skip_perms" -eq 1 ]] && claude_cmd+=(--dangerously-skip-permissions)
+    # The per-run spending cap is a hard stop here: Claude Code ends the run
+    # itself (result subtype error_max_budget_usd) instead of overshooting.
+    [[ -n "$run_budget_usd" ]] && claude_cmd+=(--max-budget-usd "$run_budget_usd")
     note "→ ${claude_cmd[*]}"
     set +e
     # Backgrounded + waited (see CLAUDE_CHILD_PID). The explicit stdin
@@ -641,6 +653,7 @@ cmd_run() {
   if jq -e . "$out_file" >/dev/null 2>&1; then
     json_ok=1
     is_error="$(jq -r '.is_error // false' "$out_file" 2>/dev/null || printf 'false')"
+    result_subtype="$(jq -r '.subtype // ""' "$out_file" 2>/dev/null || true)"
     result="$(jq -r '.result // ""' "$out_file" 2>/dev/null || true)"
     usage="$(usage_json "$out_file")"
     if jq -e '.total_cost_usd | numbers' "$out_file" >/dev/null 2>&1; then
@@ -691,7 +704,10 @@ cmd_run() {
   if [[ "$rc" -eq 0 && "$json_ok" -eq 1 && "$is_error" != "true" \
     && "$declined_final" -eq 0 && "$diff_rc" -eq 0 ]]; then
     status="ok"
-    if [[ "$do_apply" -eq 1 && -s "$diff_path" ]]; then
+    # A run can finish a little above its cap (Claude Code checks between
+    # turns): it keeps its diff for a person and is not applied.
+    status="$(legion_budget_cap_status "$status" "$cost")"
+    if [[ "$do_apply" -eq 1 && "$status" == "ok" && -s "$diff_path" ]]; then
       if git -C "$repo" apply --check "$diff_path" 2>/dev/null; then
         git -C "$repo" apply "$diff_path" && note "diff applied to $repo"
       else
@@ -715,8 +731,17 @@ cmd_run() {
     return 0
   fi
 
+  # When Claude reported an error, its result IS the provider's message (a
+  # login or usage limit); it feeds the executor's health record.
+  # shellcheck disable=SC2034 # read by legion_guard_span (lib/run-guards.sh)
+  [[ "$is_error" == "true" ]] && LEGION_GUARD_ERROR_TEXT="$result"
   if [[ "$diff_rc" -ne 0 ]]; then
     reason="diff_capture_failed"
+  elif [[ "$result_subtype" == "error_max_budget_usd" ]]; then
+    # The per-run cap stopped the run. Checked before the limit text, which
+    # matches "exceeded": a spent budget is not a usage limit, and handing the
+    # rest of the task to Codex would spend past the cap on another vendor.
+    reason="budget_exceeded"
   elif [[ "$declined_final" -eq 1 ]]; then
     # Distinct from claude_error: nothing went wrong mechanically, every model
     # in the chain declined or was unreachable. Downstream can tell "the work
@@ -728,7 +753,7 @@ cmd_run() {
     reason="claude_error"
   fi
 
-  if [[ "$allow_fallback" -eq 1 ]]; then
+  if [[ "$allow_fallback" -eq 1 && "$reason" != "budget_exceeded" ]]; then
     status="$([[ "$reason" == "claude_limit" ]] && printf blocked || printf failed)"
     local preserved_artifacts=""
     if ! preserved_artifacts="$(preserve_primary_evidence "$repo" "$RUN_ID" "$out_file" "$err_file" \
@@ -778,6 +803,10 @@ cmd_run() {
 
   if [[ "$reason" == "claude_limit" ]]; then
     status="blocked"
+  elif [[ "$reason" == "budget_exceeded" ]]; then
+    # Partial work is kept in the diff artifact and never applied.
+    status="over_budget"
+    note "⚠ Claude stopped at the per-run spending cap (\$$run_budget_usd); partial diff kept at $diff_path, not applied"
   else
     status="failed"
   fi

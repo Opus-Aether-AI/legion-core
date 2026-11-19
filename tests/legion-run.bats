@@ -2,6 +2,11 @@
 # legion-run — enforced domain-plugin pipeline runner.
 
 setup() {
+  # Legion's machine-wide state (executor health, day spend, model lists) must
+  # come from the test, never from the developer's ~/.legion.
+  export LEGION_HOME="$BATS_TEST_TMPDIR/legion-home/.legion"
+  unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+  unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   RUN="$ROOT/legion-orchestrate/bin/legion-run"
   export PATH="$BATS_TEST_TMPDIR/bin:$ROOT/legion-orchestrate/bin:$ROOT/legion-router/bin:$ROOT/legion-observability/bin:$BATS_TEST_DIRNAME/mocks/bin:$PATH"
@@ -1739,4 +1744,82 @@ SH
   [ -s "$run_dir/learning-feedback.json" ]
   [ -s "$run_dir/heal-plan.json" ]
   grep -q "self-learning command failed" "$run_dir/legion-observability.html"
+}
+
+install_nothing_applied_fanout() {
+  cat > "$BATS_TEST_TMPDIR/bin/legion-fanout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+ledger="$LEGION_RUN_DIR/fanout-task-ledger.json"
+printf '{"schema":"legion.task-ledger.v1","status":"completed","tasks":[]}\n' > "$ledger"
+jq -cn --arg ledger "$ledger" \
+  '{ok:1,slices:1,inline:0,failed:0,applied:0,results:[{status:"ok"}],task_ledger_path:$ledger}'
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/legion-delegate" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$LEGION_RUN_DIR/review-args.txt"
+printf '{"status":"ok","model":"test-model-beta","verdict":{"verdict":"approve","summary":"committed work reviewed","findings":[]}}\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/legion-fanout" "$BATS_TEST_TMPDIR/bin/legion-delegate"
+}
+
+@test "legion-run: delegated slices that applied nothing review the branch's committed work" {
+  # Issue #218: executors found the work already committed, produced empty
+  # patches, and the review of HEAD...HEAD approved an empty range.
+  install_fake_pipeline_bins
+  install_nothing_applied_fanout
+  git -C "$REPO" branch -M main
+  main_sha="$(git -C "$REPO" rev-parse HEAD)"
+  git -C "$REPO" checkout -q -b committed-work
+  printf 'committed work\n' > "$REPO/committed.txt"
+  git -C "$REPO" add committed.txt
+  git -C "$REPO" -c user.email=t@t.c -c user.name=t commit -q -m "already committed"
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  jq -e --arg main "$main_sha" '.base_sha == $main and .base_ref == "refs/heads/main"' "$run_dir/review-input.json"
+  head_sha="$(jq -r .head_sha "$run_dir/review-input.json")"
+  git -C "$REPO" diff --name-only "$main_sha" "$head_sha" | grep -qx committed.txt
+}
+
+@test "legion-run: delegated slices that applied nothing on the default branch fail instead of approving" {
+  install_fake_pipeline_bins
+  install_nothing_applied_fanout
+  git -C "$REPO" branch -M main
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --json
+  [ "$status" -eq 1 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  jq -e '(.message | contains("nothing to review: fan-out applied no changes"))' "$run_dir/failure.json"
+  jq -e '(.message | contains("--review-base"))' "$run_dir/failure.json"
+  [ ! -e "$run_dir/review-args.txt" ]
+}
+
+@test "legion-run: --review-base reviews committed work from an explicit starting point" {
+  install_fake_pipeline_bins
+  install_nothing_applied_fanout
+  git -C "$REPO" branch -M main
+  git -C "$REPO" checkout -q -b feature
+  printf 'first\n' > "$REPO/first.txt"
+  git -C "$REPO" add first.txt
+  git -C "$REPO" -c user.email=t@t.c -c user.name=t commit -q -m first
+  first_sha="$(git -C "$REPO" rev-parse HEAD)"
+  printf 'second\n' > "$REPO/second.txt"
+  git -C "$REPO" add second.txt
+  git -C "$REPO" -c user.email=t@t.c -c user.name=t commit -q -m second
+  manifest="$(make_plugin)"
+
+  run "$RUN" --plugin-manifest "$manifest" --repo "$REPO" --task "Build demo" --review-base "$first_sha" --json
+  [ "$status" -eq 0 ]
+  json="$(printf '%s' "$output" | json_from_output)"
+  run_dir="$(echo "$json" | jq -r '.run_dir')"
+  jq -e --arg first "$first_sha" '.base_sha == $first' "$run_dir/review-input.json"
+  head_sha="$(jq -r .head_sha "$run_dir/review-input.json")"
+  [ "$(git -C "$REPO" diff --name-only "$first_sha" "$head_sha")" = "second.txt" ]
 }

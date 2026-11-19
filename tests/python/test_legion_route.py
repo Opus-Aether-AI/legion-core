@@ -394,7 +394,9 @@ def test_sol_generation_resolves_for_precision_review_and_review_fallbacks():
     precision = m["codex_precision"]
     assert precision.split("-")[1:] == ["6.1", "sol"]
     assert m["codex_review"] == precision
-    assert m["opencode_review"] == "openai/" + precision
+    # opencode reviews on a cheap OpenRouter family: a second model lineage,
+    # not a mirror of the codex reviewer.
+    assert m["opencode_review"].startswith("openrouter/")
 
     executors = lr.load_executors(os.path.join(HERE, "..", "..", "legion-router", "config", "executors.toml"))
     reviewers = lr.review_order(t, executors)
@@ -417,7 +419,8 @@ def test_sol_upgrade_preserves_astra_terra_and_luna_catalog_defaults():
     assert m["codex_cheap"].split("-")[1:] == ["5.6", "luna"]
     for role in ("codex_default", "hermes_default", "pi_default"):
         assert m[role] == m["codex_workhorse"]
-    assert m["opencode_default"] == "openai/" + m["codex_workhorse"]
+    # opencode is the cheap OpenRouter executor (issue #218, step 1).
+    assert m["opencode_default"].startswith("openrouter/")
 
 
 def test_bulk_lanes_reach_the_frontier_only_through_fallback():
@@ -497,7 +500,9 @@ def test_no_role_resolves_to_a_retired_model():
     only place model ids may appear, and that rule caught this docstring.)
     """
     retired_line = "claude-fa" + "ble-5"
-    successor = retired_line + "-1"
+    # The successor moved one generation on; the one before it is now retired
+    # too, and the same exact-match carve-out keeps both rules honest.
+    successor = retired_line + "-2"
     catalog = lr.load_models(MODELS_TABLE)
     # Ban the whole retired line, then carve out the ONE successor id. An exact
     # match on the retired id alone was too loose: `<line>-latest`, a dated alias,

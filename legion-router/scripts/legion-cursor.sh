@@ -19,6 +19,9 @@ source "$_self_dir/lib/executor-context.sh"
 # shellcheck source=lib/run-id.sh
 source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
+# shellcheck source=lib/run-guards.sh
+source "$_self_dir/lib/run-guards.sh"
+# shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
@@ -65,6 +68,9 @@ scan_task_text() {
 
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  # Per-run cap, health fallback note, and the executor's health record.
+  legion_guard_span "$executor" "$status" "$cost" "$artifacts"
+  status="$LEGION_GUARD_STATUS"; artifacts="$LEGION_GUARD_ARTIFACTS"
   {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
@@ -283,6 +289,15 @@ cmd_run() {
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg stdout "$out_file" --arg stderr "$err_file" \
     '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr}')"
+  # The per-run cap decides the run's OWN status, before anything is applied:
+  # a run that ends above it is over_budget, keeps its diff, and is not applied.
+  status="$(legion_budget_cap_status "$status" "$cost")"
+  if [[ "$status" != "ok" && "$status" != "over_budget" && -n "$cursor_auth_hint" ]]; then
+    # shellcheck disable=SC2034 # both read by legion_guard_span (lib/run-guards.sh)
+    LEGION_GUARD_REASON_HINT="missing_key"
+    # shellcheck disable=SC2034
+    LEGION_GUARD_ERROR_TEXT="$cursor_auth_hint"
+  fi
   emit_span "cursor" "$actual_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
 
   if [[ "$do_apply" -eq 1 && "$status" == "ok" && -s "$art/diff.patch" ]]; then
@@ -309,7 +324,7 @@ cmd_run() {
   # A failed run that had no API key almost certainly failed FOR that reason, and
   # cursor's own stderr stays in an internal artifact the caller never reads.
   local auth_note=""
-  [[ "$status" == "ok" ]] || auth_note="$cursor_auth_hint"
+  [[ "$status" == "ok" || "$status" == "over_budget" ]] || auth_note="$cursor_auth_hint"
 
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg model "$actual_model" \
     --arg wt "$wt_report" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
@@ -319,7 +334,8 @@ cmd_run() {
      result:$result, worktree:$wt, diff_path:$diff, last_message_path:$last,
      usage:$usage, cost_usd:$cost}
     + (if $auth_note == "" then {} else {auth_error:$auth_note} end)'
-  [[ "$status" == "ok" ]] || exit 1
+  # over_budget finished and kept its diff for a person, like the native codex path.
+  [[ "$status" == "ok" || "$status" == "over_budget" ]] || exit 1
 }
 
 usage() {

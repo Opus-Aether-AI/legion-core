@@ -176,6 +176,24 @@ if [ -x "$DOCTOR" ]; then
         printf 'legion refresh: legion-doctor found issues (recorded for self-learning)\n' >&2
 fi
 
+# 3.6) Model-table currency. Fetch each provider's published model list and
+# compare it with models.toml, so a retired model id is reported the day it
+# disappears instead of when a delegated run fails on it. legion-doctor reads
+# the cached result offline. Best-effort: a network failure never blocks the
+# refresh, and nothing here edits the catalog.
+MODELS_CHECK="${LEGION_MODELS_BIN:-$SOURCE_CLONE/legion-router/bin/legion-models}"
+if [ "${LEGION_MODELS_CHECK:-1}" = "1" ] && [ -x "$MODELS_CHECK" ]; then
+    models_status=0
+    models_report="$("$MODELS_CHECK" check --fetch --json 2>/dev/null)" || models_status=$?
+    if [ "$models_status" = "1" ]; then
+        missing_ids="$(printf '%s' "$models_report" | jq -r '[.missing[] | "\(.role)=\(.model)"] | join(", ")' 2>/dev/null || true)"
+        printf 'legion refresh: configured model ids are missing from provider lists: %s\n' "${missing_ids:-see legion-models check}" >&2
+        record_refresh_failure "Configured model ids are missing from the providers' current model lists." "$missing_ids"
+    elif [ "$models_status" != "0" ]; then
+        printf 'legion refresh: model-list check failed (exit %s)\n' "$models_status" >&2
+    fi
+fi
+
 # 4) Evidence-linked learning. Normalize recent cross-harness sessions into
 # redacted sessions, episodes, decisions, linked outcomes, behavior/code scores,
 # and cross-project learning laws. It is report/proposal only during refresh.

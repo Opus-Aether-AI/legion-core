@@ -3,6 +3,11 @@
 # the native skills directory that Hermes actually scans.
 
 setup() {
+  # Legion's machine-wide state (executor health, day spend, model lists) must
+  # come from the test, never from the developer's ~/.legion.
+  export LEGION_HOME="$BATS_TEST_TMPDIR/legion-home/.legion"
+  unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+  unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SETUP_SH="$ROOT/legion-setup/scripts/legion-setup.sh"
   INSTALL_SH="$ROOT/scripts/install.sh"

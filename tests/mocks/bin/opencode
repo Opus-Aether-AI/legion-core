@@ -9,6 +9,9 @@ set -euo pipefail
 [[ -n "${MOCK_CONTEXT_LOG:-}" ]] && printf 'opencode active=%s executor=%s depth=%s run=%s\n' \
   "${LEGION_ACTIVE:-}" "${LEGION_EXECUTOR:-}" "${LEGION_DEPTH:-}" "${LEGION_RUN_ID:-}" >> "$MOCK_CONTEXT_LOG"
 
+# MOCK_ENV_LOG records whether an OpenRouter key reached opencode -- never the key.
+[[ -n "${MOCK_ENV_LOG:-}" ]] && printf 'opencode openrouter_key=%s\n' "${OPENROUTER_API_KEY:+set}" >> "$MOCK_ENV_LOG"
+
 model="fixture/opencode-model"
 agent=""
 # positional after `run`

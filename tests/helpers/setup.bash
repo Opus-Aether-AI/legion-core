@@ -18,6 +18,11 @@ setup_test_env() {
     export TEST_TMPDIR="$BATS_TEST_TMPDIR"
     export AGENTS_HOME="$TEST_TMPDIR/agents"
     export HOME="$TEST_TMPDIR/home"
+    # Executor health, day spend and model lists live under LEGION_HOME; a
+    # developer shell that exports it must not leak real state into a test.
+    export LEGION_HOME="$HOME/.legion"
+    unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+    unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
     export SOURCE_CLONE="$AGENTS_HOME/sources/legion-core"
     export AGENTS_SKILLS_DIR="$AGENTS_HOME/skills"
     export CODEX_SKILLS_DIR="$HOME/.codex/skills"
@@ -40,6 +45,13 @@ setup_test_env() {
     export MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE="$TEST_TMPDIR/mock-claude-marketplace-source"
 
     mkdir -p "$AGENTS_HOME" "$HOME/.codex" "$HOME/.claude/plugins/cache"
+    # opencode's default role runs on OpenRouter and reads its key from a file.
+    # A placeholder models a configured machine; missing-key tests point
+    # LEGION_OPENROUTER_KEY_FILE somewhere empty instead.
+    unset OPENROUTER_API_KEY LEGION_OPENROUTER_KEY_FILE
+    mkdir -p "$HOME/.config/legion"
+    printf 'test-placeholder-not-a-key\n' > "$HOME/.config/legion/openrouter.key"
+    chmod 600 "$HOME/.config/legion/openrouter.key"
     : > "$MOCK_CALL_LOG"
     : > "$MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE"
 

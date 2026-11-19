@@ -5,7 +5,8 @@
 #
 #   legion-doctor [--repo DIR] [--only CHECK] [--record-failures]
 #   checks: marketplace-schema plugins frontmatter descriptions mcp bridges
-#           costs telemetry-schema codex router
+#           costs model-catalog telemetry-schema codex opencode cursor deepseek
+#           executor-health model-ids runtime-drift router
 #
 # --record-failures: for every hard FAIL, also call `legion-self-learn record`
 #   so static marketplace defects surface as self-learning hints (no-op if
@@ -42,7 +43,7 @@ while [[ $# -gt 0 ]]; do
     --strict-demo) STRICT_DEMO=1; shift ;;
     --record-failures) RECORD_FAILURES=1; shift ;;
     --json) JSON=1; shift ;;
-    -h|--help) echo "usage: legion-doctor [--repo DIR] [--strict-demo] [--record-failures] [--json] [--only marketplace-schema|plugins|frontmatter|descriptions|mcp|bridges|costs|telemetry-schema|codex|opencode|router|route-smoke|delegate-smoke|state-root|test-tools|domain-plugin]"; exit 0 ;;
+    -h|--help) echo "usage: legion-doctor [--repo DIR] [--strict-demo] [--record-failures] [--json] [--only marketplace-schema|plugins|frontmatter|descriptions|mcp|bridges|costs|model-catalog|telemetry-schema|codex|opencode|cursor|deepseek|executor-health|model-ids|runtime-drift|router|route-smoke|delegate-smoke|state-root|test-tools|domain-plugin]"; exit 0 ;;
     *) echo "legion-doctor: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
@@ -513,6 +514,36 @@ check_opencode() {
   # OpenWork build on PATH is a different binary — see legion-opencode.sh).
   local oc="${OPENCODE_BIN:-}"
   [[ -n "$oc" && -x "$oc" ]] || oc="$HOME/.opencode/bin/opencode"
+  # The cheap executor runs opencode on OpenRouter. Its key lives in a file, and
+  # without it every opencode run is refused -- so say exactly what to add.
+  local oc_model="${LEGION_OPENCODE_MODEL:-${OPENCODE_MODEL:-}}"
+  if [[ -z "$oc_model" ]]; then
+    local route_bin
+    route_bin="$(resolve_legion_cmd legion-route "$LEGION_ROOT/legion-router/bin/legion-route" 2>/dev/null || true)"
+    [[ -z "$route_bin" ]] || oc_model="$("$route_bin" --model-ref opencode_default 2>/dev/null || true)"
+  fi
+  if [[ "$oc_model" == openrouter/* ]]; then
+    local key_file="${LEGION_OPENROUTER_KEY_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/legion/openrouter.key}"
+    if [[ ! -x "$oc" ]] && ! command -v opencode >/dev/null 2>&1; then
+      warn "opencode CLI not found — the cheap OpenRouter executor is unavailable (install opencode: https://opencode.ai)"
+    elif [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+      pass "opencode present + OpenRouter key in the environment (opencode_default = $oc_model)"
+    elif [[ ! -s "$key_file" ]] && jq -e '.openrouter | type == "object"' \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" >/dev/null 2>&1; then
+      pass "opencode present + OpenRouter credentials from 'opencode auth login' (opencode_default = $oc_model)"
+    elif [[ -r "$key_file" && -s "$key_file" ]]; then
+      local key_mode
+      key_mode="$(stat -c '%a' "$key_file" 2>/dev/null || stat -f '%Lp' "$key_file" 2>/dev/null || true)"
+      if [[ -n "$key_mode" && "$key_mode" != "600" && "$key_mode" != "400" ]]; then
+        warn "OpenRouter key file $key_file is mode $key_mode — run: chmod 600 $key_file"
+      else
+        pass "opencode present + OpenRouter key file $key_file (opencode_default = $oc_model)"
+      fi
+    else
+      warn "opencode routes to OpenRouter ($oc_model) but has no key. Add your OpenRouter API key on one line to $key_file, then run: chmod 600 $key_file (or set LEGION_OPENROUTER_KEY_FILE to a file that holds it). Until then the router skips opencode."
+    fi
+    return
+  fi
   if [[ -x "$oc" ]] || command -v opencode >/dev/null 2>&1; then
     local oc_auth="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
     if [[ ! -f "$oc_auth" ]]; then
@@ -549,6 +580,140 @@ PY
     fi
   else
     warn "opencode CLI not found — opencode delegation unavailable (optional)"
+  fi
+}
+
+# ── executor-health: which executors the router will use, and which it skips ──
+# Probes every coding executor offline (CLI present, logged in, key present) and
+# RECORDS the result, so the daily refresh (which runs doctor) keeps the router's
+# health record current. An executor that is simply not installed is listed, not
+# warned about: an executor nobody asked for should not add noise.
+check_executor_health() {
+  local hbin rows up absent
+  hbin="$(resolve_legion_cmd legion-health "$LEGION_ROOT/legion-router/bin/legion-health")" || {
+    warn "legion-health not found — the router cannot skip logged-out executors"; return; }
+  rows="$("$hbin" probe --json 2>/dev/null)" || {
+    warn "legion-health probe failed — routing learns executor health from failed runs only"; return; }
+  up="$(jq -r '[.[] | select(.available) | .executor] | join(", ")' <<<"$rows" 2>/dev/null || true)"
+  absent="$(jq -r '[.[] | select((.available | not) and .reason == "missing_binary") | .executor] | join(", ")' <<<"$rows" 2>/dev/null || true)"
+  local ex reason detail
+  while IFS=$'\t' read -r ex reason detail; do
+    [[ -n "$ex" ]] || continue
+    warn "executor $ex is unavailable ($reason): $detail — the router skips it until a probe or run shows it back"
+  done < <(jq -r '.[] | select((.available | not) and .reason != "missing_binary") | [.executor, .reason, .detail] | @tsv' <<<"$rows" 2>/dev/null)
+  if [[ -n "$up" ]]; then
+    pass "executors the router can use: $up${absent:+ (not installed: $absent)}"
+  else
+    warn "no coding executor is available${absent:+ (not installed: $absent)} — every delegated run will be refused"
+  fi
+}
+
+# ── model-ids: every configured model id is in its provider's current list ──
+# Reads the cached provider lists only (never the network); the daily refresh
+# fetches them with `legion-models check --fetch`.
+check_model_ids() {
+  local mbin report missing stale unchecked
+  mbin="$(resolve_legion_cmd legion-models "$LEGION_ROOT/legion-router/bin/legion-models")" || {
+    warn "legion-models not found — model ids are not checked against provider lists"; return; }
+  report="$("$mbin" check --offline --json 2>/dev/null)"
+  if [[ -z "$report" ]] || ! jq -e '.roles' >/dev/null 2>&1 <<<"$report"; then
+    warn "legion-models check failed — model ids are not checked against provider lists"; return
+  fi
+  missing="$(jq -r '[.missing[] | "\(.role) = \(.model) (\(.provider))"] | join("; ")' <<<"$report")"
+  unchecked="$(jq -r '.counts.unchecked // 0' <<<"$report")"
+  stale="$(jq -r '[.sources | to_entries[] | select(.value.fetched_at != null and .value.stale) | .key] | join(", ")' <<<"$report")"
+  if [[ -n "$missing" ]]; then
+    warn "configured model ids missing from the provider's current list: $missing — update legion-router/config/models.toml (and costs.json)"
+  elif [[ "$unchecked" != "0" ]]; then
+    warn "$unchecked configured model ids have never been checked against a provider list — run 'legion-models check --fetch' (the daily refresh runs it)"
+  elif [[ -n "$stale" ]]; then
+    warn "provider model lists are over a week old ($stale) — run 'legion-models check --fetch'"
+  else
+    pass "every configured model id is in its provider's current list ($(jq -r '.counts.current // 0' <<<"$report") checked, $(jq -r '.counts.unverifiable // 0' <<<"$report") without a published list)"
+  fi
+}
+
+# ── runtime-drift: the runtime checkout is not the clone you are editing ──────
+# Installed commands run from the runtime checkout (~/.agents/sources/legion-core
+# by default), pinned to a release. Edits in a working clone -- a models.toml
+# change, a new routing rule -- do nothing there until they are released and the
+# runtime refreshed, which reads exactly like a routing bug. Say so.
+_legion_core_checkout() {
+  [[ -f "$1/legion-router/config/routing.toml" && -f "$1/.claude-plugin/marketplace.json" ]] \
+    && git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+# _changed_between <runtime> <clone>: tracked paths whose committed blob differs,
+# plus the clone's uncommitted edits. Compares index blob ids, so the two
+# checkouts need no shared history or objects.
+_changed_between() {
+  python3 - "$1" "$2" <<'PYCHANGED'
+import subprocess, sys
+def blobs(root):
+    out = subprocess.run(["git", "-C", root, "ls-files", "-s"], capture_output=True, text=True).stdout
+    table = {}
+    for line in out.splitlines():
+        meta, _, path = line.partition("\t")
+        parts = meta.split()
+        if len(parts) >= 2:
+            table[path] = parts[1]
+    return table
+runtime, clone = blobs(sys.argv[1]), blobs(sys.argv[2])
+changed = {p for p in set(runtime) | set(clone) if runtime.get(p) != clone.get(p)}
+dirty = subprocess.run(["git", "-C", sys.argv[2], "diff", "--name-only", "HEAD"],
+                       capture_output=True, text=True).stdout.split()
+changed |= set(dirty)
+print("\n".join(sorted(changed)))
+PYCHANGED
+}
+
+check_runtime_drift() {
+  local runtime="${LEGION_RUNTIME_CHECKOUT:-${AGENTS_HOME:-$HOME/.agents}/sources/legion-core}"
+  if ! _legion_core_checkout "$runtime"; then
+    pass "no separate runtime checkout at $runtime (nothing to drift from)"
+    return
+  fi
+  local runtime_real clone="" clone_real="" candidate
+  runtime_real="$(cd "$runtime" && pwd -P)"
+  for candidate in "$REPO" "$LEGION_ROOT"; do
+    if [[ -z "$candidate" ]] || ! _legion_core_checkout "$candidate"; then
+      continue
+    fi
+    clone_real="$(cd "$candidate" && pwd -P)"
+    if [[ "$clone_real" != "$runtime_real" ]]; then
+      clone="$candidate"
+      break
+    fi
+    clone_real=""
+  done
+  local active_bin active_root=""
+  active_bin="$(command -v legion-delegate 2>/dev/null || true)"
+  if [[ -n "$active_bin" ]]; then
+    active_root="$(python3 -c 'import os,sys; print(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1])))))' "$active_bin" 2>/dev/null || true)"
+  fi
+  if [[ -n "$active_root" && "$active_root" != "$runtime_real" && "$active_root" != "$clone_real" ]]; then
+    warn "legion-delegate on PATH runs from $active_root, which is neither the runtime checkout ($runtime) nor this clone — check which install your shell uses"
+  fi
+  if [[ -z "$clone" ]]; then
+    pass "doctor is checking the runtime checkout itself ($runtime)"
+    return
+  fi
+  local runtime_head clone_head runtime_ver clone_ver diffs config_diffs count
+  runtime_head="$(git -C "$runtime" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+  clone_head="$(git -C "$clone" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+  runtime_ver="$(jq -r '.version // "?"' "$runtime/package.json" 2>/dev/null || echo '?')"
+  clone_ver="$(jq -r '.version // "?"' "$clone/package.json" 2>/dev/null || echo '?')"
+  diffs="$(_changed_between "$runtime" "$clone" 2>/dev/null || true)"
+  if [[ -z "$diffs" ]]; then
+    pass "runtime checkout matches this clone (v$runtime_ver at $runtime_head)"
+    return
+  fi
+  config_diffs="$(grep -E '^legion-router/config/' <<<"$diffs" | tr '\n' ' ' | sed 's/ $//' || true)"
+  count="$(grep -c . <<<"$diffs" | tr -d ' ')"
+  if [[ -n "$config_diffs" ]]; then
+    warn "runtime checkout $runtime (v$runtime_ver at $runtime_head) differs from this clone $clone (v$clone_ver at $clone_head) in routing config: $config_diffs. Installed commands read the runtime's copy, so these edits take effect only after a release is refreshed into it (to trial them now, point LEGION_ROUTING_FILE / LEGION_MODELS_FILE / LEGION_COSTS_FILE at this clone)."
+  else
+    warn "runtime checkout $runtime (v$runtime_ver at $runtime_head) differs from this clone $clone (v$clone_ver at $clone_head) in $count tracked files; installed commands run the runtime's version until the next release is refreshed into it"
   fi
 }
 
@@ -864,6 +1029,9 @@ run_one() {
     codex)              check_codex ;;
     opencode)           check_opencode ;;
     deepseek)           check_deepseek ;;
+    executor-health)    check_executor_health ;;
+    model-ids)          check_model_ids ;;
+    runtime-drift)      check_runtime_drift ;;
     cursor)             check_cursor ;;
     route-smoke)        check_route_smoke ;;
     delegate-smoke)     check_delegate_smoke ;;
@@ -881,7 +1049,7 @@ run_one() {
 if [[ -n "$ONLY" ]]; then
   run_one "$ONLY"
 else
-  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs model-catalog telemetry-schema codex opencode cursor deepseek router; do
+  for c in marketplace-schema plugins frontmatter descriptions mcp bridges costs model-catalog telemetry-schema codex opencode cursor deepseek executor-health model-ids runtime-drift router; do
     run_one "$c"
   done
   if [[ "$STRICT_DEMO" == "1" ]]; then

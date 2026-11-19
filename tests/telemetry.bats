@@ -2,6 +2,11 @@
 # legion-telemetry (legion-trace) — emit + validate legion.span.v1 spans.
 
 setup() {
+  # Legion's machine-wide state (executor health, day spend, model lists) must
+  # come from the test, never from the developer's ~/.legion.
+  export LEGION_HOME="$BATS_TEST_TMPDIR/legion-home/.legion"
+  unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+  unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
   TEL="$(cd "$BATS_TEST_DIRNAME/.." && pwd)/legion-observability/bin/legion-trace"
   export LEGION_TELEMETRY_DIR="$BATS_TEST_TMPDIR/spans"
 }

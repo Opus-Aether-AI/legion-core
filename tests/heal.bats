@@ -4,6 +4,11 @@
 # repo with one real defect (a block-scalar description) is healed end-to-end.
 
 setup() {
+  # Legion's machine-wide state (executor health, day spend, model lists) must
+  # come from the test, never from the developer's ~/.legion.
+  export LEGION_HOME="$BATS_TEST_TMPDIR/legion-home/.legion"
+  unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+  unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
   REAL="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   HEAL="$REAL/legion-observability/scripts/legion-heal.sh"
   DOCTOR="$REAL/legion-observability/bin/legion-doctor"

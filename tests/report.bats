@@ -15,7 +15,9 @@ setup() {
 }
 
 @test "state: cli prints auto project paths for any repo" {
-  unset LEGION_STATE_ROOT LEGION_TELEMETRY_DIR LEGION_REGISTRY_DIR LEGION_REPOS_FILE LEGION_BENCH_DIR LEGION_REPORTS_DIR
+  # "Without env setup" includes LEGION_HOME, which setup() isolates for the
+  # other tests: these two check the default derived from HOME.
+  unset LEGION_STATE_ROOT LEGION_TELEMETRY_DIR LEGION_REGISTRY_DIR LEGION_REPOS_FILE LEGION_BENCH_DIR LEGION_REPORTS_DIR LEGION_HOME
   app="$BATS_TEST_TMPDIR/app"; mkdir -p "$app"
 
   HOME="$BATS_TEST_TMPDIR/home" run "$STATE" --repo "$app" --json
@@ -25,7 +27,9 @@ setup() {
 }
 
 @test "report: path latest uses auto project reports dir without env setup" {
-  unset LEGION_STATE_ROOT LEGION_TELEMETRY_DIR LEGION_REGISTRY_DIR LEGION_REPOS_FILE LEGION_BENCH_DIR LEGION_REPORTS_DIR
+  # "Without env setup" includes LEGION_HOME, which setup() isolates for the
+  # other tests: these two check the default derived from HOME.
+  unset LEGION_STATE_ROOT LEGION_TELEMETRY_DIR LEGION_REGISTRY_DIR LEGION_REPOS_FILE LEGION_BENCH_DIR LEGION_REPORTS_DIR LEGION_HOME
   app="$BATS_TEST_TMPDIR/app"; mkdir -p "$app"
 
   HOME="$BATS_TEST_TMPDIR/home" run bash -c "cd '$app' && '$REPORT' path latest"

@@ -271,7 +271,12 @@ SH
     MOCK_ENV_LOG="$TEST_TMPDIR/env.log" run "$OPENCODE" run --task "x" --repo "$repo" --quiet
     [ "$status" -eq 0 ]
     grep -qx 'opencode openrouter_key=set' "$TEST_TMPDIR/env.log"
-    ! grep -q 'test-placeholder-not-a-key' "$LEGION_TELEMETRY_DIR"/*.jsonl
+    # The key never lands in a span or the run's artifacts (a bare `! grep`
+    # would not fail the test, so the check is explicit).
+    if grep -rqs 'test-placeholder-not-a-key' "$LEGION_TELEMETRY_DIR" "$repo/.legion"; then
+        echo "the OpenRouter key leaked into telemetry or run artifacts" >&2
+        return 1
+    fi
 }
 
 @test "opencode: without a key file the run is refused with the exact remedy and health records it" {
@@ -331,8 +336,10 @@ SH
 
 @test "opencode: an OpenRouter key stored by 'opencode auth login' is accepted as it is" {
     local repo; repo="$(make_test_repo or-native)"
-    mkdir -p "$HOME/.local/share/opencode"
-    printf '%s\n' '{"openrouter":{"type":"api","key":"placeholder"}}' > "$HOME/.local/share/opencode/auth.json"
+    # Pinned: CI and desktop sessions may export XDG_DATA_HOME.
+    export XDG_DATA_HOME="$TEST_TMPDIR/xdg-data"
+    mkdir -p "$XDG_DATA_HOME/opencode"
+    printf '%s\n' '{"openrouter":{"type":"api","key":"placeholder"}}' > "$XDG_DATA_HOME/opencode/auth.json"
     LEGION_OPENROUTER_KEY_FILE="$TEST_TMPDIR/absent.key" MOCK_ENV_LOG="$TEST_TMPDIR/env.log" \
       run "$OPENCODE" run --task "x" --repo "$repo" --quiet
     [ "$status" -eq 0 ]

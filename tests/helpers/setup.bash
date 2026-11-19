@@ -47,11 +47,14 @@ setup_test_env() {
     mkdir -p "$AGENTS_HOME" "$HOME/.codex" "$HOME/.claude/plugins/cache"
     # opencode's default role runs on OpenRouter and reads its key from a file.
     # A placeholder models a configured machine; missing-key tests point
-    # LEGION_OPENROUTER_KEY_FILE somewhere empty instead.
-    unset OPENROUTER_API_KEY LEGION_OPENROUTER_KEY_FILE
+    # LEGION_OPENROUTER_KEY_FILE somewhere empty instead. The path is pinned
+    # explicitly: CI runners export XDG_CONFIG_HOME, which would otherwise move
+    # the default key file out of this test's HOME.
+    unset OPENROUTER_API_KEY
+    export LEGION_OPENROUTER_KEY_FILE="$HOME/.config/legion/openrouter.key"
     mkdir -p "$HOME/.config/legion"
-    printf 'test-placeholder-not-a-key\n' > "$HOME/.config/legion/openrouter.key"
-    chmod 600 "$HOME/.config/legion/openrouter.key"
+    printf 'test-placeholder-not-a-key\n' > "$LEGION_OPENROUTER_KEY_FILE"
+    chmod 600 "$LEGION_OPENROUTER_KEY_FILE"
     : > "$MOCK_CALL_LOG"
     : > "$MOCK_CLAUDE_MARKETPLACE_SOURCE_FILE"
 

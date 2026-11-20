@@ -242,6 +242,36 @@ SH
     [[ "$output" == *"plugin reconciliation failed"* ]]
 }
 
+@test "refresh.sh refreshes a folder marketplace that is the source clone without re-adding it" {
+    make_source_clone marketplace-minimal.json
+    bash "$INSTALL_SH" all --no-cron
+    : > "$MOCK_CALL_LOG"
+    # Claude Code refuses the add when settings pin the marketplace to the folder.
+    export MOCK_CLAUDE_MARKETPLACE_ADD_FAIL=1
+    MOCK_CLAUDE_MARKETPLACE_LIST_JSON="$(jq -cn --arg p "$SOURCE_CLONE/." \
+        '[{name:"legion-core",source:"directory",path:$p,installLocation:$p}]')"
+    export MOCK_CLAUDE_MARKETPLACE_LIST_JSON
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"could not bind Claude marketplace"* ]]
+    if grep -F 'claude plugin marketplace add' "$MOCK_CALL_LOG"; then false; fi
+    assert_mock_called claude "marketplace update legion-core"
+    assert_mock_called claude "plugin update plugin-with-skill@legion-core"
+}
+
+@test "refresh.sh still rebinds a folder marketplace that points somewhere else" {
+    make_source_clone marketplace-minimal.json
+    mkdir -p "$TEST_TMPDIR/elsewhere"
+    MOCK_CLAUDE_MARKETPLACE_LIST_JSON="$(jq -cn --arg p "$TEST_TMPDIR/elsewhere" \
+        '[{name:"legion-core",source:"directory",path:$p,installLocation:$p}]')"
+    export MOCK_CLAUDE_MARKETPLACE_LIST_JSON
+
+    run bash "$REFRESH_SH"
+    [ "$status" -eq 0 ]
+    assert_mock_called claude "marketplace add Opus-Aether-AI/legion-core@v0.0.0-test"
+}
+
 @test "refresh.sh updates each installed Legion plugin after refreshing the marketplace" {
     make_source_clone marketplace-minimal.json
     bash "$INSTALL_SH" all --no-cron

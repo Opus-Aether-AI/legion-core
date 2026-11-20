@@ -71,6 +71,11 @@ if [[ "${1:-}" == "-p" ]]; then
 fi
 
 if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "list" ]]; then
+    # MOCK_CLAUDE_MARKETPLACE_LIST_JSON is what `marketplace list --json` prints.
+    if [[ "${4:-}" == "--json" && -n "${MOCK_CLAUDE_MARKETPLACE_LIST_JSON:-}" ]]; then
+        printf '%s\n' "$MOCK_CLAUDE_MARKETPLACE_LIST_JSON"
+        exit 0
+    fi
     [[ -f "$MOCK_STATE_FILE" ]] && cat "$MOCK_STATE_FILE"
     exit 0
 fi

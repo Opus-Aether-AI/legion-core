@@ -37,8 +37,14 @@ npm install -g @opus-aether-ai/legion-core
 ```
 
 Use `LEGION_REF=main` for the current main branch or `LEGION_REF=<tag>` to pin
-the bootstrap snapshot. Manual/daily refresh intentionally advances the managed
-source clone to `origin/main`; disable cron when maintaining a frozen snapshot.
+the bootstrap snapshot. Manual/daily refresh advances the managed source clone
+to the latest stable release tag, not `main`, so a merged change reaches an
+install only once it is released. `LEGION_UPDATE_REF=main` (or an exact tag)
+overrides that for one refresh; the next refresh without it returns to the
+latest release. Disable cron when maintaining a frozen snapshot. When Claude
+Code's `legion-core` marketplace is the source clone's own folder (for example
+pinned by `extraKnownMarketplaces`), refresh updates it in place instead of
+re-adding it from GitHub.
 `minimal` installs router and observability; pass a plugin name to install just
 that plugin.
 

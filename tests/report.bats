@@ -2,6 +2,11 @@
 # legion-report — telemetry aggregation CLI.
 
 setup() {
+  # Legion's machine-wide state (executor health, day spend, model lists) must
+  # come from the test, never from the developer's ~/.legion.
+  export LEGION_HOME="$BATS_TEST_TMPDIR/legion-home/.legion"
+  unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+  unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   TRACE="$ROOT/legion-observability/bin/legion-trace"
   REPORT="$ROOT/legion-observability/bin/legion-report"
@@ -10,7 +15,9 @@ setup() {
 }
 
 @test "state: cli prints auto project paths for any repo" {
-  unset LEGION_STATE_ROOT LEGION_TELEMETRY_DIR LEGION_REGISTRY_DIR LEGION_REPOS_FILE LEGION_BENCH_DIR LEGION_REPORTS_DIR
+  # "Without env setup" includes LEGION_HOME, which setup() isolates for the
+  # other tests: these two check the default derived from HOME.
+  unset LEGION_STATE_ROOT LEGION_TELEMETRY_DIR LEGION_REGISTRY_DIR LEGION_REPOS_FILE LEGION_BENCH_DIR LEGION_REPORTS_DIR LEGION_HOME
   app="$BATS_TEST_TMPDIR/app"; mkdir -p "$app"
 
   HOME="$BATS_TEST_TMPDIR/home" run "$STATE" --repo "$app" --json
@@ -20,7 +27,9 @@ setup() {
 }
 
 @test "report: path latest uses auto project reports dir without env setup" {
-  unset LEGION_STATE_ROOT LEGION_TELEMETRY_DIR LEGION_REGISTRY_DIR LEGION_REPOS_FILE LEGION_BENCH_DIR LEGION_REPORTS_DIR
+  # "Without env setup" includes LEGION_HOME, which setup() isolates for the
+  # other tests: these two check the default derived from HOME.
+  unset LEGION_STATE_ROOT LEGION_TELEMETRY_DIR LEGION_REGISTRY_DIR LEGION_REPOS_FILE LEGION_BENCH_DIR LEGION_REPORTS_DIR LEGION_HOME
   app="$BATS_TEST_TMPDIR/app"; mkdir -p "$app"
 
   HOME="$BATS_TEST_TMPDIR/home" run bash -c "cd '$app' && '$REPORT' path latest"

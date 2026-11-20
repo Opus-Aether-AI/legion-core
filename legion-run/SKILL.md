@@ -157,3 +157,9 @@ A successful `legion-run` answer should give the user:
 
 Do not claim success from model output alone. Treat validation, review, and the
 run artifacts as the source of truth.
+
+The final review covers the immutable diff the run produced. When fan-out
+applied nothing (the work was already committed, or every slice ran inline),
+the review starts where `HEAD` forked from the default branch instead of
+approving an empty range; pass `--review-base REF` to name the starting point,
+and expect a "nothing to review" failure when that range is empty too.

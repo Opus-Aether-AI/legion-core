@@ -59,6 +59,37 @@ order = ["codex", "cursor", "opencode", "claude"]
 [targets]
 codex_share = 0.5          # advisory default; choose any value from 0.0 to 1.0
 
+# ── Health-aware routing ───────────────────────────────────────────────
+# legion-delegate never dispatches to an executor that legion-health records as
+# logged out, out of quota, or failing its last probe. A ROUTED run (archetype
+# or default) falls back to the first healthy executor below whose model role
+# resolves in the active models file, and the run's span carries
+# artifacts.health_fallback {from, to, reason}. An explicit --executor is
+# refused with the healthy alternatives named. The review walk skips unhealthy
+# reviewers before spending an attempt on them. LEGION_HEALTH=off disables it;
+# LEGION_HEALTH_FALLBACK_ORDER overrides the order.
+[health]
+fallback_order = ["claude", "codex", "opencode", "cursor"]
+
+# ── Spending caps (USD; 0 turns a cap off) ─────────────────────────────
+# run_usd   per delegated run. legion-claude passes it to Claude Code as a hard
+#           stop (--max-budget-usd); other executors cannot be pre-empted, so a
+#           run that ends above it is recorded as over_budget and its diff is not
+#           auto-applied. Env: LEGION_RUN_BUDGET_USD.
+# day_usd   per UTC day, summed over every project's delegated spans. Once spent,
+#           new delegated runs and reviews are refused until the next day.
+#           Env: LEGION_DAY_BUDGET_USD.
+# review_fix_max_rounds
+#           legion-converge stops a review-and-fix loop after this many
+#           actionable rounds, and earlier when a round finds nothing it has not
+#           already seen. Env: LEGION_REVIEW_FIX_MAX_ROUNDS.
+# These are defaults to tune, not a measured optimum; `legion-budget status`
+# shows today's spend against them.
+[budget]
+run_usd = 10.0
+day_usd = 50.0
+review_fix_max_rounds = 3
+
 [defaults]
 executor = "self"          # an unclassified task: the primary decides (it should classify into an archetype)
 model_ref = "claude_orchestrator"
@@ -118,14 +149,14 @@ model_ref = "claude_frontier"
 sandbox = "workspace-write"
 reasoning_effort = "high"
 fallback_refs = ["claude_default"]
-note = "The polish / a11y / responsive / motion pass runs on the FRONTIER Claude role via Claude Code (Fable 5.1 + impeccable = the best frontend craft combo), verified by screenshot. Claude models run on Claude Code, never Cursor."
+note = "The polish / a11y / responsive / motion pass runs on the FRONTIER Claude role via Claude Code (Fable 5.2 + impeccable = the best frontend craft combo), verified by screenshot. Claude models run on Claude Code, never Cursor."
 
 [archetypes.frontend-review]
 executor = "claude"
 model_ref = "claude_default"
 sandbox = "read-only"
 reasoning_effort = "high"
-note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Signed off on Claude Code. This is a DIFFERENT model from the one that did the polish (claude_default = Opus 5.5 vs claude_frontier = Fable 5.1), so it is a genuine second lens within the Claude lineage; route to the Cursor or Codex review roles when cross-VENDOR independence matters."
+note = "Verify by SCREENSHOT (browser-patterns visual-regression), not by reading the diff. Signed off on Claude Code. This is a DIFFERENT model from the one that did the polish (claude_default = Opus 5.5 vs claude_frontier = Fable 5.2), so it is a genuine second lens within the Claude lineage; route to the Cursor or Codex review roles when cross-VENDOR independence matters."
 
 [archetypes.write-tests]
 executor = "codex"

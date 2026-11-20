@@ -9,6 +9,11 @@
 # the LEGION_ROOT env var. --repo only scopes the frontmatter scan.
 
 setup() {
+  # Legion's machine-wide state (executor health, day spend, model lists) must
+  # come from the test, never from the developer's ~/.legion.
+  export LEGION_HOME="$BATS_TEST_TMPDIR/legion-home/.legion"
+  unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+  unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
   REAL="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   DOCTOR="$REAL/legion-observability/bin/legion-doctor"
   BROKEN="$BATS_TEST_TMPDIR/broken"
@@ -649,4 +654,106 @@ EOF
   [[ "$output" == *"CURSOR_AGENT_BIN"* ]]
   [[ "$output" == *"not executable"* ]]
   [[ "$output" != *"headless auth configured"* ]]
+}
+
+# ── issue #218: executor health, model-id currency, runtime drift ───────
+
+_make_core_checkout() {
+  local d="$1" routing="$2"
+  mkdir -p "$d/.claude-plugin" "$d/legion-router/config"
+  printf '%s\n' '{"name":"legion-core","version":"0.0.0","plugins":[]}' > "$d/.claude-plugin/marketplace.json"
+  printf '%s\n' '{"version":"0.0.0"}' > "$d/package.json"
+  printf '%s\n' "$routing" > "$d/legion-router/config/routing.toml"
+  git -C "$d" init -q
+  git -C "$d" add -A
+  git -C "$d" -c user.email=t@t.c -c user.name=t commit -q -m init
+}
+
+@test "doctor: runtime-drift warns when the runtime checkout's routing config differs from this clone" {
+  _make_core_checkout "$BATS_TEST_TMPDIR/runtime" '[defaults]
+executor = "self"'
+  _make_core_checkout "$BATS_TEST_TMPDIR/clone" '[defaults]
+executor = "codex"'
+  LEGION_RUNTIME_CHECKOUT="$BATS_TEST_TMPDIR/runtime" run "$DOCTOR" --repo "$BATS_TEST_TMPDIR/clone" --only runtime-drift
+  [ "$status" -eq 0 ]
+  [[ "$output" == *WARN*"routing config: legion-router/config/routing.toml"* ]]
+  [[ "$output" == *"LEGION_ROUTING_FILE"* ]]
+
+  # Once the runtime carries the same config, there is nothing to warn about.
+  cp "$BATS_TEST_TMPDIR/clone/legion-router/config/routing.toml" "$BATS_TEST_TMPDIR/runtime/legion-router/config/routing.toml"
+  git -C "$BATS_TEST_TMPDIR/runtime" -c user.email=t@t.c -c user.name=t commit -q -am same
+  LEGION_RUNTIME_CHECKOUT="$BATS_TEST_TMPDIR/runtime" run "$DOCTOR" --repo "$BATS_TEST_TMPDIR/clone" --only runtime-drift
+  [[ "$output" == *PASS*"matches this clone"* ]]
+}
+
+@test "doctor: runtime-drift is silent when there is no separate runtime checkout" {
+  LEGION_RUNTIME_CHECKOUT="$BATS_TEST_TMPDIR/absent" run "$DOCTOR" --repo "$GOOD" --only runtime-drift
+  [ "$status" -eq 0 ]
+  [[ "$output" == *PASS*"no separate runtime checkout"* ]]
+}
+
+@test "doctor: executor-health warns about a logged-out executor and records it for the router" {
+  local bin="$BATS_TEST_TMPDIR/codex-bin"
+  mkdir -p "$bin"
+  printf '#!/usr/bin/env bash\nprintf "Not logged in\\n"; exit 1\n' > "$bin/codex"
+  chmod +x "$bin/codex"
+  CODEX_BIN="$bin/codex" run "$DOCTOR" --repo "$GOOD" --only executor-health
+  [ "$status" -eq 0 ]
+  [[ "$output" == *WARN*"executor codex is unavailable (logged_out)"* ]]
+  CODEX_BIN="$bin/codex" run "$REAL/legion-router/bin/legion-health" check codex --no-probe
+  [ "$status" -eq 1 ]
+}
+
+@test "doctor: model-ids warns until the provider lists are fetched, then names a missing id" {
+  run "$DOCTOR" --repo "$GOOD" --only model-ids
+  [ "$status" -eq 0 ]
+  [[ "$output" == *WARN*"never been checked"* ]]
+
+  local fixtures="$BATS_TEST_TMPDIR/model-lists"
+  mkdir -p "$fixtures"
+  # Built from the live catalog (ids may appear only in models.toml/costs.json),
+  # minus the frontier Claude role so exactly that id is missing.
+  python3 - "$REAL" "$fixtures" <<'PY'
+import importlib.util, json, sys
+root, out = sys.argv[1], sys.argv[2]
+def load(name, rel):
+    spec = importlib.util.spec_from_file_location(name, f"{root}/{rel}")
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); return module
+models = load("m", "legion-router/scripts/legion-models.py")
+catalog = load("r", "legion-router/scripts/legion-route.py").load_models(f"{root}/legion-router/config/models.toml")
+dropped = catalog["claude_frontier"]
+md, orl = {}, []
+for model in catalog.values():
+    if model == dropped:
+        continue
+    provider, listed = models.provider_of(model)
+    if provider == "openrouter":
+        orl.append({"id": listed})
+    elif provider in models.MODELS_DEV_PROVIDERS:
+        md.setdefault(provider, {"models": {}})["models"][listed] = {}
+json.dump(md, open(f"{out}/md.json", "w")); json.dump({"data": orl}, open(f"{out}/or.json", "w"))
+PY
+  LEGION_MODELS_DEV_URL="file://$fixtures/md.json" LEGION_OPENROUTER_MODELS_URL="file://$fixtures/or.json" \
+    run "$REAL/legion-router/bin/legion-models" check --fetch
+  [ "$status" -eq 1 ]
+  run "$DOCTOR" --repo "$GOOD" --only model-ids
+  [ "$status" -eq 0 ]
+  [[ "$output" == *WARN*"missing from the provider's current list: claude_frontier"* ]]
+}
+
+@test "doctor: opencode on OpenRouter names the exact key file to add" {
+  local bin="$BATS_TEST_TMPDIR/oc-bin"
+  mkdir -p "$bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$bin/opencode"
+  chmod +x "$bin/opencode"
+  OPENCODE_BIN="$bin/opencode" LEGION_OPENROUTER_KEY_FILE="$BATS_TEST_TMPDIR/or.key" \
+    run "$DOCTOR" --repo "$GOOD" --only opencode
+  [ "$status" -eq 0 ]
+  [[ "$output" == *WARN*"$BATS_TEST_TMPDIR/or.key"*"chmod 600"* ]]
+
+  printf 'placeholder\n' > "$BATS_TEST_TMPDIR/or.key"
+  chmod 600 "$BATS_TEST_TMPDIR/or.key"
+  OPENCODE_BIN="$bin/opencode" LEGION_OPENROUTER_KEY_FILE="$BATS_TEST_TMPDIR/or.key" \
+    run "$DOCTOR" --repo "$GOOD" --only opencode
+  [[ "$output" == *PASS*"OpenRouter key file"* ]]
 }

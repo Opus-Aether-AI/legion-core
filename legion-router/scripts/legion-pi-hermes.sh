@@ -13,6 +13,9 @@ source "$_self_dir/lib/executor-context.sh"
 # shellcheck source=lib/run-id.sh
 source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
+# shellcheck source=lib/run-guards.sh
+source "$_self_dir/lib/run-guards.sh"
+# shellcheck disable=SC1091
 source "$_self_dir/lib/task-scan.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
 # shellcheck disable=SC1090
@@ -117,6 +120,9 @@ write_state() {
 }
 emit_span() {
   local status="$1" duration="$2" cost="$3" usage="$4" task="$5" artifacts="$6"
+  # Per-run cap, health fallback note, and the executor's health record.
+  legion_guard_span "$ADAPTER_KIND" "$status" "$cost" "$artifacts"
+  status="$LEGION_GUARD_STATUS"; artifacts="$LEGION_GUARD_ARTIFACTS"
   local trace_bin="$_self_dir/../../legion-observability/bin/legion-trace"
   if [[ ! -x "$trace_bin" ]]; then
     note "warning: canonical legion-trace emitter is unavailable; span was not emitted"
@@ -760,6 +766,9 @@ cmd_run() {
     cost_provenance="$(hermes_cost_provenance "$usage_art")"
   fi
   local artifacts; artifacts="$(jq -cn --arg worktree "$WT_RECORD" --arg diff "$diff" --arg stdout "$out" --arg stderr "$err" --arg usage "$usage_art" --argjson cost_provenance "$cost_provenance" '{worktree:$worktree,diff:$diff,stdout:$stdout,stderr:$stderr,usage_file:$usage} + $cost_provenance')"
+  # The per-run cap decides the run's OWN status, before anything is applied:
+  # a run that ends above it is over_budget, keeps its diff, and is not applied.
+  status="$(legion_budget_cap_status "$status" "$cost")"
   emit_span "$status" "$duration" "$cost" "$usage" "$task" "$artifacts"
   if [[ "$apply" == 1 && "$status" == ok && -s "$diff" ]]; then
     if git -C "$REPO" apply --check "$diff"; then git -C "$REPO" apply "$diff"; else note "diff did not apply cleanly; left in $diff"; fi
@@ -767,7 +776,8 @@ cmd_run() {
   local report="$WT_RECORD"; [[ "$KEEP" == 1 ]] || { cleanup_worktree; report='(removed; rerun with --keep to retain the worktree)'; }
   write_state "$status"; [[ -z "$PRESET_RUN_ID" ]] || legion_disarm_adopted_run_guard
   jq -cn --arg run "$RUN_ID" --arg status "$status" --arg executor "$ADAPTER_KIND" --arg model "$actual_model" --arg result "$result" --arg worktree "$report" --arg diff "$diff" --arg last "$ART/last-message.txt" --argjson usage "$usage" --argjson cost "$cost" --argjson rc "$PROVIDER_RC" '{run_id:$run,status:$status,executor:$executor,model:$model,result:$result,worktree:$worktree,diff_path:$diff,last_message_path:$last,usage:$usage,cost_usd:$cost,provider_exit:$rc}'
-  [[ "$status" == ok ]] || exit 1
+  # over_budget finished and kept its diff for a person, like the native codex path.
+  [[ "$status" == ok || "$status" == over_budget ]] || exit 1
 }
 
 usage() { printf '%s — isolated, metered %s diff adapter.\n\nUsage: %s run --task TASK [--model MODEL] [--repo DIR] [--sandbox read-only|workspace-write] [--base REF] [--run-id ID] [--apply] [--keep]\n' "$ADAPTER" "$ADAPTER_KIND" "$ADAPTER"; }

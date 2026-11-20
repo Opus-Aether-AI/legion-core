@@ -36,7 +36,8 @@ Legion is a team. Play each configured role to its strength:
 The share target is an advisory routing preference, not a hard workflow rule.
 It defaults to `0.5` in `routing.toml [targets].codex_share` and can be changed
 in that config, with `LEGION_TARGET_CODEX_SHARE`, or per command with
-`legion-share --target <0..1>`. A routing policy that sends no archetype to
+`legion-share --target <0..1>`. The share gate is silent while codex is
+recorded unavailable (`legion-health`). A routing policy that sends no archetype to
 codex (a repository's own `LEGION_ROUTING_FILE`, say) has a target of `0`, so
 the gate stays quiet there. Route by task fit even when that differs from the
 target; use an explicit `legion-share gate` only when a repository chooses to
@@ -175,6 +176,8 @@ independent simplification judgement.
   - `LEGION_LOW_CREDIT=claude` → Claude is low: delegate *more* to the configured Codex workhorse, even normally-self tasks.
   - `LEGION_LOW_CREDIT=codex` (or `gpt`) → GPT is low: **refuse to delegate**, so Claude does it inline instead (`LEGION_FORCE_DELEGATE=1` overrides if you want to spend the last credits anyway).
 - **Budget is advisory:** `--budget-tokens N` flags an over-budget run (`status: over_budget`) but still returns the usable diff and **exits 0** — codex can't be pre-empted mid-run, so budget never silently fails a good result.
+- **Default spending caps:** `routing.toml [budget]` caps each delegated run (`run_usd`; a hard stop on Claude Code) and each UTC day (`day_usd`; new runs are refused once it is spent). `legion-budget status` shows where today stands.
+- **Health-aware routing:** a routed run never goes to an executor `legion-health` records as logged out, out of quota, or failing its last probe; it falls back along `[health].fallback_order` and the span says so. An explicit `--executor` that is down is refused with the healthy alternatives named. `legion-health status` shows the current picture.
 
 ## Worktree lifecycle
 

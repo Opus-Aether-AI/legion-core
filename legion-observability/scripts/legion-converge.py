@@ -30,6 +30,14 @@ MAX_CHECKS = 128
 MAX_FINDINGS = 128
 MAX_JOURNAL_TAIL_BYTES = 1024 * 1024
 MAX_DECISION_BYTES = 64 * 1024
+# Review-and-fix stop rule. A loop that keeps producing "actionable" decisions
+# without converging costs about the same every round, so it ends after a fixed
+# number of actionable rounds, and earlier when a round's review raises nothing
+# the loop has not already seen. The default comes from LEGION_REVIEW_FIX_MAX_ROUNDS,
+# then routing.toml [budget].review_fix_max_rounds; 0 means no round limit.
+DEFAULT_MAX_ROUNDS = 3
+MAX_SEEN_FINDINGS = 256
+LOOP_DECISION_KEYS = {"review_round", "seen_finding_hashes"}
 DURABLE_DECISION_KEYS = {
     "schema",
     "recorded_at",
@@ -59,6 +67,8 @@ DURABLE_REASONS = {
     "local_check_pending",
     "new_failure_evidence",
     "no_progress",
+    "no_new_findings",
+    "round_limit",
     "external_checks_pending",
     "all_required_evidence_passed",
 }
@@ -69,7 +79,7 @@ DURABLE_STATE_REASONS = {
         "local_check_pending",
         "new_failure_evidence",
     },
-    "blocked": {"no_progress"},
+    "blocked": {"no_progress", "no_new_findings", "round_limit"},
     "waiting_external": {"external_checks_pending"},
     "complete": {"all_required_evidence_passed"},
 }
@@ -224,11 +234,56 @@ def _normalize_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def resolve_max_rounds(explicit: int | None = None, env=None) -> int:
+    """Review-and-fix round limit: explicit, then env, then routing.toml, then 3."""
+    if explicit is not None:
+        return max(0, int(explicit))
+    env = os.environ if env is None else env
+    raw = env.get("LEGION_REVIEW_FIX_MAX_ROUNDS")
+    if raw not in (None, ""):
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    budget = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "..", "legion-router", "scripts", "legion-budget.py",
+    )
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("legion_budget_for_converge", budget)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return int(module.caps(env)["review_fix_max_rounds"])
+    except Exception:  # noqa: BLE001 - a missing router install keeps the default
+        return DEFAULT_MAX_ROUNDS
+
+
+def _loop_state(previous: dict[str, Any] | None) -> tuple[int, set[str]]:
+    """Rounds and findings already spent in the current review-and-fix loop.
+
+    A loop ends at complete or waiting_external; the next actionable decision
+    starts a new one. Records written before the stop rule existed carry no
+    loop fields and count as a fresh loop.
+    """
+    if not previous or previous.get("state") not in {"actionable", "blocked"}:
+        return 0, set()
+    rounds = previous.get("review_round")
+    seen = previous.get("seen_finding_hashes")
+    return (
+        rounds if isinstance(rounds, int) and not isinstance(rounds, bool) else 0,
+        set(seen) if isinstance(seen, list) else set(),
+    )
+
+
 def evaluate_checkpoint(
     payload: dict[str, Any],
     previous: dict[str, Any] | None = None,
     *,
     attempted_pair: bool = False,
+    max_rounds: int | None = None,
 ) -> dict[str, Any]:
     """Return the next semantic state for a validated checkpoint."""
 
@@ -266,6 +321,22 @@ def evaluate_checkpoint(
     }
     evidence_hash = _digest(actionable_evidence)
 
+    rounds_spent, seen = _loop_state(previous)
+    finding_hashes = {_digest(["finding", fingerprint]) for fingerprint in blocking}
+    check_hashes = {
+        _digest(["check", item["id"], item["evidence_fingerprint"]])
+        for item in checks
+        if item["status"] == "failed"
+    }
+    current = finding_hashes | check_hashes
+
+    def loop_fields(rounds: int, include_current: bool) -> dict[str, Any]:
+        merged = seen | current if include_current else set()
+        return {
+            "review_round": rounds,
+            "seen_finding_hashes": sorted(merged)[:MAX_SEEN_FINDINGS],
+        }
+
     common: dict[str, Any] = {
         "source_fingerprint_hash": source_hash,
         "review_head_sha_hash": _digest(checkpoint["review"]["head_sha"]),
@@ -277,13 +348,9 @@ def evaluate_checkpoint(
         "suggestion_count": len(suggestions),
     }
     if failed or pending_local or blocking:
+        stopped = {**common, **loop_fields(rounds_spent, True), "state": "blocked", "action": "yield"}
         if attempted_pair:
-            return {
-                **common,
-                "state": "blocked",
-                "action": "yield",
-                "reason": "no_progress",
-            }
+            return {**stopped, "reason": "no_progress"}
         reason = (
             "blocking_review_finding"
             if blocking
@@ -297,16 +364,22 @@ def evaluate_checkpoint(
                 previous.get("failure_evidence_fingerprint") == evidence_hash
             )
             if same_source and same_evidence:
-                return {
-                    **common,
-                    "state": "blocked",
-                    "action": "yield",
-                    "reason": "no_progress",
-                }
+                return {**stopped, "reason": "no_progress"}
             if same_source and not same_evidence:
                 reason = "new_failure_evidence"
+        # A review that only re-raises findings this loop has already been
+        # through -- after a fix round changed the source -- is the plateau: the
+        # fixer and the reviewer disagree, and another round costs the same
+        # again. Failing checks alone keep the existing rule (a new source is a
+        # new attempt), bounded by the round limit below.
+        if blocking and seen and not pending_local and current <= seen:
+            return {**stopped, "reason": "no_new_findings"}
+        limit = resolve_max_rounds(max_rounds)
+        if limit and rounds_spent >= limit:
+            return {**stopped, "reason": "round_limit"}
         return {
             **common,
+            **loop_fields(rounds_spent + 1, True),
             "state": "actionable",
             "action": "continue",
             "reason": reason,
@@ -315,6 +388,7 @@ def evaluate_checkpoint(
     if pending_external:
         return {
             **common,
+            **loop_fields(0, False),
             "state": "waiting_external",
             "action": "yield",
             "reason": "external_checks_pending",
@@ -322,6 +396,7 @@ def evaluate_checkpoint(
 
     return {
         **common,
+        **loop_fields(0, False),
         "state": "complete",
         "action": "yield",
         "reason": "all_required_evidence_passed",
@@ -331,8 +406,22 @@ def evaluate_checkpoint(
 def _validate_durable_record(
     record: Any, *, expected_task_id_hash: str
 ) -> dict[str, Any]:
-    if not isinstance(record, dict) or set(record) != DURABLE_DECISION_KEYS:
+    if not isinstance(record, dict) or set(record) not in (
+        DURABLE_DECISION_KEYS,
+        DURABLE_DECISION_KEYS | LOOP_DECISION_KEYS,
+    ):
         raise ConvergenceError("persisted convergence decision has invalid fields")
+    if LOOP_DECISION_KEYS <= set(record):
+        rounds = record["review_round"]
+        seen = record["seen_finding_hashes"]
+        if not isinstance(rounds, int) or isinstance(rounds, bool) or not 0 <= rounds <= 10_000:
+            raise ConvergenceError("persisted convergence decision has invalid review_round")
+        if (
+            not isinstance(seen, list)
+            or len(seen) > MAX_SEEN_FINDINGS
+            or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in seen)
+        ):
+            raise ConvergenceError("persisted convergence decision has invalid seen_finding_hashes")
     if record.get("schema") != DECISION_SCHEMA:
         raise ConvergenceError("persisted convergence decision has invalid schema")
     for key in DURABLE_DIGEST_KEYS:
@@ -581,7 +670,9 @@ def _claim_actionable_pair(
     return False
 
 
-def checkpoint(payload: dict[str, Any], *, state_root: Path) -> dict[str, Any]:
+def checkpoint(
+    payload: dict[str, Any], *, state_root: Path, max_rounds: int | None = None
+) -> dict[str, Any]:
     normalized = _normalize_checkpoint(payload)
     lock_descriptor, directory_descriptor = _open_history(
         Path(state_root).expanduser(), normalized["task_id"]
@@ -592,12 +683,12 @@ def checkpoint(payload: dict[str, Any], *, state_root: Path) -> dict[str, Any]:
                 lock_descriptor,
                 expected_task_id_hash=_digest(normalized["task_id"]),
             )
-            decision = evaluate_checkpoint(payload, previous=previous)
+            decision = evaluate_checkpoint(payload, previous=previous, max_rounds=max_rounds)
             if decision["state"] == "actionable" and _claim_actionable_pair(
                 directory_descriptor, normalized["task_id"], decision
             ):
                 decision = evaluate_checkpoint(
-                    payload, previous=previous, attempted_pair=True
+                    payload, previous=previous, attempted_pair=True, max_rounds=max_rounds
                 )
             _record_decision(lock_descriptor, normalized["task_id"], decision)
     finally:
@@ -638,19 +729,30 @@ def main(argv: list[str] | None = None) -> int:
         help="evaluate without comparing or recording task history",
     )
     parser.add_argument("--json", action="store_true", help="emit the full decision")
+    parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=None,
+        help="review-and-fix rounds before yielding (default: LEGION_REVIEW_FIX_MAX_ROUNDS, "
+        "then routing.toml [budget].review_fix_max_rounds, then 3; 0 = no limit). A task "
+        "stopped at the limit stays stopped until it completes; resume deliberately with "
+        "a higher --max-rounds or a new task id",
+    )
     args = parser.parse_args(argv)
 
     try:
         payload = _read_payload(args.checkpoint)
+        if args.max_rounds is not None and args.max_rounds < 0:
+            raise ConvergenceError("--max-rounds must be 0 or more")
         if args.no_record:
-            decision = evaluate_checkpoint(payload)
+            decision = evaluate_checkpoint(payload, max_rounds=args.max_rounds)
         else:
             state_root = (
                 Path(args.state_root).expanduser()
                 if args.state_root
                 else Path(legion_state.resolve_state(args.repo)["state_root"])
             )
-            decision = checkpoint(payload, state_root=state_root)
+            decision = checkpoint(payload, state_root=state_root, max_rounds=args.max_rounds)
     except (ConvergenceError, OSError) as error:
         print(f"legion-converge: {error}", file=sys.stderr)
         return 2

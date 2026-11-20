@@ -2,6 +2,11 @@
 # legion-fanout — parallel multi-model fan-out across executors (mock codex on PATH).
 
 setup() {
+  # Legion's machine-wide state (executor health, day spend, model lists) must
+  # come from the test, never from the developer's ~/.legion.
+  export LEGION_HOME="$BATS_TEST_TMPDIR/legion-home/.legion"
+  unset LEGION_HEALTH_FILE LEGION_RUN_BUDGET_USD LEGION_DAY_BUDGET_USD
+  unset LEGION_REVIEW_FIX_MAX_ROUNDS LEGION_MODELS_CACHE_DIR LEGION_HEALTH
   # Fanout's root-span tests must be independent of whichever Legion worker
   # launched Bats. Nested-span tests set their own context explicitly.
   unset LEGION_ACTIVE LEGION_EXECUTOR LEGION_DEPTH LEGION_RUN_ID
@@ -620,6 +625,39 @@ SH
     [ ! -e "$overlap" ]
     [ "$(wc -l < "$completed" | tr -d ' ')" = "40" ]
   done
+}
+
+@test "state lock waits, not fails, when mkdir reports success for a directory a rival created" {
+  # The Rust coreutils on Ubuntu 26.04 can report success for `mkdir` when a
+  # racing writer created the directory first. The lock then failed that
+  # writer outright (its noclobber pid write lost to the creator), so fewer
+  # than all contenders completed. Emulate the behaviour deterministically:
+  # this mkdir "succeeds" for any directory that already exists.
+  local state_lib="$ROOT/legion-observability/scripts/lib/state.sh"
+  local root="$BATS_TEST_TMPDIR/lock-lenient-mkdir"
+  local record="$root/state.json" completed="$root/completed"
+  local guard="$root/critical-section" overlap="$root/overlap" i
+  mkdir -p "$root"
+  : > "$record"
+  mkdir "$record.lock"
+  printf '99999999\n' > "$record.lock/pid"
+
+  for ((i = 0; i < 12; i++)); do
+    bash -c '
+      mkdir() { command mkdir "$@" 2>/dev/null && return 0; [[ -d "${!#}" ]]; }
+      source "$1"
+      lock="$(legion_acquire_run_state_lock "$2")" || exit 3
+      if ! command mkdir "$3" 2>/dev/null; then : > "$4"; fi
+      sleep 0.02
+      rmdir "$3" 2>/dev/null || true
+      printf "%s\n" "$5" >> "$6"
+      legion_release_run_state_lock "$lock"
+    ' _ "$state_lib" "$record" "$guard" "$overlap" "$i" "$completed" &
+  done
+  wait
+
+  [ ! -e "$overlap" ]
+  [ "$(wc -l < "$completed" | tr -d ' ')" = "12" ]
 }
 
 @test "state lock recovery cannot delete a replacement owner generation" {
@@ -1297,4 +1335,19 @@ SH
   echo "$output" | jq -e '.results[0].id == "setup" and .results[0].status == "failed"'
   echo "$output" | jq -e '.results[1].id == "dependent" and .results[1].status == "blocked"'
   echo "$output" | jq -e '.results[1].blocked_by == ["setup"]'
+}
+
+@test "fanout: a binary file a slice adds reaches the repository byte for byte" {
+  # Issue #218 listed binary files as silently dropped by fan-out. Every slice
+  # patch is now captured with --binary (#216); this pins the whole path, from
+  # the executor's worktree through fan-out's apply into the caller's tree.
+  printf '%s\n' '{"id":"report","archetype":"implement-feature","task":"add the report"}' \
+    > "$BATS_TEST_TMPDIR/binary.jsonl"
+
+  MOCK_CODEX_BINARY=1 run "$FANOUT" --slices "$BATS_TEST_TMPDIR/binary.jsonl" --repo "$REPO" --apply --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == 1 and .failed == 0 and .applied == 1'
+  [ -f "$REPO/MOCK_CODEX_REPORT.pdf" ]
+  printf '%%PDF-1.7\n\x00\x01\x02\xffbinary\x00\n' > "$BATS_TEST_TMPDIR/expected.pdf"
+  cmp "$BATS_TEST_TMPDIR/expected.pdf" "$REPO/MOCK_CODEX_REPORT.pdf"
 }

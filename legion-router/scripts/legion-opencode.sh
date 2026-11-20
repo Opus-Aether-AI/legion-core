@@ -23,6 +23,9 @@ source "$_self_dir/lib/executor-context.sh"
 # shellcheck source=lib/run-id.sh
 source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
+# shellcheck source=lib/run-guards.sh
+source "$_self_dir/lib/run-guards.sh"
+# shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
@@ -41,6 +44,52 @@ trap 'declare -F legion_terminalize_adopted_run_on_exit >/dev/null 2>&1 && legio
 _now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _today()  { date -u +%Y-%m-%d; }
 _run_id() { legion_new_run_id; }
+
+# OpenRouter models (openrouter/<vendor>/<model>) take their key from a FILE,
+# so the key never sits in a shell profile, an argv or a span. The file holds
+# the key on one line; LEGION_OPENROUTER_KEY_FILE overrides the default path.
+# An OPENROUTER_API_KEY already in the environment wins, and a key stored with
+# `opencode auth login` is accepted as it is.
+openrouter_key_file() {
+  if [[ -n "${LEGION_OPENROUTER_KEY_FILE:-}" ]]; then
+    printf '%s\n' "$LEGION_OPENROUTER_KEY_FILE"
+  else
+    printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/legion/openrouter.key"
+  fi
+}
+
+# load_openrouter_key <model>: export OPENROUTER_API_KEY for an openrouter/ model.
+# Fails (with the exact remedy) when the model needs a key and none is set.
+load_openrouter_key() {
+  local model="$1" key_file key=""
+  [[ "$model" == openrouter/* ]] || return 0
+  [[ -z "${OPENROUTER_API_KEY:-}" ]] || return 0
+  key_file="$(openrouter_key_file)"
+  # A key saved the opencode way (`opencode auth login`) is opencode's own to
+  # use; Legion neither reads nor exports it. Only presence is checked.
+  if [[ ! -s "$key_file" ]] && jq -e '.openrouter | type == "object"' \
+      "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -r "$key_file" && -s "$key_file" ]]; then
+    key="$(head -n 1 "$key_file" | tr -d '[:space:]')"
+  fi
+  if [[ -z "$key" ]]; then
+    # "OPENROUTER_API_KEY is missing" is the outage vocabulary the review walk
+    # and legion-health recognise, so a keyless opencode is skipped, not failed.
+    printf 'legion-opencode: OPENROUTER_API_KEY is missing: %s needs an OpenRouter key. Put the key on one line in %s and run: chmod 600 %s (or set LEGION_OPENROUTER_KEY_FILE to a file that holds one).\n' \
+      "$model" "$key_file" "$key_file" >&2
+    return 1
+  fi
+  local mode=""
+  mode="$(stat -c '%a' "$key_file" 2>/dev/null || stat -f '%Lp' "$key_file" 2>/dev/null || true)"
+  case "$mode" in
+    ""|600|400) ;;
+    *) note "⚠ $key_file is mode $mode; run: chmod 600 $key_file" ;;
+  esac
+  OPENROUTER_API_KEY="$key"
+  export OPENROUTER_API_KEY
+}
 
 # Resolve the opencode binary. PIN $HOME/.opencode/bin first: a stray `opencode`
 # on PATH (e.g. OpenWork's bundled build) is a different, incompatible binary.
@@ -72,6 +121,9 @@ scan_task_text() {
 
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  # Per-run cap, health fallback note, and the executor's health record.
+  legion_guard_span "$executor" "$status" "$cost" "$artifacts"
+  status="$LEGION_GUARD_STATUS"; artifacts="$LEGION_GUARD_ARTIFACTS"
   {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
@@ -205,6 +257,11 @@ cmd_run() {
   validate_sandbox "$sandbox"
   [[ "$sandbox" == "read-only" ]] || scan_task_text "$task"
   oc_bin="$(resolve_opencode_bin)" || die "opencode CLI not found. Install opencode or set OPENCODE_BIN (expected \$HOME/.opencode/bin/opencode)."
+  if ! load_openrouter_key "$model"; then
+    LEGION_GUARD_REASON_HINT="missing_key" LEGION_GUARD_ERROR_TEXT="OpenRouter key missing" \
+      legion_guard_span "opencode" "failed" 0 '{}'
+    exit 2
+  fi
   mkdir -p "$art"
   legion_write_runtime_gitignore "$repo"
 
@@ -307,6 +364,12 @@ cmd_run() {
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg stdout "$out_file" --arg stderr "$err_file" \
     '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr}')"
+  # The per-run cap decides the run's OWN status, before anything is applied:
+  # a run that ends above it is over_budget, keeps its diff, and is not applied.
+  status="$(legion_budget_cap_status "$status" "$cost")"
+  # opencode_error is the provider's message (auth, quota); it feeds executor health.
+  # shellcheck disable=SC2034 # read by legion_guard_span (lib/run-guards.sh)
+  [[ -z "$opencode_error" ]] || LEGION_GUARD_ERROR_TEXT="$opencode_error"
   emit_span "opencode" "$actual_model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
 
   if [[ "$do_apply" -eq 1 && "$status" == "ok" && -s "$art/diff.patch" ]]; then
@@ -338,7 +401,8 @@ cmd_run() {
      result:$result, opencode_error:(if $opencode_error == "" then null else $opencode_error end),
      worktree:$wt, diff_path:$diff, last_message_path:$last,
      usage:$usage, cost_usd:$cost}'
-  [[ "$status" == "ok" ]] || exit 1
+  # over_budget finished and kept its diff for a person, like the native codex path.
+  [[ "$status" == "ok" || "$status" == "over_budget" ]] || exit 1
 }
 
 usage() {

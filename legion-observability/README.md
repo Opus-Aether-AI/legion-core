@@ -12,13 +12,13 @@ See everything Legion's multi-model runs do: per-executor **cost, success rate, 
 | `legion-bench` | `scripts/legion-bench.py` | Harness Bench-style scorecards for Legion harness changes: deterministic `core`/`stable` suites, repeated-run flake detection, A/B `corpus` runs across harness modes, eval/route/doctor/fixture task cases, compare/gate commands, `learning-lift`, spans, and optional self-learning outcomes. |
 | `legion-trace` | `scripts/legion-telemetry.sh` | `emit` a validated span; `validate` a span file/stream. |
 | `legion-otel-export` | `scripts/legion-otel-export.py` | Map `legion.span.v1` → OTLP/HTTP; POST to `$OTEL_EXPORTER_OTLP_ENDPOINT` (no-op until set; `--dry-run` to preview). |
-| `legion-doctor` | `scripts/legion-doctor.sh` | CI-usable verifier; exits nonzero on any hard-check failure. |
+| `legion-doctor` | `scripts/legion-doctor.sh` | CI-usable verifier; exits nonzero on any hard-check failure. Also reports which executors the router can use (`executor-health`), configured model ids missing from provider lists (`model-ids`), and a runtime checkout that differs from the clone you are editing (`runtime-drift`). |
 | `legion-catalog` | `scripts/legion-catalog.py` | Read-only inventory of plugins, skills, agents, commands, hooks, and MCPs. |
 | `legion-learn` | `scripts/legion_learning.py` | Stream and redact cross-harness sessions into versioned sessions, episodes, decisions, outcome links, five behavior axes, 14 code-quality dimensions, and cross-project learning laws. |
 | `legion-self-learn` | `scripts/legion-self-learn.py` | Daily self-learning loop: spans + review findings + trigger evals + benchmark misses + session feedback + manual bug records -> entity-scoped memory/proposals. `--apply-source` is a compatibility-only dry-run response. |
 | `legion-improve` | `scripts/legion-improve.py` | Consume a maintainer-eligible typed proposal in `off` (default), `dry-run`, or `draft` mode. It freezes a base SHA, uses isolated worktrees, repeats paired gates, requires a receipt, and creates only idempotent draft PRs. |
 | `legion-context-profile` | `scripts/legion-context-profile.py` | Reversibly shape active Codex/.agents skills and Claude plugins from external context profiles and skill groups when context budget gets noisy. |
-| `legion-converge` | `scripts/legion-converge.py` | Classify a primary workflow checkpoint as actionable, complete, waiting on external state, or blocked by repeated evidence—without an arbitrary runtime deadline. |
+| `legion-converge` | `scripts/legion-converge.py` | Classify a primary workflow checkpoint as actionable, complete, waiting on external state, or blocked—by repeated evidence, by a review that raises nothing new, or by the review-and-fix round limit (`--max-rounds`, default `routing.toml [budget].review_fix_max_rounds`)—without an arbitrary runtime deadline. |
 | `legion-session-learn` | `scripts/legion-session-learn.py` | Mine bounded, provenance-aware Claude/Codex/Cursor sessions and project memories for recurring gotchas and explicit corrections; output and recorded outcomes use hashes/counts instead of transcript text by default. |
 
 ## Quick start

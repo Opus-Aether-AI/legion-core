@@ -115,8 +115,8 @@ repos_file_for_repo() {
     # costs.json row is missing and the frontier model is being under-billed.
     run "$LIB/cost.sh" "$CLAUDE_FRONTIER" 1000000 500000 0 0
     [ "$status" -eq 0 ]
-    # 1M in @ $10.00/M + 500k out @ $50.00/M
-    [ "$output" = "35" ]
+    # 1M in @ $8.00/M + 500k out @ $40.00/M
+    [ "$output" = "28" ]
 }
 
 @test "cost: codex_review pricing comes from costs.json" {

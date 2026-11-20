@@ -33,6 +33,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legion_state  # noqa: E402
 
 try:
+    import legion_executor_health  # noqa: E402
+except Exception:  # pragma: no cover - health is advisory; never break share
+    legion_executor_health = None
+
+try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
@@ -202,23 +207,52 @@ def compute(spans):
     }
 
 
-def recommend_next(share_runs, total_runs, target):
+def codex_health():
+    """(available, reason) for codex from legion-health's record.
+
+    The record comes from legion-doctor's daily probe and from runs that failed
+    on a login or quota error. A stale outage is re-probed (a cheap offline
+    `codex login status`) and re-recorded, so a prompt hook that calls `gate` on
+    every prompt stays quiet for as long as codex stays logged out, at one
+    probe per record lifetime. No record, or anything going wrong, reads as
+    available: health only ever quiets the controller, it never invents an
+    outage.
+    """
+    if legion_executor_health is None:
+        return True, ""
+    try:
+        verdict = legion_executor_health.evaluate("codex")
+    except Exception:  # noqa: BLE001
+        return True, ""
+    return bool(verdict.get("available", True)), str(verdict.get("reason") or "")
+
+
+def recommend_next(share_runs, total_runs, target, codex_available=True):
     # With no history, or below target, push the next eligible task to codex; else Opus.
+    # Never recommend an executor that cannot take the work.
+    if not codex_available:
+        return "opus"
     return "codex" if (total_runs == 0 or share_runs < target) else "opus"
 
 
-def gate(c, tgt):
+def gate(c, tgt, codex_available=True):
     """Opt-in enforcement surface: turn the measured share into
     a one-line directive + exit code. Exit code 1 means "under target — delegate
     the next eligible slice to codex"; 0 means no action (on balance, no data yet,
     or unmeasurable). Normal reports and `next` remain advisory; a repository or
     CI job must explicitly invoke this command to enforce its configured target.
+
+    When codex is unavailable (logged out, out of quota, failed its last health
+    probe) there is nothing to act on, so the gate is silent and exits 0: a
+    prompt hook must not tell every prompt to use an executor that cannot run.
     """
     runs, share = c["total_runs"], c["codex_share_runs"]
     pct, tpct = round(share * 100), round(tgt * 100)
     if tgt <= 0:
         return ("legion-share: the codex share target is 0% (the routing policy sends no "
                 "work to codex, or the target is set to 0) — nothing to balance.", 0)
+    if not codex_available:
+        return ("", 0)
     if c["codex_runs"] > 0 and c["opus_runs"] == 0:
         return ("legion-share: only codex work is logged — Opus self-work isn't being "
                 "recorded, so the share is unmeasurable.", 0)
@@ -247,14 +281,19 @@ def main(argv=None):
     since = time.time() - window_seconds if window_seconds is not None else None
     c = compute(load_spans(a.dir, since=since))
     tgt = target_share(a.target, a.routing)
+    codex_ok, codex_reason = codex_health() if tgt > 0 else (True, "")
     if a.cmd == "next":
-        print(recommend_next(c["codex_share_runs"], c["total_runs"], tgt))
+        print(recommend_next(c["codex_share_runs"], c["total_runs"], tgt, codex_ok))
         return 0
     if a.cmd == "gate":
-        line, code = gate(c, tgt)
-        print(line)
+        line, code = gate(c, tgt, codex_ok)
+        if line:
+            print(line)
         return code
     c["target"] = tgt
+    c["codex_available"] = codex_ok
+    if not codex_ok:
+        c["codex_unavailable_reason"] = codex_reason or "unavailable"
     c["window"] = a.window or "all"
     # The share is only meaningful if BOTH sides are logged. An all-codex corpus means
     # Opus isn't logging its self-work — report that honestly instead of a false "met".

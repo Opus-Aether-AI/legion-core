@@ -47,6 +47,9 @@ source "$_self_dir/lib/executor-context.sh"
 # shellcheck source=lib/run-id.sh
 source "$_self_dir/lib/run-id.sh"
 # shellcheck disable=SC1091
+# shellcheck source=lib/run-guards.sh
+source "$_self_dir/lib/run-guards.sh"
+# shellcheck disable=SC1091
 # shellcheck source=lib/task-scan.sh
 source "$_self_dir/lib/task-scan.sh"
 _state_lib="$_self_dir/../../legion-observability/scripts/lib/state.sh"
@@ -95,6 +98,9 @@ scan_task_text() {
 
 emit_span() {
   local executor="$1" model="$2" status="$3" dur="$4" cost="$5" usage="$6" task="$7" artifacts="$8"
+  # Per-run cap, health fallback note, and the executor's health record.
+  legion_guard_span "$executor" "$status" "$cost" "$artifacts"
+  status="$LEGION_GUARD_STATUS"; artifacts="$LEGION_GUARD_ARTIFACTS"
   {
     mkdir -p "$LEGION_TELEMETRY_DIR"
     local trace_id="${LEGION_TRACE_ID:-${RUN_ID:-}}"
@@ -239,6 +245,9 @@ cmd_run() {
   artifacts="$(jq -cn --arg wt "$wt" --arg diff "$art/diff.patch" --arg last "$art/last-message.txt" \
     --arg stdout "$out_file" --arg stderr "$err_file" --arg profile "$DSH_PROFILE" \
     '{worktree:$wt, diff:$diff, last_message:$last, stdout:$stdout, stderr:$stderr, dsh_profile:$profile}')"
+  # The per-run cap decides the run's OWN status, before anything is applied:
+  # a run that ends above it is over_budget, keeps its diff, and is not applied.
+  status="$(legion_budget_cap_status "$status" "$cost")"
   emit_span "deepseek" "$model" "$status" "$dur" "$cost" "$usage" "$task" "$artifacts"
 
   if [[ "$do_apply" == "1" && "$status" == "ok" && -s "$art/diff.patch" ]]; then
@@ -266,7 +275,7 @@ cmd_run() {
     --arg wt "$wt" --argjson usage "$usage" --argjson cost "$cost" \
     '{run_id:$run_id, executor:$executor, model:$model, status:$status,
       diff_path:$diff, last_message:$last, worktree:$wt, usage:$usage, cost_usd:$cost}'
-  [[ "$status" == "ok" ]]
+  [[ "$status" == "ok" || "$status" == "over_budget" ]]
 }
 
 usage_text() {

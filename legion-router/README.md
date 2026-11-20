@@ -21,6 +21,9 @@ archetype, and evidence contracts are not limited to coding.
 | `legion-pi` | `scripts/legion-pi.sh` | Delegate through Pi's official `-p --mode json --no-session` stream inside a filesystem write sandbox; validate the final settled `agent_end`, meter every `message_end` plus compaction call exactly once, and return a patch captured with parent-owned Git metadata. |
 | `legion-hermes` | `scripts/legion-hermes.sh` | Delegate through Hermes `--oneshot` inside a filesystem write sandbox; parse its complete `--usage-file` JSON document while preserving stdout as opaque final text. |
 | `legion-intake` | `scripts/legion-intake.sh` | GitHub issue intake wrapper. Runs a compatible Legion worker (`delegate`, `cursor`, or `custom`) in explore or implement mode, comments assessment results, and opens review PRs for implementation diffs. |
+| `legion-health` | `scripts/legion-health.py` | Executor health for routing: `status`, `probe` (offline: CLI present, logged in, key present), `check`, `pick`, `record`, `observe`, `reset`. The router never dispatches to an executor recorded as logged out, out of quota, or failing its last probe. |
+| `legion-budget` | `scripts/legion-budget.py` | Default spending caps: `caps`, `status` (today's delegated spend), `check`, `run-status`. |
+| `legion-models` | `scripts/legion-models.py` | `check [--fetch]`: compare every `models.toml` id with its provider's published list (models.dev; OpenRouter's catalogue for `openrouter/` ids). Exit 1 when one is missing. |
 | `legion-router` | `scripts/router.sh` | Manage the loopback `:8082` Anthropic-compatible metering proxy as a launchd service: `install`/`uninstall`/`start`/`stop`/`restart`/`status`/`logs`/`errors`/`dev`. Endpoints: `/health`, `/stats`, `POST /ingest`. Keys optional (runs as a pure meter). |
 
 ## Running the meter
@@ -98,6 +101,80 @@ when neither boundary exists. The proxy additionally needs `bun`, and a
 through `legion-route.py` rather than parsing `models.toml` a second time. If no
 interpreter resolves, the proxy still starts and warns, but every model role
 falls through to its default.
+
+## Health-aware routing
+
+`legion-delegate` checks `legion-health` before it dispatches. An executor that
+is logged out, out of quota, or failed its last health probe never receives
+work:
+
+- a **routed** run (an archetype, or the default route) falls back to the first
+  healthy executor in `routing.toml` `[health].fallback_order` whose model role
+  resolves in the active models file, and its span records
+  `artifacts.health_fallback {from, to, reason}`;
+- an **explicit** `--executor` is the caller's choice, so it is refused (exit 2,
+  `legion.route-preflight.v1` receipt, reason `executor_unavailable`) with the
+  healthy alternatives named;
+- `legion-delegate review` skips an unhealthy reviewer before spending an
+  attempt on it.
+
+The record is learned, not configured. A run that fails on a login or quota
+error records the executor `unavailable`; `legion-doctor` (and so the daily
+refresh) probes every executor offline and records the result; each record has
+a recheck time, and a stale outage is re-probed before the router decides, so a
+re-login is noticed without a reset. A probe that passes never clears a fresh
+outage a run recorded (a static probe cannot see a spent quota); clear one by
+hand with `legion-health reset <executor>`. An executor with no record is available:
+routing never invents an outage. `LEGION_HEALTH=off` turns the whole mechanism
+off.
+
+```bash
+legion-health status          # what the router will do right now
+legion-health probe codex     # re-check after logging in
+```
+
+## Spending caps
+
+`routing.toml` `[budget]` sets default caps (0 turns one off):
+
+- `run_usd`, per delegated run. `legion-claude` passes it to Claude Code as a
+  hard stop (`--max-budget-usd`); a stopped run is `over_budget` and is never
+  handed on to another vendor. Any run that ends above the cap is `over_budget`:
+  it exits 0 with its diff kept, and the diff is not applied (by `--apply` or by
+  fan-out).
+- `day_usd`, per UTC day across every project's delegated spans. Once spent,
+  new delegated runs and reviews are refused until the next day.
+- `review_fix_max_rounds`, read by `legion-converge` (see legion-observability).
+
+`LEGION_RUN_BUDGET_USD`, `LEGION_DAY_BUDGET_USD` and
+`LEGION_REVIEW_FIX_MAX_ROUNDS` override them. `legion-budget status` shows
+today's spend against the caps.
+
+## The cheap executor: opencode on OpenRouter
+
+`opencode_default` and `opencode_review` in `models.toml` name cheap DeepSeek
+models through OpenRouter. The adapter reads
+the OpenRouter key from a file, never from argv or a span:
+
+```bash
+mkdir -p ~/.config/legion
+$EDITOR ~/.config/legion/openrouter.key   # the key, on one line
+chmod 600 ~/.config/legion/openrouter.key
+legion-doctor --only opencode
+```
+
+`LEGION_OPENROUTER_KEY_FILE` points at another file; an `OPENROUTER_API_KEY`
+already in the environment wins, and a key saved with `opencode auth login` is
+accepted as it is. Without a key the executor is reported
+unavailable and the router skips it. No archetype routes here until a paired
+benchmark shows it holds quality; use `--executor opencode` explicitly.
+
+## Keeping the model table current
+
+`legion-models check --fetch` (run by the daily refresh) downloads each
+provider's public model list and reports any configured id that is no longer
+listed; `legion-doctor` reads the cached result offline. Cursor publishes no
+list, so its ids are reported as unverifiable.
 
 ## DeepSeek Harness (`deepseek`, needs a profile you author)
 

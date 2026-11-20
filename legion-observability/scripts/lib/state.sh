@@ -129,12 +129,17 @@ legion_acquire_run_state_lock() {
   # cannot stretch the nominal 30-second ceiling into minutes.
   while [[ "$SECONDS" -lt "$deadline" ]]; do
     if (umask 077; mkdir "$lock") 2>/dev/null; then
+      # The pid file, created with noclobber (O_EXCL), is the claim that
+      # counts. Some mkdir implementations (the Rust coreutils Ubuntu 26.04
+      # ships) report success when a racing writer created the directory a
+      # moment earlier; that writer then owns the generation. Losing the pid
+      # claim is therefore a lost race: wait like any other contender instead
+      # of failing. rmdir only ever removes a generation nobody stamped.
       if (set -C; umask 077; printf '%s\n' "$$" > "$lock/pid") 2>/dev/null; then
         printf '%s\n' "$lock"
         return 0
       fi
       rmdir "$lock" 2>/dev/null || true
-      return 1
     fi
     [[ ! -L "$lock" ]] || return 1
     if [[ ! -d "$lock" ]]; then

@@ -114,12 +114,32 @@ marketplace_source_for_ref() {
     esac
 }
 
+# A machine may register the marketplace as a folder: the source clone itself,
+# often pinned there by extraKnownMarketplaces in the user's settings. Claude
+# Code then refuses `marketplace add <repo>@<tag>` as a source mismatch. Step 1
+# already moved the clone to $UPDATE_REF, so the folder marketplace only needs
+# its `update`.
+marketplace_is_source_clone() {
+    local listing registered want got
+    listing="$(claude plugin marketplace list --json 2>/dev/null)" || return 1
+    registered="$(printf '%s\n' "$listing" | jq -r --arg name "$MARKETPLACE_SLUG" \
+        'if type == "array" then .[] else empty end
+         | select(.name == $name and .source == "directory") | .path // empty' 2>/dev/null \
+        | head -n 1)" || return 1
+    [ -n "$registered" ] || return 1
+    want="$(cd -- "$SOURCE_CLONE" 2>/dev/null && pwd -P)" || return 1
+    got="$(cd -- "$registered" 2>/dev/null && pwd -P)" || return 1
+    [ "$want" = "$got" ]
+}
+
 reconcile_claude_plugins() {
     local marketplace_source
-    marketplace_source="$(marketplace_source_for_ref)"
-    if ! claude plugin marketplace add "$marketplace_source" >/dev/null 2>&1; then
-        printf 'legion refresh: could not bind Claude marketplace to %s\n' "$UPDATE_REF" >&2
-        return 1
+    if ! marketplace_is_source_clone; then
+        marketplace_source="$(marketplace_source_for_ref)"
+        if ! claude plugin marketplace add "$marketplace_source" >/dev/null 2>&1; then
+            printf 'legion refresh: could not bind Claude marketplace to %s\n' "$UPDATE_REF" >&2
+            return 1
+        fi
     fi
     if ! claude plugin marketplace update "$MARKETPLACE_SLUG" >/dev/null 2>&1; then
         printf 'legion refresh: claude marketplace update failed\n' >&2

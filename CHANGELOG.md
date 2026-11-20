@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.1](https://github.com/Opus-Aether-AI/legion-core/compare/v0.31.0...v0.31.1) (2026-11-20)
+
+
+### Fixed
+
+* **setup:** refresh a folder marketplace in place instead of re-adding it ([#220](https://github.com/Opus-Aether-AI/legion-core/issues/220)) ([8945399](https://github.com/Opus-Aether-AI/legion-core/commit/894539906caa09950d7558105bd74ec2a8aa6071))
+
 ## [0.31.0](https://github.com/Opus-Aether-AI/legion-core/compare/v0.30.0...v0.31.0) (2026-11-20)
 
 
